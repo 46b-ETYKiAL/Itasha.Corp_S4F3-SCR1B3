@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<!--
+  WiX source for the SCR1B3 Windows installer (.msi), built with cargo-wix:
+
+      cargo install cargo-wix
+      cargo wix --package scribe-app --nocapture
+
+  Produces target/wix/scr1b3-<version>-x86_64.msi: a standard MSI that installs
+  scr1b3.exe to Program Files, adds a Start-Menu shortcut, and (optionally) puts
+  it on PATH. Per-machine install; clean upgrade + uninstall.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="SCR1B3"
+    UpgradeCode="7B1C3D2E-5A4F-4E6B-9C1A-2D3E4F5A6B7C"
+    Manufacturer="Itasha.Corp"
+    Language="1033"
+    Codepage="1252"
+    Version="$(var.Version)">
+
+    <Package Id="*"
+      Keywords="Installer"
+      Description="SCR1B3 — fast, telemetry-free, cross-platform code/text editor"
+      Manufacturer="Itasha.Corp"
+      InstallerVersion="450"
+      Languages="1033"
+      Compressed="yes"
+      InstallScope="perMachine"
+      SummaryCodepage="1252" />
+
+    <MajorUpgrade
+      Schedule="afterInstallInitialize"
+      DowngradeErrorMessage="A newer version of SCR1B3 is already installed. Setup will now exit." />
+
+    <Media Id="1" Cabinet="media1.cab" EmbedCab="yes" />
+    <Property Id="DiskPrompt" Value="SCR1B3 Installation" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder" Name="PFiles">
+        <Directory Id="APPLICATIONFOLDER" Name="SCR1B3">
+          <Component Id="MainExecutable" Guid="*">
+            <File Id="scr1b3.exe"
+              Name="scr1b3.exe"
+              DiskId="1"
+              Source="$(var.CargoTargetBinDir)\scr1b3.exe"
+              KeyPath="yes" />
+            <!-- Optional PATH entry (machine-wide). -->
+            <Environment Id="PATH"
+              Name="PATH"
+              Value="[APPLICATIONFOLDER]"
+              Permanent="no"
+              Part="last"
+              Action="set"
+              System="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+
+      <Directory Id="ProgramMenuFolder">
+        <Component Id="StartMenuShortcut" Guid="*">
+          <Shortcut Id="ScribeStartMenu"
+            Name="SCR1B3"
+            Description="present day, present text"
+            Target="[APPLICATIONFOLDER]scr1b3.exe"
+            WorkingDirectory="APPLICATIONFOLDER" />
+          <RegistryValue Root="HKCU"
+            Key="Software\ItashaCorp\SCR1B3"
+            Name="installed"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Binaries"
+      Title="SCR1B3"
+      Description="The SCR1B3 editor executable."
+      Level="1"
+      ConfigurableDirectory="APPLICATIONFOLDER"
+      AllowAdvertise="no"
+      Display="expand"
+      Absent="disallow">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[APPLICATIONFOLDER]" After="CostFinalize" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3" />
+
+    <UIRef Id="WixUI_FeatureTree" />
+  </Product>
+</Wix>

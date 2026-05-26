@@ -1,0 +1,32 @@
+[package]
+name = "scribe-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SCR1B3 editor core: buffer, file I/O, encoding, config, theme, syntax, search."
+
+[dependencies]
+ropey.workspace = true
+memmap2.workspace = true
+encoding_rs.workspace = true
+chardetng.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json = "1"                                 # LSP JSON-RPC payloads
+toml.workspace = true
+directories.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tree-sitter = "0.24"
+tree-sitter-highlight = "0.24"
+tree-sitter-rust = "0.23"
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
+rhai = { version = "1", features = ["sync"] }   # pure-Rust sandboxed scripting for the plugin "easy mode"
+sha2 = "0.10"                                    # checksum verification for updates
+minisign-verify = "0.2"                          # pure-Rust ed25519 update-signature verify
+self-replace = "1"                               # atomic running-binary swap (Win rename-trick)
+
+[dev-dependencies]
+tempfile = "3"
+minisign = "0.7"                                 # sign in tests only (verify path round-trip)

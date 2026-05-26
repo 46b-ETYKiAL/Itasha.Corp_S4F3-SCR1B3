@@ -1,0 +1,27 @@
+[package]
+name = "scribe-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SCR1B3 — standalone cross-platform code/text editor (the binary)."
+default-run = "scr1b3"
+
+[[bin]]
+name = "scr1b3"
+path = "src/main.rs"
+
+[dependencies]
+scribe-core.workspace = true
+scribe-render.workspace = true
+eframe.workspace = true
+egui.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rfd = "0.15"          # native OS file dialogs (native-feel)
+notify = { workspace = true }                 # config/theme live-reload
+notify-debouncer-mini = { workspace = true }
+window-vibrancy = "0.7"                        # OS glass/acrylic/mica/vibrancy (rwh 0.6, matches eframe 0.29)
+
+[dev-dependencies]
+tempfile = "3"

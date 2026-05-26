@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <pattern id="scanlines" patternUnits="userSpaceOnUse" width="512" height="6">
+      <rect width="512" height="3" fill="transparent"/>
+      <rect y="3" width="512" height="3" fill="rgba(0,0,0,0.15)"/>
+    </pattern>
+    <filter id="phosphor">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="0.8" result="bloom"/>
+      <feMerge>
+        <feMergeNode in="bloom"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <radialGradient id="vignette" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="transparent"/>
+      <stop offset="100%" stop-color="rgba(0,0,0,0.5)"/>
+    </radialGradient>
+  </defs>
+  <!-- Outer CRT bezel -->
+  <rect x="0" y="0" width="512" height="512" rx="96" ry="96" fill="#111118"/>
+  <rect x="14" y="14" width="484" height="484" rx="86" ry="86" fill="#18181f" stroke="#2a2833" stroke-width="2"/>
+  <!-- Inner screen -->
+  <rect x="44" y="44" width="424" height="424" rx="56" ry="56" fill="#08060d"/>
+  <rect x="44" y="44" width="424" height="424" rx="56" ry="56" fill="none" stroke="#1a1825" stroke-width="2"/>
+  <!-- Logomark glyph: prompt chevron + caret block -->
+  <g filter="url(#phosphor)">
+    <path d="M 150 178 L 226 256 L 150 334" fill="none" stroke="#00fffe" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="270" y="182" width="66" height="148" rx="6" ry="6" fill="#01fe36"/>
+  </g>
+  <!-- Scanlines + vignette confined to screen -->
+  <rect x="44" y="44" width="424" height="424" rx="56" ry="56" fill="url(#scanlines)"/>
+  <rect x="44" y="44" width="424" height="424" rx="56" ry="56" fill="url(#vignette)"/>
+  <!-- Power LED on bezel -->
+  <circle cx="256" cy="486" r="7" fill="#01fe36" opacity="0.85"/>
+  <circle cx="256" cy="486" r="3.5" fill="#01fe36"/>
+  <!-- Bezel microtext -->
+  <text x="256" y="40" text-anchor="middle" font-family="'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace" font-size="14" fill="#2a2833" letter-spacing="6">ITASHA.CORP</text>
+</svg>

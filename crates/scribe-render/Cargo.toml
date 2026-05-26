@@ -1,0 +1,11 @@
+[package]
+name = "scribe-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SCR1B3 render layer: theme -> egui Visuals mapping, syntax color mapping, CRT post-process params."
+
+[dependencies]
+egui.workspace = true
+scribe-core.workspace = true

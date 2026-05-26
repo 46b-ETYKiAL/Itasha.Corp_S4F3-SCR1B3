@@ -1,0 +1,281 @@
+//! Editor power-features that are pure data transforms — kept out of the egui
+//! UI layer so they are unit-testable without a render context.
+//!
+//! * [`fold_regions`] — brace-balanced foldable line ranges for the fold gutter.
+//! * [`project_folded`] — collapse folded regions into a display string + a
+//!   display-line → source-line map (for a read-only folded preview).
+//! * [`word_completions`] — local "dabbrev"-style identifier completion that
+//!   powers the completion popup with zero network/LSP dependency. LSP items,
+//!   when available, are merged on top by the caller.
+
+use std::collections::BTreeSet;
+
+/// A foldable region: the line that owns the opening brace, and the last line
+/// of the region (the line with the matching closing brace). Both are 0-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldRegion {
+    /// Line carrying the `{` — the line that stays visible with a ▾/▸ toggle.
+    pub start_line: usize,
+    /// Line carrying the matching `}` — last line hidden when folded.
+    pub end_line: usize,
+}
+
+impl FoldRegion {
+    /// Number of lines hidden when this region is folded (the body, excluding
+    /// the header line that remains visible).
+    pub fn hidden_len(&self) -> usize {
+        self.end_line.saturating_sub(self.start_line)
+    }
+}
+
+/// Compute brace-balanced foldable regions spanning more than one line.
+///
+/// Heuristic (language-agnostic, good enough until tree-sitter node ranges
+/// drive it): track `{`/`}` nesting outside of string and line-comment context,
+/// pairing each `{` with its matching `}`. Only multi-line pairs are returned,
+/// ordered by `start_line`.
+pub fn fold_regions(text: &str) -> Vec<FoldRegion> {
+    let mut stack: Vec<usize> = Vec::new(); // line index of each open brace
+    let mut out: Vec<FoldRegion> = Vec::new();
+    let mut in_string: Option<char> = None;
+    let mut prev = '\0';
+
+    for (line_idx, line) in text.split_inclusive('\n').enumerate() {
+        let mut line_comment = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            if line_comment {
+                break;
+            }
+            match in_string {
+                Some(q) => {
+                    // End of string unless escaped.
+                    if c == q && prev != '\\' {
+                        in_string = None;
+                    }
+                }
+                None => match c {
+                    '"' | '\'' => in_string = Some(c),
+                    '/' if chars.peek() == Some(&'/') => line_comment = true,
+                    '{' => stack.push(line_idx),
+                    '}' => {
+                        if let Some(open) = stack.pop() {
+                            if line_idx > open {
+                                out.push(FoldRegion {
+                                    start_line: open,
+                                    end_line: line_idx,
+                                });
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+            }
+            prev = c;
+        }
+        // Newlines never continue a single-line string for this heuristic.
+        in_string = None;
+        prev = '\0';
+    }
+
+    out.sort_by_key(|r| r.start_line);
+    out
+}
+
+/// Project `text` with the given folded regions collapsed. Each folded region
+/// keeps its header line (with a ` …` marker appended) and drops the body
+/// through `end_line`. Returns the display string and a map from each display
+/// line to its source line index.
+///
+/// `folded` holds the `start_line` of every region the user has collapsed; only
+/// regions present in `regions` are honoured (so stale fold state is ignored).
+pub fn project_folded(
+    text: &str,
+    regions: &[FoldRegion],
+    folded: &BTreeSet<usize>,
+) -> (String, Vec<usize>) {
+    // Lines hidden by an active fold (header excluded).
+    let mut hidden: BTreeSet<usize> = BTreeSet::new();
+    let mut header_of: std::collections::BTreeMap<usize, usize> = Default::default();
+    for r in regions {
+        if folded.contains(&r.start_line) {
+            for l in (r.start_line + 1)..=r.end_line {
+                hidden.insert(l);
+            }
+            header_of.insert(r.start_line, r.end_line);
+        }
+    }
+
+    let mut display = String::new();
+    let mut map: Vec<usize> = Vec::new();
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    for (idx, line) in lines.iter().enumerate() {
+        if hidden.contains(&idx) {
+            continue;
+        }
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        if header_of.contains_key(&idx) {
+            display.push_str(body);
+            display.push_str(" …");
+        } else {
+            display.push_str(body);
+        }
+        // Preserve original newline presence.
+        if line.ends_with('\n') {
+            display.push('\n');
+        }
+        map.push(idx);
+    }
+    (display, map)
+}
+
+/// Extract distinct identifier-like words from `text` that start with `prefix`
+/// (case-sensitive), excluding `prefix` itself, ordered shortest-first then
+/// lexicographically. A word is `[A-Za-z_][A-Za-z0-9_]*`. Returns at most
+/// `limit` suggestions.
+pub fn word_completions(text: &str, prefix: &str, limit: usize) -> Vec<String> {
+    if prefix.is_empty() {
+        return Vec::new();
+    }
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut cur = String::new();
+    let flush = |cur: &mut String, seen: &mut BTreeSet<String>| {
+        if !cur.is_empty() {
+            if cur.len() > prefix.len() && cur.starts_with(prefix) {
+                seen.insert(std::mem::take(cur));
+            } else {
+                cur.clear();
+            }
+        }
+    };
+    for c in text.chars() {
+        if c == '_' || c.is_ascii_alphanumeric() {
+            // Identifiers cannot start with a digit.
+            if cur.is_empty() && c.is_ascii_digit() {
+                // Skip the rest of this numeric token.
+                cur.push('\0');
+                continue;
+            }
+            if !cur.starts_with('\0') {
+                cur.push(c);
+            }
+        } else {
+            flush(&mut cur, &mut seen);
+            cur.clear();
+        }
+    }
+    flush(&mut cur, &mut seen);
+
+    let mut v: Vec<String> = seen.into_iter().collect();
+    v.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    v.truncate(limit);
+    v
+}
+
+/// Find the start byte of the identifier ending at byte offset `cursor` in
+/// `text` (the prefix being typed). Returns `(prefix_start, prefix_str)`.
+pub fn prefix_before(text: &str, cursor: usize) -> (usize, String) {
+    let bytes = text.as_bytes();
+    let mut start = cursor.min(text.len());
+    while start > 0 {
+        let b = bytes[start - 1];
+        let is_word = b == b'_' || b.is_ascii_alphanumeric();
+        if !is_word {
+            break;
+        }
+        start -= 1;
+    }
+    (start, text[start..cursor.min(text.len())].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folds_multiline_brace_pairs() {
+        let src = "fn a() {\n    body;\n}\nfn b() {}\n";
+        let regions = fold_regions(src);
+        // Only the multi-line `fn a` body folds; `fn b() {}` is single-line.
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].start_line, 0);
+        assert_eq!(regions[0].end_line, 2);
+        assert_eq!(regions[0].hidden_len(), 2);
+    }
+
+    #[test]
+    fn nested_braces_pair_correctly() {
+        let src = "a {\n  b {\n    c;\n  }\n}\n";
+        let regions = fold_regions(src);
+        assert_eq!(regions.len(), 2);
+        // Sorted by start_line: outer (0..4) then inner (1..3).
+        assert_eq!((regions[0].start_line, regions[0].end_line), (0, 4));
+        assert_eq!((regions[1].start_line, regions[1].end_line), (1, 3));
+    }
+
+    #[test]
+    fn braces_in_strings_and_comments_are_ignored() {
+        let src = "let s = \"{ not a fold\";\n// } also not\nok;\n";
+        assert!(fold_regions(src).is_empty());
+    }
+
+    #[test]
+    fn project_folded_collapses_body() {
+        let src = "fn a() {\n    body;\n}\ntail;\n";
+        let regions = fold_regions(src);
+        let folded: BTreeSet<usize> = [0usize].into_iter().collect();
+        let (disp, map) = project_folded(src, &regions, &folded);
+        // Header + tail only; body lines 1 and 2 hidden.
+        assert_eq!(disp, "fn a() { …\ntail;\n");
+        assert_eq!(map, vec![0, 3]);
+    }
+
+    #[test]
+    fn project_unfolded_is_identity_map() {
+        let src = "a\nb\nc\n";
+        let (disp, map) = project_folded(src, &[], &BTreeSet::new());
+        assert_eq!(disp, src);
+        assert_eq!(map, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn completions_prefix_match_shortest_first() {
+        // "valuate" does NOT match "value" (valu-A-te); excluded by design.
+        let src = "value valuer valuate value_x other";
+        let got = word_completions(src, "value", 10);
+        assert_eq!(got, vec!["valuer", "value_x"]);
+    }
+
+    #[test]
+    fn completions_exclude_exact_prefix_and_nonmatches() {
+        let src = "foo foobar baz";
+        let got = word_completions(src, "foo", 10);
+        assert_eq!(got, vec!["foobar"]);
+    }
+
+    #[test]
+    fn completions_ignore_numeric_tokens() {
+        let src = "var123 12345 var_a";
+        let got = word_completions(src, "var", 10);
+        assert_eq!(got, vec!["var_a", "var123"]);
+    }
+
+    #[test]
+    fn completions_respect_limit() {
+        let src = "aa ab ac ad ae af";
+        let got = word_completions(src, "a", 3);
+        assert_eq!(got.len(), 3);
+    }
+
+    #[test]
+    fn prefix_before_cursor() {
+        let text = "let foo.bar";
+        let (start, pre) = prefix_before(text, text.len());
+        assert_eq!(pre, "bar");
+        assert_eq!(start, 8);
+        // Cursor in the middle of `foo`.
+        let (s2, p2) = prefix_before(text, 6);
+        assert_eq!(p2, "fo");
+        assert_eq!(s2, 4);
+    }
+}

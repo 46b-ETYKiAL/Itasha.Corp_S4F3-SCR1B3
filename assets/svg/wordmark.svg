@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="160" viewBox="0 0 600 160">
+  <defs>
+    <pattern id="scanlines" patternUnits="userSpaceOnUse" width="600" height="4">
+      <rect width="600" height="2" fill="transparent"/>
+      <rect y="2" width="600" height="2" fill="rgba(0,0,0,0.15)"/>
+    </pattern>
+    <filter id="phosphor">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="0.8" result="bloom"/>
+      <feMerge>
+        <feMergeNode in="bloom"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="600" height="160" fill="#08060d"/>
+  <g filter="url(#phosphor)">
+    <text x="300" y="40" text-anchor="middle" font-family="'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace" font-size="12" fill="#5a5869" letter-spacing="8">
+      I T A S H A . C O R P
+    </text>
+    <text x="282" y="106" text-anchor="middle" font-family="'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace" font-size="56" font-weight="bold" fill="#00fffe" letter-spacing="6">
+      SCR1B3
+    </text>
+    <text x="500" y="106" text-anchor="middle" font-family="'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace" font-size="56" font-weight="bold" fill="#01fe36">&#9612;</text>
+    <line x1="120" y1="120" x2="480" y2="120" stroke="#00fffe" stroke-width="0.5" opacity="0.4"/>
+    <text x="300" y="146" text-anchor="middle" font-family="'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace" font-size="11" fill="#5a5869" letter-spacing="3">
+      present day, present text
+    </text>
+  </g>
+  <rect x="0" y="0" width="600" height="160" fill="url(#scanlines)"/>
+</svg>

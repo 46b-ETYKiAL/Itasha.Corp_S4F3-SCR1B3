@@ -1,0 +1,12 @@
+Package: scr1b3
+Version: 0.1.0
+Section: editors
+Priority: optional
+Architecture: amd64
+Maintainer: Itasha.Corp <scr1b3@itasha-corp.example>
+Depends: libc6, libgtk-3-0, libxkbcommon0
+Homepage: https://github.com/itasha-corp/scr1b3
+Description: Fast, telemetry-free, cross-platform code/text editor
+ SCR1B3 is a modern, lightweight code and text editor — large-file capable,
+ privacy-respecting (no telemetry), deeply themeable, with a sandboxed mod
+ system and an offline spellcheck. A retro-CRT-styled "better Notepad++".

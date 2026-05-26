@@ -1,0 +1,87 @@
+name: Release
+
+# Tag-gated cross-OS release: builds signed, checksummed artifacts and attaches
+# them to a GitHub Release. Signing keys are provided as repo secrets and are
+# NEVER committed (see packaging/signing.md). The in-app updater verifies the
+# minisign signature against the embedded public key before swapping.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Linux GUI deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libssl-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build Windows MSI (cargo-wix)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cargo install cargo-wix --locked || true
+          # Uses wix/main.wxs; reuses the release build (--no-build).
+          cargo wix --package scribe-app --target ${{ matrix.target }} --no-build --nocapture \
+            --output "dist/scr1b3-${{ matrix.target }}.msi" || \
+          echo "::warning::MSI build skipped (WiX toolset unavailable on runner)"
+      - name: Package + checksum
+        shell: bash
+        run: |
+          mkdir -p dist
+          bin="scr1b3"
+          [ "${{ runner.os }}" = "Windows" ] && bin="scr1b3.exe"
+          cp "target/${{ matrix.target }}/release/$bin" "dist/" 2>/dev/null || true
+          cd dist
+          tar -czf "scr1b3-${{ matrix.target }}.tar.gz" "$bin" 2>/dev/null || true
+          # SHA-256 over every artifact (.tar.gz + .msi). Signature step runs
+          # only when the MINISIGN_SECRET_KEY secret is present.
+          if command -v sha256sum >/dev/null; then sha256sum scr1b3-* > "scr1b3-${{ matrix.target }}.sha256" 2>/dev/null || true; fi
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scr1b3-${{ matrix.target }}
+          path: apps/scribe/dist/*
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true

@@ -1,0 +1,8 @@
+id = "wordcount"
+name = "Word Count"
+version = "0.1.0"
+api_version = 1
+kind = "script"
+entry = "main.rhai"
+capabilities = ["buffer"]
+description = "Reports the buffer word count on save, and via a command."

@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="160" viewBox="0 0 1280 160">
+  <defs>
+    <pattern id="scanlines-footer" patternUnits="userSpaceOnUse" width="1280" height="4">
+      <rect width="1280" height="2" fill="transparent"/>
+      <rect y="2" width="1280" height="2" fill="rgba(0,0,0,0.15)"/>
+    </pattern>
+    <radialGradient id="vignette-footer" cx="50%" cy="50%" r="80%">
+      <stop offset="0%" stop-color="transparent"/>
+      <stop offset="100%" stop-color="rgba(0,0,0,0.3)"/>
+    </radialGradient>
+    <filter id="phosphor-footer">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="0.6" result="bloom"/>
+      <feMerge><feMergeNode in="bloom"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <style>
+    @keyframes blink-cursor { 0%,50% { opacity: 1; } 51%,100% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+  </style>
+
+  <!-- Outer CRT case (bezel) -->
+  <rect x="0" y="0" width="1280" height="160" rx="10" ry="10" fill="#111118"/>
+  <rect x="2" y="2" width="1276" height="156" rx="9" ry="9" fill="#18181f" stroke="#2a2833" stroke-width="1"/>
+
+  <!-- Bezel detail lines -->
+  <line x1="20" y1="10" x2="1260" y2="10" stroke="#2a2833" stroke-width="0.5"/>
+  <line x1="20" y1="150" x2="1260" y2="150" stroke="#2a2833" stroke-width="0.5"/>
+
+  <!-- Inner screen -->
+  <rect x="20" y="16" width="1240" height="118" rx="4" ry="4" fill="#08060d"/>
+  <rect x="20" y="16" width="1240" height="118" rx="4" ry="4" fill="none" stroke="#1a1825" stroke-width="1"/>
+  <rect x="20" y="16" width="1240" height="118" rx="4" ry="4" fill="url(#scanlines-footer)"/>
+  <rect x="20" y="16" width="1240" height="118" rx="4" ry="4" fill="url(#vignette-footer)"/>
+
+  <!-- Text content -->
+  <g filter="url(#phosphor-footer)">
+    <text x="640" y="58" text-anchor="middle" font-family="'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace" font-size="13" fill="#00fffe" letter-spacing="1">
+      present day, present text
+    </text>
+    <rect x="838" y="47" width="9" height="14" fill="#00fffe" style="animation: blink-cursor 1.1s step-end infinite;"/>
+
+    <line x1="340" y1="70" x2="940" y2="70" stroke="#00fffe" stroke-width="0.4" opacity="0.3"/>
+
+    <text x="640" y="90" text-anchor="middle" font-family="'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace" font-size="11" fill="#5a5869" letter-spacing="2">
+      TELEMETRY DISABLED // YOUR TEXT IS YOURS
+    </text>
+
+    <text x="640" y="116" text-anchor="middle" font-family="'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace" font-size="9" fill="#2a2833" letter-spacing="4">
+      I T A S H A . C O R P  //  SCR1B3
+    </text>
+  </g>
+
+  <!-- Scanline shimmer -->
+  <rect x="28" y="108" width="1224" height="1" fill="#00fffe" opacity="0.04"/>
+
+  <!-- Power LED -->
+  <circle cx="1240" cy="144" r="3" fill="#01fe36" opacity="0.6"/>
+  <circle cx="1240" cy="144" r="1.5" fill="#01fe36"/>
+
+  <!-- Bezel labels -->
+  <text x="40" y="147" font-family="'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace" font-size="8" fill="#2a2833" letter-spacing="1">ITASHA.CORP</text>
+  <text x="1160" y="147" font-family="'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace" font-size="8" fill="#2a2833">CRT-S4F3</text>
+</svg>

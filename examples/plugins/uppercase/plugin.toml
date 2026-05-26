@@ -1,0 +1,8 @@
+id = "uppercase"
+name = "Uppercase"
+version = "0.1.0"
+api_version = 1
+kind = "script"
+entry = "main.rhai"
+capabilities = ["buffer"]
+description = "Adds an 'Uppercase Buffer' command to the palette."

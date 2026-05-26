@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=SCR1B3
+GenericName=Text Editor
+Comment=Fast, telemetry-free, cross-platform code/text editor
+Exec=scr1b3 %F
+Icon=scr1b3
+Terminal=false
+Categories=Development;TextEditor;Utility;
+MimeType=text/plain;text/x-csrc;text/x-rust;application/json;text/markdown;
+Keywords=editor;code;text;notepad;
+StartupWMClass=scr1b3

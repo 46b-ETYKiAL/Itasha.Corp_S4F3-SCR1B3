@@ -1,0 +1,33 @@
+# Rust build output
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# SCR1B3 ships as a binary/app, so its lockfile MUST be committed for
+# reproducible + `--locked` CI builds. Override the monorepo-root ignore.
+!Cargo.lock
+
+# Secrets / signing keys — NEVER commit
+*.key
+*.pem
+*.minisig.sec
+minisign.key
+signing/*.sec
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor/IDE local
+.idea/
+.vscode/
+*.swp
+
+# Local runtime
+*.log
+/scr1b3.toml.local
+
+# Harness runtime state — must never enter the public repo
+.s4f3-data/
+.claude-data/

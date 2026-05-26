@@ -1,0 +1,16 @@
+# winget installer manifest (schema 1.6). Submit to microsoft/winget-pkgs.
+# Self-update is disabled in winget builds (winget owns updates); the portable
+# .zip build has the in-app updater enabled.
+PackageIdentifier: ItashaCorp.SCR1B3
+PackageVersion: 0.1.0
+InstallerType: wix
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/itasha-corp/scr1b3/releases/download/v0.1.0/scr1b3-x86_64-pc-windows-msvc.msi
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: installer
+ManifestVersion: 1.6.0

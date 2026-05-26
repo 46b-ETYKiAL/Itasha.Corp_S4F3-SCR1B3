@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>SCR1B3</string>
+  <key>CFBundleDisplayName</key><string>SCR1B3</string>
+  <key>CFBundleIdentifier</key><string>com.itashacorp.scr1b3</string>
+  <key>CFBundleExecutable</key><string>scr1b3</string>
+  <key>CFBundleIconFile</key><string>scr1b3.icns</string>
+  <key>CFBundleVersion</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Text Document</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSItemContentTypes</key><array><string>public.plain-text</string><string>public.source-code</string></array>
+    </dict>
+  </array>
+</dict>
+</plist>
