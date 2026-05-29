@@ -15,7 +15,7 @@
   <a href="#installation">Install</a> &nbsp;&middot;&nbsp;
   <a href="#quick-start">Quick Start</a> &nbsp;&middot;&nbsp;
   <a href="#capabilities">Capabilities</a> &nbsp;&middot;&nbsp;
-  <a href="#the-network">Network</a> &nbsp;&middot;&nbsp;
+  <a href="PRIVACY.md">Privacy</a> &nbsp;&middot;&nbsp;
   <a href="#contributing">Contributing</a>
 </p>
 
@@ -117,7 +117,7 @@ Or launch SCR1B3 and open files from the editor. On first run it writes nothing 
 - **Deep theming** — live-reload Helix-style `[palette]` / `[ui]` / `[syntax]` TOML themes, including glass / transparency effects; ship your own without recompiling. Broken themes fall back to the compiled-in default, so the editor never blanks.
 - **LSP diagnostics** — language-server integration surfaces errors, warnings, and hints inline.
 - **Modern editing** — multi-tab, find / replace with full regex and capture-group replacement, per-line syntax spans, and encoding + EOL detection that round-trips files unmodified.
-- **Plugins &amp; mods** — a capability-consent user plugin system scripted in [Rhai](https://rhai.rs) (pure-Rust, sandboxed by construction — no filesystem or network access, bounded by an operation count and a wall-clock deadline so a runaway script can't hang the editor).
+- **Plugins** — a capability-consent user plugin system scripted in [Rhai](https://rhai.rs) (pure-Rust, sandboxed by construction — no filesystem or network access, bounded by an operation count and a wall-clock deadline so a runaway script can't hang the editor), with minisign-signed tarballs verified against a TOFU-pinned key store.
 - **Offline spellcheck** — fully offline, code-aware (comments / strings), off by default.
 - **Signed auto-update** — telemetry-free version check against the public GitHub Releases API only, cryptographically verified before swap, fully opt-out.
 - **Tiny binary** — `strip`ped, LTO release build. No Chromium, no system webview, hundreds of MB lighter than Electron editors.
@@ -133,13 +133,6 @@ Configuration is a single TOML file that live-reloads on change. Themes use a th
 
 </details>
 
-## The Network
-
-| Node | Role |
-|------|------|
-| [S4F3-3TCH](https://github.com/46b-ETYKiAL/S4F3-3TCH) | ComfyUI custom nodes |
-| [S4F3-R3L4Y](https://github.com/46b-ETYKiAL/S4F3-R3L4Y) | MCP server infrastructure |
-
 ## Configuration
 
 SCR1B3 reads a single live-reloading TOML file from your OS config directory. A missing file uses built-in defaults; a malformed file falls back to defaults and surfaces the error in-app. Every key — `[editor]`, `[appearance]`, `[fonts]`, `[effects]`, `[updates]`, `[spellcheck]`, `[plugins]` — is documented with types, defaults, and a full example in **[CONFIG.md](CONFIG.md)**.
@@ -150,7 +143,7 @@ Themes use a Helix-style three-namespace TOML schema (`[palette]` / `[ui]` / `[s
 
 ## Plugins
 
-Beyond config and themes, SCR1B3 supports a user plugin / mod system with a capability-consent model: a low-barrier Lua easy-mode (no build step) and a WASM power track for sandboxed compiled extensions. Plugins declare the capabilities they need and you approve them. See **[PLUGINS.md](PLUGINS.md)**.
+SCR1B3 supports a user plugin system with a **capability-consent model**: plugins declare the capabilities they need and you approve them on install. Scripts run in an embedded [Rhai](https://rhai.rs) interpreter — pure-Rust, sandboxed by construction (no ambient filesystem or network access), bounded by an operation-count ceiling and a wall-clock deadline so a runaway plugin cannot hang or compromise the editor. Plugins ship as tarballs signed with [minisign](https://jedisct1.github.io/minisign/) (ed25519) and verified against a TOFU-pinned key store before install. See **[PLUGINS.md](PLUGINS.md)**.
 
 ## Tech Stack
 
@@ -160,7 +153,7 @@ Beyond config and themes, SCR1B3 supports a user plugin / mod system with a capa
 | Highlighting | syntect, tree-sitter |
 | Rendering | GPU surface + WGSL CRT shader |
 | Config / themes | TOML (live-reload) |
-| Plugins | Lua, WASM |
+| Plugins | Rhai (sandboxed, capability-consented, minisign-signed) |
 | License | MIT OR Apache-2.0 |
 
 ## Status
@@ -186,6 +179,8 @@ SCR1B3 is dual-licensed under either of:
 - **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
 
 at your option. Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project by you, as defined in the Apache-2.0 license, shall be dual-licensed as above, without any additional terms or conditions.
+
+Bundled fonts (JetBrains Mono OFL-1.1, Hack MIT, Ubuntu UFL-1.0) and the full transitive Cargo-dependency license inventory are documented in **[THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md)**.
 
 <p align="center">
   <picture>

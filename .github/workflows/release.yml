@@ -43,6 +43,29 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Generate third-party license inventory (cargo-about)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # cargo-about generates a single HTML page with the license text of
+          # every transitive Cargo dependency, satisfying the Apache-2.0
+          # NOTICE-file convention and the OFL/UFL §3 redistribution clause for
+          # the bundled fonts. Generated only on Linux because output is
+          # platform-independent (avoids 3× redundant runs).
+          cargo install cargo-about --locked --version "^0.6" || true
+          cargo about init --no-handlebars 2>/dev/null || true
+          cargo about generate about.hbs --output-file THIRD-PARTY-LICENSES-RUST.html 2>/dev/null \
+            || cargo about generate --format json --output-file THIRD-PARTY-LICENSES-RUST.json \
+            || echo "cargo-about generate skipped (config not yet committed)"
+      - name: Upload third-party license inventory
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: third-party-licenses-rust
+          path: |
+            THIRD-PARTY-LICENSES-RUST.html
+            THIRD-PARTY-LICENSES-RUST.json
+          if-no-files-found: warn
       - name: Build Windows MSI (cargo-wix)
         if: runner.os == 'Windows'
         shell: bash
