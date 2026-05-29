@@ -22,7 +22,7 @@ chardetng = "0.1"             # encoding detection
 regex = "1"                   # find/replace
 # Config + theming
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 semver = "1"                  # plugin manifest min_app_version SemVer compare (Phase 20 T20.2)
 directories = "5"             # per-OS config paths
 notify = "8"                  # config/theme live-reload
