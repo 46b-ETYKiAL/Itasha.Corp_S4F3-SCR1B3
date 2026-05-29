@@ -247,16 +247,25 @@ mod tests {
         assert_eq!(count_panes(&snapshot), 3);
     }
 
-    /// Direct TOML serialisation of `Tree<Pane>` currently fails because
-    /// `egui_tiles::TileId(pub u64)` carries values that exceed `i64::MAX`
-    /// (TOML's only integer width), and `toml` 0.8 rejects them at
-    /// serialise time. This is a KNOWN follow-up: persistence wiring in
-    /// the next PR routes through a JSON-string-in-TOML wrapper. The
-    /// in-memory `Tree<Pane>` itself round-trips through `Clone` (see
-    /// `grid_layout_clones_losslessly` above), which is what the 6-pane
-    /// cap enforcement actually depends on at runtime.
+    /// Direct TOML round-trip of `Tree<Pane>` remains a known gap, with the
+    /// failure point shifted by the `toml` 0.8 → 1.x bump:
+    ///
+    /// - `toml` 0.8: serialise itself failed because `egui_tiles::TileId(pub u64)`
+    ///   carries values exceeding `i64::MAX` (TOML's only integer width) and the
+    ///   0.8 serializer rejected them.
+    /// - `toml` 1.x: serialise now succeeds (1.x relaxed the integer-width
+    ///   check and handles newtype tuple structs gracefully), but deserialise
+    ///   fails because `egui_tiles::Container::Tabs` declines to emit its
+    ///   `height` field on serialise and then requires it on deserialise — a
+    ///   round-trip asymmetry in egui_tiles itself, not in toml.
+    ///
+    /// The persistence wiring in the next PR routes through a JSON-string-in-
+    /// TOML wrapper (the JSON serializer doesn't depend on egui_tiles' field
+    /// ordering). The in-memory `Tree<Pane>` itself round-trips through
+    /// `Clone` (see `grid_layout_clones_losslessly` above), which is what the
+    /// 6-pane cap enforcement actually depends on at runtime.
     #[test]
-    fn tree_direct_toml_serialisation_is_a_known_gap() {
+    fn tree_direct_toml_round_trip_is_a_known_gap() {
         let docs = [DocId(10), DocId(20), DocId(30)];
         let tree = build_default_grid(&docs);
         #[derive(Serialize, Deserialize)]
@@ -264,14 +273,17 @@ mod tests {
             tree: egui_tiles::Tree<Pane>,
         }
         let w = Wrap { tree };
-        // Asserts the documented limitation. When the follow-up PR adds
-        // the JSON-string-in-TOML wrapper, this test gets re-pointed.
-        let r = toml::to_string(&w);
+        // Serialisation is now lossy under toml 1.x — drops Container.Tabs.height.
+        let s = toml::to_string(&w).expect("toml 1.x serialises egui_tiles::Tree (lossily)");
         assert!(
-            r.is_err(),
-            "expected direct toml serialise to fail until \
-             JSON-string-in-TOML wrapper lands, got Ok with {:?}",
-            r.ok()
+            s.contains("[tree]"),
+            "expected [tree] table in serialised output, got {s}",
+        );
+        // Round-trip fails: the deserialiser requires the dropped field.
+        let back: Result<Wrap, _> = toml::from_str(&s);
+        assert!(
+            back.is_err(),
+            "expected deserialise to fail until JSON-string-in-TOML wrapper lands, got Ok",
         );
     }
 }
