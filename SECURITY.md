@@ -89,8 +89,73 @@ These workflows run on every push and pull request against the public repository
 | Supply-chain policy | [`workflows/cargo-deny.yml`](.github/workflows/cargo-deny.yml) | `cargo-deny` matrix-runs **advisories / bans / licenses / sources** against the workspace `deny.toml`. Nightly cron @ 06:30 UTC. |
 | Secret scan | [`workflows/secret-scan.yml`](.github/workflows/secret-scan.yml) | `gitleaks` scans full history for committed API keys / tokens / minisign private-key material. |
 | SBOM | [`workflows/sbom.yml`](.github/workflows/sbom.yml) | `cargo-cyclonedx` emits a CycloneDX 1.6 SBOM and attaches it to every tagged release as `scr1b3-sbom.cdx.json`. |
-| Content-safety | [`scripts/content_safety_audit.py`](scripts/content_safety_audit.py) | The publishable-cleanliness gate — fails any change that introduces an internal path, plan token, agent-system reference, or secret-shaped string into the public-repo-bound tree. |
+| Content-safety | [`scripts/content_safety_audit.py`](scripts/content_safety_audit.py) | The publishable-cleanliness gate — fails any change that introduces an internal path, agent-system reference, or secret-shaped string into the public-repo-bound tree. |
 | Dependency bumps | [`dependabot.yml`](.github/dependabot.yml) | Weekly Cargo + GitHub-Actions update PRs (Monday 09:00 UTC, 5 PRs cap). |
+| Workflow security (zizmor) | [`workflows/workflow-security.yml`](.github/workflows/workflow-security.yml) | `zizmor` static analysis for template injection, dangerous triggers, unpinned actions, and excessive permissions. SARIF results land in the Security tab. Weekly cron @ Thursday 06:47 UTC. |
+| CodeQL | [`workflows/codeql.yml`](.github/workflows/codeql.yml) | CodeQL with `security-extended` queries on Python (`scripts/*.py`) and GitHub Actions. Rust is not a CodeQL-supported free public-repo language — it is covered by `cargo clippy --deny warnings` and `cargo-deny`. Weekly cron @ Tuesday 14:23 UTC. |
+| OpenSSF Scorecard | [`workflows/scorecard.yml`](.github/workflows/scorecard.yml) | OpenSSF Scorecard supply-chain assessment with public publication of the score. Weekly cron @ Wednesday 09:31 UTC. |
+
+## CI/CD security posture
+
+This section documents the load-bearing CI/CD controls on the `master` branch of this public repository. It is a baseline — the controls below are the defaults the maintainer commits to; any drift should be reconciled, not normalised.
+
+### Branch protection contract
+
+`master` carries a GitHub branch-protection rule with the following guarantees:
+
+| Setting | Value | Why |
+|---|---|---|
+| `required_status_checks` | `build & test (ubuntu-latest)`, `build & test (windows-latest)`, `build & test (macos-latest)`, `cargo-deny advisories`, `cargo-deny bans`, `cargo-deny licenses`, `cargo-deny sources`, `public-repo content-safety audit`, `F0RG3-W1R3 install-manifest audit`, `gitleaks`, `zizmor workflow audit`, `Analyze (python)`, `Analyze (actions)`, `Scorecard analysis` | A PR cannot merge unless every gate that already exists passes. The gates are advisory if they aren't required; advisory is honour-system. |
+| `required_pull_request_reviews.required_approving_review_count` | `1` | Forces every change through PR review, even from the maintainer. |
+| `required_pull_request_reviews.dismiss_stale_reviews` | `true` | A new push invalidates a stale approval. |
+| `required_pull_request_reviews.bypass_pull_request_allowances.users` | `[46b-ETYKiAL]` | Preserves the solo-maintainer emergency self-merge path; admin-bypass is the documented escape hatch for hotfixes when no second reviewer is available. |
+| `required_conversation_resolution` | `true` | Every PR comment thread must be resolved before merge. |
+| `required_linear_history` | `true` | No merge commits — rebase or squash only. |
+| `required_signatures` | `true` | Every commit landing on `master` must be signature-verified. |
+| `allow_force_pushes` | `false` | History on `master` is immutable. |
+| `allow_deletions` | `false` | `master` cannot be deleted. |
+| `enforce_admins` | `false` | Deliberately off so the solo maintainer can land emergency hotfixes when CI is broken; every admin-bypass merge is audited by GitHub itself. |
+
+### Dependabot security updates
+
+Dependabot is configured at [`.github/dependabot.yml`](.github/dependabot.yml) for both the Cargo ecosystem (workspace + crate manifests under `crates/`) and the `github-actions` ecosystem (the workflows under `.github/workflows/`). Updates land as PRs every Monday 09:00 UTC with a cap of 5 open PRs per ecosystem.
+
+Dependabot security updates (the auto-PR on a newly-disclosed advisory) is the higher-priority surface — when enabled at the repo settings layer, an advisory landing on a transitive dependency opens a PR within minutes rather than waiting for the weekly tick.
+
+### SHA-pinned GitHub Actions
+
+Every `uses: <action>@<tag>` reference in `.github/workflows/*.yml` is pinned by full 40-char commit SHA with a trailing version comment, e.g.:
+
+```yaml
+- uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+- uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+```
+
+This closes the tag-mover supply-chain class documented in the March-2025 `tj-actions/changed-files` incident: a JS Action runs in-process on the runner with full secret context, so a malicious tag-move on a popular action repo would let it exfiltrate every secret in the workflow scope on its next run. SHA-pinning makes the action a content-addressed dependency rather than a mutable reference.
+
+Dependabot rewrites both the SHA pin and the trailing version comment together — the version comment never drifts from the pinned SHA, because the same Dependabot PR updates both lines.
+
+The companion control is `persist-credentials: false` on every `actions/checkout@…` step. Without it, the runner leaves `GITHUB_TOKEN` material in `.git/config` for downstream steps to read — SHA-pinning the checkout alone is insufficient.
+
+### Weekly security-scan schedule
+
+The three workflow-security feeds are staggered across the week to spread runner usage:
+
+| Workflow | Cron | Slot |
+|---|---|---|
+| CodeQL | `23 14 * * 2` | Tuesday 14:23 UTC |
+| OpenSSF Scorecard | `31 9 * * 3` | Wednesday 09:31 UTC |
+| Workflow Security (zizmor) | `47 6 * * 4` | Thursday 06:47 UTC |
+
+Each also runs on every push to `master` and every PR, so the weekly cron is the catch-up surface for advisories or upstream rule additions that landed between PRs.
+
+### Gitleaks: PR-time and push-protection
+
+`gitleaks` runs on every PR and every push to `master` via the [`workflows/secret-scan.yml`](.github/workflows/secret-scan.yml) workflow. Full history is scanned (`fetch-depth: 0`), and the action exits non-zero on any finding — a PR carrying a leak cannot merge.
+
+The complementary control is GitHub-native **secret scanning + push protection**, enabled at the repo settings layer. This blocks a `git push` at the server before the commit lands, so even a leaked secret in a *local* commit never reaches the public history.
+
+The two controls compose: push protection catches the leak at `git push` time; gitleaks catches anything that slips through (e.g. a credential committed before the secret scanner learned its pattern, surfaced via the full-history scan).
 
 ## Reporting a vulnerability
 
