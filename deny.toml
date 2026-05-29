@@ -36,6 +36,12 @@ allow = [
     # JetBrains Mono Regular we ship at
     # assets/fonts/JetBrainsMono/OFL.txt.
     "OFL-1.1",
+    # Ubuntu-font-1.0 — Ubuntu Font Licence (permissive font
+    # license; equivalent to OFL for practical purposes). Required
+    # by epaint_default_fonts whose compound license is
+    # `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` (egui
+    # bundles Ubuntu Light as one of the default fallback faces).
+    "Ubuntu-font-1.0",
 ]
 confidence-threshold = 0.9
 

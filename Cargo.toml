@@ -36,7 +36,7 @@ anyhow = "1"
 # Phase 16 / T16.2: bumped 0.29 -> 0.34 (Rounding->CornerRadius, panel/Visuals
 # API deltas migrated; matches the lockstep constraint with egui_tiles 0.15 +
 # egui-phosphor 0.12). ADR docs/adr/0006-ui-framework-ratify-egui.md (T16.1).
-eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts"] }
+eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "wayland", "x11"] }
 egui = "0.34"
 egui-phosphor = { version = "0.12", default-features = false, features = ["thin"] }  # Phosphor Thin icon font (T16.3, DECISION-2026-005 "hairline icons")
 egui_tiles = "0.15"           # tiling layout engine — multi-note grid (Phase 18 T18.2). Pairs lockstep with egui 0.34. Default features include `serde` so the Tree round-trips through the existing TOML config.
