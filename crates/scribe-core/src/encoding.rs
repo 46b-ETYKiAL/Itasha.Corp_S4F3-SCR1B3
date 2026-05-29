@@ -36,9 +36,15 @@ pub fn decode(bytes: &[u8]) -> (String, DetectedEncoding) {
         );
     }
     // Otherwise run statistical detection.
-    let mut det = chardetng::EncodingDetector::new();
+    //
+    // chardetng 1.0 changed the EncodingDetector API to use structured enums
+    // instead of bools: ISO-2022-JP detection is opt-in via Iso2022JpDetection,
+    // and UTF-8 detection is opt-in via Utf8Detection. We pass `Allow` for
+    // both — same behavior as the 0.x `det.guess(None, /*allow_utf8=*/ true)`
+    // call.
+    let mut det = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     det.feed(bytes, true);
-    let enc = det.guess(None, true);
+    let enc = det.guess(None, chardetng::Utf8Detection::Allow);
     let (text, _, _) = enc.decode(bytes);
     (
         text.into_owned(),

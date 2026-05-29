@@ -18,11 +18,11 @@ authors = ["Itasha.Corp"]
 ropey = "1.6"                 # rope text buffer (1.x is battle-tested; 2.0 is beta)
 memmap2 = "0.9"               # mmap large-file read-only browse
 encoding_rs = "0.8"           # encoding conversion
-chardetng = "0.1"             # encoding detection
+chardetng = "1"               # encoding detection (1.0 — new API: explicit ISO-2022-JP / UTF-8 detection enums)
 regex = "1"                   # find/replace
 # Config + theming
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1"                    # 1.x — major rewrite of toml-rs with improved newtype-tuple serialization
 semver = "1"                  # plugin manifest min_app_version SemVer compare (Phase 20 T20.2)
 directories = "5"             # per-OS config paths
 notify = "8"                  # config/theme live-reload
