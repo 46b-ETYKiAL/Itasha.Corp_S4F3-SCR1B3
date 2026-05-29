@@ -59,7 +59,7 @@ jobs:
             || echo "cargo-about generate skipped (config not yet committed)"
       - name: Upload third-party license inventory
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: third-party-licenses-rust
           path: |
@@ -89,7 +89,7 @@ jobs:
           # only when the MINISIGN_SECRET_KEY secret is present.
           if command -v sha256sum >/dev/null; then sha256sum scr1b3-* > "scr1b3-${{ matrix.target }}.sha256" 2>/dev/null || true; fi
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: scr1b3-${{ matrix.target }}
           path: apps/scribe/dist/*
