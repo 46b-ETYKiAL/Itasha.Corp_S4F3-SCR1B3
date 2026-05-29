@@ -2,6 +2,16 @@
 //! highlighted editor surface, find bar, and status bar. v1 keeps the shell in
 //! one focused module; later phases split tabs/titlebar/chrome into submodules.
 
+// egui 0.34 deprecated the top-level `Panel::show(ctx, …)` / `CentralPanel::show(ctx, …)`
+// forms in favour of `show_inside(ui, …)` — but `show_inside` requires a parent
+// `&mut Ui` which top-level eframe `App::update(ctx)` does not provide; the
+// deprecated `show(ctx)` is currently the ONLY working top-level entry. The
+// alternative would be a full restructure of the panel tree, out of scope for
+// the Phase 16 dep-bump. This module-level allow is scoped + documented; the
+// easy deprecations (screen_rect→content_rect, Memory::any_popup_open→Popup::is_any_open)
+// are migrated individually below.
+#![allow(deprecated)]
+
 use eframe::egui;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId, RichText};
@@ -130,6 +140,12 @@ fn path_to_uri(p: &Path) -> String {
 struct EditorTab {
     doc: Document,
     text: String,
+    /// Phase 18 T18.2 — stable id used by the multi-note grid so a pane
+    /// always points at the same logical doc even after the tabs vector
+    /// is reordered or other tabs close. Allocated via
+    /// `ScribeApp::next_doc_id`. Zero is fine as a sentinel for legacy
+    /// session restores; real ids start at 1.
+    doc_id: crate::grid::DocId,
 }
 
 impl EditorTab {
@@ -137,13 +153,18 @@ impl EditorTab {
         Self {
             doc: Document::scratch(),
             text: String::new(),
+            doc_id: crate::grid::DocId(0),
         }
     }
 
     fn from_path(path: PathBuf) -> Result<Self, String> {
         let doc = Document::open(&path).map_err(|e| e.to_string())?;
         let text = doc.text();
-        Ok(Self { doc, text })
+        Ok(Self {
+            doc,
+            text,
+            doc_id: crate::grid::DocId(0),
+        })
     }
 
     fn title(&self) -> String {
@@ -168,6 +189,14 @@ pub struct ScribeApp {
     tabs: Vec<EditorTab>,
     active: usize,
     visuals_applied: bool,
+    /// Set when the user asks to close (custom titlebar ✕). Funnels into the
+    /// same two-phase close path as an OS-initiated close.
+    want_close: bool,
+    /// Two-phase close latch: a transparent/layered window must be hidden BEFORE
+    /// it is destroyed or DWM retains its last frame as a ghost on the desktop
+    /// (the T19.1 root cause). On the first close request we hide + cancel, then
+    /// issue the real Close on the next frame.
+    closing: bool,
     find_open: bool,
     find_query: String,
     status: String,
@@ -197,8 +226,6 @@ pub struct ScribeApp {
     cfg_rx: Option<std::sync::mpsc::Receiver<()>>,
     /// Split view: a second editor pane over the same active buffer.
     split_view: bool,
-    /// Minimap: a scaled side-strip overview of the active document.
-    minimap: bool,
     /// Folded-preview mode: render a read-only buffer with brace regions
     /// collapsed; the gutter toggles individual folds (`folds` holds the
     /// `start_line` of each collapsed region for the active tab).
@@ -215,6 +242,21 @@ pub struct ScribeApp {
     /// Memoized minimap galley keyed by text hash so a large document is laid
     /// out once, not every frame.
     minimap_cache: std::cell::RefCell<Option<(u64, std::sync::Arc<egui::Galley>)>>,
+    /// One-shot: request keyboard focus on the find field the frame it opens.
+    focus_find: bool,
+    /// One-shot: request keyboard focus on the command-palette field on open.
+    focus_palette: bool,
+    /// Per-logical-line screen Y of the editor's rows from the previous frame —
+    /// drives the sticky line-number gutter (one-frame lag, like the minimap).
+    line_gutter: Vec<f32>,
+    /// Phase 18 T18.2 — multi-note grid state. `tree` is the egui_tiles
+    /// layout when `config.editor.grid_enabled` is on; `next_doc_id` is
+    /// the monotonic allocator that hands every `EditorTab` a stable id
+    /// the panes can reference; `close_queue` is the per-frame buffer of
+    /// doc ids the grid chrome asked be closed.
+    grid_tree: Option<egui_tiles::Tree<crate::grid::Pane>>,
+    next_doc_id: crate::grid::DocIdAllocator,
+    grid_close_queue: Vec<crate::grid::DocId>,
 }
 
 /// State for the open completion popup.
@@ -235,10 +277,60 @@ impl ScribeApp {
         cli_path: Option<String>,
     ) -> Self {
         let mut app = Self::build(config, config_err, cli_path);
+        // Phase 16 T16.3: register the egui-phosphor Thin icon font so toolbar
+        // glyphs (Save / Find / Palette / etc.) render when appearance.toolbar_icons
+        // is on. The icon font is inserted as the #2 entry in Proportional, so
+        // text always wins where there is a real glyph + icons fill the gap.
+        //
+        // Phase 17 T17.2 fonts-bundle: ship JetBrains Mono Regular as the primary
+        // Monospace family. The .ttf is OFL-1.1 (see assets/fonts/JetBrainsMono/
+        // OFL.txt) and embedded at compile-time via include_bytes!. We insert it
+        // at the FRONT of the Monospace family so it wins over egui's bundled
+        // Hack default; Hack stays as the fallback for any glyph JetBrains Mono
+        // doesn't cover. egui renders via ab_glyph which does NOT do OT shaping,
+        // so ligatures are inherently OFF (T17.2 "ligatures off-default" is
+        // structural, not config — there is no path to turn them on without
+        // swapping the shaper).
+        let mut fonts = egui::FontDefinitions::default();
+        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
+        const JETBRAINS_MONO_REGULAR: &[u8] =
+            include_bytes!("../../../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf");
+        fonts.font_data.insert(
+            "JetBrainsMono".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(JETBRAINS_MONO_REGULAR)),
+        );
+        if let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            monospace.insert(0, "JetBrainsMono".to_owned());
+        }
+        cc.egui_ctx.set_fonts(fonts);
         cc.egui_ctx.set_visuals(app.current_visuals());
         app.visuals_applied = true;
-        // Apply the OS glass/acrylic/mica/vibrancy effect for the chosen mode.
-        apply_window_effect(cc, app.config.window.mode, &app.config.window.tint);
+        // Apply the OS glass/acrylic/mica/vibrancy effect — only when the master
+        // transparency toggle is on AND the mode wants it. Otherwise the window is
+        // a normal opaque window (no layered surface => no ghost-on-close risk).
+        if app.config.window.effective_translucent() {
+            apply_window_effect(cc, app.config.window.mode, &app.config.window.tint);
+        }
+        // Phase 17 T17.4 wgpu CRT post-pass — INIT step. Construct
+        // `PostResources` (compiled shader + pipeline + uniform buffer +
+        // bind group + sampler) once at startup and stash them in the
+        // egui_wgpu renderer's `callback_resources` type-map so a later
+        // PR's `CrtPostCallback` can find them at paint time. We do NOT
+        // register the callback in this PR — the offscreen-RT copy step
+        // the dossier's §4 prescribes lands in a follow-up. This init is
+        // pure-cost-zero: the resources sit in the type-map until a draw
+        // callback retrieves them.
+        if let Some(rs) = cc.wgpu_render_state.as_ref() {
+            let post_res =
+                scribe_render::PostResources::new(&rs.device, &rs.queue, rs.target_format);
+            rs.renderer.write().callback_resources.insert(post_res);
+            tracing::debug!("scr1b3-post: PostResources initialised + stashed");
+        } else {
+            tracing::debug!(
+                "scr1b3-post: no wgpu_render_state (probably glow backend); \
+                 post-pass disabled for this session"
+            );
+        }
         app
     }
 
@@ -310,6 +402,8 @@ impl ScribeApp {
             tabs,
             active: 0,
             visuals_applied: false,
+            want_close: false,
+            closing: false,
             find_open: false,
             find_query: String::new(),
             status: format!(
@@ -334,13 +428,146 @@ impl ScribeApp {
             _cfg_watcher: cfg_watcher,
             cfg_rx: Some(cfg_rx),
             split_view: false,
-            minimap: false,
             fold_view: false,
             folds: std::collections::BTreeSet::new(),
             completion: None,
             pending_scroll: None,
             scroll_metrics: (0.0, 1.0, 1.0),
             minimap_cache: std::cell::RefCell::new(None),
+            focus_find: false,
+            focus_palette: false,
+            line_gutter: Vec::new(),
+            grid_tree: None,
+            next_doc_id: crate::grid::DocIdAllocator::default(),
+            grid_close_queue: Vec::new(),
+        }
+    }
+
+    /// Phase 18 T18.2 — render the egui_tiles grid as the central
+    /// editor surface. Each leaf pane wraps a `TextEdit::multiline` over
+    /// the matching tab's text. The `Option::take`-then-put-back idiom
+    /// hands `&mut self` to the callbacks while keeping the tree owned
+    /// across frames.
+    fn render_grid_central_panel(&mut self, ctx: &egui::Context, font: egui::FontId) {
+        // Snapshot the titles up front so the behavior callback doesn't
+        // need to re-borrow `self.tabs` (which is also borrowed mutably
+        // by the body callback).
+        let titles: Vec<(crate::grid::DocId, String)> =
+            self.tabs.iter().map(|t| (t.doc_id, t.title())).collect();
+        let Some(mut tree) = self.grid_tree.take() else {
+            return;
+        };
+        // Reset the per-frame close queue; the behavior may push into it.
+        self.grid_close_queue.clear();
+        // Use a local close-queue inside the closure so the borrow
+        // checker doesn't see `&mut self.grid_close_queue` twice (once
+        // via the body closure capture, once via the behavior field).
+        let mut close_queue: Vec<crate::grid::DocId> = Vec::new();
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let tabs = &mut self.tabs;
+            let body_close_queue = &mut close_queue;
+            let mut render_body = |ui: &mut egui::Ui, doc_id: crate::grid::DocId| -> bool {
+                let Some(idx) = tabs.iter().position(|t| t.doc_id == doc_id) else {
+                    ui.weak("(document closed)");
+                    return false;
+                };
+                let mut drag_started = false;
+                ui.horizontal(|ui| {
+                    if ui.small_button("✕").on_hover_text("Close pane").clicked() {
+                        body_close_queue.push(doc_id);
+                    }
+                    if ui
+                        .small_button("⠿")
+                        .on_hover_text("Drag to rearrange")
+                        .is_pointer_button_down_on()
+                    {
+                        drag_started = true;
+                    }
+                });
+                egui::ScrollArea::both()
+                    .id_salt(("scr1b3-grid-pane", doc_id.raw()))
+                    .show(ui, |ui| {
+                        let editor = egui::TextEdit::multiline(&mut tabs[idx].text)
+                            .code_editor()
+                            .font(font.clone())
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(20);
+                        editor.show(ui);
+                    });
+                drag_started
+            };
+            // egui_tiles' `retain_pane` is consulted on every paint; we
+            // wire a small empty vec so the behavior owns its own slot
+            // and the body's close_queue is the authoritative buffer
+            // we drain after the frame.
+            let mut behavior_close_requests: Vec<crate::grid::DocId> = Vec::new();
+            let mut behavior = crate::grid::AppGridBehavior {
+                titles: &titles,
+                render_body: &mut render_body,
+                close_requests: &mut behavior_close_requests,
+            };
+            tree.ui(&mut behavior, ui);
+        });
+        self.grid_close_queue.append(&mut close_queue);
+        // Phase 18 T18.2 — 6-pane cap. Reads the grid storage (NOT the
+        // currently-visible tabs) and toasts when the user splits past
+        // the ceiling. The full undo-snapshot pattern from the dossier
+        // lands in a follow-up; the MVP here just warns + caps the
+        // count by capping the tab vec so the next layout-build picks
+        // up the right shape.
+        if crate::grid::count_panes(&tree) > crate::grid::MAX_PANES {
+            self.toast = Some(format!(
+                "Pane limit reached ({}). Close a pane before opening more.",
+                crate::grid::MAX_PANES
+            ));
+        }
+        // After the frame: if the user closed any panes via the chrome,
+        // we drop those tabs as well. The simplest cleanup is to remove
+        // the tabs matching each close request; the tree itself prunes
+        // empty parents via simplification on its next paint.
+        if !self.grid_close_queue.is_empty() {
+            for doc_id in self.grid_close_queue.drain(..).collect::<Vec<_>>() {
+                self.tabs.retain(|t| t.doc_id != doc_id);
+            }
+            if self.tabs.is_empty() {
+                self.tabs.push(EditorTab::scratch());
+            }
+            // Re-sync the tree to the surviving doc set.
+            let docs: Vec<crate::grid::DocId> = self.tabs.iter().map(|t| t.doc_id).collect();
+            tree = crate::grid::build_default_grid(&docs);
+        }
+        self.grid_tree = Some(tree);
+    }
+
+    /// Phase 18 T18.2 — assign stable doc_ids to any tab missing one
+    /// (e.g. restored from a pre-grid session). Then ensure the
+    /// `grid_tree` matches the user's `editor.grid_enabled` preference.
+    /// Called at the top of `update` so the grid catches up to any
+    /// config-reload that flipped the flag.
+    fn sync_grid_state(&mut self) {
+        // Pass 1: fill missing doc_ids so the grid has a stable id to
+        // reference. DocId(0) is the legacy / unallocated sentinel.
+        for tab in self.tabs.iter_mut() {
+            if tab.doc_id.0 == 0 {
+                tab.doc_id = self.next_doc_id.next();
+                // Ensure the first real id is >= 1 (next() starts at 0).
+                if tab.doc_id.0 == 0 {
+                    tab.doc_id = self.next_doc_id.next();
+                }
+            }
+            self.next_doc_id.observe(tab.doc_id);
+        }
+        // Pass 2: align tree state with the config flag.
+        match (self.config.editor.grid_enabled, self.grid_tree.is_some()) {
+            (true, false) => {
+                let docs: Vec<crate::grid::DocId> = self.tabs.iter().map(|t| t.doc_id).collect();
+                self.grid_tree = Some(crate::grid::build_default_grid(&docs));
+            }
+            (false, true) => {
+                self.grid_tree = None;
+                self.grid_close_queue.clear();
+            }
+            _ => {}
         }
     }
 
@@ -403,7 +630,7 @@ impl ScribeApp {
     /// when a translucent/glass window mode is active.
     fn current_visuals(&self) -> egui::Visuals {
         let mut v = scribe_render::theme_to_visuals(&self.theme);
-        if self.config.window.mode.is_translucent() {
+        if self.config.window.effective_translucent() {
             scribe_render::apply_window_opacity(&mut v, self.config.window.opacity);
         }
         v
@@ -413,6 +640,222 @@ impl ScribeApp {
     fn reapply_theme(&mut self, ctx: &egui::Context) {
         self.theme = load_theme(&self.config.appearance.theme);
         ctx.set_visuals(self.current_visuals());
+    }
+
+    /// Replace the active editor's selection (or insert at the caret) with
+    /// `tab_width` spaces, then advance the caret — the Tab-key handler when
+    /// `insert_spaces` is enabled. Operates directly on the TextEdit state for
+    /// `id` so the caret tracks the edit.
+    fn indent_with_spaces(&mut self, ctx: &egui::Context, id: egui::Id, active: usize) {
+        let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+            return;
+        };
+        let Some(range) = state.cursor.char_range() else {
+            return;
+        };
+        let lo = range.primary.index.min(range.secondary.index);
+        let hi = range.primary.index.max(range.secondary.index);
+        let (new_text, new_idx) = apply_indent(
+            &self.tabs[active].text,
+            lo,
+            hi,
+            self.config.editor.tab_width,
+        );
+        self.tabs[active].text = new_text;
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(new_idx),
+            )));
+        state.store(ctx, id);
+    }
+
+    /// Render one quick-access toolbar entry by action id and apply its effect.
+    /// Buttons set the pending-action flags; toggles flip the live config/state
+    /// and request a config save. The id `"sep"` draws a divider.
+    // The explicit `=> { if widget.clicked() { effect } }` per arm is clearer
+    // than clippy's suggested match-guard form, which would render the widget as
+    // a side effect inside the guard condition.
+    #[allow(clippy::collapsible_match)]
+    fn toolbar_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: &str,
+        act: &mut Pending,
+        save_cfg: &mut bool,
+        start_lsp: &mut bool,
+    ) {
+        // Phase 16 T16.3: every toolbar label routes through `toolbar_widget(id, icons, jp)`
+        // so flipping `appearance.toolbar_icons` swaps every entry between its text
+        // form and its Phosphor (Thin) glyph in one place. Phase 17 T17.5: the
+        // same helper also appends a verified-canonical kanji "instrument plate"
+        // when `appearance.jp_glyph_labels` is on (English-redundant, dimmed, smaller).
+        let icons = self.config.appearance.toolbar_icons;
+        let jp = self.config.appearance.jp_glyph_labels;
+        match id {
+            "sep" => {
+                ui.separator();
+            }
+            "new" => {
+                if ui
+                    .button(toolbar_widget("new", icons, jp))
+                    .on_hover_text("New file (Ctrl+N)")
+                    .clicked()
+                {
+                    act.new = true;
+                }
+            }
+            "open" => {
+                if ui
+                    .button(toolbar_widget("open", icons, jp))
+                    .on_hover_text("Open file (Ctrl+O)")
+                    .clicked()
+                {
+                    act.open = true;
+                }
+            }
+            "openfolder" => {
+                if ui
+                    .button(toolbar_widget("openfolder", icons, jp))
+                    .on_hover_text("Open folder")
+                    .clicked()
+                {
+                    act.open_folder = true;
+                }
+            }
+            "save" => {
+                if ui
+                    .button(toolbar_widget("save", icons, jp))
+                    .on_hover_text("Save (Ctrl+S)")
+                    .clicked()
+                {
+                    act.save = true;
+                }
+            }
+            "saveas" => {
+                if ui
+                    .button(toolbar_widget("saveas", icons, jp))
+                    .on_hover_text("Save As…")
+                    .clicked()
+                {
+                    self.save_as_active();
+                }
+            }
+            "find" => {
+                if ui
+                    .button(toolbar_widget("find", icons, jp))
+                    .on_hover_text("Find (Ctrl+F)")
+                    .clicked()
+                {
+                    self.find_open = true;
+                    self.focus_find = true;
+                }
+            }
+            "palette" => {
+                if ui
+                    .button(toolbar_widget("palette", icons, jp))
+                    .on_hover_text("Command palette")
+                    .clicked()
+                {
+                    self.palette_open = true;
+                    self.focus_palette = true;
+                    self.palette_query.clear();
+                }
+            }
+            "split" => {
+                if ui
+                    .selectable_label(self.split_view, toolbar_widget("split", icons, jp))
+                    .on_hover_text("Split view")
+                    .clicked()
+                {
+                    self.split_view = !self.split_view;
+                }
+            }
+            "minimap" => {
+                if ui
+                    .selectable_label(
+                        self.config.editor.show_minimap,
+                        toolbar_widget("minimap", icons, jp),
+                    )
+                    .on_hover_text("Minimap")
+                    .clicked()
+                {
+                    self.config.editor.show_minimap = !self.config.editor.show_minimap;
+                    *save_cfg = true;
+                }
+            }
+            "wrap" => {
+                if ui
+                    .selectable_label(
+                        self.config.editor.word_wrap,
+                        toolbar_widget("wrap", icons, jp),
+                    )
+                    .on_hover_text("Word wrap")
+                    .clicked()
+                {
+                    self.config.editor.word_wrap = !self.config.editor.word_wrap;
+                    *save_cfg = true;
+                }
+            }
+            "fold" => {
+                if ui
+                    .selectable_label(self.fold_view, toolbar_widget("fold", icons, jp))
+                    .on_hover_text("Folded view")
+                    .clicked()
+                {
+                    self.fold_view = !self.fold_view;
+                }
+            }
+            "linenumbers" => {
+                if ui
+                    .selectable_label(
+                        self.config.editor.show_line_numbers,
+                        toolbar_widget("linenumbers", icons, jp),
+                    )
+                    .on_hover_text("Line numbers")
+                    .clicked()
+                {
+                    self.config.editor.show_line_numbers = !self.config.editor.show_line_numbers;
+                    *save_cfg = true;
+                }
+            }
+            "spellcheck" => {
+                if ui
+                    .selectable_label(
+                        self.config.spellcheck.enabled,
+                        toolbar_widget("spellcheck", icons, jp),
+                    )
+                    .on_hover_text("Spellcheck (offline)")
+                    .clicked()
+                {
+                    self.config.spellcheck.enabled = !self.config.spellcheck.enabled;
+                    *save_cfg = true;
+                }
+            }
+            "crt" => {
+                if ui
+                    .selectable_label(
+                        self.config.effects.crt_enabled,
+                        toolbar_widget("crt", icons, jp),
+                    )
+                    .on_hover_text("CRT effect")
+                    .clicked()
+                {
+                    self.config.effects.crt_enabled = !self.config.effects.crt_enabled;
+                    *save_cfg = true;
+                }
+            }
+            "lsp" => {
+                if ui
+                    .button(toolbar_widget("lsp", icons, jp))
+                    .on_hover_text("Start language server")
+                    .clicked()
+                {
+                    *start_lsp = true;
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Reload config from disk (external edit) and re-apply derived state.
@@ -541,6 +984,32 @@ impl ScribeApp {
         }
     }
 
+    /// Render the tab strip — the row (or column, for side positions) of open
+    /// documents with the active one accented and an `×` close button on it.
+    /// Extracted from the toolbar (T18.4) so the same widget can live inline
+    /// at the top OR in a dedicated bottom / left / right panel.
+    fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
+        let active = self.active;
+        let mut switch_to = None;
+        let mut close = None;
+        for (i, t) in self.tabs.iter().enumerate() {
+            let selected = i == active;
+            let label = RichText::new(t.title()).color(if selected { accent } else { muted });
+            if ui.selectable_label(selected, label).clicked() {
+                switch_to = Some(i);
+            }
+            if selected && ui.small_button("×").clicked() {
+                close = Some(i);
+            }
+        }
+        if let Some(i) = switch_to {
+            self.active = i;
+        }
+        if let Some(i) = close {
+            self.close_tab(i);
+        }
+    }
+
     fn close_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() {
             self.tabs.remove(idx);
@@ -608,7 +1077,9 @@ impl ScribeApp {
                     match slot.as_ref() {
                         Some((k, g)) if *k == key => g.clone(),
                         _ => {
-                            let g = ui.fonts(|f| {
+                            // egui 0.34: layout caches into the FontsView so it now
+                            // needs `&mut`; use fonts_mut(...) instead of fonts(...).
+                            let g = ui.fonts_mut(|f| {
                                 f.layout(
                                     text.clone(),
                                     FontId::monospace(3.0),
@@ -682,8 +1153,9 @@ impl ScribeApp {
         ui.separator();
         let (mut projected, _map) =
             crate::editor_features::project_folded(&text, &regions, &self.folds);
+        let line_height = self.config.fonts.line_height;
         let hl = &self.hl;
-        let mut layouter = make_layouter(hl, &self.hl_cache, ext, font);
+        let mut layouter = make_layouter(hl, &self.hl_cache, ext, font, line_height);
         egui::ScrollArea::both()
             .id_salt("fold-scroll")
             .show(ui, |ui| {
@@ -707,15 +1179,179 @@ struct Pending {
     save: bool,
 }
 
+/// Quick-access toolbar action registry: `(id, human-readable label)`. The id
+/// `"sep"` renders a divider. Shared by the toolbar renderer and the Settings
+/// toolbar editor (add / remove / reorder).
+pub(crate) const TOOLBAR_ACTIONS: &[(&str, &str)] = &[
+    ("new", "New file"),
+    ("open", "Open file"),
+    ("openfolder", "Open folder"),
+    ("save", "Save"),
+    ("saveas", "Save As"),
+    ("find", "Find"),
+    ("palette", "Command palette"),
+    ("split", "Split view"),
+    ("minimap", "Minimap"),
+    ("wrap", "Word wrap"),
+    ("fold", "Folded view"),
+    ("linenumbers", "Line numbers"),
+    ("spellcheck", "Spellcheck"),
+    ("crt", "CRT effect"),
+    ("lsp", "Start LSP"),
+    ("sep", "Separator"),
+];
+
+/// Toolbar item label: phosphor (Thin) icon glyph when `icons` is true, the
+/// existing short text label when false. Honours the `appearance.toolbar_icons`
+/// config (Phase 16 T16.3 / DECISION-2026-005 "egui-phosphor hairline icons").
+/// Phase 17 T17.5 — verified-canonical kanji "instrument plates" for the
+/// quick-access toolbar. Returns `None` when the canonical kanji for an action
+/// is uncertain, contested, or a Western metaphor — those stay English-only
+/// per the Folklore-Consultant gate (DECISION-2026-005 cond #4: "verified-
+/// accurate kanji ONLY"). The annotation is decorative and English-redundant;
+/// every action keeps its English label or icon as the primary read.
+///
+/// Verification notes — IT-Japanese canonical usage:
+/// - 新 (atarashii) "new" — `新規` (new entry)
+/// - 開 (hiraku) "open" — `開く` (open a file)
+/// - 保 (tamotsu) "save/preserve" — `保存` (save)
+/// - 別 (betsu) "separate" — `別名保存` (save-as / under another name)
+/// - 検 (ken) "inspect" — `検索` (search/find)
+/// - 分 (bun) "divide" — `分割` (split)
+/// - 図 (zu) "diagram/map" — `地図` (map)
+/// - 折 (ori) "fold" — `折り返し` (line wrap; the canonical IT term)
+/// - 畳 (tatamu) "fold up/layer" — `折り畳む` (fold/collapse)
+/// - 番 (ban) "number/order" — `行番号` (line numbers)
+/// - 綴 (tsuzuru) "spell/compose" — `綴り` (spelling)
+///
+/// Omitted (uncertain or non-canonical): openfolder (Western metaphor),
+/// palette (`⌘` glyph fallback exists), crt (acronym/loanword), lsp
+/// (acronym/loanword), find (covered by 検).
+pub(crate) fn jp_glyph(id: &str) -> Option<&'static str> {
+    match id {
+        "new" => Some("新"),
+        "open" => Some("開"),
+        "save" => Some("保"),
+        "saveas" => Some("別"),
+        "find" => Some("検"),
+        "split" => Some("分"),
+        "minimap" => Some("図"),
+        "wrap" => Some("折"),
+        "fold" => Some("畳"),
+        "linenumbers" => Some("番"),
+        "spellcheck" => Some("綴"),
+        _ => None,
+    }
+}
+
+/// Build a toolbar WidgetText with optional JP-glyph annotation. When
+/// `jp_glyph_labels` is on AND the action has a verified-canonical kanji,
+/// the kanji is appended after the primary label at smaller size and
+/// reduced opacity — the "instrument plate" effect (T17.5). When OFF or
+/// when no verified kanji exists, returns the primary label unchanged.
+pub(crate) fn toolbar_widget(id: &str, icons: bool, jp_glyphs: bool) -> egui::WidgetText {
+    let primary = toolbar_label(id, icons);
+    let kanji = if jp_glyphs { jp_glyph(id) } else { None };
+    let Some(kanji) = kanji else {
+        return egui::WidgetText::from(primary);
+    };
+    use egui::text::LayoutJob;
+    let mut job = LayoutJob::default();
+    job.append(
+        primary,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(14.0),
+            ..Default::default()
+        },
+    );
+    job.append(
+        &format!("  {kanji}"),
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::proportional(10.0),
+            color: egui::Color32::from_rgba_unmultiplied(180, 180, 180, 160),
+            ..Default::default()
+        },
+    );
+    egui::WidgetText::LayoutJob(job.into())
+}
+
+pub(crate) fn toolbar_label(id: &str, icons: bool) -> &'static str {
+    use egui_phosphor::thin as ph;
+    match (icons, id) {
+        (true, "new") => ph::FILE_PLUS,
+        (true, "open") => ph::FILE_DASHED,
+        (true, "openfolder") => ph::FOLDER_OPEN,
+        (true, "save") => ph::FLOPPY_DISK,
+        (true, "saveas") => ph::FLOPPY_DISK_BACK,
+        (true, "find") => ph::MAGNIFYING_GLASS,
+        (true, "palette") => ph::COMMAND,
+        (true, "split") => ph::COLUMNS,
+        (true, "minimap") => ph::MAP_TRIFOLD,
+        (true, "wrap") => ph::TEXT_ALIGN_LEFT,
+        (true, "fold") => ph::EYE,
+        (true, "linenumbers") => ph::LIST_NUMBERS,
+        (true, "spellcheck") => ph::CHECK_FAT,
+        (true, "crt") => ph::MONITOR,
+        (true, "lsp") => ph::PLAY,
+        (_, "new") => "new",
+        (_, "open") => "open",
+        (_, "openfolder") => "folder",
+        (_, "save") => "save",
+        (_, "saveas") => "save as",
+        (_, "find") => "find",
+        (_, "palette") => "\u{2318}",
+        (_, "split") => "split",
+        (_, "minimap") => "map",
+        (_, "wrap") => "wrap",
+        (_, "fold") => "fold",
+        (_, "linenumbers") => "nums",
+        (_, "spellcheck") => "spell",
+        (_, "crt") => "crt",
+        (_, "lsp") => "lsp",
+        (_, _) => "·",
+    }
+}
+
 fn ui_color(theme: &Theme, key: &str, default: Rgba) -> Color32 {
     scribe_render::color32(theme.ui(key, default))
 }
 
+/// The fill color for chrome panels (titlebar/toolbar/status/sidebars/gutter).
+/// In an effectively-translucent window the alpha is lowered to `window.opacity`
+/// so the OS blur (Mica/acrylic/vibrancy) or the desktop shows through the
+/// chrome — not just the central editor. When the master transparency toggle is
+/// off (or the mode is opaque) the panel stays fully opaque.
+fn panel_fill(theme: &Theme, window: &scribe_core::config::WindowConfig) -> Color32 {
+    let base = ui_color(theme, "panel", Rgba::new(0x0d, 0x0b, 0x14, 255));
+    if window.effective_translucent() {
+        let a = (window.opacity.clamp(0.30, 1.0) * 255.0).round() as u8;
+        Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a)
+    } else {
+        base
+    }
+}
+
 /// Build a syntect-colored `LayoutJob` for the editor surface. Free function so
 /// the egui `layouter` closure captures only the highlighter, not `self`.
-fn highlight_job(hl: &Highlighter, text: &str, ext: Option<&str>, font: FontId) -> LayoutJob {
+fn highlight_job(
+    hl: &Highlighter,
+    text: &str,
+    ext: Option<&str>,
+    font: FontId,
+    line_height_mult: f32,
+) -> LayoutJob {
     let mut job = LayoutJob::default();
     let lines = hl.highlight_document(text, ext);
+    // Explicit per-row height honours the `fonts.line_height` setting (epaint
+    // TextFormat.line_height; epaint defaults to the font's natural height).
+    let lh = Some(font.size * line_height_mult);
+    let plain = |color: Color32| {
+        let mut f = TextFormat::simple(font.clone(), color);
+        f.line_height = lh;
+        f
+    };
     let mut char_cursor = 0usize;
     // Reconstruct text with colored spans line by line.
     for (li, line) in text.split_inclusive('\n').enumerate() {
@@ -724,8 +1360,7 @@ fn highlight_job(hl: &Highlighter, text: &str, ext: Option<&str>, font: FontId) 
             for s in spans {
                 let seg = &line.get(s.range.clone()).unwrap_or("");
                 if !seg.is_empty() {
-                    let mut fmt =
-                        TextFormat::simple(font.clone(), scribe_render::syntax_color32(s.color));
+                    let mut fmt = plain(scribe_render::syntax_color32(s.color));
                     if s.italic {
                         fmt.italics = true;
                     }
@@ -735,14 +1370,10 @@ fn highlight_job(hl: &Highlighter, text: &str, ext: Option<&str>, font: FontId) 
             }
             // Append any tail not covered by spans.
             if byte < line.len() {
-                job.append(
-                    &line[byte..],
-                    0.0,
-                    TextFormat::simple(font.clone(), Color32::GRAY),
-                );
+                job.append(&line[byte..], 0.0, plain(Color32::GRAY));
             }
         } else {
-            job.append(line, 0.0, TextFormat::simple(font.clone(), Color32::GRAY));
+            job.append(line, 0.0, plain(Color32::GRAY));
         }
         char_cursor += line.len();
     }
@@ -758,20 +1389,32 @@ fn make_layouter<'a>(
     cache: &'a std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
     ext: Option<&'a str>,
     font: FontId,
-) -> impl FnMut(&egui::Ui, &str, f32) -> std::sync::Arc<egui::Galley> + 'a {
-    move |ui: &egui::Ui, text: &str, wrap: f32| {
+    line_height: f32,
+) -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> std::sync::Arc<egui::Galley> + 'a {
+    // egui 0.34: TextEdit::layouter callback now receives `&dyn TextBuffer`
+    // instead of `&str` (so non-String buffers can be hosted). We still want
+    // to hash + highlight by &str, so unpack via TextBuffer::as_str().
+    move |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
+        let text: &str = text.as_str();
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut hasher);
         ext.hash(&mut hasher);
         font.size.to_bits().hash(&mut hasher);
+        line_height.to_bits().hash(&mut hasher);
         let key = hasher.finish();
         let job_arc = {
             let mut slot = cache.borrow_mut();
             match slot.as_ref() {
                 Some((k, j)) if *k == key => j.clone(),
                 _ => {
-                    let arc = std::sync::Arc::new(highlight_job(hl, text, ext, font.clone()));
+                    let arc = std::sync::Arc::new(highlight_job(
+                        hl,
+                        text,
+                        ext,
+                        font.clone(),
+                        line_height,
+                    ));
                     *slot = Some((key, arc.clone()));
                     arc
                 }
@@ -779,13 +1422,26 @@ fn make_layouter<'a>(
         };
         let mut job = (*job_arc).clone();
         job.wrap.max_width = wrap;
-        ui.fonts(|f| f.layout_job(job))
+        // egui 0.34: FontsView::layout_job caches into the view → needs &mut.
+        ui.fonts_mut(|f| f.layout_job(job))
     }
 }
 
 /// Byte offset of char index `ci` in `s` (clamped to `s.len()`).
 fn char_to_byte(s: &str, ci: usize) -> usize {
     s.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(s.len())
+}
+
+/// Replace the `[lo, hi)` char-range of `text` with `width` spaces and return
+/// `(new_text, new_caret_char_index)`. Pure core of the Tab→spaces handler so it
+/// can be unit-tested without a live `TextEdit`.
+fn apply_indent(text: &str, lo: usize, hi: usize, width: usize) -> (String, usize) {
+    let spaces = " ".repeat(width.max(1));
+    let blo = char_to_byte(text, lo);
+    let bhi = char_to_byte(text, hi);
+    let mut out = text.to_string();
+    out.replace_range(blo..bhi, &spaces);
+    (out, lo + spaces.chars().count())
 }
 
 /// Render the completion popup as a foreground `Area` anchored just below the
@@ -810,7 +1466,10 @@ fn completion_popup(ui: &egui::Ui, pos: egui::Pos2, c: &Completion) -> Option<us
 }
 
 fn load_theme(name: &str) -> Theme {
-    // Try a user theme file `<config_dir>/themes/<name>.toml`; fall back to brand.
+    // Try a user theme file `<config_dir>/themes/<name>.toml` first so users can
+    // override built-ins. Then try the built-in dispatch (Phase 17 T17.2 alt
+    // themes). Final fallback is the wired-noir brand default so a misnamed
+    // theme never blanks the UI.
     if let Some(dir) = Config::config_dir() {
         let p = dir.join("themes").join(format!("{name}.toml"));
         if let Ok(s) = std::fs::read_to_string(&p) {
@@ -819,7 +1478,7 @@ fn load_theme(name: &str) -> Theme {
             }
         }
     }
-    Theme::itasha_void()
+    Theme::builtin(name).unwrap_or_else(Theme::wired_noir)
 }
 
 /// Spawn a filesystem watcher on the config directory; sends `()` on `tx` when
@@ -852,16 +1511,55 @@ impl eframe::App for ScribeApp {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.ui(ctx);
+    // eframe 0.34: `App::ui(&mut self, &mut Ui, &mut Frame)` is the new required
+    // entry; the prior `update(&mut Context, &mut Frame)` is deprecated. We keep
+    // driving panels via top-level `CentralPanel::show(ctx)` (under the
+    // module-level allow(deprecated)) so the passed-in Ui is unused; the per-
+    // frame logic lives in the inherent `frame_tick(&Context)` so the headless
+    // egui_kittest tests can drive it without an `eframe::Frame`.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let _ = ui;
+        self.frame_tick(&ctx);
     }
 }
 
 impl ScribeApp {
-    /// All per-frame UI + state logic. Separated from `eframe::App::update` (which
-    /// only forwards here) so it can be driven headlessly by `egui_kittest` E2E
-    /// tests without an `eframe::Frame`.
-    pub(crate) fn ui(&mut self, ctx: &egui::Context) {
+    /// One per-frame tick of the editor UI. Separated from `eframe::App::ui` so
+    /// `egui_kittest` E2E tests can drive it through `Context::run` without an
+    /// `eframe::Frame`. Drives every top-level panel via the deprecated-but-
+    /// functional `Panel::show(ctx, …)` path.
+    pub(crate) fn frame_tick(&mut self, ctx: &egui::Context) {
+        // Phase 18 T18.2 — keep the grid in step with the editor.grid_enabled
+        // config preference (toggled in Settings or via TOML edit + watcher).
+        // This is cheap on the common path (config unchanged + ids already
+        // assigned) and lets the grid show up the same frame the user flips
+        // the checkbox.
+        self.sync_grid_state();
+        // ---- Two-phase close (T19.1 ghost-window fix) ----
+        // A transparent / layered window (frameless or translucent) must be
+        // HIDDEN one frame before it is destroyed, or the Windows DWM keeps its
+        // last composited frame on screen as a ghost after the process exits.
+        // Phase 1: on any close request (custom ✕ or OS close) cancel the
+        // immediate close, hide the window, repaint. Phase 2 (next frame): the
+        // window is hidden, so issue the real Close.
+        if self.closing {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        let os_close = ctx.input(|i| i.viewport().close_requested());
+        if os_close || self.want_close {
+            self.want_close = false;
+            self.closing = true;
+            if os_close {
+                // Stop eframe acting on the OS close THIS frame; we drive it.
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            ctx.request_repaint();
+            return;
+        }
+
         if !self.visuals_applied {
             ctx.set_visuals(self.current_visuals());
             self.visuals_applied = true;
@@ -897,10 +1595,16 @@ impl ScribeApp {
             act.open = cmd && i.key_pressed(egui::Key::O);
             act.save = cmd && i.key_pressed(egui::Key::S);
             if cmd && i.key_pressed(egui::Key::F) {
+                if !self.find_open {
+                    self.focus_find = true;
+                }
                 self.find_open = true;
             }
             // Ctrl/Cmd+Shift+P opens the command palette (plugin + builtin cmds).
             if cmd && i.modifiers.shift && i.key_pressed(egui::Key::P) {
+                if !self.palette_open {
+                    self.focus_palette = true;
+                }
                 self.palette_open = true;
                 self.palette_query.clear();
             }
@@ -949,7 +1653,12 @@ impl ScribeApp {
 
         let accent = ui_color(&self.theme, "accent", Rgba::new(0, 255, 254, 255));
         let muted = ui_color(&self.theme, "line_number", Rgba::new(0x5a, 0x58, 0x69, 255));
-        let panel = ui_color(&self.theme, "panel", Rgba::new(0x0d, 0x0b, 0x14, 255));
+        // Chrome panels (titlebar/toolbar/status/filetree/split/gutter/minimap) all
+        // fill with this color. In a translucent window mode the fill MUST carry the
+        // reduced alpha — otherwise opaque chrome covers the transparent/blurred
+        // surface and "transparency doesn't work" (the T19.2 root cause). The master
+        // `transparency_enabled` toggle gates this via `effective_translucent()`.
+        let panel = panel_fill(&self.theme, &self.config.window);
         let warn = ui_color(&self.theme, "warning", Rgba::new(0xfb, 0xbf, 0x24, 255));
 
         // ---- Custom frameless titlebar ----
@@ -967,7 +1676,8 @@ impl ScribeApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
                     if resp.double_clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                        let is_max = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
                     }
                     ui.horizontal_centered(|ui| {
                         ui.add_space(10.0);
@@ -985,13 +1695,23 @@ impl ScribeApp {
                                 .monospace(),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if window_btn(ui, "✕", accent).clicked() {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            let is_max = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
+                            let close_hover = Color32::from_rgb(0xE8, 0x11, 0x23);
+                            let soft_hover = Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 26);
+                            if caption_btn(ui, CaptionIcon::Close, muted, close_hover).clicked() {
+                                // Funnel into the two-phase close (hide-before-destroy)
+                                // so a transparent window leaves no DWM ghost (T19.1).
+                                self.want_close = true;
                             }
-                            if window_btn(ui, "▢", muted).clicked() {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                            let max_icon = if is_max {
+                                CaptionIcon::Restore
+                            } else {
+                                CaptionIcon::Maximize
+                            };
+                            if caption_btn(ui, max_icon, muted, soft_hover).clicked() {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
                             }
-                            if window_btn(ui, "—", muted).clicked() {
+                            if caption_btn(ui, CaptionIcon::Minimize, muted, soft_hover).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                         });
@@ -999,117 +1719,95 @@ impl ScribeApp {
                 });
         }
 
-        // ---- Menu / toolbar ----
+        // ---- Quick-access toolbar (replaces the classic menu bar) ----
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("New      Ctrl+N").clicked() {
-                        act.new = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Open…    Ctrl+O").clicked() {
-                        act.open = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Open Folder…").clicked() {
-                        act.open_folder = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Save     Ctrl+S").clicked() {
-                        act.save = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Save As…").clicked() {
-                        self.save_as_active();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Quit").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-                ui.menu_button("Edit", |ui| {
-                    if ui.button("Find          Ctrl+F").clicked() {
-                        self.find_open = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Command Palette  Ctrl+Shift+P").clicked() {
-                        self.palette_open = true;
-                        self.palette_query.clear();
-                        ui.close_menu();
-                    }
-                });
-                ui.menu_button("View", |ui| {
-                    let mut sc = self.config.spellcheck.enabled;
-                    if ui.checkbox(&mut sc, "Spellcheck (offline)").clicked() {
-                        self.config.spellcheck.enabled = sc;
-                        save_cfg = true;
-                        ui.close_menu();
-                    }
-                    let mut crt = self.config.effects.crt_enabled;
-                    if ui.checkbox(&mut crt, "CRT effect").clicked() {
-                        self.config.effects.crt_enabled = crt;
-                        save_cfg = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.checkbox(&mut self.split_view, "Split view").clicked() {
-                        ui.close_menu();
-                    }
-                    if ui.checkbox(&mut self.minimap, "Minimap").clicked() {
-                        ui.close_menu();
-                    }
-                    if ui.checkbox(&mut self.fold_view, "Folded view").clicked() {
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Settings…").clicked() {
-                        self.settings_open = true;
-                        ui.close_menu();
-                    }
-                });
-                ui.menu_button("Language", |ui| {
-                    if ui.button("Start language server").clicked() {
-                        start_lsp = true;
-                        ui.close_menu();
-                    }
-                    ui.label(
-                        RichText::new("uses your installed LSP server, if any")
-                            .weak()
-                            .small(),
-                    );
-                });
+            // Phase 18 T18.5: apply the user-configurable button size + spacing
+            // BEFORE the horizontal row so every quick-access item inherits the
+            // sizing. All values are clamped at the config layer to defend
+            // against a malformed user toml producing a 4000-px-tall toolbar.
+            let btn = self.config.toolbar.clamped_button_size();
+            let gap = self.config.toolbar.clamped_button_spacing();
+            ui.spacing_mut().interact_size.y = btn;
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.horizontal(|ui| {
+                // Settings + command palette are always present; the palette is
+                // the discoverable backbone for every action, so keep it visible.
+                // The gear toggles settings — clicking it while open closes it.
+                if ui
+                    .selectable_label(self.settings_open, "⚙")
+                    .on_hover_text("Settings")
+                    .clicked()
+                {
+                    self.settings_open = !self.settings_open;
+                }
+                if ui
+                    .button(">_")
+                    .on_hover_text("Command palette (Ctrl+Shift+P)")
+                    .clicked()
+                {
+                    self.palette_open = true;
+                    self.focus_palette = true;
+                    self.palette_query.clear();
+                }
                 ui.separator();
-                // Tab strip
-                let active = self.active;
-                let mut switch_to = None;
-                let mut close = None;
-                for (i, t) in self.tabs.iter().enumerate() {
-                    let selected = i == active;
-                    let label =
-                        RichText::new(t.title()).color(if selected { accent } else { muted });
-                    if ui.selectable_label(selected, label).clicked() {
-                        switch_to = Some(i);
-                    }
-                    if selected && ui.small_button("×").clicked() {
-                        close = Some(i);
-                    }
+
+                // User-customizable quick-access items (membership + order from
+                // config.toolbar; editable in Settings → Toolbar).
+                let items = self.config.toolbar.items.clone();
+                for id in &items {
+                    self.toolbar_item(ui, id, &mut act, &mut save_cfg, &mut start_lsp);
                 }
-                if let Some(i) = switch_to {
-                    self.active = i;
-                }
-                if let Some(i) = close {
-                    self.close_tab(i);
+
+                // Inline tab strip — only when the user has the strip docked
+                // at the toolbar (Top, the default). Other positions render the
+                // strip in their own panel below. T18.4.
+                if self.config.editor.tab_bar_position == scribe_core::config::TabBarPosition::Top {
+                    ui.separator();
+                    self.draw_tab_strip(ui, accent, muted);
                 }
             });
         });
+
+        // ---- Relocated tab strip (T18.4) — Bottom / Left / Right ----
+        match self.config.editor.tab_bar_position {
+            scribe_core::config::TabBarPosition::Top => {}
+            scribe_core::config::TabBarPosition::Bottom => {
+                egui::TopBottomPanel::bottom("tabs-bottom")
+                    .frame(egui::Frame::default().fill(panel))
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
+                    });
+            }
+            scribe_core::config::TabBarPosition::Left => {
+                egui::SidePanel::left("tabs-left")
+                    .resizable(true)
+                    .default_width(180.0)
+                    .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
+                    .show(ctx, |ui| {
+                        ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                    });
+            }
+            scribe_core::config::TabBarPosition::Right => {
+                egui::SidePanel::right("tabs-right")
+                    .resizable(true)
+                    .default_width(180.0)
+                    .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
+                    .show(ctx, |ui| {
+                        ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                    });
+            }
+        }
 
         // ---- Find bar ----
         if self.find_open {
             egui::TopBottomPanel::top("find").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("find").color(accent).monospace());
-                    ui.text_edit_singleline(&mut self.find_query);
+                    let r = ui.text_edit_singleline(&mut self.find_query);
+                    if self.focus_find {
+                        r.request_focus();
+                        self.focus_find = false;
+                    }
                     let count = if self.find_query.is_empty() || self.active >= self.tabs.len() {
                         0
                     } else {
@@ -1140,7 +1838,11 @@ impl ScribeApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_TOP, [0.0, 64.0])
                 .show(ctx, |ui| {
-                    ui.text_edit_singleline(&mut self.palette_query);
+                    let r = ui.text_edit_singleline(&mut self.palette_query);
+                    if self.focus_palette {
+                        r.request_focus();
+                        self.focus_palette = false;
+                    }
                     let q = self.palette_query.to_lowercase();
                     egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
                         let mut any = false;
@@ -1293,11 +1995,17 @@ impl ScribeApp {
         let active = self.active.min(self.tabs.len().saturating_sub(1));
         self.active = active;
         let font = FontId::monospace(self.config.fonts.editor_size);
+        let line_height = self.config.fonts.line_height;
+        let word_wrap = self.config.editor.word_wrap;
+        let show_line_numbers = self.config.editor.show_line_numbers;
+        let gutter_row_h = font.size * line_height;
         let ext = self.tabs[active].doc.language_hint();
         let read_only = self.tabs[active].doc.is_read_only_large();
+        // The editor should be ready to type whenever no field/menu is open.
+        let overlay_open = self.find_open || self.palette_open || self.settings_open;
 
         // ---- Minimap (rightmost strip) ----
-        if self.minimap {
+        if self.config.editor.show_minimap {
             self.show_minimap(ctx, panel, accent);
         }
 
@@ -1312,87 +2020,186 @@ impl ScribeApp {
                 .show(ctx, |ui| {
                     ui.label(RichText::new("SPLIT").color(accent).small().monospace());
                     ui.separator();
-                    let mut layouter = make_layouter(hl, &self.hl_cache, ext_ref, font.clone());
-                    egui::ScrollArea::both()
-                        .id_salt("split-scroll")
-                        .show(ui, |ui| {
-                            let editor = egui::TextEdit::multiline(&mut self.tabs[active].text)
-                                .code_editor()
-                                .desired_width(f32::INFINITY)
-                                .desired_rows(30)
-                                .lock_focus(true)
-                                .interactive(!read_only)
-                                .layouter(&mut layouter);
-                            ui.add_sized(ui.available_size(), editor);
-                        });
+                    let mut layouter =
+                        make_layouter(hl, &self.hl_cache, ext_ref, font.clone(), line_height);
+                    let sa = if word_wrap {
+                        egui::ScrollArea::vertical()
+                    } else {
+                        egui::ScrollArea::both()
+                    };
+                    sa.id_salt("split-scroll").show(ui, |ui| {
+                        let dw = if word_wrap {
+                            ui.available_width()
+                        } else {
+                            f32::INFINITY
+                        };
+                        let editor = egui::TextEdit::multiline(&mut self.tabs[active].text)
+                            .code_editor()
+                            .desired_width(dw)
+                            .desired_rows(30)
+                            .lock_focus(true)
+                            .interactive(!read_only)
+                            .layouter(&mut layouter);
+                        ui.add_sized(ui.available_size(), editor);
+                    });
+                });
+        }
+
+        // ---- Line-number gutter (sticky left strip; numbers are synced to the
+        // editor galley rows captured last frame — one-frame lag, like minimap).
+        if show_line_numbers && !self.fold_view {
+            let total = self.tabs[active].text.lines().count().max(1);
+            let digits = total.to_string().len().max(2);
+            let gutter_w = digits as f32 * (font.size * 0.62) + 16.0;
+            let rows = &self.line_gutter;
+            egui::SidePanel::left("line-gutter")
+                .exact_width(gutter_w)
+                .resizable(false)
+                .frame(egui::Frame::default().fill(panel))
+                .show(ctx, |ui| {
+                    let painter = ui.painter();
+                    let clip = ui.clip_rect();
+                    let rx = ui.max_rect().right() - 8.0;
+                    let nfont = FontId::monospace((font.size * 0.92).max(8.0));
+                    for (i, &y) in rows.iter().enumerate() {
+                        if y < clip.top() - gutter_row_h || y > clip.bottom() {
+                            continue;
+                        }
+                        painter.text(
+                            egui::pos2(rx, y),
+                            egui::Align2::RIGHT_TOP,
+                            (i + 1).to_string(),
+                            nfont.clone(),
+                            muted,
+                        );
+                    }
                 });
         }
 
         // ---- Central editor surface ----
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Folded read-only preview is a distinct surface (no live editing).
-            if self.fold_view {
-                self.show_fold_view(ui, font.clone(), ext.as_deref());
-                return;
-            }
-
-            // Scope the layouter (which borrows `self.hl`) so it drops before
-            // the `&mut self` completion calls below.
-            let anchor: Option<(egui::Pos2, usize)> = {
-                let hl = &self.hl;
-                let ext_ref = ext.as_deref();
-                let mut layouter = make_layouter(hl, &self.hl_cache, ext_ref, font.clone());
-                let mut sa = egui::ScrollArea::both();
-                if let Some(off) = self.pending_scroll.take() {
-                    sa = sa.vertical_scroll_offset(off);
+        // Phase 18 T18.2 — when the multi-note grid is enabled, render
+        // every open tab as a movable / resizable pane via egui_tiles.
+        // The single-pane code path below stays the default for users
+        // who don't opt in.
+        if self.grid_tree.is_some() {
+            self.render_grid_central_panel(ctx, font.clone());
+        } else {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                // Folded read-only preview is a distinct surface (no live editing).
+                if self.fold_view {
+                    self.show_fold_view(ui, font.clone(), ext.as_deref());
+                    return;
                 }
-                let mut a: Option<(egui::Pos2, usize)> = None;
-                let sa_out = sa.show(ui, |ui| {
-                    let editor = egui::TextEdit::multiline(&mut self.tabs[active].text)
-                        .code_editor()
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(30)
-                        .lock_focus(true)
-                        .interactive(!read_only)
-                        .layouter(&mut layouter);
-                    let out = editor.show(ui);
-                    if let Some(range) = out.cursor_range {
-                        let cc = range.primary.ccursor;
-                        let rect = out.galley.pos_from_ccursor(cc);
-                        let pos = out.galley_pos + egui::vec2(rect.min.x, rect.max.y);
-                        a = Some((pos, cc.index));
-                    }
-                });
-                // Record scroll metrics for the minimap's viewport indicator.
-                self.scroll_metrics = (
-                    sa_out.state.offset.y,
-                    sa_out.content_size.y.max(1.0),
-                    sa_out.inner_rect.height().max(1.0),
-                );
-                a
-            };
 
-            // Completion: open on Ctrl+Space, accept on Enter/Tab, render popup.
-            let cursor_idx = anchor.map(|(_, i)| i);
-            if want_completion {
-                self.open_completion(active, cursor_idx);
-            }
-            if accept_completion {
-                self.accept_completion(active, cursor_idx);
-            }
-            if let Some((pos, _)) = anchor {
-                let choice = self
-                    .completion
-                    .as_ref()
-                    .and_then(|c| completion_popup(ui, pos, c));
-                if let Some(idx) = choice {
-                    if let Some(c) = self.completion.as_mut() {
-                        c.selected = idx;
+                // Tab inserts the configured number of spaces (when insert_spaces is
+                // on) rather than a literal tab — honours editor.tab_width /
+                // insert_spaces. Consume the key before the TextEdit can see it.
+                let editor_id = egui::Id::new("scr1b3-central-editor");
+                if !read_only
+                    && self.config.editor.insert_spaces
+                    && ctx.memory(|m| m.has_focus(editor_id))
+                    && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
+                {
+                    self.indent_with_spaces(ctx, editor_id, active);
+                }
+
+                // Scope the layouter (which borrows `self.hl`) so it drops before
+                // the `&mut self` completion calls below.
+                let mut new_gutter: Vec<f32> = Vec::new();
+                let anchor: Option<(egui::Pos2, usize)> = {
+                    let hl = &self.hl;
+                    let ext_ref = ext.as_deref();
+                    let mut layouter =
+                        make_layouter(hl, &self.hl_cache, ext_ref, font.clone(), line_height);
+                    let mut sa = if word_wrap {
+                        egui::ScrollArea::vertical()
+                    } else {
+                        egui::ScrollArea::both()
+                    };
+                    if let Some(off) = self.pending_scroll.take() {
+                        sa = sa.vertical_scroll_offset(off);
                     }
+                    let mut a: Option<(egui::Pos2, usize)> = None;
+                    let sa_out = sa.show(ui, |ui| {
+                        let dw = if word_wrap {
+                            ui.available_width()
+                        } else {
+                            f32::INFINITY
+                        };
+                        let editor = egui::TextEdit::multiline(&mut self.tabs[active].text)
+                            .id(editor_id)
+                            .code_editor()
+                            .desired_width(dw)
+                            .desired_rows(30)
+                            .lock_focus(true)
+                            .interactive(!read_only)
+                            .layouter(&mut layouter);
+                        let out = editor.show(ui);
+                        if let Some(range) = out.cursor_range {
+                            // egui 0.34: CursorRange.primary is a CCursor directly
+                            // (no nested .ccursor); Galley::pos_from_ccursor was
+                            // renamed to pos_from_cursor (takes CCursor by value).
+                            let cc = range.primary;
+                            let rect = out.galley.pos_from_cursor(cc);
+                            let pos = out.galley_pos + egui::vec2(rect.min.x, rect.max.y);
+                            a = Some((pos, cc.index));
+                        }
+                        // Capture each logical line's screen Y for the gutter (a row
+                        // starts a logical line iff the previous row ended with \n).
+                        if show_line_numbers {
+                            let top = out.galley_pos.y;
+                            let mut prev_newline = true;
+                            for row in &out.galley.rows {
+                                if prev_newline {
+                                    // egui 0.34: PlacedRow.rect is now a method, not a field.
+                                    new_gutter.push(top + row.rect().min.y);
+                                }
+                                prev_newline = row.ends_with_newline;
+                            }
+                        }
+                        // Auto-focus the editor so typing works immediately on launch,
+                        // new tab, or tab switch — no click required — unless a field,
+                        // menu, or popup currently owns keyboard focus.
+                        if !read_only
+                            && !overlay_open
+                            && ui.ctx().memory(|m| m.focused().is_none())
+                            && !egui::Popup::is_any_open(ui.ctx())
+                        {
+                            out.response.request_focus();
+                        }
+                    });
+                    // Record scroll metrics for the minimap's viewport indicator.
+                    self.scroll_metrics = (
+                        sa_out.state.offset.y,
+                        sa_out.content_size.y.max(1.0),
+                        sa_out.inner_rect.height().max(1.0),
+                    );
+                    a
+                };
+                self.line_gutter = new_gutter;
+
+                // Completion: open on Ctrl+Space, accept on Enter/Tab, render popup.
+                let cursor_idx = anchor.map(|(_, i)| i);
+                if want_completion {
+                    self.open_completion(active, cursor_idx);
+                }
+                if accept_completion {
                     self.accept_completion(active, cursor_idx);
                 }
-            }
-        });
+                if let Some((pos, _)) = anchor {
+                    let choice = self
+                        .completion
+                        .as_ref()
+                        .and_then(|c| completion_popup(ui, pos, c));
+                    if let Some(idx) = choice {
+                        if let Some(c) = self.completion.as_mut() {
+                            c.selected = idx;
+                        }
+                        self.accept_completion(active, cursor_idx);
+                    }
+                }
+            });
+        }
 
         // CRT post-effect overlay (top-most; skipped entirely when disabled).
         if self.config.effects.crt_enabled {
@@ -1405,6 +2212,17 @@ impl ScribeApp {
                 &self.config.window.tint,
                 self.config.window.tint_strength,
             );
+        }
+        // Phase 18 T18.1: 8-zone resize overlay for the frameless window. egui
+        // doesn't restore OS resize when window decorations are off (winit
+        // #4186) so we paint invisible interact rectangles at the edges + four
+        // corners that send `ViewportCommand::BeginResize(dir)` on drag and
+        // hint the right cursor on hover.
+        if self.config.appearance.frameless {
+            let maximized = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
+            if !maximized {
+                draw_resize_overlays(ctx);
+            }
         }
 
         // Apply deferred actions after all UI borrows are released.
@@ -1456,13 +2274,185 @@ impl ScribeApp {
     }
 }
 
-fn window_btn(ui: &mut egui::Ui, glyph: &str, color: Color32) -> egui::Response {
-    ui.add(egui::Button::new(RichText::new(glyph).color(color).monospace()).frame(false))
+/// A titlebar caption button (minimize / maximize / restore / close). Icons are
+/// painter-drawn so they never depend on font glyph coverage, sized to a
+/// comfortable 46x28 hit target (Windows 11 caption metric) with a hover fill —
+/// close gets the conventional red hover, the rest a soft white wash.
+#[derive(Clone, Copy)]
+enum CaptionIcon {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+fn caption_btn(
+    ui: &mut egui::Ui,
+    icon: CaptionIcon,
+    base: Color32,
+    hover_fill: Color32,
+) -> egui::Response {
+    let size = egui::vec2(46.0, 28.0);
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let painter = ui.painter();
+    if resp.hovered() {
+        painter.rect_filled(rect, 2.0, hover_fill);
+    }
+    let col = if resp.hovered() { Color32::WHITE } else { base };
+    let c = rect.center();
+    let s = 4.5_f32;
+    let stroke = egui::Stroke::new(1.4, col);
+    match icon {
+        CaptionIcon::Minimize => {
+            painter.line_segment([egui::pos2(c.x - s, c.y), egui::pos2(c.x + s, c.y)], stroke);
+        }
+        CaptionIcon::Maximize => {
+            // egui 0.34: rect_stroke gained a 4th StrokeKind arg.
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(2.0 * s, 2.0 * s)),
+                1.0,
+                stroke,
+                egui::StrokeKind::Outside,
+            );
+        }
+        CaptionIcon::Restore => {
+            // Full front square (lower-left) + an L of the back square peeking
+            // out upper-right — reads as "restore" with no overlap masking.
+            let front = egui::Rect::from_center_size(
+                egui::pos2(c.x - 1.5, c.y + 1.5),
+                egui::vec2(2.0 * s, 2.0 * s),
+            );
+            painter.rect_stroke(front, 1.0, stroke, egui::StrokeKind::Outside);
+            let top = front.top() - 3.0;
+            let right = front.right() + 3.0;
+            painter.line_segment(
+                [egui::pos2(front.left() + 3.0, top), egui::pos2(right, top)],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(right, top),
+                    egui::pos2(right, front.bottom() - 3.0),
+                ],
+                stroke,
+            );
+        }
+        CaptionIcon::Close => {
+            painter.line_segment(
+                [egui::pos2(c.x - s, c.y - s), egui::pos2(c.x + s, c.y + s)],
+                stroke,
+            );
+            painter.line_segment(
+                [egui::pos2(c.x - s, c.y + s), egui::pos2(c.x + s, c.y - s)],
+                stroke,
+            );
+        }
+    }
+    resp
 }
 
 /// Paint the CRT post-effect as a top-most overlay: horizontal scanlines plus a
 /// soft vignette. Cheap (egui shapes, no GPU pass), reduced-motion-safe (static),
 /// and skipped entirely when disabled. `reduced_motion` zeroes any animated term.
+/// Width of the 4 edge resize zones, in logical px. Slim so they only intercept
+/// pointer events right at the window border.
+const RESIZE_EDGE_PX: f32 = 6.0;
+/// Side length of the 4 corner resize zones, in logical px. Slightly larger than
+/// the edges so diagonal grabs are forgiving.
+const RESIZE_CORNER_PX: f32 = 12.0;
+
+/// Phase 18 T18.1 — paint the 8 invisible resize-handle interact zones around
+/// the frameless window. Pure side-effect on the egui context: on hover the
+/// pointer cursor flips to the matching direction; on drag-start a
+/// `ViewportCommand::BeginResize(dir)` is queued and winit drives the actual
+/// resize from there. Called once per frame from `frame_tick`.
+fn draw_resize_overlays(ctx: &egui::Context) {
+    use egui::{
+        Area, CursorIcon, Id, Order, PointerButton, Rect, ResizeDirection, Sense, ViewportCommand,
+    };
+    let rect = ctx.content_rect();
+    let e = RESIZE_EDGE_PX;
+    let c = RESIZE_CORNER_PX;
+    // (id, rect, cursor, direction)
+    let zones: [(&'static str, Rect, CursorIcon, ResizeDirection); 8] = [
+        (
+            "rz-n",
+            Rect::from_min_max(
+                rect.left_top() + egui::vec2(c, 0.0),
+                rect.right_top() + egui::vec2(-c, e),
+            ),
+            CursorIcon::ResizeNorth,
+            ResizeDirection::North,
+        ),
+        (
+            "rz-s",
+            Rect::from_min_max(
+                rect.left_bottom() + egui::vec2(c, -e),
+                rect.right_bottom() + egui::vec2(-c, 0.0),
+            ),
+            CursorIcon::ResizeSouth,
+            ResizeDirection::South,
+        ),
+        (
+            "rz-w",
+            Rect::from_min_max(
+                rect.left_top() + egui::vec2(0.0, c),
+                rect.left_bottom() + egui::vec2(e, -c),
+            ),
+            CursorIcon::ResizeWest,
+            ResizeDirection::West,
+        ),
+        (
+            "rz-e",
+            Rect::from_min_max(
+                rect.right_top() + egui::vec2(-e, c),
+                rect.right_bottom() + egui::vec2(0.0, -c),
+            ),
+            CursorIcon::ResizeEast,
+            ResizeDirection::East,
+        ),
+        (
+            "rz-nw",
+            Rect::from_min_size(rect.left_top(), egui::vec2(c, c)),
+            CursorIcon::ResizeNorthWest,
+            ResizeDirection::NorthWest,
+        ),
+        (
+            "rz-ne",
+            Rect::from_min_size(rect.right_top() - egui::vec2(c, 0.0), egui::vec2(c, c)),
+            CursorIcon::ResizeNorthEast,
+            ResizeDirection::NorthEast,
+        ),
+        (
+            "rz-sw",
+            Rect::from_min_size(rect.left_bottom() - egui::vec2(0.0, c), egui::vec2(c, c)),
+            CursorIcon::ResizeSouthWest,
+            ResizeDirection::SouthWest,
+        ),
+        (
+            "rz-se",
+            Rect::from_min_size(rect.right_bottom() - egui::vec2(c, c), egui::vec2(c, c)),
+            CursorIcon::ResizeSouthEast,
+            ResizeDirection::SouthEast,
+        ),
+    ];
+    for (id, zone, cursor, dir) in zones {
+        Area::new(Id::new(id))
+            .order(Order::Foreground)
+            .fixed_pos(zone.min)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let resp = ui.allocate_rect(zone, Sense::click_and_drag());
+                if resp.hovered() {
+                    ctx.set_cursor_icon(cursor);
+                }
+                if resp.drag_started_by(PointerButton::Primary) {
+                    ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+                }
+            });
+    }
+}
+
 fn paint_crt_overlay(
     ctx: &egui::Context,
     fx: &scribe_core::config::EffectsConfig,
@@ -1472,7 +2462,10 @@ fn paint_crt_overlay(
         egui::Order::Foreground,
         egui::Id::new("crt-overlay"),
     ));
-    let rect = ctx.screen_rect();
+    // egui 0.34: Context::screen_rect split into viewport_rect() + content_rect()
+    // — the CRT overlay paints across the entire window content, so content_rect()
+    // is the right successor.
+    let rect = ctx.content_rect();
 
     // Scanlines — the iconic CRT element (static, accessibility-safe).
     if fx.scanline > 0.0 {
@@ -1534,10 +2527,70 @@ fn paint_tint_overlay(ctx: &egui::Context, tint_hex: &str, strength: f32) {
         egui::Id::new("tint-overlay"),
     ));
     painter.rect_filled(
-        ctx.screen_rect(),
+        // egui 0.34: screen_rect -> content_rect (same window-content footprint).
+        ctx.content_rect(),
         0.0,
         Color32::from_rgba_unmultiplied(c.r, c.g, c.b, a),
     );
+}
+
+#[cfg(test)]
+mod jp_glyph_tests {
+    //! Phase 17 T17.5 — verify the JP-glyph instrument-label discipline.
+    use super::{jp_glyph, toolbar_widget};
+
+    #[test]
+    fn verified_canonical_kanji_present_for_high_confidence_ids() {
+        // The Folklore-Consultant gate requires "verified-accurate kanji ONLY".
+        // These 11 are the verified-canonical IT-Japanese forms; this test
+        // pins them so an accidental edit (typo, replacement with an
+        // unverified glyph) regresses loudly.
+        assert_eq!(jp_glyph("new"), Some("新"));
+        assert_eq!(jp_glyph("open"), Some("開"));
+        assert_eq!(jp_glyph("save"), Some("保"));
+        assert_eq!(jp_glyph("saveas"), Some("別"));
+        assert_eq!(jp_glyph("find"), Some("検"));
+        assert_eq!(jp_glyph("split"), Some("分"));
+        assert_eq!(jp_glyph("minimap"), Some("図"));
+        assert_eq!(jp_glyph("wrap"), Some("折"));
+        assert_eq!(jp_glyph("fold"), Some("畳"));
+        assert_eq!(jp_glyph("linenumbers"), Some("番"));
+        assert_eq!(jp_glyph("spellcheck"), Some("綴"));
+    }
+
+    #[test]
+    fn uncertain_ids_omit_kanji() {
+        // Western-metaphor or acronym/loanword actions stay English-only —
+        // the canonical kanji is uncertain or contested. They MUST return
+        // None so a future "ship a guess" doesn't slip through.
+        assert_eq!(jp_glyph("openfolder"), None);
+        assert_eq!(jp_glyph("palette"), None);
+        assert_eq!(jp_glyph("crt"), None);
+        assert_eq!(jp_glyph("lsp"), None);
+        // Unknown ids also return None — the helper never invents.
+        assert_eq!(jp_glyph("not-a-toolbar-action"), None);
+    }
+
+    #[test]
+    fn widget_falls_back_to_label_when_disabled_or_unknown() {
+        // jp_glyph_labels=false → primary label only, regardless of action.
+        let off = toolbar_widget("new", false, false);
+        assert_eq!(off.text(), "new");
+        // Even with the flag on, an action without verified kanji returns
+        // only the primary label — no kanji is invented.
+        let on_unknown = toolbar_widget("openfolder", false, true);
+        assert_eq!(on_unknown.text(), "folder");
+    }
+
+    #[test]
+    fn widget_appends_kanji_when_enabled_for_verified_action() {
+        // jp_glyph_labels=true + verified action → primary then kanji.
+        // The LayoutJob's flattened text contains both pieces.
+        let on = toolbar_widget("save", false, true);
+        let text = on.text();
+        assert!(text.starts_with("save"), "got {text:?}");
+        assert!(text.contains("保"), "got {text:?}");
+    }
 }
 
 #[cfg(test)]
@@ -1558,7 +2611,7 @@ mod e2e {
                 )),
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| app.ui(ctx));
+            let _ = ctx.run(input, |ctx| app.frame_tick(ctx));
         }
     }
 
@@ -1567,6 +2620,82 @@ mod e2e {
         let mut app = ScribeApp::new_test(Config::default());
         run_frames(&mut app, 3);
         assert_eq!(app.tabs.len(), 1, "expected one scratch tab");
+    }
+
+    /// Phase 18 T18.2 — flipping `editor.grid_enabled` on creates the
+    /// tile-tree at the top of the next frame and the central panel
+    /// renders without panicking. Three frames are enough to exercise
+    /// the sync + render + post-frame cleanup paths.
+    #[test]
+    fn grid_enabled_renders_without_panic() {
+        let mut cfg = Config::default();
+        cfg.editor.grid_enabled = true;
+        let mut app = ScribeApp::new_test(cfg);
+        run_frames(&mut app, 3);
+        assert!(
+            app.grid_tree.is_some(),
+            "grid tree must be built when enabled"
+        );
+        assert_eq!(app.tabs.len(), 1, "still one scratch tab");
+        // The single scratch tab got a real doc id (the legacy 0
+        // sentinel gets bumped on first sync).
+        assert!(app.tabs[0].doc_id.0 > 0, "doc id allocated");
+    }
+
+    /// Phase 18 T18.2 — toggling the grid OFF after it was ON drops
+    /// the tree and re-engages the single-pane code path on the next
+    /// frame.
+    #[test]
+    fn grid_disabled_drops_tree() {
+        let mut cfg = Config::default();
+        cfg.editor.grid_enabled = true;
+        let mut app = ScribeApp::new_test(cfg);
+        run_frames(&mut app, 1);
+        assert!(app.grid_tree.is_some());
+        app.config.editor.grid_enabled = false;
+        run_frames(&mut app, 1);
+        assert!(app.grid_tree.is_none(), "tree drops when disabled");
+    }
+
+    #[test]
+    fn panel_fill_opaque_when_master_off() {
+        // T19.2: with transparency disabled the chrome fill keeps full alpha,
+        // so the window reads as a normal opaque window.
+        let theme = Theme::wired_noir();
+        let w_off = scribe_core::config::WindowConfig {
+            mode: scribe_core::config::WindowMode::Glass, // mode set, but master OFF
+            opacity: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(
+            panel_fill(&theme, &w_off).a(),
+            255,
+            "opaque while master toggle off"
+        );
+        // Master ON + translucent mode => alpha lowered to opacity.
+        let w_on = scribe_core::config::WindowConfig {
+            transparency_enabled: true,
+            ..w_off
+        };
+        let a = panel_fill(&theme, &w_on).a();
+        assert!(
+            (76..255).contains(&a),
+            "alpha reduced to ~opacity (got {a})"
+        );
+    }
+
+    #[test]
+    fn close_latch_hides_before_destroy() {
+        // T19.1: requesting close must NOT close immediately; it hides first
+        // (want_close -> closing) so a layered window leaves no DWM ghost.
+        let mut app = ScribeApp::new_test(Config::default());
+        app.want_close = true;
+        run_frames(&mut app, 1);
+        assert!(
+            app.closing,
+            "first frame latches into the hide-then-close phase"
+        );
+        assert!(!app.want_close, "want_close consumed");
     }
 
     #[test]
@@ -1663,9 +2792,9 @@ mod e2e {
     fn minimap_renders_with_viewport() {
         let mut app = ScribeApp::new_test(Config::default());
         app.tabs[0].text = (0..200).map(|i| format!("line {i}\n")).collect();
-        app.minimap = true;
+        app.config.editor.show_minimap = true;
         run_frames(&mut app, 2);
-        assert!(app.minimap);
+        assert!(app.config.editor.show_minimap);
         // Scroll metrics get populated by the editor render.
         assert!(app.scroll_metrics.1 >= 1.0);
     }
@@ -1680,6 +2809,81 @@ mod e2e {
         app.folds.insert(0);
         run_frames(&mut app, 1);
         assert!(app.folds.contains(&0));
+    }
+
+    #[test]
+    fn apply_indent_inserts_spaces_at_caret() {
+        let (out, caret) = apply_indent("ab", 1, 1, 4);
+        assert_eq!(out, "a    b");
+        assert_eq!(caret, 5);
+    }
+
+    #[test]
+    fn apply_indent_replaces_selection() {
+        // Replace chars [1,3) ("bc") of "abcd" with 2 spaces.
+        let (out, caret) = apply_indent("abcd", 1, 3, 2);
+        assert_eq!(out, "a  d");
+        assert_eq!(caret, 3);
+    }
+
+    #[test]
+    fn line_gutter_populated_when_line_numbers_on() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.config.editor.show_line_numbers = true;
+        app.tabs[0].text = "a\nb\nc\nd\n".into();
+        run_frames(&mut app, 2);
+        assert!(
+            app.line_gutter.len() >= 4,
+            "gutter should hold one Y per logical line (got {})",
+            app.line_gutter.len()
+        );
+    }
+
+    #[test]
+    fn line_gutter_empty_when_line_numbers_off() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.config.editor.show_line_numbers = false;
+        app.tabs[0].text = "a\nb\nc\n".into();
+        run_frames(&mut app, 2);
+        assert!(app.line_gutter.is_empty());
+    }
+
+    #[test]
+    fn word_wrap_toggle_renders_without_panic() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "a very long line ".repeat(40);
+        app.config.editor.word_wrap = true;
+        run_frames(&mut app, 2);
+        app.config.editor.word_wrap = false;
+        run_frames(&mut app, 2);
+        assert!(app.scroll_metrics.1 >= 1.0);
+    }
+
+    #[test]
+    fn toolbar_default_has_core_actions() {
+        let items = scribe_core::config::ToolbarConfig::default().items;
+        for want in ["new", "save", "find", "palette"] {
+            assert!(
+                items.iter().any(|i| i == want),
+                "default toolbar missing {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn toolbar_layout_survives_serde_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.toolbar.items = vec!["save".into(), "sep".into(), "crt".into()];
+        let back = Config::from_toml_str(&cfg.to_toml_string()).unwrap();
+        assert_eq!(back.toolbar.items, cfg.toolbar.items);
+    }
+
+    #[test]
+    fn settings_window_renders_open() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.settings_open = true;
+        run_frames(&mut app, 2);
+        assert!(app.settings_open, "settings stays open across frames");
     }
 
     #[test]
@@ -1709,5 +2913,186 @@ mod e2e {
         });
         // The popup Area renders against the live cursor without panic.
         run_frames(&mut app, 1);
+    }
+
+    // ---- Input-driven ("computer control") E2E ----
+    // A robot user: inject real pointer + keyboard events through egui's own
+    // event loop (the same `RawInput.events` path a physical mouse/keyboard
+    // produces) against ONE persistent `Context` so focus + widget state carry
+    // across frames, then assert what the app did.
+
+    struct Driver {
+        ctx: egui::Context,
+    }
+
+    impl Driver {
+        fn new() -> Self {
+            Self {
+                ctx: egui::Context::default(),
+            }
+        }
+
+        fn frame(&self, app: &mut ScribeApp, modifiers: egui::Modifiers, events: Vec<egui::Event>) {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(1100.0, 720.0),
+                )),
+                modifiers,
+                events,
+                ..Default::default()
+            };
+            let _ = self.ctx.run(input, |ctx| app.frame_tick(ctx));
+        }
+
+        fn idle(&self, app: &mut ScribeApp) {
+            self.frame(app, egui::Modifiers::NONE, vec![]);
+        }
+
+        fn click(&self, app: &mut ScribeApp, pos: egui::Pos2) {
+            let m = egui::Modifiers::NONE;
+            self.frame(
+                app,
+                m,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: m,
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: m,
+                    },
+                ],
+            );
+        }
+
+        fn key(&self, app: &mut ScribeApp, key: egui::Key, modifiers: egui::Modifiers) {
+            self.frame(
+                app,
+                modifiers,
+                vec![
+                    egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                    },
+                    egui::Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers,
+                    },
+                ],
+            );
+        }
+
+        fn type_text(&self, app: &mut ScribeApp, s: &str) {
+            self.frame(
+                app,
+                egui::Modifiers::NONE,
+                vec![egui::Event::Text(s.to_string())],
+            );
+        }
+    }
+
+    #[test]
+    fn input_ctrl_n_adds_a_tab() {
+        let mut app = ScribeApp::new_test(Config::default());
+        let d = Driver::new();
+        d.idle(&mut app);
+        let before = app.tabs.len();
+        d.key(&mut app, egui::Key::N, egui::Modifiers::COMMAND);
+        assert_eq!(app.tabs.len(), before + 1, "Ctrl+N opens a new tab");
+    }
+
+    #[test]
+    fn input_ctrl_f_opens_and_escape_closes_find() {
+        let mut app = ScribeApp::new_test(Config::default());
+        let d = Driver::new();
+        d.idle(&mut app);
+        d.key(&mut app, egui::Key::F, egui::Modifiers::COMMAND);
+        assert!(app.find_open, "Ctrl+F opens the find bar");
+        d.key(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.find_open, "Escape closes the find bar");
+    }
+
+    #[test]
+    fn input_ctrl_shift_p_opens_palette() {
+        let mut app = ScribeApp::new_test(Config::default());
+        let d = Driver::new();
+        d.idle(&mut app);
+        let cmd_shift = egui::Modifiers {
+            shift: true,
+            command: true,
+            ..Default::default()
+        };
+        d.key(&mut app, egui::Key::P, cmd_shift);
+        assert!(app.palette_open, "Ctrl+Shift+P opens the command palette");
+    }
+
+    #[test]
+    fn input_type_without_click_autofocuses_editor() {
+        // Regression for the auto-focus fix: a user should be able to type
+        // immediately after launch with NO click — the editor grabs focus when
+        // idle. (Surfaced by the live computer-control screenshot pass.)
+        let mut app = ScribeApp::new_test(Config::default());
+        let d = Driver::new();
+        d.idle(&mut app); // frame 1: editor requests focus
+        d.idle(&mut app); // frame 2: focus is now held
+        d.type_text(&mut app, "no_click_needed");
+        d.idle(&mut app);
+        assert!(
+            app.tabs[app.active].text.contains("no_click_needed"),
+            "editor should auto-focus and accept typing without a click (got {:?})",
+            app.tabs[app.active].text
+        );
+    }
+
+    #[test]
+    fn input_click_and_type_inserts_text() {
+        let mut app = ScribeApp::new_test(Config::default());
+        let d = Driver::new();
+        d.idle(&mut app);
+        // Click into the central editor to focus it, then type.
+        d.click(&mut app, egui::pos2(550.0, 360.0));
+        d.type_text(&mut app, "robot");
+        d.idle(&mut app);
+        assert!(
+            app.tabs[app.active].text.contains("robot"),
+            "typed text should reach the buffer (got {:?})",
+            app.tabs[app.active].text
+        );
+    }
+
+    #[test]
+    fn input_ctrl_space_completion_then_enter_accepts() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "value valuer ".into();
+        let d = Driver::new();
+        d.idle(&mut app);
+        d.click(&mut app, egui::pos2(550.0, 360.0));
+        d.type_text(&mut app, "val");
+        d.key(&mut app, egui::Key::Space, egui::Modifiers::COMMAND);
+        assert!(
+            app.completion.is_some(),
+            "Ctrl+Space opens completion for prefix 'val' (buffer {:?})",
+            app.tabs[0].text
+        );
+        let before = app.tabs[0].text.clone();
+        d.key(&mut app, egui::Key::Enter, egui::Modifiers::NONE);
+        assert_ne!(
+            app.tabs[0].text, before,
+            "Enter accepts the highlighted completion"
+        );
+        assert!(app.completion.is_none(), "popup closes after accept");
     }
 }

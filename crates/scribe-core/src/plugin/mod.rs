@@ -16,8 +16,14 @@
 //! capability-consent — not signatures — is the real security gate.
 
 mod host;
+pub mod integrity;
+pub mod pinned_keys;
+pub mod registry;
 
 pub use host::{CommandInfo, HookEvent, PluginContext, PluginHost};
+pub use integrity::verify_plugin_tarball;
+pub use pinned_keys::{PinOutcome, PinnedKeyStore};
+pub use registry::{PluginEntry, RegistryIndex, Release};
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -77,6 +83,38 @@ pub struct PluginManifest {
     pub capabilities: Vec<Capability>,
     #[serde(default)]
     pub description: String,
+
+    // ---- Phase 20 T20.2: signed-plugin fields. All Option so existing
+    // unsigned script plugins keep loading; the host enforces the gate
+    // for compiled / registry-installed plugins as the WASM track lands.
+    /// Minimum SCR1B3 app version required for this plugin (semver string).
+    /// Refused when the running host is older than the declared minimum so
+    /// a plugin authored against newer host-API extensions doesn't crash
+    /// the host. `None` means 'no minimum' — the api_version gate alone
+    /// is consulted.
+    #[serde(default)]
+    pub min_app_version: Option<String>,
+
+    /// SHA-256 of the artifact this manifest covers (lowercase hex). The
+    /// host computes the hash of the entry file (or the compiled WASM
+    /// blob for the WASM track) on load and refuses on mismatch. `None`
+    /// for the local-development unsigned case.
+    #[serde(default)]
+    pub checksum_sha256: Option<String>,
+
+    /// Author's ed25519 public key (`untrusted comment` minisign form, or
+    /// raw base64). Pinned at install time; the host refuses updates that
+    /// arrive signed by a different key (prevents author-takeover).
+    #[serde(default)]
+    pub author_pubkey: Option<String>,
+
+    /// Minisign detached signature of THIS manifest (signed over the
+    /// canonical TOML bytes, NOT including the signature field itself).
+    /// Host verifies against `author_pubkey` before granting any
+    /// privileged capability or persisting the install. `None` for the
+    /// unsigned local-development path.
+    #[serde(default)]
+    pub signature: Option<String>,
 }
 
 impl PluginManifest {
@@ -96,6 +134,27 @@ impl PluginManifest {
             .copied()
             .filter(|c| c.is_privileged())
             .collect()
+    }
+
+    /// True if the running app build satisfies the manifest-declared
+    /// `min_app_version`. Returns true unconditionally when the manifest
+    /// declares no minimum (the manifest field is `Option<String>` to
+    /// keep older plugins parsing without panicking).
+    ///
+    /// `app` is parsed as a SemVer 2.0 string; a parse error on either
+    /// side returns `false` so we err on the side of rejecting a plugin
+    /// rather than silently lying about compatibility.
+    pub fn is_app_version_ok(&self, app: &str) -> bool {
+        let Some(req) = self.min_app_version.as_deref() else {
+            return true;
+        };
+        match (
+            semver::Version::parse(req.trim()),
+            semver::Version::parse(app.trim()),
+        ) {
+            (Ok(min), Ok(running)) => running >= min,
+            _ => false,
+        }
     }
 }
 
@@ -204,5 +263,59 @@ description = "Uppercases the buffer"
         assert_eq!(found.len(), 1);
         assert!(errors.is_empty());
         assert_eq!(found[0].manifest.id, "uppercase");
+    }
+
+    // ---- Phase 20 T20.2 is_app_version_ok regression tests ----
+
+    fn manifest_with_min(min: Option<&str>) -> PluginManifest {
+        PluginManifest {
+            id: "p".into(),
+            name: "p".into(),
+            version: String::new(),
+            api_version: 1,
+            kind: PluginKind::default(),
+            entry: "main.rhai".into(),
+            capabilities: Vec::new(),
+            description: String::new(),
+            min_app_version: min.map(str::to_owned),
+            checksum_sha256: None,
+            author_pubkey: None,
+            signature: None,
+        }
+    }
+
+    #[test]
+    fn is_app_version_ok_true_when_no_min_declared() {
+        let m = manifest_with_min(None);
+        assert!(m.is_app_version_ok("0.1.0"));
+        assert!(m.is_app_version_ok("99.99.99"));
+    }
+
+    #[test]
+    fn is_app_version_ok_true_when_app_equal_to_min() {
+        let m = manifest_with_min(Some("1.2.3"));
+        assert!(m.is_app_version_ok("1.2.3"));
+    }
+
+    #[test]
+    fn is_app_version_ok_true_when_app_greater_than_min() {
+        let m = manifest_with_min(Some("1.2.3"));
+        assert!(m.is_app_version_ok("1.2.4"));
+        assert!(m.is_app_version_ok("2.0.0"));
+    }
+
+    #[test]
+    fn is_app_version_ok_false_when_app_less_than_min() {
+        let m = manifest_with_min(Some("1.2.3"));
+        assert!(!m.is_app_version_ok("1.2.2"));
+        assert!(!m.is_app_version_ok("0.9.0"));
+    }
+
+    #[test]
+    fn is_app_version_ok_false_on_parse_error() {
+        let m = manifest_with_min(Some("1.2.3"));
+        assert!(!m.is_app_version_ok("not-a-version"));
+        let bad = manifest_with_min(Some("also-bad"));
+        assert!(!bad.is_app_version_ok("1.0.0"));
     }
 }

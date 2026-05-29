@@ -37,15 +37,19 @@ All settings are grouped into seven tables: `[editor]`, `[appearance]`, `[fonts]
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `theme` | string | `"itasha-void"` | Theme name: a built-in scheme or the file stem of a user theme in your themes directory. See [THEMING.md](THEMING.md). |
+| `theme` | string | `"wired-noir"` | Theme name: a built-in scheme or the file stem of a user theme in your themes directory. See [THEMING.md](THEMING.md). |
 | `follow_os_theme` | boolean | `true` | Follow the OS dark/light preference. |
 | `frameless` | boolean | `true` | Use a frameless window with the custom brand titlebar (no OS title bar). Set `false` for standard OS window decorations. |
+| `toolbar_icons` | boolean | `false` | Render the quick-access toolbar as Phosphor (Thin) icon glyphs instead of text labels. |
+| `jp_glyph_labels` | boolean | `false` | Append a small, dim, English-redundant kanji to each toolbar action whose canonical Japanese term is verified (e.g. New → 新, Save → 保, Find → 検). Actions whose canonical kanji is uncertain (open-folder, palette, CRT, LSP) stay English-only — Folklore-Consultant gate (DECISION-2026-005). |
 
 ## `[fonts]` — typography
 
+JetBrains Mono Regular is **bundled** with the binary (OFL-1.1, see `assets/fonts/JetBrainsMono/OFL.txt`) and registered as the primary Monospace family. egui renders via ab_glyph which does not perform OpenType shaping, so JetBrains Mono ligatures are inherently OFF (no config knob; the shaper does not support enabling them).
+
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `editor_family` | array of strings | `["JetBrains Mono", "Cascadia Code", "Consolas"]` | Ordered fallback list of monospace families for the editing surface. |
+| `editor_family` | array of strings | `["JetBrains Mono", "Cascadia Code", "Consolas"]` | Ordered fallback list of monospace families for the editing surface. JetBrains Mono ships bundled; other entries fall through to the system font registry. |
 | `ui_family` | array of strings | `["Inter"]` | Ordered fallback list of families for UI chrome (tabs, status bar, menus). |
 | `editor_size` | float | `14.0` | Editor font size in points. |
 | `line_height` | float | `1.4` | Line height as a multiple of the font size. |
@@ -114,7 +118,7 @@ auto_save = false
 restore_session = true
 
 [appearance]
-theme = "itasha-void"
+theme = "wired-noir"
 follow_os_theme = true
 frameless = true
 
@@ -158,7 +162,7 @@ A real config rarely needs more than a few lines:
 
 ```toml
 [appearance]
-theme = "itasha-void"
+theme = "wired-noir"
 
 [effects]
 crt_enabled = true

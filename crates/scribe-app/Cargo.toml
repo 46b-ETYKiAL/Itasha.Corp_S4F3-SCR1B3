@@ -16,12 +16,16 @@ scribe-core.workspace = true
 scribe-render.workspace = true
 eframe.workspace = true
 egui.workspace = true
+egui-phosphor.workspace = true                 # hairline Phosphor icon font (Phase 16 T16.3)
+egui_tiles.workspace = true                    # tiling layout for the multi-note grid (Phase 18 T18.2)
+serde.workspace = true                         # DocId / Pane serde for Tree<Pane> persistence (Phase 18 T18.2)
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rfd = "0.15"          # native OS file dialogs (native-feel)
 notify = { workspace = true }                 # config/theme live-reload
 notify-debouncer-mini = { workspace = true }
-window-vibrancy = "0.7"                        # OS glass/acrylic/mica/vibrancy (rwh 0.6, matches eframe 0.29)
+window-vibrancy = "0.7"                        # OS glass/acrylic/mica/vibrancy
 
 [dev-dependencies]
 tempfile = "3"
+toml = { workspace = true }                    # Tree<Pane> round-trip test (Phase 18 T18.2)

@@ -1,0 +1,108 @@
+# SCR1B3 install manifest — consumed by F0RG3-W1R3 (FORGE-WIRE), the in-house
+# cross-platform installer framework. F0RG3-W1R3 reads this file, picks the
+# per-OS artifact identifier for the target host, fetches the artifact from
+# the GitHub Releases endpoint, verifies the signature/checksum, and runs the
+# OS-native install path.
+#
+# Authority: lore-council DECISION-2026-008 (Daemon-Seal app icon family) +
+# DECISION-2026-005 (wired-noir brand) + the v1 D5/D6 decisions (gated public
+# publish + telemetry-free signed auto-update).
+#
+# This file is shipped under apps/scribe/packaging/ and copies into the public
+# Itasha.Corp_S4F3-SCR1B3 repository alongside the per-OS packaging configs
+# already present in this directory.
+
+schema_version = "1"
+
+[product]
+name        = "SCR1B3"
+slug        = "scr1b3"
+display     = "SCR1B3"
+tagline     = "fast, telemetry-free, not-bloated code/notes editor"
+description = """
+SCR1B3 — a standalone cross-platform code/text editor by Itasha.Corp. Fast,
+GPU-rendered, modern, telemetry-free; deep customization without bloat. Sibling
+of the C0PL4ND terminal; same wired-noir visual system.
+"""
+license  = "MIT OR Apache-2.0"
+homepage = "https://github.com/itasha-corp/scr1b3"
+vendor   = "Itasha.Corp"
+icon     = "assets/icons/scr1b3.png"
+icon_ico = "assets/icons/scr1b3.ico"
+icon_icns = "assets/icons/scr1b3.icns"
+icon_svg = "assets/svg/app-icon.svg"
+
+[update]
+# Telemetry-free, GitHub-Releases-only. Forge-Wire follows the same source
+# the in-app auto-updater uses; both verify against the embedded ed25519
+# public key (minisign).
+source         = "github-releases"
+repo           = "itasha-corp/scr1b3"
+channel        = "stable"
+verify_method  = "minisign"
+verify_pubkey  = "apps/scribe/packaging/minisign.pub"
+
+[[artifact]]
+target  = "windows-x86_64"
+kind    = "winget"
+file    = "ItashaCorp.SCR1B3.installer.yaml"
+path    = "windows/ItashaCorp.SCR1B3.installer.yaml"
+
+[[artifact]]
+target  = "windows-x86_64"
+kind    = "msi"
+file    = "scr1b3-x86_64-pc-windows-msvc.msi"
+
+[[artifact]]
+target  = "windows-x86_64"
+kind    = "portable"
+file    = "scr1b3-x86_64-pc-windows-msvc.zip"
+self_update = true
+
+[[artifact]]
+target  = "macos-universal"
+kind    = "dmg"
+file    = "scr1b3-universal-apple-darwin.dmg"
+self_update = true
+
+[[artifact]]
+target  = "macos-universal"
+kind    = "homebrew-cask"
+file    = "scr1b3.rb"
+path    = "macos/scr1b3.rb"
+
+[[artifact]]
+target  = "linux-x86_64"
+kind    = "appimage"
+file    = "scr1b3-x86_64-linux.AppImage"
+self_update = "opt-in"
+
+[[artifact]]
+target  = "linux-x86_64"
+kind    = "deb"
+file    = "scr1b3_x86_64.deb"
+control = "linux/debian-control"
+
+[[artifact]]
+target  = "linux-x86_64"
+kind    = "install-script"
+file    = "install.sh"
+
+[shortcut]
+# Start-menu / dock / launcher entry. F0RG3-W1R3 wires these to the OS-native
+# shortcut mechanism (Windows: WiX shortcut; macOS: .app Info.plist; Linux:
+# .desktop file).
+name     = "SCR1B3"
+comment  = "Itasha.Corp code/notes editor"
+exec     = "scr1b3"
+icon     = "scr1b3"
+desktop  = "linux/scr1b3.desktop"
+categories = ["Development", "TextEditor", "Utility"]
+
+[telemetry]
+# Hard zero per the v1 D6 decision and DECISION-2026-005 'privacy-respecting'
+# brand axis. F0RG3-W1R3 MUST NOT phone home or attach an install-id token.
+collect       = false
+install_id    = "none"
+crash_reports = false
+analytics     = false

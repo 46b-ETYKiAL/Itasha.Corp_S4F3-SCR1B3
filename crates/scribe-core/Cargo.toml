@@ -26,6 +26,7 @@ rhai = { version = "1", features = ["sync"] }   # pure-Rust sandboxed scripting 
 sha2 = "0.10"                                    # checksum verification for updates
 minisign-verify = "0.2"                          # pure-Rust ed25519 update-signature verify
 self-replace = "1"                               # atomic running-binary swap (Win rename-trick)
+semver.workspace = true                          # plugin manifest min_app_version SemVer compare
 
 [dev-dependencies]
 tempfile = "3"

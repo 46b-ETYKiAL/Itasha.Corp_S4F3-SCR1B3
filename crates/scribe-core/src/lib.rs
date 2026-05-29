@@ -6,7 +6,20 @@
 //!
 //! This crate has NO UI dependency — it is the replaceable engine behind the
 //! `scribe-render` + `scribe-app` shell.
+//!
+//! ## Unsafe-code discipline (Phase 21 T21.2 P1)
+//!
+//! `#![deny(unsafe_code)]` at the crate root so every future `unsafe` block
+//! requires an explicit, module-scoped `#[allow(unsafe_code)]` carrying a
+//! `SAFETY:` comment. `forbid` is rejected here because it cannot be locally
+//! overridden; `deny` keeps the security budget visible per call-site. The
+//! single documented exception lives in [`document`] for the read-only
+//! `memmap2::Mmap::map` on the D2 multi-GB-open path (`SAFETY:` comment
+//! present at the call-site).
 
+#![deny(unsafe_code)]
+
+pub mod buffer;
 pub mod config;
 pub mod document;
 pub mod encoding;

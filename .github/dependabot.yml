@@ -1,0 +1,47 @@
+# SCR1B3 Dependabot config — Phase 21 T21.1. Tracks security advisories on
+# Cargo + GitHub Actions deps and opens weekly bump PRs the maintainer reviews
+# before merge. No private/paid registries; OSS-only per the no-paid-services
+# posture. Honors the no-vendor-SDK rule (we never depend on a vendor LLM SDK)
+# and the dep-management policy (production deps pinned, lockfile committed,
+# vulnerability check before any add).
+
+version: 2
+
+updates:
+  # Rust crates (workspace + every crate manifest under apps/scribe/).
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    rebase-strategy: auto
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+    # Only PRs that close a security advisory go through automatically; the
+    # rest are queued for the maintainer's weekly review per the security
+    # hardening dossier (T21.2).
+    allow:
+      - dependency-type: "all"
+
+  # GitHub Actions used in apps/scribe/.github/workflows/.
+  - package-ecosystem: github-actions
+    directory: "/.github/workflows"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"

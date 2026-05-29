@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [master]
   pull_request:
   workflow_dispatch:
 
@@ -63,3 +63,14 @@ jobs:
           python-version: "3.12"
       - name: Audit for internal references / secrets
         run: python3 scripts/content_safety_audit.py
+
+  forge-wire-manifest:
+    name: F0RG3-W1R3 install-manifest audit (Phase 22 T22.3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Audit forge-wire-manifest.toml
+        run: python3 scripts/verify_forge_wire_manifest.py

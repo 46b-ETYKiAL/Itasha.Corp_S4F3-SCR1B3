@@ -1,6 +1,18 @@
 //! SCR1B3 render layer: maps the engine-agnostic `Theme` onto egui `Visuals`,
 //! converts colors, and carries CRT post-process parameters. Keeps the
 //! `egui`-specific mapping out of `scribe-core`.
+//!
+//! Phase 21 T21.2 P1 — `#![forbid(unsafe_code)]`. This crate is pure-safe
+//! Rust: theme → Visuals, color math, CRT parameter conversion. No mmap,
+//! no FFI, no transmute path is needed; the forbid is unconditional.
+
+#![forbid(unsafe_code)]
+
+pub mod post;
+pub mod rope_editor;
+
+pub use post::{CrtPostCallback, PostResources, PostState, PostUniforms};
+pub use rope_editor::{BufferModeSeen, RopeEditor, RopeEditorResponse};
 
 use egui::{Color32, Stroke, Visuals};
 use scribe_core::theme::{Appearance, Rgba, Theme};
@@ -64,7 +76,7 @@ pub fn apply_window_opacity(v: &mut Visuals, opacity: f32) {
 
 /// CRT post-process parameters (consumed by the optional wgpu post-pass).
 /// When `enabled` is false the post-pass is skipped entirely (zero cost).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct CrtParams {
     pub enabled: bool,
     pub scanline: f32,
@@ -112,8 +124,8 @@ mod tests {
 
     #[test]
     fn visuals_from_brand_theme() {
-        let v = theme_to_visuals(&Theme::itasha_void());
-        assert_eq!(v.extreme_bg_color, Color32::from_rgb(0x08, 0x06, 0x0d));
+        let v = theme_to_visuals(&Theme::wired_noir());
+        assert_eq!(v.extreme_bg_color, Color32::from_rgb(0x07, 0x0a, 0x0c));
     }
 
     #[test]

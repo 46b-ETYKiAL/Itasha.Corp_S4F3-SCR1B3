@@ -59,7 +59,9 @@ impl Document {
             // mmap read-only browse: decode lossily as UTF-8 for display.
             let file = fs::File::open(path)?;
             // SAFETY: read-only mmap of a file we just opened; we never write
-            // through it and drop it before any edit.
+            // through it and drop it before any edit. Documented exception to
+            // the crate-root `#![deny(unsafe_code)]` per Phase 21 T21.2 P1.
+            #[allow(unsafe_code)]
             let mmap = unsafe { memmap2::Mmap::map(&file)? };
             let (text, enc) = encoding::decode(&mmap);
             let detected_eol = eol::detect(&text);
