@@ -38,7 +38,11 @@ jobs:
       - name: Format check
         run: cargo fmt --all --check
       - name: Clippy (deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        # `--locked` forces clippy to resolve against the committed
+        # Cargo.lock so a freshly-published upstream major (e.g.
+        # chardetng 1.0 — a breaking-API rev that lands as a
+        # Dependabot PR) cannot break CI before we explicitly bump.
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Build
         run: cargo build --locked --all-targets
       - name: Test
