@@ -1,0 +1,43 @@
+# SCR1B3 supply-chain gate — Phase 21 T21.1 primary safety check. Runs
+# `cargo-deny` against the workspace `deny.toml` config (license allowlist +
+# advisory deny + sources lockdown). Fails the CI on any new license drift,
+# unpatched RUSTSEC advisory, or banned source. The in-app updater and the
+# F0RG3-W1R3 installer manifest both trust this gate as the primary
+# supply-chain proof.
+
+name: cargo-deny
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    # Nightly so advisories that landed between PRs surface within 24 h.
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: cargo-deny-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: cargo-deny ${{ matrix.checks }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        checks:
+          - advisories
+          - bans
+          - licenses
+          - sources
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}
+          arguments: --workspace --all-features

@@ -1,32 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="SCR1B3 logomark — daemon seal">
+  <!-- SCR1B3 logomark — quiet daemon-seal monogram for in-app / title-bar use.
+       Same family as app-icon (DECISION-2026-008) without CRT scanlines / vignette / ticks. -->
   <defs>
-    <pattern id="scanlines" patternUnits="userSpaceOnUse" width="256" height="6">
-      <rect width="256" height="3" fill="transparent"/>
-      <rect y="3" width="256" height="3" fill="rgba(0,0,0,0.15)"/>
-    </pattern>
-    <filter id="phosphor">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="0.8" result="bloom"/>
-      <feMerge>
-        <feMergeNode in="bloom"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-    <radialGradient id="vignette" cx="50%" cy="50%" r="72%">
-      <stop offset="0%" stop-color="transparent"/>
-      <stop offset="100%" stop-color="rgba(0,0,0,0.45)"/>
-    </radialGradient>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#070A0C"/>
+      <stop offset="1" stop-color="#121A1F"/>
+    </linearGradient>
   </defs>
-  <!-- Void screen with rounded CRT corners -->
-  <rect x="0" y="0" width="256" height="256" rx="40" ry="40" fill="#08060d"/>
-  <rect x="6" y="6" width="244" height="244" rx="36" ry="36" fill="none" stroke="#18181f" stroke-width="6"/>
-  <!-- Scribe caret glyph: a stylized prompt bracket + blinking caret block -->
-  <g filter="url(#phosphor)">
-    <!-- terminal prompt chevron in cyan -->
-    <path d="M 70 90 L 110 128 L 70 166" fill="none" stroke="#00fffe" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
-    <!-- caret block (the editor cursor) in green -->
-    <rect x="132" y="92" width="34" height="72" rx="3" ry="3" fill="#01fe36"/>
+  <rect x="0" y="0" width="256" height="256" rx="40" ry="40" fill="url(#bg)"/>
+  <rect x="6" y="6" width="244" height="244" rx="36" ry="36" fill="none" stroke="#1A242B" stroke-width="4"/>
+  <g stroke="#34E0D0" fill="none" stroke-linecap="round">
+    <circle cx="128" cy="128" r="76" stroke-width="14"/>
+    <rect x="118" y="108" width="20" height="40" rx="2" ry="2" fill="#34E0D0" stroke="none"/>
+    <line x1="100" y1="160" x2="156" y2="160" stroke-width="3"/>
   </g>
-  <!-- Scanlines + vignette over the screen -->
-  <rect x="0" y="0" width="256" height="256" rx="40" ry="40" fill="url(#scanlines)"/>
-  <rect x="0" y="0" width="256" height="256" rx="40" ry="40" fill="url(#vignette)"/>
 </svg>

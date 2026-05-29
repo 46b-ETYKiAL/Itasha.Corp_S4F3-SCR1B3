@@ -22,6 +22,7 @@ regex = "1"                   # find/replace
 # Config + theming
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+semver = "1"                  # plugin manifest min_app_version SemVer compare (Phase 20 T20.2)
 directories = "5"             # per-OS config paths
 notify = "6"                  # config/theme live-reload
 notify-debouncer-mini = "0.4"
@@ -32,8 +33,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "1"
 anyhow = "1"
 # UI (egui via eframe = winit + wgpu + egui, the official bundle)
-eframe = { version = "0.29", default-features = false, features = ["wgpu", "default_fonts"] }
-egui = "0.29"
+# Phase 16 / T16.2: bumped 0.29 -> 0.34 (Rounding->CornerRadius, panel/Visuals
+# API deltas migrated; matches the lockstep constraint with egui_tiles 0.15 +
+# egui-phosphor 0.12). ADR docs/adr/0006-ui-framework-ratify-egui.md (T16.1).
+eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts"] }
+egui = "0.34"
+egui-phosphor = { version = "0.12", default-features = false, features = ["thin"] }  # Phosphor Thin icon font (T16.3, DECISION-2026-005 "hairline icons")
+egui_tiles = "0.15"           # tiling layout engine — multi-note grid (Phase 18 T18.2). Pairs lockstep with egui 0.34. Default features include `serde` so the Tree round-trips through the existing TOML config.
 # Internal
 scribe-core = { path = "crates/scribe-core" }
 scribe-render = { path = "crates/scribe-render" }

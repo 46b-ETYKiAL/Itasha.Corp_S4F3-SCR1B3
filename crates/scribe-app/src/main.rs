@@ -3,11 +3,16 @@
 //! A "better Notepad++": fast, telemetry-free, not bloated, modern. This binary
 //! is the egui/eframe shell over `scribe-core` (engine) + `scribe-render`
 //! (theme/CRT mapping). Frameless window with a custom brand titlebar.
+//!
+//! Phase 21 T21.2 P1 — `#![forbid(unsafe_code)]`. The egui shell is pure-safe
+//! Rust over eframe; no `unsafe` is ever needed at this layer.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#![forbid(unsafe_code)]
 
 mod app;
 mod editor_features;
 mod filetree;
+mod grid;
 mod settings;
 
 use tracing_subscriber::EnvFilter;
@@ -34,7 +39,10 @@ fn main() -> eframe::Result<()> {
     }
     // A transparent surface is required for frameless rounded corners AND for
     // any translucent/glass window mode (so the OS blur / desktop shows through).
-    if config.appearance.frameless || config.window.mode.is_translucent() {
+    // egui-wgpu then selects a PreMultiplied/PostMultiplied composite-alpha-mode
+    // (see egui-wgpu 0.29 winit.rs) — but only if the painted content is itself
+    // non-opaque, which `effective_translucent()` drives in the shell.
+    if config.appearance.frameless || config.window.effective_translucent() {
         viewport = viewport.with_transparent(true);
     }
 

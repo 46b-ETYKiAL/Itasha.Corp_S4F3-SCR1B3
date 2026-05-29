@@ -4,25 +4,70 @@ SCR1B3 themes are plain TOML files using a **Helix-style three-namespace schema*
 
 ## Selecting a theme
 
-Set the theme name in your config (see [CONFIG.md](CONFIG.md)):
+The fastest path: **Settings → Appearance → Theme** picks one of the built-ins from a dropdown. The same value can be set in your config (see [CONFIG.md](CONFIG.md)):
 
 ```toml
 [appearance]
-theme = "itasha-void"
+theme = "wired-noir"
 ```
 
-The value is either a **built-in scheme name** or the **file stem** of a theme file you drop in your themes directory.
+The value is either a **built-in name** (see below) or the **file stem** of a theme file you drop in your themes directory. If the file exists it overrides the built-in of the same name; otherwise the built-in with that name renders; otherwise the editor falls back to `wired-noir` so a misnamed entry never blanks the UI.
+
+## Built-in themes
+
+SCR1B3 ships **19 themes** (all compiled into the binary — no asset path needed). The catalogue is organised in three lines:
+
+### Calm-canon line (DECISION-2026-005 brand canon)
+| Name | Appearance | Voice | Notes |
+|---|---|---|---|
+| `wired-noir` | dark | teal `#34E0D0` | **Default**. Cool near-black, off-white text, one teal accent, Akira-red reserved for alarms. |
+| `phosphor-amber` | dark | amber `#FFC04A` | BBS / hairline-terminal heritage. |
+| `lain-mauve` | dark | mauve `#C89AE8` | Wired-era violet melancholy (pastel-leaning). |
+| `ghost-paper` | light | teal (darker) | Warm paper background, ink-grey text. WCAG AA. |
+| `a11y-high-contrast` | dark | teal `#00FFE0` | WCAG AAA-target. Pure white on black, saturated complements — for low-vision users. |
+
+### Brand-signature line — **`itasha-neon` family** (DECISION-2026-009 brand-LINE)
+| Name | Appearance | Voice | Notes |
+|---|---|---|---|
+| `itasha-neon` | dark | cyan `#00FFFF` | Main. Reconciles the user-seed 13 colours with Itten complementary-pair discipline (cyan = system voice; hot-pink/fuchsia/deep-purple demoted to syntax-token roles ≤5% glyph-area). |
+| `itasha-neon-pastel` | dark | cyan `#9EE5E5` | ~30% chroma. 8-hour-session comfort. |
+| `itasha-neon-soft` | dark | cyan `#5CFFE5` | ~60% chroma. Between full-neon and pastel. |
+| `itasha-neon-night` | dark | cyan `#00FFFF` | Pure black, max-saturation tokens. For dark-room use. |
+| `itasha-neon-dawn` | **light** | cyan `#0A90A0` | Light-appearance port of the neon line. Daytime partner. WCAG AAA body. |
+| `itasha-neon-aurora` | dark | cyan `#5CFFE5` | Cyan-violet axis only. Wired-net aurora mood. |
+
+### Heritage-alt line (DECISION-2026-009 §5 — brand-influence palettes)
+| Name | Appearance | Voice | Anchor | Notes |
+|---|---|---|---|---|
+| `geocities-bbs` | dark | hyperlink `#5050FF` | Web 1.0 16-colour cohort | **Camp slot — construction-yellow IS body text; sticker required, not for long sessions.** |
+| `lain-wired` | dark | mauve `#8C6CD0` | Serial Experiments Lain (the Wired) | Copper-circuit warning, deep violet-black. |
+| `kusanagi-dive` | dark | cyan `#34DCE0` | Ghost in the Shell (1995) | Cyan-on-deep-marine dive-sequence palette. |
+| `akira-redshift` | dark | red `#FF2030` | Akira (1988) | **Opt-in only.** Red-as-voice documented exception (Akira IS red). Alarm degrades to higher-saturation, not colour swap. |
+| `atompunk-sodium` | dark | sodium `#FFA030` | Eames-era Atompunk | **Opt-in only.** Sodium-orange-as-voice documented exception. |
+| `terminal-lock` | dark | phosphor `#33FF66` | Tektronix 4014 / Hercules | Pure terminal-green-on-black heritage. |
+| `mecha-armour` | dark | chrome `#A8B0C0` | Gundam RX-78-2 colour-spec | Federation white/blue/red/yellow on graphite-black. |
+| `shutoko-night` | dark | Bayside `#0C2D6A` | 80s–2000s JDM (Itasha brand root) | Documented period paint codes (Honda NH-547 / Nissan BT2 / Mazda Soul-Red-Crystal precedent). |
+
+All 19 themes keep the **one-accent-equals-system-voice** principle: a single accent colour carries every interactive signal (cursor, hover, selection, active line-number, OK status). Akira-red is **alarm-only** across the family — never decorative — with the two documented exceptions above (`akira-redshift`, `atompunk-sodium`) cabined to opt-in-only themes.
 
 ## Color values
 
 Every color is written one of two ways:
 
 1. **A `#`-hex literal**: `#RGB`, `#RRGGBB`, or `#RRGGBBAA`.
-   - `#08060d` → opaque void black
-   - `#00fffe` → opaque signal cyan
-   - `#00fffe33` → cyan at ~20% alpha (used for selection)
+   - `#070A0C` → opaque wired-noir void
+   - `#34E0D0` → opaque wired-noir teal (the system voice)
+   - `#34E0D033` → teal at ~20% alpha (used for selection)
    - `#fff` → shorthand white
 2. **A palette name** defined in the `[palette]` table — so you set a color once and reference it everywhere.
+
+## Customising a built-in
+
+Use **Settings → Appearance → Export to user theme** to write the current built-in's full palette to `<config_dir>/themes/<name>.toml`. SCR1B3 sets the active theme to your new name automatically; open the file, edit the colours, save — the live-reload watcher applies your changes immediately. The original built-in stays intact, so you can always switch back from the picker.
+
+### Live color editor (in-app)
+
+Once a user theme exists on disk, **Settings → Appearance → Edit colors live** surfaces a color picker for every `[palette]` / `[ui]` / `[syntax]` entry. Changes write back to the TOML on every drag; the watcher reloads and applies them live. Sections collapse independently so you can focus on `[ui]` or `[syntax]` without scrolling past the rest. Switch theme to revert; built-ins stay immutable.
 
 ## Schema
 
@@ -44,13 +89,13 @@ appearance = "dark"        # "dark" (default) or "light"
 
 ### `[palette]` — named base colors
 
-Define your base colors once. Each value is a `#`-hex literal. Names are arbitrary; the brand default uses `void`, `bezel`, `panel`, `text`, `muted`, `cyan`, `green`, `magenta`, `yellow`, `orange`, `red`.
+Define your base colors once. Each value is a `#`-hex literal. Names are arbitrary; the wired-noir default uses `void`, `bezel`, `panel`, `text`, `muted`, `dim`, `teal`, `red`, `amber`, `green`, `slate`, `sage`, `steel`, `sand`.
 
 ```toml
 [palette]
-void    = "#08060d"
-cyan    = "#00fffe"
-green   = "#01fe36"
+void  = "#070A0C"
+teal  = "#34E0D0"
+amber = "#F2B33D"
 ```
 
 ### `[ui]` — chrome colors
@@ -67,7 +112,7 @@ UI keys color the editor frame and gutter. Each value is a palette name **or** a
 | `line_number` | Inactive line numbers. |
 | `line_number_active` | Current line number. |
 | `cursor` | Text caret. |
-| `selection` | Selection highlight (typically uses an alpha value, e.g. `#00fffe33`). |
+| `selection` | Selection highlight (typically uses an alpha value, e.g. `#34E0D033`). |
 | `accent` | Primary accent (links, focus strokes). |
 | `ok` | Success / OK status. |
 | `error` | Error status. |
@@ -79,26 +124,29 @@ Syntax keys color code tokens. Lookups use **longest-matching-scope-wins** fallb
 
 `keyword` · `function` · `string` · `comment` · `type` · `constant` · `number` · `variable`
 
-## The brand default: `itasha-void`
+## The brand default: `wired-noir`
 
-`itasha-void` is the compiled-in default and the fallback for any broken theme. It is the Itasha.Corp CRT palette: **void black, signal cyan, status green**. Written as a TOML theme it looks like this:
+`wired-noir` is the compiled-in default and the fallback for any broken theme. It is the lore-council-approved (DECISION-2026-005) palette: **cool near-black layers, off-white text, one teal accent (the system voice), Akira-red reserved for alarms, restrained amber for warnings**. Written as a TOML theme it looks like this:
 
 ```toml
-name = "itasha-void"
+name = "wired-noir"
 appearance = "dark"
 
 [palette]
-void    = "#08060d"
-bezel   = "#111118"
-panel   = "#0d0b14"
-text    = "#d6e2f0"
-muted   = "#5a5869"
-cyan    = "#00fffe"
-green   = "#01fe36"
-magenta = "#d946ef"
-yellow  = "#fbbf24"
-orange  = "#fb923c"
-red     = "#ff0040"
+void  = "#070A0C"
+panel = "#0E1417"
+bezel = "#1A242B"
+text  = "#C8D6DC"
+muted = "#5A6B73"
+dim   = "#4F5E66"
+teal  = "#34E0D0"   # the system voice
+red   = "#FF3B30"   # alarms only
+amber = "#F2B33D"   # warnings
+green = "#6FB89A"   # muted ok
+slate = "#79A0B0"   # keyword
+sage  = "#8DA88C"   # string
+steel = "#A9C2CC"   # type
+sand  = "#C9A86A"   # constant / number
 
 [ui]
 background         = "void"
@@ -107,22 +155,22 @@ panel              = "panel"
 bezel              = "bezel"
 gutter             = "void"
 line_number        = "muted"
-line_number_active = "cyan"
-cursor             = "cyan"
-selection          = "#00fffe33"
-accent             = "cyan"
+line_number_active = "teal"
+cursor             = "teal"
+selection          = "#34E0D033"
+accent             = "teal"
 ok                 = "green"
 error              = "red"
-warning            = "yellow"
+warning            = "amber"
 
 [syntax]
-keyword  = "magenta"
-function = "cyan"
-string   = "green"
-comment  = "muted"
-type     = "yellow"
-constant = "orange"
-number   = "orange"
+keyword  = "slate"
+function = "teal"
+string   = "sage"
+comment  = "dim"
+type     = "steel"
+constant = "sand"
+number   = "sand"
 variable = "text"
 ```
 

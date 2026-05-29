@@ -1,0 +1,56 @@
+# CycloneDX SBOM generation — Phase 21 T21.1.
+#
+# Builds a Software Bill of Materials (CycloneDX 1.6 JSON) on every tagged
+# release so downstream consumers can audit the dependency tree without
+# scraping the lockfile by hand. Attached to the GitHub Release as
+# `scr1b3-sbom.cdx.json`. Used by the supply-chain assurance posture
+# described in SECURITY.md.
+#
+# Triggers ONLY on tag pushes — the SBOM is a release artifact, not a
+# per-PR check (cargo-deny is the per-PR supply-chain gate).
+
+name: SBOM
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write   # attach the SBOM to the release
+
+jobs:
+  cyclonedx:
+    name: cargo-cyclonedx
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+      - name: Generate SBOM
+        run: |
+          cargo cyclonedx \
+            --format json \
+            --spec-version 1.6 \
+            --all \
+            --output-pattern bom
+          # cargo-cyclonedx emits per-crate bom.json files; the workspace
+          # root one is the unified BOM. Copy + name it for the release.
+          cp bom.json scr1b3-sbom.cdx.json
+      - name: Upload SBOM as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scr1b3-sbom
+          path: scr1b3-sbom.cdx.json
+          if-no-files-found: error
+      - name: Attach SBOM to the GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: scr1b3-sbom.cdx.json
+          fail_on_unmatched_files: true

@@ -1,38 +1,42 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="SCR1B3 — daemon seal">
+  <!--
+    SCR1B3 app-icon master — Daemon-Seal Caret-in-Circle.
+    Approved by lore-council DECISION-2026-008 (amends -005, sibling of -007).
+    Original radial / alchemical primitives only — no traced seals,
+    no inverted pentagram / Baphomet / hexagram. Teal-only (Akira-red is
+    alarm-only). 824/1024 macOS safe box honoured (all geometry within
+    the inner screen rect).
+  -->
   <defs>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#070A0C"/>
+      <stop offset="1" stop-color="#121A1F"/>
+    </linearGradient>
     <pattern id="scanlines" patternUnits="userSpaceOnUse" width="512" height="6">
       <rect width="512" height="3" fill="transparent"/>
-      <rect y="3" width="512" height="3" fill="rgba(0,0,0,0.15)"/>
+      <rect y="3" width="512" height="3" fill="rgba(0,0,0,0.18)"/>
     </pattern>
-    <filter id="phosphor">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="0.8" result="bloom"/>
-      <feMerge>
-        <feMergeNode in="bloom"/>
-        <feMergeNode in="SourceGraphic"/>
-      </feMerge>
-    </filter>
-    <radialGradient id="vignette" cx="50%" cy="50%" r="70%">
+    <radialGradient id="vignette" cx="50%" cy="50%" r="72%">
       <stop offset="0%" stop-color="transparent"/>
-      <stop offset="100%" stop-color="rgba(0,0,0,0.5)"/>
+      <stop offset="100%" stop-color="rgba(0,0,0,0.50)"/>
     </radialGradient>
+    <filter id="phosphor">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="0.7" result="bloom"/>
+      <feMerge><feMergeNode in="bloom"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
   </defs>
-  <!-- Outer CRT bezel -->
-  <rect x="0" y="0" width="512" height="512" rx="96" ry="96" fill="#111118"/>
-  <rect x="14" y="14" width="484" height="484" rx="86" ry="86" fill="#18181f" stroke="#2a2833" stroke-width="2"/>
-  <!-- Inner screen -->
-  <rect x="44" y="44" width="424" height="424" rx="56" ry="56" fill="#08060d"/>
-  <rect x="44" y="44" width="424" height="424" rx="56" ry="56" fill="none" stroke="#1a1825" stroke-width="2"/>
-  <!-- Logomark glyph: prompt chevron + caret block -->
-  <g filter="url(#phosphor)">
-    <path d="M 150 178 L 226 256 L 150 334" fill="none" stroke="#00fffe" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
-    <rect x="270" y="182" width="66" height="148" rx="6" ry="6" fill="#01fe36"/>
+  <rect x="0" y="0" width="512" height="512" rx="96" ry="96" fill="#1A242B"/>
+  <rect x="12" y="12" width="488" height="488" rx="86" ry="86" fill="none" stroke="#0F1A20" stroke-width="2"/>
+  <rect x="44" y="44" width="424" height="424" rx="56" ry="56" fill="url(#screen)"/>
+  <g filter="url(#phosphor)" stroke="#34E0D0" fill="none" stroke-linecap="round">
+    <circle cx="256" cy="256" r="160" stroke-width="32"/>
+    <line x1="256" y1="68"  x2="256" y2="96"  stroke-width="6"/>
+    <line x1="256" y1="416" x2="256" y2="444" stroke-width="6"/>
+    <line x1="68"  y1="256" x2="96"  y2="256" stroke-width="6"/>
+    <line x1="416" y1="256" x2="444" y2="256" stroke-width="6"/>
+    <rect x="236" y="216" width="40" height="80" rx="4" ry="4" fill="#34E0D0" stroke="none"/>
+    <line x1="200" y1="320" x2="312" y2="320" stroke-width="6"/>
   </g>
-  <!-- Scanlines + vignette confined to screen -->
   <rect x="44" y="44" width="424" height="424" rx="56" ry="56" fill="url(#scanlines)"/>
   <rect x="44" y="44" width="424" height="424" rx="56" ry="56" fill="url(#vignette)"/>
-  <!-- Power LED on bezel -->
-  <circle cx="256" cy="486" r="7" fill="#01fe36" opacity="0.85"/>
-  <circle cx="256" cy="486" r="3.5" fill="#01fe36"/>
-  <!-- Bezel microtext -->
-  <text x="256" y="40" text-anchor="middle" font-family="'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace" font-size="14" fill="#2a2833" letter-spacing="6">ITASHA.CORP</text>
 </svg>

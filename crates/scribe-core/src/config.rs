@@ -20,6 +20,141 @@ pub struct Config {
     pub updates: UpdateConfig,
     pub spellcheck: SpellcheckConfig,
     pub plugins: PluginConfig,
+    pub toolbar: ToolbarConfig,
+    #[serde(default)]
+    pub motion: MotionConfig,
+}
+
+/// Motion / animation catalog (Phase 17 T17.3). Master switch + per-effect
+/// toggles + global intensity. **OFF by default** — animation is opt-in so
+/// the editor matches DECISION-2026-005's "calm, legible surface; chrome is
+/// instrumentation, not decoration" through-line and so idle frames cost
+/// the same as plain egui. When `enabled` is true, individual effects
+/// follow their own toggle, the global `intensity` scales their amplitude,
+/// and the `respect_reduced_motion` + `respect_battery` flags zero-out
+/// animation when the OS asks for it or the device is on battery.
+///
+/// The per-effect implementations are wired progressively as follow-up
+/// increments. This struct is the load-bearing scaffold every motion
+/// site consults via `MotionConfig::active_for(effect, …)`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MotionConfig {
+    /// Master switch. When false, every animation is suppressed regardless
+    /// of the per-effect flags below — keeps the editor cost identical to
+    /// the no-motion build.
+    pub enabled: bool,
+    /// 0.0..=1.0 amplitude scale every effect honours.
+    pub intensity: f32,
+    /// Honour the OS reduced-motion request (e.g. macOS Reduce Motion,
+    /// Windows Animate windows when minimizing OFF, Linux GNOME tweaks).
+    pub respect_reduced_motion: bool,
+    /// Suppress animation when the device reports it's on battery (laptop
+    /// power-save). Verified at runtime; falls back to `enabled` on desktops.
+    pub respect_battery: bool,
+
+    // ---- 12-effect catalog (the named animations from the plan) ----
+    pub hover: bool,
+    pub focus_ring: bool,
+    pub panel_slide: bool,
+    pub tab_underline: bool,
+    pub palette_lift: bool,
+    pub cursor_blink: bool,
+    pub status_breathe: bool,
+    pub toast: bool,
+    pub error_glitch: bool,
+    pub ascii_boot_splash: bool,
+    pub idle_pulse: bool,
+    pub transition_fade: bool,
+}
+
+/// The 12 named motion effects. Mirrors the boolean fields on `MotionConfig`
+/// 1:1 so `active_for(effect, …)` can route each enquiry to the right flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MotionEffect {
+    Hover,
+    FocusRing,
+    PanelSlide,
+    TabUnderline,
+    PaletteLift,
+    CursorBlink,
+    StatusBreathe,
+    Toast,
+    ErrorGlitch,
+    AsciiBootSplash,
+    IdlePulse,
+    TransitionFade,
+}
+
+impl MotionConfig {
+    /// True when motion is on AND not gated by reduced-motion or battery.
+    /// The caller supplies the live `reduced_motion` + `on_battery` flags
+    /// (the config itself stays pure / platform-agnostic).
+    pub fn effective(&self, reduced_motion: bool, on_battery: bool) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if self.respect_reduced_motion && reduced_motion {
+            return false;
+        }
+        if self.respect_battery && on_battery {
+            return false;
+        }
+        true
+    }
+
+    /// True when the master is effective AND this specific effect's toggle
+    /// is on. Every motion site should consult this before driving an
+    /// animation — never branch on `enabled` alone.
+    pub fn active_for(&self, effect: MotionEffect, reduced_motion: bool, on_battery: bool) -> bool {
+        self.effective(reduced_motion, on_battery)
+            && match effect {
+                MotionEffect::Hover => self.hover,
+                MotionEffect::FocusRing => self.focus_ring,
+                MotionEffect::PanelSlide => self.panel_slide,
+                MotionEffect::TabUnderline => self.tab_underline,
+                MotionEffect::PaletteLift => self.palette_lift,
+                MotionEffect::CursorBlink => self.cursor_blink,
+                MotionEffect::StatusBreathe => self.status_breathe,
+                MotionEffect::Toast => self.toast,
+                MotionEffect::ErrorGlitch => self.error_glitch,
+                MotionEffect::AsciiBootSplash => self.ascii_boot_splash,
+                MotionEffect::IdlePulse => self.idle_pulse,
+                MotionEffect::TransitionFade => self.transition_fade,
+            }
+    }
+
+    /// Clamped intensity so a malformed user config can't drive an animation
+    /// outside its design band.
+    pub fn clamped_intensity(&self) -> f32 {
+        self.intensity.clamp(0.0, 1.0)
+    }
+}
+
+impl Default for MotionConfig {
+    fn default() -> Self {
+        // Master OFF by default — animation is opt-in. Per-effect flags
+        // carry the sensible "when motion is on" defaults so the user
+        // doesn't have to tick every box on first activation.
+        Self {
+            enabled: false,
+            intensity: 0.6,
+            respect_reduced_motion: true,
+            respect_battery: true,
+            hover: true,
+            focus_ring: true,
+            panel_slide: false,
+            tab_underline: true,
+            palette_lift: false,
+            cursor_blink: true,
+            status_breathe: false,
+            toast: true,
+            error_glitch: false,
+            ascii_boot_splash: false,
+            idle_pulse: false,
+            transition_fade: true,
+        }
+    }
 }
 
 /// Window translucency mode. `Opaque` is the default; the rest reveal what's
@@ -47,6 +182,11 @@ impl WindowMode {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct WindowConfig {
+    /// Master on/off switch for the whole transparency system. When `false`
+    /// the window paints fully opaque regardless of `mode` (safe, fast, and
+    /// avoids the layered-window ghost-on-close failure mode on Windows).
+    /// Default OFF — translucency is opt-in.
+    pub transparency_enabled: bool,
     pub mode: WindowMode,
     /// Surface opacity for translucent modes (0.30..=1.0).
     pub opacity: f32,
@@ -56,9 +196,20 @@ pub struct WindowConfig {
     pub tint_strength: f32,
 }
 
+impl WindowConfig {
+    /// Whether translucency should actually be rendered: the master toggle is
+    /// on AND the chosen mode wants a non-opaque surface. This is the single
+    /// predicate every render path consults so the master switch is honoured
+    /// uniformly (chrome fills, surface request, and the opacity pass).
+    pub fn effective_translucent(&self) -> bool {
+        self.transparency_enabled && self.mode.is_translucent()
+    }
+}
+
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
+            transparency_enabled: false,
             mode: WindowMode::Opaque,
             opacity: 0.92,
             tint: "#08060d".to_string(),
@@ -77,6 +228,37 @@ pub struct EditorConfig {
     pub word_wrap: bool,
     pub auto_save: bool,
     pub restore_session: bool,
+    /// Where the open-tab strip lives: top (default, inline with the toolbar),
+    /// bottom (status-side), left, or right. Phase 18 T18.4.
+    pub tab_bar_position: TabBarPosition,
+    /// Phase 18 T18.2 — enable the multi-note grid. When ON, the central
+    /// editor surface renders every open tab as a movable, resizable pane
+    /// inside an egui_tiles tree (up to 6 panes). Default OFF — the
+    /// existing single-pane render path is unchanged for users who don't
+    /// opt in.
+    #[serde(default)]
+    pub grid_enabled: bool,
+}
+
+/// Tab-strip position relative to the editor surface. `Top` keeps the tab
+/// strip inline with the toolbar (the v1 layout); the other three host the
+/// strip in its own dedicated panel.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TabBarPosition {
+    #[default]
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl TabBarPosition {
+    /// True when the strip should render as a vertical list of tabs (one tab
+    /// per row) — used for the side positions.
+    pub fn is_vertical(self) -> bool {
+        matches!(self, TabBarPosition::Left | TabBarPosition::Right)
+    }
 }
 
 impl Default for EditorConfig {
@@ -89,6 +271,8 @@ impl Default for EditorConfig {
             word_wrap: false,
             auto_save: false,
             restore_session: true,
+            tab_bar_position: TabBarPosition::Top,
+            grid_enabled: false,
         }
     }
 }
@@ -102,14 +286,28 @@ pub struct AppearanceConfig {
     pub follow_os_theme: bool,
     /// Frameless window with custom brand titlebar.
     pub frameless: bool,
+    /// Render quick-access toolbar items as Phosphor (Thin) icons rather than
+    /// their text labels. Default OFF — words are universally readable; icons
+    /// are an opt-in compact mode. (Phase 16 T16.3.)
+    pub toolbar_icons: bool,
+    /// Annotate toolbar items with small, dim, English-redundant **kanji
+    /// instrument labels** (Phase 17 T17.5). The annotation is additive — the
+    /// English (or icon) label remains the primary read; the kanji sits to
+    /// the right at smaller size and reduced contrast as a typographic ornament
+    /// (instrument plates on a control panel). Per the Folklore-Consultant gate
+    /// (DECISION-2026-005 cond #4) only verified-canonical kanji ship; actions
+    /// whose canonical kanji is uncertain stay English-only. Default OFF.
+    pub jp_glyph_labels: bool,
 }
 
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self {
-            theme: "itasha-void".to_string(),
+            theme: "wired-noir".to_string(),
             follow_os_theme: true,
             frameless: true,
+            toolbar_icons: false,
+            jp_glyph_labels: false,
         }
     }
 }
@@ -239,6 +437,79 @@ impl Default for PluginConfig {
     }
 }
 
+/// Customizable quick-access toolbar. `items` is an ordered list of action ids
+/// (see `app::TOOLBAR_ACTIONS`); the literal id `"sep"` renders a divider. The
+/// user reorders/adds/removes entries from Settings; the layout persists here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ToolbarConfig {
+    pub items: Vec<String>,
+    /// Minimum height of each quick-access button in logical pixels. Clamped
+    /// to [16.0, 64.0] at render time. Phase 18 T18.5.
+    #[serde(default = "ToolbarConfig::default_button_size")]
+    pub button_size_px: f32,
+    /// Horizontal spacing between adjacent items in logical pixels. Clamped
+    /// to [0.0, 24.0] at render time. Phase 18 T18.5.
+    #[serde(default = "ToolbarConfig::default_button_spacing")]
+    pub button_spacing_px: f32,
+    /// Icon glyph size in logical pixels — only consulted when
+    /// `appearance.toolbar_icons` is on. Clamped to [10.0, 32.0]. T18.5.
+    #[serde(default = "ToolbarConfig::default_icon_size")]
+    pub icon_size_px: f32,
+}
+
+impl ToolbarConfig {
+    pub fn default_button_size() -> f32 {
+        24.0
+    }
+    pub fn default_button_spacing() -> f32 {
+        6.0
+    }
+    pub fn default_icon_size() -> f32 {
+        14.0
+    }
+
+    /// Clamped values applied at render time so a malformed user config can't
+    /// produce a 4000px-tall toolbar or zero-padded buttons.
+    pub fn clamped_button_size(&self) -> f32 {
+        self.button_size_px.clamp(16.0, 64.0)
+    }
+    pub fn clamped_button_spacing(&self) -> f32 {
+        self.button_spacing_px.clamp(0.0, 24.0)
+    }
+    pub fn clamped_icon_size(&self) -> f32 {
+        self.icon_size_px.clamp(10.0, 32.0)
+    }
+}
+
+impl Default for ToolbarConfig {
+    fn default() -> Self {
+        Self {
+            items: [
+                "new",
+                "open",
+                "save",
+                "sep",
+                "find",
+                "palette",
+                "sep",
+                "split",
+                "minimap",
+                "wrap",
+                "sep",
+                "spellcheck",
+                "crt",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            button_size_px: Self::default_button_size(),
+            button_spacing_px: Self::default_button_spacing(),
+            icon_size_px: Self::default_icon_size(),
+        }
+    }
+}
+
 impl Config {
     /// Parse from a TOML string; on error, return defaults plus the error so
     /// the caller can surface it without losing the editor.
@@ -296,7 +567,7 @@ mod tests {
         assert_eq!(c.editor.tab_width, 2);
         // unspecified fields keep defaults
         assert!(c.editor.show_line_numbers);
-        assert_eq!(c.appearance.theme, "itasha-void");
+        assert_eq!(c.appearance.theme, "wired-noir");
     }
 
     #[test]
@@ -307,6 +578,128 @@ mod tests {
     #[test]
     fn spellcheck_off_by_default() {
         assert!(!Config::default().spellcheck.enabled);
+    }
+
+    #[test]
+    fn motion_master_gates_all_effects() {
+        // T17.3: master switch OFF must zero every per-effect query, even
+        // when the per-effect toggle is on and reduced-motion / battery are
+        // both fine. Defaults: master off => everything off.
+        let m = MotionConfig::default();
+        assert!(!m.enabled, "master defaults OFF");
+        for effect in [
+            MotionEffect::Hover,
+            MotionEffect::CursorBlink,
+            MotionEffect::Toast,
+            MotionEffect::TransitionFade,
+            MotionEffect::IdlePulse,
+        ] {
+            assert!(
+                !m.active_for(effect, false, false),
+                "master off must gate {effect:?}"
+            );
+        }
+
+        // Master on, reduced-motion on => still off (respect_reduced_motion).
+        let m_on = MotionConfig {
+            enabled: true,
+            ..MotionConfig::default()
+        };
+        assert!(m_on.active_for(MotionEffect::Hover, false, false));
+        assert!(!m_on.active_for(MotionEffect::Hover, true, false));
+        assert!(!m_on.active_for(MotionEffect::Hover, false, true));
+
+        // Per-effect toggle OFF must gate even when master is effective.
+        let m_partial = MotionConfig {
+            enabled: true,
+            hover: false,
+            ..MotionConfig::default()
+        };
+        assert!(!m_partial.active_for(MotionEffect::Hover, false, false));
+        assert!(m_partial.active_for(MotionEffect::CursorBlink, false, false));
+    }
+
+    #[test]
+    fn motion_intensity_clamps_to_unit_band() {
+        let lo = MotionConfig {
+            intensity: -5.0,
+            ..MotionConfig::default()
+        };
+        let hi = MotionConfig {
+            intensity: 42.0,
+            ..MotionConfig::default()
+        };
+        assert_eq!(lo.clamped_intensity(), 0.0);
+        assert_eq!(hi.clamped_intensity(), 1.0);
+        assert_eq!(MotionConfig::default().clamped_intensity(), 0.6);
+    }
+
+    #[test]
+    fn toolbar_sizing_clamps_extreme_values() {
+        // T18.5: a malformed user toml can't produce a 4000-px-tall toolbar or
+        // a zero-padded mess. Clamped helpers enforce the safe band.
+        let huge = ToolbarConfig {
+            button_size_px: 9999.0,
+            button_spacing_px: -50.0,
+            icon_size_px: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(huge.clamped_button_size(), 64.0);
+        assert_eq!(huge.clamped_button_spacing(), 0.0);
+        assert_eq!(huge.clamped_icon_size(), 10.0);
+        let defaults = ToolbarConfig::default();
+        assert_eq!(defaults.clamped_button_size(), 24.0);
+        assert_eq!(defaults.clamped_button_spacing(), 6.0);
+        assert_eq!(defaults.clamped_icon_size(), 14.0);
+    }
+
+    #[test]
+    fn tab_bar_defaults_to_top_horizontal() {
+        // T18.4: the v1 layout puts the tab strip inline with the toolbar at
+        // the top. is_vertical() flips only for the side positions.
+        assert_eq!(
+            EditorConfig::default().tab_bar_position,
+            TabBarPosition::Top
+        );
+        assert!(!TabBarPosition::Top.is_vertical());
+        assert!(!TabBarPosition::Bottom.is_vertical());
+        assert!(TabBarPosition::Left.is_vertical());
+        assert!(TabBarPosition::Right.is_vertical());
+    }
+
+    #[test]
+    fn transparency_off_by_default() {
+        // Master toggle defaults OFF: a normal opaque window (no ghost-on-close
+        // risk, no perf cost). See T19.1/T19.2.
+        assert!(!Config::default().window.transparency_enabled);
+        assert!(!Config::default().window.effective_translucent());
+    }
+
+    #[test]
+    fn effective_translucent_requires_master_toggle_and_mode() {
+        // Translucent mode alone is NOT enough — the master toggle gates it.
+        let w = WindowConfig {
+            mode: WindowMode::Glass,
+            ..Default::default()
+        };
+        assert!(
+            !w.effective_translucent(),
+            "mode without toggle stays opaque"
+        );
+        // Toggle on + translucent mode => translucent.
+        let w = WindowConfig {
+            mode: WindowMode::Glass,
+            transparency_enabled: true,
+            ..Default::default()
+        };
+        assert!(w.effective_translucent());
+        // Toggle on but Opaque mode => still opaque.
+        let w = WindowConfig {
+            mode: WindowMode::Opaque,
+            transparency_enabled: true,
+            ..Default::default()
+        };
+        assert!(!w.effective_translucent());
     }
 
     #[test]

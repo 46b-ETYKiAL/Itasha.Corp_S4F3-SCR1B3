@@ -101,11 +101,34 @@ impl PluginHost {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let mut engine = Engine::new();
         // Sandbox hardening: bound script resource use so a buggy/hostile mod
-        // can't hang or OOM the editor.
+        // can't hang or OOM the editor. Phase 20 T20.1 closes the gaps from
+        // the prior wiring per the plugin-hardening design dossier:
+        //
+        // | Cap | Pre-T20.1 | Post-T20.1 | Why |
+        // |---|---|---|---|
+        // | max_operations | 5_000_000 ✓ | 5_000_000 | ok |
+        // | max_call_levels | 64 ✓ | 64 | ok |
+        // | max_string_size | 50 MiB | **10 MiB** | smaller blast radius |
+        // | max_array_size | 1_000_000 ✓ | 1_000_000 | ok |
+        // | max_map_size | (unset, ∞) | **1_000_000** | omission lets a hostile script build a huge Map up to OOM |
+        // | max_modules | (unset, ∞) | **0** | explicit no-modules floor; some built-ins charge against the budget even with a Dummy resolver |
+        // | max_expr_depths | (unset, ∞) | **(32, 32)** | bounds parser recursion against a 10_000-deep paren attack |
         engine.set_max_operations(5_000_000);
         engine.set_max_call_levels(64);
-        engine.set_max_string_size(50 * 1024 * 1024);
+        engine.set_max_string_size(10 * 1024 * 1024);
         engine.set_max_array_size(1_000_000);
+        engine.set_max_map_size(1_000_000);
+        engine.set_max_modules(0);
+        engine.set_max_expr_depths(32, 32);
+
+        // Defense in depth — parser-level deny of the two most-dangerous
+        // language features. `disable_symbol` removes the keyword FROM THE
+        // PARSER, so a script using `eval(...)` or `import` fails to
+        // COMPILE — strictly stronger than a runtime trap. The Dummy
+        // module resolver is the runtime backstop.
+        engine.disable_symbol("eval");
+        engine.disable_symbol("import");
+        engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
 
         // Wall-clock guard: abort if a script runs past its deadline.
         let deadline: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
@@ -362,5 +385,71 @@ mod tests {
         let mut ctx = PluginContext::new("x");
         let r = h.run_command("spin", &mut ctx);
         assert!(r.is_err(), "runaway script must be terminated, got {r:?}");
+    }
+
+    // ---- Phase 20 T20.1 sandbox-hardening regression tests ----
+
+    /// `eval(...)` is removed FROM THE PARSER. A script using it fails to
+    /// compile — not just at runtime. This is strictly stronger than a
+    /// runtime trap because the offending registration block never runs.
+    #[test]
+    fn eval_keyword_disabled_at_parse_time() {
+        let mut h = PluginHost::new();
+        let r = h.load_script("evil", r#"eval("1+1");"#);
+        assert!(r.is_err(), "eval must be a parse error, got {r:?}");
+    }
+
+    /// `import` is similarly removed FROM THE PARSER. Combined with the
+    /// DummyModuleResolver, this kills the module-loading attack surface
+    /// at two layers of defense.
+    #[test]
+    fn import_keyword_disabled_at_parse_time() {
+        let mut h = PluginHost::new();
+        let r = h.load_script("evil", r#"import "lib"; print("loaded");"#);
+        assert!(r.is_err(), "import must be a parse error, got {r:?}");
+    }
+
+    /// `set_max_map_size(1_000_000)` bounds map allocation. A loop that
+    /// inserts past the cap is rejected by the engine.
+    #[test]
+    fn oversize_map_rejected() {
+        let h = host_with(
+            r#"
+            fn fill_big_map() {
+                let m = #{};
+                let i = 0;
+                while i < 2_000_000 {
+                    m[i.to_string()] = i;
+                    i += 1;
+                }
+                notify("never");
+            }
+            register_command("big-map", "Big Map", "fill_big_map");
+            "#,
+        );
+        let mut ctx = PluginContext::new("");
+        let r = h.run_command("big-map", &mut ctx);
+        assert!(
+            r.is_err(),
+            "oversize map allocation must be rejected, got {r:?}"
+        );
+    }
+
+    /// `set_max_expr_depths((32, 32))` bounds parser recursion. A
+    /// script with deeply nested parens fails at COMPILE — the
+    /// registration block never runs. This defends against a one-line
+    /// script that blows the recursion stack during parse.
+    #[test]
+    fn deeply_nested_expression_rejected_at_compile() {
+        // 200-deep paren chain (well past the 32 cap).
+        let opens = "(".repeat(200);
+        let closes = ")".repeat(200);
+        let script = format!("let x = {opens}1{closes};");
+        let mut h = PluginHost::new();
+        let r = h.load_script("nested", &script);
+        assert!(
+            r.is_err(),
+            "deeply nested expression must fail at parse, got {r:?}"
+        );
     }
 }

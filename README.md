@@ -129,7 +129,7 @@ SCR1B3 is a Cargo workspace: `scribe-core` holds the rope-backed text engine, en
 
 The text engine uses a rope so insertions and deletions cost O(log n) regardless of document size. Read-only browsing of very large files is backed by `mmap`, so the OS pages content on demand rather than loading the whole file into memory. Highlighting layers syntect (TextMate / Sublime grammars, 100+ languages bundled) with tree-sitter for structure-aware features.
 
-Configuration is a single TOML file that live-reloads on change. Themes use a three-namespace schema (`[palette]` / `[ui]` / `[syntax]`) with palette-name references and `#RRGGBB` / `#RRGGBBAA` literals; the default theme is `itasha-void` — void black, signal cyan, status green. The plugin system is capability-consented: plugins declare the capabilities they need and you approve them. Scripts run in an embedded [Rhai](https://rhai.rs) interpreter that is sandboxed by construction (no ambient filesystem or network access) and bounded by both an operation-count ceiling and a wall-clock deadline, so a misbehaving or runaway plugin cannot hang or compromise the editor.
+Configuration is a single TOML file that live-reloads on change. Themes use a three-namespace schema (`[palette]` / `[ui]` / `[syntax]`) with palette-name references and `#RRGGBB` / `#RRGGBBAA` literals; the default theme is `wired-noir` — cool near-black layers, off-white text, one teal accent (the system voice), Akira-red reserved for alarms. Five themes ship in the binary (`wired-noir`, `phosphor-amber`, `lain-mauve`, `ghost-paper`, `a11y-high-contrast`); user themes drop in `<config_dir>/themes/` and override built-ins of the same name. The plugin system is capability-consented: plugins declare the capabilities they need and you approve them. Scripts run in an embedded [Rhai](https://rhai.rs) interpreter that is sandboxed by construction (no ambient filesystem or network access) and bounded by both an operation-count ceiling and a wall-clock deadline, so a misbehaving or runaway plugin cannot hang or compromise the editor.
 
 </details>
 
@@ -146,7 +146,7 @@ SCR1B3 reads a single live-reloading TOML file from your OS config directory. A 
 
 ## Theming
 
-Themes use a Helix-style three-namespace TOML schema (`[palette]` / `[ui]` / `[syntax]`) with palette-name references and `#RRGGBB` / `#RRGGBBAA` literals. The default theme is `itasha-void`. Write your own and drop it in the themes directory; broken themes fall back to the compiled-in default. CRT effect toggles and intensities live in `[effects]`. Full guide: **[THEMING.md](THEMING.md)**.
+Themes use a Helix-style three-namespace TOML schema (`[palette]` / `[ui]` / `[syntax]`) with palette-name references and `#RRGGBB` / `#RRGGBBAA` literals. SCR1B3 ships **five built-in themes** — `wired-noir` (default, brand canon), `phosphor-amber` (BBS heritage), `lain-mauve` (Wired violet), `ghost-paper` (light, WCAG AA), and `a11y-high-contrast` (WCAG AAA-target for low-vision users). Pick one from **Settings → Appearance → Theme**, drop a user theme in `<config_dir>/themes/` to override, or click **Export to user theme** to fork the active theme to disk and edit it by hand (the live-reload watcher applies your changes immediately). Broken themes fall back to `wired-noir` so the editor never blanks. CRT effect toggles + intensities live in `[effects]`; the optional motion catalog (hover / focus-ring / panel-slide / cursor blink / etc.) lives in `[motion]`, all OFF by default. Full guide: **[THEMING.md](THEMING.md)**.
 
 ## Plugins
 
@@ -175,6 +175,8 @@ Beyond config and themes, SCR1B3 supports a user plugin / mod system with a capa
 Contributions are welcome. SCR1B3 is a Cargo workspace (`scribe-core` / `scribe-render` / `scribe-app`). Build with `cargo build`, test with `cargo nextest run`, and pass `cargo fmt --check` + `cargo clippy -D warnings` before opening a PR. Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** and the [Architecture Decision Records](docs/adr/), and review our **[Code of Conduct](CODE_OF_CONDUCT.md)** before participating.
 
 Found a security issue? Please follow the disclosure process in **[SECURITY.md](SECURITY.md)** — do not open a public issue for vulnerabilities.
+
+SCR1B3 is **telemetry-free by construction**. The full transparency record — exactly which network calls the app makes (one: the opt-out auto-update version check), exactly what it sends, what it doesn't, no fingerprinting, no install-id, offline mode, local-only state, and a "clear local data" control — is in **[PRIVACY.md](PRIVACY.md)**.
 
 ## License
 
