@@ -31,8 +31,10 @@ jobs:
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
       - name: Linux GUI deps
@@ -40,7 +42,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libssl-dev
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Generate third-party license inventory (cargo-about)
@@ -59,7 +61,7 @@ jobs:
             || echo "cargo-about generate skipped (config not yet committed)"
       - name: Upload third-party license inventory
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: third-party-licenses-rust
           path: |
@@ -89,7 +91,7 @@ jobs:
           # only when the MINISIGN_SECRET_KEY secret is present.
           if command -v sha256sum >/dev/null; then sha256sum scr1b3-* > "scr1b3-${{ matrix.target }}.sha256" 2>/dev/null || true; fi
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: scr1b3-${{ matrix.target }}
           path: apps/scribe/dist/*
@@ -100,11 +102,11 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
           files: dist/**/*
           generate_release_notes: true
