@@ -24,7 +24,14 @@ use scribe_core::theme::{Rgba, Theme};
 use scribe_core::{Config, Document};
 use std::path::{Path, PathBuf};
 
-/// Parse a `#RRGGBB` tint to an RGBA quad for native blur tinting.
+// Parse a `#RRGGBB` tint to an RGBA quad for native blur tinting.
+//
+// Only consumed by Windows' `window_vibrancy::apply_acrylic`. macOS' vibrancy
+// API takes no tint, and Linux falls back to the portable transparent surface
+// with a tint overlay (neither needs the quad). Gating the fn to Windows keeps
+// `-D warnings` (clippy dead_code) green on Linux and macOS without a blanket
+// `#[allow(dead_code)]` (which would mask real dead code).
+#[cfg(windows)]
 fn tint_rgba(hex: &str, alpha: u8) -> Option<(u8, u8, u8, u8)> {
     Rgba::parse_hex(hex).map(|c| (c.r, c.g, c.b, alpha))
 }
