@@ -1,63 +1,70 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="160" viewBox="0 0 1280 160">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 214" width="1280" height="214" role="img" aria-label="SCR1B3 — a fast, telemetry-free code and text editor">
   <defs>
-    <pattern id="scanlines-footer" patternUnits="userSpaceOnUse" width="1280" height="4">
-      <rect width="1280" height="2" fill="transparent"/>
-      <rect y="2" width="1280" height="2" fill="rgba(0,0,0,0.15)"/>
+    <pattern id="fscan" patternUnits="userSpaceOnUse" width="1280" height="4">
+      <rect width="1280" height="2" fill="transparent"/><rect y="2" width="1280" height="2" fill="rgba(0,0,0,0.16)"/>
     </pattern>
-    <radialGradient id="vignette-footer" cx="50%" cy="50%" r="80%">
-      <stop offset="0%" stop-color="transparent"/>
-      <stop offset="100%" stop-color="rgba(0,0,0,0.3)"/>
+    <radialGradient id="fvig" cx="50%" cy="50%" r="75%">
+      <stop offset="0%" stop-color="transparent"/><stop offset="100%" stop-color="rgba(0,0,0,0.5)"/>
     </radialGradient>
-    <filter id="phosphor-footer">
-      <feGaussianBlur in="SourceGraphic" stdDeviation="0.6" result="bloom"/>
-      <feMerge><feMergeNode in="bloom"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#FFC04A" stop-opacity="0"/><stop offset="50%" stop-color="#FFC04A" stop-opacity="0.9"/><stop offset="100%" stop-color="#FFC04A" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="fphos"><feGaussianBlur in="SourceGraphic" stdDeviation="0.7" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <filter id="fglow"><feGaussianBlur stdDeviation="2.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
   </defs>
   <style>
-    @keyframes blink-cursor { 0%,50% { opacity: 1; } 51%,100% { opacity: 0; } }
+    text { font-family: 'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace; }
+    @keyframes fheart { 0%,100% { transform: scale(1); opacity: 0.55; } 15% { transform: scale(1.3); opacity: 0.95; } 30% { transform: scale(1); opacity: 0.55; } }
+    @keyframes wireTravel { 0% { transform: translateX(-220px); } 100% { transform: translateX(1280px); } }
+    @keyframes fflicker { 0%,96%,100% { opacity: 1; } 97% { opacity: 0.96; } 98% { opacity: 0.99; } }
+    @keyframes nodeOn { 0%,100% { opacity: 0.3; } 50% { opacity: 0.9; } }
+    @keyframes fpulse { 0%,100% { opacity: 0.35; } 50% { opacity: 1; } }
     @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
   </style>
 
-  <!-- Outer CRT case (bezel) -->
-  <rect x="0" y="0" width="1280" height="160" rx="10" ry="10" fill="#111118"/>
-  <rect x="2" y="2" width="1276" height="156" rx="9" ry="9" fill="#18181f" stroke="#2a2833" stroke-width="1"/>
+  <rect x="0" y="0" width="1280" height="214" rx="12" fill="#0b0f12"/>
+  <rect x="2" y="2" width="1276" height="210" rx="11" fill="#1a242b" stroke="#2a3a42" stroke-width="1"/>
+  <rect x="24" y="20" width="1232" height="174" rx="5" fill="#070a0c"/>
+  <rect x="24" y="20" width="1232" height="174" rx="5" fill="url(#fscan)"/>
+  <rect x="24" y="20" width="1232" height="174" rx="5" fill="url(#fvig)"/>
+  <rect x="24" y="20" width="1232" height="174" rx="5" fill="none" stroke="#1a242b"/>
 
-  <!-- Bezel detail lines -->
-  <line x1="20" y1="10" x2="1260" y2="10" stroke="#2a2833" stroke-width="0.5"/>
-  <line x1="20" y1="150" x2="1260" y2="150" stroke="#2a2833" stroke-width="0.5"/>
-
-  <!-- Inner screen -->
-  <rect x="20" y="16" width="1240" height="118" rx="4" ry="4" fill="#08060d"/>
-  <rect x="20" y="16" width="1240" height="118" rx="4" ry="4" fill="none" stroke="#1a1825" stroke-width="1"/>
-  <rect x="20" y="16" width="1240" height="118" rx="4" ry="4" fill="url(#scanlines-footer)"/>
-  <rect x="20" y="16" width="1240" height="118" rx="4" ry="4" fill="url(#vignette-footer)"/>
-
-  <!-- Text content -->
-  <g filter="url(#phosphor-footer)">
-    <text x="640" y="58" text-anchor="middle" font-family="'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace" font-size="13" fill="#00fffe" letter-spacing="1">
-      present day, present text
-    </text>
-    <rect x="838" y="47" width="9" height="14" fill="#00fffe" style="animation: blink-cursor 1.1s step-end infinite;"/>
-
-    <line x1="340" y1="70" x2="940" y2="70" stroke="#00fffe" stroke-width="0.4" opacity="0.3"/>
-
-    <text x="640" y="90" text-anchor="middle" font-family="'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace" font-size="11" fill="#5a5869" letter-spacing="2">
-      TELEMETRY DISABLED // YOUR TEXT IS YOURS
-    </text>
-
-    <text x="640" y="116" text-anchor="middle" font-family="'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace" font-size="9" fill="#2a2833" letter-spacing="4">
-      I T A S H A . C O R P  //  SCR1B3
-    </text>
+  <g stroke="#FFC04A" stroke-width="1.2" fill="none" opacity="0.55">
+    <path d="M48 44 h22 M48 44 v22"/><path d="M1232 44 h-22 M1232 44 v22"/>
+    <path d="M48 170 h22 M48 170 v-22"/><path d="M1232 170 h-22 M1232 170 v-22"/>
   </g>
 
-  <!-- Scanline shimmer -->
-  <rect x="28" y="108" width="1224" height="1" fill="#00fffe" opacity="0.04"/>
+  <g style="animation: fflicker 7s infinite;">
+    <line x1="120" y1="107" x2="1160" y2="107" stroke="#1f2b32" stroke-width="1"/>
+    <g fill="#FFC04A">
+      <circle cx="260" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 0s infinite;"/>
+      <circle cx="470" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 0.5s infinite;"/>
+      <circle cx="810" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 1s infinite;"/>
+      <circle cx="1020" cy="107" r="2.2" style="animation: nodeOn 3s ease-in-out 1.5s infinite;"/>
+    </g>
+    <g style="animation: wireTravel 5s linear infinite;">
+      <rect x="0" y="106" width="220" height="2" fill="url(#wire)"/>
+    </g>
 
-  <!-- Power LED -->
-  <circle cx="1240" cy="144" r="3" fill="#01fe36" opacity="0.6"/>
-  <circle cx="1240" cy="144" r="1.5" fill="#01fe36"/>
+    <g font-size="8" letter-spacing="1.4" text-anchor="middle">
+      <text x="270" y="148" fill="#FFC04A" style="animation: fpulse 2.8s ease-in-out 0s infinite;">ROPE</text>
+      <text x="450" y="148" fill="#6fb89a" style="animation: fpulse 2.8s ease-in-out 0.5s infinite;">SYNTECT</text>
+      <text x="830" y="148" fill="#5050ff" style="animation: fpulse 2.8s ease-in-out 1s infinite;">TREE-SITTER</text>
+      <text x="1010" y="148" fill="#FFC04A" style="animation: fpulse 2.8s ease-in-out 1.5s infinite;">TOML</text>
+    </g>
 
-  <!-- Bezel labels -->
-  <text x="40" y="147" font-family="'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace" font-size="8" fill="#2a2833" letter-spacing="1">ITASHA.CORP</text>
-  <text x="1160" y="147" font-family="'SF Mono','Fira Code','Cascadia Code','JetBrains Mono',Consolas,monospace" font-size="8" fill="#2a2833">CRT-S4F3</text>
+    <text x="640" y="86" text-anchor="middle" font-size="20" font-weight="bold" letter-spacing="8" fill="#e9f7ff" filter="url(#fglow)">SCR1B3</text>
+    <text x="640" y="128" text-anchor="middle" font-size="11" letter-spacing="4" fill="#8c6cd0" filter="url(#fphos)">a fast, telemetry-free code &amp; text editor</text>
+  </g>
+
+  <g>
+    <circle cx="52" cy="200" r="3.2" fill="#6fb89a" opacity="0.7" style="animation: fheart 2.4s ease-in-out infinite; transform-origin: 52px 200px;"/>
+    <circle cx="66" cy="200" r="2.6" fill="#FFC04A" opacity="0.45"/>
+    <circle cx="80" cy="200" r="2.6" fill="#5050ff" opacity="0.3"/>
+    <text x="100" y="200" font-size="8.5" fill="#3a4a52" letter-spacing="3" dominant-baseline="central">ITASHA.CORP</text>
+    <text x="640" y="200" text-anchor="middle" font-size="8.5" fill="#2c3a42" letter-spacing="2.4" dominant-baseline="central">SCRIBE · present day · present time</text>
+    <text x="1232" y="200" font-size="8.5" fill="#3a4a52" letter-spacing="2.4" dominant-baseline="central" text-anchor="end">CRT-IC v2</text>
+    <circle cx="1248" cy="200" r="3.4" fill="#6fb89a" opacity="0.5"/>
+    <circle cx="1248" cy="200" r="1.8" fill="#6fb89a" opacity="0.95" style="animation: fheart 2.4s ease-in-out infinite; transform-origin: 1248px 200px;"/>
+  </g>
 </svg>
