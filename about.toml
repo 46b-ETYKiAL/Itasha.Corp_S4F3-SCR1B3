@@ -1,0 +1,39 @@
+# cargo-about configuration for SCR1B3.
+#
+# Generates THIRD-PARTY-LICENSES-RUST.html at release time, satisfying:
+#   - Apache-2.0 §4(d) NOTICE-file convention
+#   - OFL-1.1 §4 redistribution clause
+#   - Ubuntu Font Licence 1.0 §3 redistribution clause
+#
+# The allow-list mirrors deny.toml so a license that passes cargo-deny will
+# also pass cargo-about. Any divergence is a CI bug — fix deny.toml + this
+# file together.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+
+# Treat licenses with confidence below this as unknown (must be on the
+# accepted list explicitly, not inferred).
+confidence-threshold = 0.9
+
+# Workspace-level clarifications — none currently needed; SCR1B3 itself is
+# MIT OR Apache-2.0 which cargo-about reads directly from Cargo.toml.
+
+# Per-crate clarifications: add overrides here if a transitive license
+# detection fails (typical: dual-licensed crates whose LICENSE files
+# don't follow Cargo conventions).
+[clarify]
