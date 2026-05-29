@@ -1,0 +1,12 @@
+# Hash-locked zizmor for the Linux x86_64 GitHub-hosted runner.
+# Consumed via: python -m pip install --require-hashes -r .github/requirements-zizmor.txt
+# Rationale: OSSF Scorecard Pinned-Dependencies (pipCommand). See pip docs on
+# "Hash-checking mode" / --require-hashes and ossf/scorecard discussion #4834.
+# Regenerate from https://pypi.org/pypi/zizmor/<ver>/json
+# zizmor is distributed as platform wheels on PyPI; ubuntu-latest is x86_64 so
+# the manylinux x86_64 wheel + sdist are the reachable distributions.
+
+# zizmor 1.25.2 (GitHub Actions workflow security auditor)
+zizmor==1.25.2 \
+    --hash=sha256:c4246f1344d8dbeffc044d7bb11b131773a7db7eb57d9073c45942dfd3543a1f \
+    --hash=sha256:f26ffeb16659c8922c7b08203ca5a4f8bf5e1a7e8d190734961c40877cf778ea

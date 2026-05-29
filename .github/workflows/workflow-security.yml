@@ -1,0 +1,72 @@
+name: Workflow Security
+
+# zizmor — static analysis for GitHub Actions workflow security (template
+# injection, excessive permissions, unpinned actions, dangerous triggers,
+# self-hosted-runner risks). This is the OSS-published equivalent of the
+# monorepo's in-house workflow-security audit. The public repo cannot import
+# the internal module, so the public, pip-installable zizmor is the right
+# tool here. Results upload to the Security tab as SARIF.
+#
+# Ported from F0RG3-W1R3's workflow-security.yml per audit M-002 (see
+# SECURITY.md "CI/CD Security Posture"). Scheduled on Thursdays to spread
+# runner usage across the week (codeql is Tuesday, scorecard is Wednesday).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "47 6 * * 4"   # Thursday 06:47 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zizmor:
+    name: zizmor workflow audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install zizmor (hash-pinned)
+        # Hash-pinned per OSSF Scorecard Pinned-Dependencies (pipCommand).
+        # Pins zizmor==1.25.2 by sha256; see .github/requirements-zizmor.txt.
+        run: python -m pip install --require-hashes -r .github/requirements-zizmor.txt
+
+      - name: Run zizmor (SARIF)
+        # zizmor v1.x always writes results to stdout — there is no
+        # --output flag; SARIF must be captured via shell redirection.
+        # With --format sarif zizmor exits 0 even when findings exist
+        # (SARIF consumers read results from the document, not the exit
+        # code), so the report is uploaded to the Security tab below.
+        # https://docs.zizmor.sh/usage/  (Output handling + SARIF section)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: zizmor --format sarif . >zizmor.sarif
+
+      - name: Upload zizmor SARIF
+        uses: github/codeql-action/upload-sarif@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor

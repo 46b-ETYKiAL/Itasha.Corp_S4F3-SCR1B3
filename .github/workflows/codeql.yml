@@ -1,0 +1,68 @@
+name: CodeQL
+
+# Free GHAS code scanning for SCR1B3. Languages present in the repo that
+# CodeQL supports: Python (`scripts/content_safety_audit.py`,
+# `scripts/verify_forge_wire_manifest.py`) and GitHub Actions (the five
+# workflow files under `.github/workflows/`). Rust is NOT a CodeQL-supported
+# language on the free public-repo tier (`cpp` / `csharp` / `go` / `java` /
+# `javascript` / `python` / `ruby` / `actions` only) — Rust is covered by
+# `cargo clippy --deny warnings` + `cargo-deny` (advisories / bans / licenses
+# / sources) in `ci.yml` and `cargo-deny.yml`.
+#
+# Ported from F0RG3-W1R3's codeql.yml per audit M-002. Scheduled on Tuesdays
+# to spread runner usage across the week.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: "23 14 * * 2"   # Tuesday 14:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@7211b7c8077ea37d8641b6271f6a365a22a5fbfa # v4.36.0
+        with:
+          category: "/language:${{ matrix.language }}"
