@@ -43,7 +43,7 @@ jobs:
           # root one is the unified BOM. Copy + name it for the release.
           cp bom.json scr1b3-sbom.cdx.json
       - name: Upload SBOM as workflow artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: scr1b3-sbom
           path: scr1b3-sbom.cdx.json
