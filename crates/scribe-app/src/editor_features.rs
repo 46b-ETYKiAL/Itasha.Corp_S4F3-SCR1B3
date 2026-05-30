@@ -7,6 +7,8 @@
 //! * [`word_completions`] — local "dabbrev"-style identifier completion that
 //!   powers the completion popup with zero network/LSP dependency. LSP items,
 //!   when available, are merged on top by the caller.
+//! * [`symbol_scopes`] — brace-delimited definition scopes (fn/struct/impl/…)
+//!   that drive the breadcrumbs bar (F-033) and sticky-scroll headers (F-034).
 
 use std::collections::BTreeSet;
 
@@ -188,6 +190,158 @@ pub fn prefix_before(text: &str, cursor: usize) -> (usize, String) {
     (start, text[start..cursor.min(text.len())].to_string())
 }
 
+/// A brace-delimited definition scope (a `fn`/`struct`/`impl`/… block).
+/// Lines are 0-based. `depth` is the brace-nesting depth of the header
+/// (0 = top level) so callers can render nesting without recomputing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolScope {
+    /// 0-based line carrying the definition header (and its opening brace).
+    pub start_line: usize,
+    /// 0-based line carrying the matching closing brace.
+    pub end_line: usize,
+    /// Concise label, e.g. `fn parse`, `impl Display`, `struct Point`.
+    pub label: String,
+    /// Brace-nesting depth of the header line (0 = outermost).
+    pub depth: usize,
+}
+
+/// Definition-introducing keywords the breadcrumb scanner recognises. A
+/// brace-opening line is only treated as a symbol scope when one of these
+/// appears as a whole word before the `{` — so control-flow blocks
+/// (`if`/`for`/`while`/`match`/`loop`/`else`) and closures are excluded.
+const DEF_KEYWORDS: &[&str] = &[
+    "fn",
+    "struct",
+    "enum",
+    "trait",
+    "impl",
+    "mod",
+    "class",
+    "interface",
+    "namespace",
+    "macro_rules",
+    "function",
+];
+
+/// Extract the concise label for a definition header line, or `None` when the
+/// line opens a brace block that is not a definition (control flow, closure,
+/// bare block). The label is `"<keyword> <name>"`, the name being the next
+/// identifier-ish token after the keyword (trimmed of `(`, `<`, `{`, `:`).
+fn label_for_def(line: &str) -> Option<String> {
+    // Tokenise on whitespace; tolerate `macro_rules!` and `impl<T>`.
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    for (i, tok) in tokens.iter().enumerate() {
+        // Strip a trailing `!` so `macro_rules!` matches `macro_rules`.
+        let kw = tok.trim_end_matches('!');
+        if !DEF_KEYWORDS.contains(&kw) {
+            continue;
+        }
+        // Found the keyword. The name is the next token, cleaned of the
+        // punctuation that commonly butts against it.
+        let name = tokens.get(i + 1).map(|n| {
+            n.trim_matches(|c: char| {
+                c == '(' || c == '{' || c == '<' || c == ':' || c == ';' || c == '!'
+            })
+            .split(['(', '{', '<', ':', ';'])
+            .next()
+            .unwrap_or("")
+        });
+        return Some(match name {
+            Some(n) if !n.is_empty() => format!("{kw} {n}"),
+            _ => kw.to_string(),
+        });
+    }
+    None
+}
+
+/// Discover brace-delimited definition scopes, ordered by `start_line`.
+///
+/// Reuses the same string/line-comment-aware brace scanner as
+/// [`fold_regions`], but records each opening brace's line text so a closed
+/// pair can be classified as a definition (via [`label_for_def`]) or
+/// discarded. Single-line definitions and non-definition blocks are skipped.
+/// Brace-based by design — indentation-delimited languages (Python) are not
+/// covered by this heuristic.
+pub fn symbol_scopes(text: &str) -> Vec<SymbolScope> {
+    // Stack entries: (line index of `{`, trimmed header text at that line).
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    let mut out: Vec<SymbolScope> = Vec::new();
+    let mut in_string: Option<char> = None;
+    let mut prev = '\0';
+
+    for (line_idx, line) in text.split_inclusive('\n').enumerate() {
+        let mut line_comment = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            if line_comment {
+                break;
+            }
+            match in_string {
+                Some(q) => {
+                    if c == q && prev != '\\' {
+                        in_string = None;
+                    }
+                }
+                None => match c {
+                    '"' | '\'' => in_string = Some(c),
+                    '/' if chars.peek() == Some(&'/') => line_comment = true,
+                    '{' => stack.push((line_idx, line.trim().to_string())),
+                    '}' => {
+                        if let Some((open, header)) = stack.pop() {
+                            if line_idx > open {
+                                if let Some(label) = label_for_def(&header) {
+                                    out.push(SymbolScope {
+                                        start_line: open,
+                                        end_line: line_idx,
+                                        label,
+                                        depth: stack.len(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+            }
+            prev = c;
+        }
+        in_string = None;
+        prev = '\0';
+    }
+
+    out.sort_by_key(|s| s.start_line);
+    out
+}
+
+/// The chain of definition scopes enclosing a 0-based `line`, outermost first.
+/// This is the breadcrumb path (F-033) — e.g. `[mod foo, impl Bar, fn baz]`.
+pub fn breadcrumb_at(scopes: &[SymbolScope], line: usize) -> Vec<&SymbolScope> {
+    let mut chain: Vec<&SymbolScope> = scopes
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .collect();
+    chain.sort_by_key(|s| s.depth);
+    chain
+}
+
+/// The definition headers to pin at the top of the viewport (F-034): every
+/// scope whose header has scrolled above `first_visible_line` while its body
+/// still spans it, outermost first. Capped at `max` so deep nesting can't eat
+/// the viewport.
+pub fn sticky_chain_at(
+    scopes: &[SymbolScope],
+    first_visible_line: usize,
+    max: usize,
+) -> Vec<&SymbolScope> {
+    let mut chain: Vec<&SymbolScope> = scopes
+        .iter()
+        .filter(|s| s.start_line < first_visible_line && first_visible_line <= s.end_line)
+        .collect();
+    chain.sort_by_key(|s| s.depth);
+    chain.truncate(max);
+    chain
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +431,78 @@ mod tests {
         let (s2, p2) = prefix_before(text, 6);
         assert_eq!(p2, "fo");
         assert_eq!(s2, 4);
+    }
+
+    // ---- symbol_scopes / breadcrumb_at / sticky_chain_at (F-033 / F-034) ----
+
+    #[test]
+    fn symbol_scopes_finds_nested_defs() {
+        let src =
+            "mod foo {\n    impl Bar {\n        fn baz() {\n            x;\n        }\n    }\n}\n";
+        let scopes = symbol_scopes(src);
+        let labels: Vec<&str> = scopes.iter().map(|s| s.label.as_str()).collect();
+        // Ordered by start_line: mod (0), impl (1), fn (2).
+        assert_eq!(labels, vec!["mod foo", "impl Bar", "fn baz"]);
+        assert_eq!(scopes[0].depth, 0);
+        assert_eq!(scopes[1].depth, 1);
+        assert_eq!(scopes[2].depth, 2);
+        assert_eq!((scopes[2].start_line, scopes[2].end_line), (2, 4));
+    }
+
+    #[test]
+    fn symbol_scopes_excludes_control_flow_and_closures() {
+        // `if`, `for`, `match`, and a closure all open braces but are NOT defs.
+        let src = "fn run() {\n    if x {\n        y;\n    }\n    for i in 0..3 {\n        z;\n    }\n    let c = || {\n        w;\n    };\n}\n";
+        let scopes = symbol_scopes(src);
+        let labels: Vec<&str> = scopes.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["fn run"], "only the fn is a symbol scope");
+    }
+
+    #[test]
+    fn symbol_scopes_handles_struct_and_single_line_is_skipped() {
+        // `struct Point { x: i32 }` is single-line → skipped (no nesting).
+        let src = "struct Point { x: i32 }\nfn area() {\n    1;\n}\n";
+        let scopes = symbol_scopes(src);
+        let labels: Vec<&str> = scopes.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["fn area"]);
+    }
+
+    #[test]
+    fn breadcrumb_at_returns_outermost_first() {
+        let src = "mod foo {\n    impl Bar {\n        fn baz() {\n            here;\n        }\n    }\n}\n";
+        let scopes = symbol_scopes(src);
+        // Line 3 is `here;` — enclosed by all three.
+        let crumbs: Vec<&str> = breadcrumb_at(&scopes, 3)
+            .iter()
+            .map(|s| s.label.as_str())
+            .collect();
+        assert_eq!(crumbs, vec!["mod foo", "impl Bar", "fn baz"]);
+        // A line outside any scope yields an empty path.
+        assert!(breadcrumb_at(&scopes, 99).is_empty());
+    }
+
+    #[test]
+    fn sticky_chain_pins_enclosing_headers_above_viewport() {
+        let src = "mod foo {\n    impl Bar {\n        fn baz() {\n            a;\n            b;\n            c;\n        }\n    }\n}\n";
+        let scopes = symbol_scopes(src);
+        // Viewport top at line 4 (`b;`): all three headers (lines 0/1/2) are
+        // above it and still enclose it → pin all three, outermost first.
+        let pinned: Vec<&str> = sticky_chain_at(&scopes, 4, 5)
+            .iter()
+            .map(|s| s.label.as_str())
+            .collect();
+        assert_eq!(pinned, vec!["mod foo", "impl Bar", "fn baz"]);
+        // The `max` cap truncates the deepest entries.
+        let capped = sticky_chain_at(&scopes, 4, 2);
+        assert_eq!(capped.len(), 2);
+        assert_eq!(capped[0].label, "mod foo");
+    }
+
+    #[test]
+    fn sticky_chain_empty_when_header_is_visible() {
+        let src = "fn baz() {\n    a;\n}\n";
+        let scopes = symbol_scopes(src);
+        // Viewport top at line 0 — the header itself is visible, nothing to pin.
+        assert!(sticky_chain_at(&scopes, 0, 5).is_empty());
     }
 }
