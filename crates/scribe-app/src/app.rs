@@ -239,6 +239,11 @@ pub struct ScribeApp {
     /// the recent-files modal renders this frame. Opened via Ctrl+R, the
     /// command palette, or the toolbar's "Recent" button.
     recent_open: bool,
+    /// F-013 from docs/audits/overlooked-surfaces-2026-05-29.md: when true,
+    /// the welcome modal renders this frame. Auto-opened on first launch
+    /// (when `config.editor.first_run_completed` is false); reachable
+    /// thereafter via the Help menu / command palette.
+    welcome_open: bool,
     /// F-015 from docs/audits/overlooked-surfaces-2026-05-29.md: Ctrl+G
     /// "go to line" modal. `goto_open` is the modal-open flag, `goto_query`
     /// is the typed text (accepts `N` or `N:C`), `focus_goto` is the
@@ -397,6 +402,12 @@ impl ScribeApp {
 
     fn build(config: Config, config_err: Option<String>, cli_path: Option<String>) -> Self {
         let theme = load_theme(&config.appearance.theme);
+        // F-013 — open the welcome modal on first launch only. Suppressed
+        // when the user passed a file on the command line OR the recent-
+        // files list is already populated (they've been here before).
+        let welcome_on_launch = !config.editor.first_run_completed
+            && cli_path.is_none()
+            && config.editor.recent_files.is_empty();
 
         let mut tabs = Vec::new();
         // F-038 — keep the parse error in a persistent banner field rather
@@ -478,6 +489,7 @@ impl ScribeApp {
             settings_open: false,
             cheatsheet_open: false,
             recent_open: false,
+            welcome_open: welcome_on_launch,
             goto_open: false,
             goto_query: String::new(),
             focus_goto: false,
@@ -2338,6 +2350,7 @@ impl ScribeApp {
                 self.cheatsheet_open = false;
                 self.goto_open = false;
                 self.recent_open = false;
+                self.welcome_open = false;
             }
         });
         // Ctrl/Cmd+Space requests identifier completion at the cursor.
@@ -2819,6 +2832,105 @@ impl ScribeApp {
                 self.recent_open = false;
             } else if !still_open {
                 self.recent_open = false;
+            }
+        }
+
+        // ---- Welcome modal (F-013) ----
+        //
+        // First-launch greeter: open file, open folder, pick from recent,
+        // open settings, see keyboard shortcuts. Dismiss with the close
+        // button (sets first_run_completed) or Esc (suppress this session
+        // only). The decision-to-open happens at build() time; this
+        // renderer just paints the state.
+        if self.welcome_open {
+            let mut want_new = false;
+            let mut want_open = false;
+            let mut want_open_folder = false;
+            let mut want_recent = false;
+            let mut want_settings = false;
+            let mut want_cheatsheet = false;
+            let mut want_dismiss_permanent = false;
+            let mut still_open = true;
+            egui::Window::new(
+                RichText::new(format!("welcome to {}", scribe_core::PRODUCT_NAME))
+                    .color(accent)
+                    .monospace(),
+            )
+            .open(&mut still_open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(480.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(scribe_core::PRODUCT_TAGLINE)
+                        .color(muted)
+                        .monospace(),
+                );
+                ui.add_space(10.0);
+                if ui.button("📄  New file (Ctrl+N)").clicked() {
+                    want_new = true;
+                }
+                if ui.button("📂  Open file… (Ctrl+O)").clicked() {
+                    want_open = true;
+                }
+                if ui.button("🗂  Open folder…").clicked() {
+                    want_open_folder = true;
+                }
+                if ui.button("⌖  Recent files (Ctrl+R)").clicked() {
+                    want_recent = true;
+                }
+                ui.separator();
+                if ui.button("⚙  Open Settings").clicked() {
+                    want_settings = true;
+                }
+                if ui.button("⌨  Show keyboard shortcuts (F1)").clicked() {
+                    want_cheatsheet = true;
+                }
+                ui.add_space(10.0);
+                if ui.button("✓  Don't show this again").clicked() {
+                    want_dismiss_permanent = true;
+                }
+                ui.label(
+                    RichText::new("Esc dismisses for this session only.")
+                        .color(muted)
+                        .small(),
+                );
+            });
+            if want_new {
+                self.new_tab();
+                self.welcome_open = false;
+            }
+            if want_open {
+                self.open_dialog();
+                self.welcome_open = false;
+            }
+            if want_open_folder {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    self.file_tree_root = Some(folder);
+                }
+                self.welcome_open = false;
+            }
+            if want_recent {
+                self.recent_open = true;
+                self.welcome_open = false;
+            }
+            if want_settings {
+                self.settings_open = true;
+                self.welcome_open = false;
+            }
+            if want_cheatsheet {
+                self.cheatsheet_open = true;
+                self.welcome_open = false;
+            }
+            if want_dismiss_permanent {
+                self.config.editor.first_run_completed = true;
+                self.save_config();
+                self.welcome_open = false;
+            }
+            if !still_open {
+                self.welcome_open = false;
             }
         }
 

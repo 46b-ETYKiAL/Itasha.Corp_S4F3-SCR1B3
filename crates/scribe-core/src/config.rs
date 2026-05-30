@@ -257,6 +257,11 @@ pub struct EditorConfig {
     /// duplicates collapse to the front position.
     #[serde(default)]
     pub recent_files: Vec<PathBuf>,
+    /// F-013 from docs/audits/overlooked-surfaces-2026-05-29.md: set true
+    /// after the welcome modal is dismissed. Used to suppress the welcome
+    /// modal on subsequent launches.
+    #[serde(default)]
+    pub first_run_completed: bool,
 }
 
 /// Cap on the recent-files MRU list. 20 is the universal editor
@@ -308,6 +313,7 @@ impl Default for EditorConfig {
             tab_bar_position: TabBarPosition::Top,
             grid_enabled: false,
             recent_files: Vec::new(),
+            first_run_completed: false,
         }
     }
 }
@@ -796,5 +802,17 @@ mod tests {
         let back: Config = toml::from_str(&s).expect("config TOML round-trip");
         assert_eq!(back.editor.recent_files.len(), 2);
         assert_eq!(back.editor.recent_files[0], PathBuf::from("/x/y.rs"));
+    }
+
+    /// F-013: first_run_completed defaults false + round-trips.
+    #[test]
+    fn first_run_completed_default_false_and_round_trips() {
+        let c = Config::default();
+        assert!(!c.editor.first_run_completed);
+        let mut c2 = c.clone();
+        c2.editor.first_run_completed = true;
+        let s = c2.to_toml_string();
+        let back: Config = toml::from_str(&s).expect("config TOML round-trip");
+        assert!(back.editor.first_run_completed);
     }
 }
