@@ -194,6 +194,17 @@ pub struct WindowConfig {
     pub tint: String,
     /// Tint overlay strength (0.0 = none .. 1.0 = strong).
     pub tint_strength: f32,
+    /// F-020 from docs/audits/overlooked-surfaces-2026-05-29.md: last
+    /// window position + size. Persisted on save_config and restored on
+    /// next launch. `None` means "use the hard-coded default size" — the
+    /// pre-audit behaviour. Tuple is `(x, y, width, height)` in logical
+    /// pixels (eframe's surface unit).
+    #[serde(default)]
+    pub last_geometry: Option<(f32, f32, f32, f32)>,
+    /// F-035 from docs/audits/overlooked-surfaces-2026-05-29.md: keep the
+    /// SCR1B3 window on top of other windows. Default OFF.
+    #[serde(default)]
+    pub always_on_top: bool,
 }
 
 impl WindowConfig {
@@ -214,6 +225,8 @@ impl Default for WindowConfig {
             opacity: 0.92,
             tint: "#08060d".to_string(),
             tint_strength: 0.0,
+            last_geometry: None,
+            always_on_top: false,
         }
     }
 }
@@ -705,5 +718,32 @@ mod tests {
     #[test]
     fn crt_off_by_default() {
         assert!(!Config::default().effects.crt_enabled);
+    }
+
+    /// F-020: default `last_geometry` is None (first-launch falls back to
+    /// hard-coded size) and the field round-trips through TOML.
+    #[test]
+    fn window_last_geometry_default_none_and_round_trips() {
+        let mut c = Config::default();
+        assert_eq!(c.window.last_geometry, None);
+        c.window.last_geometry = Some((100.0, 200.0, 1280.0, 720.0));
+        let s = c.to_toml_string();
+        let back: Config = toml::from_str(&s).expect("config TOML round-trip");
+        assert_eq!(
+            back.window.last_geometry,
+            Some((100.0, 200.0, 1280.0, 720.0))
+        );
+    }
+
+    /// F-035: always_on_top defaults OFF and round-trips through TOML.
+    #[test]
+    fn always_on_top_default_off_and_round_trips() {
+        let c = Config::default();
+        assert!(!c.window.always_on_top);
+        let mut c2 = c.clone();
+        c2.window.always_on_top = true;
+        let s = c2.to_toml_string();
+        let back: Config = toml::from_str(&s).expect("config TOML round-trip");
+        assert!(back.window.always_on_top);
     }
 }

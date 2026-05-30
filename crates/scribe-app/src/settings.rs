@@ -467,6 +467,14 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         "Window",
         &["mode", "opacity", "tint", "glass", "mica"],
     ) {
+        ui.heading("Window");
+        // F-035 — always-on-top toggle. Takes effect immediately via the
+        // ViewportCommand the app issues when this checkbox flips.
+        changed |= ui
+            .checkbox(&mut config.window.always_on_top, "Always on top")
+            .on_hover_text("Keep the SCR1B3 window above other windows.")
+            .changed();
+        ui.add_space(4.0);
         ui.heading("Window (transparency / glass)");
         // Master on/off switch for the whole transparency system. Off by default:
         // a normal opaque window is fast and never leaves a DWM ghost on close.

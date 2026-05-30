@@ -53,11 +53,25 @@ fn main() -> ExitCode {
 
     let (config, config_err) = scribe_core::Config::load_or_default();
 
+    // F-020 from docs/audits/overlooked-surfaces-2026-05-29.md: restore the
+    // last known window geometry. Fall back to the hard-coded default size
+    // when no geometry was persisted (first launch).
+    let (init_x, init_w, init_h) = match config.window.last_geometry {
+        Some((x, y, w, h)) if w >= 200.0 && h >= 150.0 => (Some((x, y)), w, h),
+        _ => (None, 1100.0, 720.0),
+    };
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1100.0, 720.0])
+        .with_inner_size([init_w, init_h])
         .with_min_inner_size([520.0, 360.0])
         .with_app_id("com.itashacorp.scr1b3")
         .with_title(scribe_core::PRODUCT_NAME);
+    if let Some((x, y)) = init_x {
+        viewport = viewport.with_position([x, y]);
+    }
+    // F-035: keep the window on top when the user has enabled it.
+    if config.window.always_on_top {
+        viewport = viewport.with_window_level(egui::WindowLevel::AlwaysOnTop);
+    }
     if config.appearance.frameless {
         viewport = viewport.with_decorations(false);
     }

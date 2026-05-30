@@ -976,6 +976,23 @@ impl ScribeApp {
         }
     }
 
+    /// F-020 — sample the current viewport inner rect + outer position and
+    /// record it on `self.config.window.last_geometry` so the next launch
+    /// restores it. Called from the eframe `save()` lifecycle hook and
+    /// opportunistically by [`Self::persist_geometry_if_changed`] each frame.
+    fn capture_window_geometry(&mut self, ctx: &egui::Context) {
+        let (pos, size) = ctx.input(|i| {
+            let vp = i.viewport();
+            (vp.outer_rect, vp.inner_rect)
+        });
+        if let (Some(pos), Some(size)) = (pos, size) {
+            let g = (pos.min.x, pos.min.y, size.width(), size.height());
+            if self.config.window.last_geometry != Some(g) {
+                self.config.window.last_geometry = Some(g);
+            }
+        }
+    }
+
     fn new_tab(&mut self) {
         self.tabs.push(EditorTab::scratch());
         self.active = self.tabs.len() - 1;
@@ -1986,6 +2003,17 @@ impl eframe::App for ScribeApp {
         [0.0, 0.0, 0.0, 0.0]
     }
 
+    // F-020 — eframe::App::save runs on graceful shutdown and (depending on
+    // backend) periodically while the app is running. We use it to write the
+    // current window geometry to the user TOML so the next launch restores
+    // the same position + size.
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        // We don't use eframe's own Storage (no JSON-blob serialisation —
+        // SCR1B3 owns its config). Persist via save_config, which writes the
+        // single canonical TOML.
+        self.save_config();
+    }
+
     // eframe 0.34: `App::ui(&mut self, &mut Ui, &mut Frame)` is the new required
     // entry; the prior `update(&mut Context, &mut Frame)` is deprecated. We keep
     // driving panels via top-level `CentralPanel::show(ctx)` (under the
@@ -2005,6 +2033,10 @@ impl ScribeApp {
     /// `eframe::Frame`. Drives every top-level panel via the deprecated-but-
     /// functional `Panel::show(ctx, …)` path.
     pub(crate) fn frame_tick(&mut self, ctx: &egui::Context) {
+        // F-020 — capture the live window geometry each frame so save_config
+        // (called on settings change OR on eframe::App::save) records the
+        // latest position + size. Cheap (one input-read clone).
+        self.capture_window_geometry(ctx);
         // Phase 18 T18.2 — keep the grid in step with the editor.grid_enabled
         // config preference (toggled in Settings or via TOML edit + watcher).
         // This is cheap on the common path (config unchanged + ids already
@@ -2430,6 +2462,14 @@ impl ScribeApp {
             let changed = crate::settings::show(ctx, &mut self.config, &mut self.settings_open);
             if changed {
                 self.reapply_theme(ctx);
+                // F-035 — push the always-on-top flag to the viewport
+                // immediately so the toggle is live (no restart required).
+                let level = if self.config.window.always_on_top {
+                    egui::WindowLevel::AlwaysOnTop
+                } else {
+                    egui::WindowLevel::Normal
+                };
+                ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
                 self.save_config();
             }
         }
