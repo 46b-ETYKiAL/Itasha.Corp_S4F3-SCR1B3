@@ -22,6 +22,7 @@ serde.workspace = true                         # DocId / Pane serde for Tree<Pan
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rfd = "0.15"          # native OS file dialogs (native-feel)
+arboard = "3"         # OS clipboard read for palette-driven Paste (egui exposes no read API; already in tree via eframe)
 notify = { workspace = true }                 # config/theme live-reload
 notify-debouncer-mini = { workspace = true }
 window-vibrancy = "0.7"                        # OS glass/acrylic/mica/vibrancy

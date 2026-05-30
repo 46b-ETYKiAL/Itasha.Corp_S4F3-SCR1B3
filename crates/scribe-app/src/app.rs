@@ -319,6 +319,12 @@ pub struct ScribeApp {
     /// Pending vertical scroll offset to apply to the editor next frame (set by
     /// a minimap click/drag). Consumed once.
     pending_scroll: Option<f32>,
+    /// A clipboard / undo action requested via the command palette. Drained at
+    /// the top of `frame_tick` by injecting the matching egui event + focusing
+    /// the central editor so egui's `TextEdit` performs it natively. Consumed
+    /// once. The chords (Ctrl+C/X/V/Z) always worked directly on the focused
+    /// editor; this gives the palette a working entry point too.
+    pending_editor_action: Option<EditorAction>,
     /// Last-frame editor scroll metrics `(offset_y, content_height, viewport_height)`
     /// — read by the minimap to draw its viewport indicator (one-frame lag is fine).
     scroll_metrics: (f32, f32, f32),
@@ -554,6 +560,7 @@ impl ScribeApp {
             folds: std::collections::BTreeSet::new(),
             completion: None,
             pending_scroll: None,
+            pending_editor_action: None,
             scroll_metrics: (0.0, 1.0, 1.0),
             minimap_cache: std::cell::RefCell::new(None),
             focus_find: false,
@@ -1198,7 +1205,50 @@ impl ScribeApp {
                     .ensure_defaults(Config::config_dir().as_deref());
                 self.plugin_manager.open = true;
             }
+            // Clipboard / history actions: record the request; `frame_tick`
+            // drains it into the focused editor as a native egui event.
+            BuiltinCommand::Copy => self.pending_editor_action = Some(EditorAction::Copy),
+            BuiltinCommand::Cut => self.pending_editor_action = Some(EditorAction::Cut),
+            BuiltinCommand::Paste => self.pending_editor_action = Some(EditorAction::Paste),
+            BuiltinCommand::Undo => self.pending_editor_action = Some(EditorAction::Undo),
+            BuiltinCommand::Redo => self.pending_editor_action = Some(EditorAction::Redo),
         }
+    }
+
+    /// Drain a palette-requested clipboard/history action by injecting the
+    /// corresponding egui event into the input queue and focusing the central
+    /// editor, so egui's `TextEdit` performs it natively this frame. Called at
+    /// the top of `frame_tick`, before any panel renders, so the editor (shown
+    /// later in the same frame) sees the event. `Paste` reads the OS clipboard
+    /// via `arboard`; a read failure surfaces a toast rather than panicking.
+    fn drain_pending_editor_action(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_editor_action.take() else {
+            return;
+        };
+        let editor_id = egui::Id::new("scr1b3-central-editor");
+        // Focus the editor so the injected event is delivered to it.
+        ctx.memory_mut(|m| m.request_focus(editor_id));
+        let event = match action {
+            EditorAction::Copy => egui::Event::Copy,
+            EditorAction::Cut => egui::Event::Cut,
+            EditorAction::Paste => match read_clipboard_text() {
+                Ok(text) => egui::Event::Paste(text),
+                Err(e) => {
+                    self.toast = Some(format!("paste unavailable: {e}"));
+                    return;
+                }
+            },
+            EditorAction::Undo => key_event(egui::Key::Z, egui::Modifiers::COMMAND),
+            EditorAction::Redo => key_event(
+                egui::Key::Z,
+                egui::Modifiers {
+                    command: true,
+                    shift: true,
+                    ..Default::default()
+                },
+            ),
+        };
+        ctx.input_mut(|i| i.events.push(event));
     }
 
     fn open_dialog(&mut self) {
@@ -2076,6 +2126,26 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
         chord: "Ctrl+Shift+]",
         action: "Expand every folded region",
     },
+    ShortcutEntry {
+        chord: "Ctrl+C",
+        action: "Copy selection to clipboard",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+X",
+        action: "Cut selection to clipboard",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+V",
+        action: "Paste from clipboard",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Z",
+        action: "Undo",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+Z",
+        action: "Redo",
+    },
 ];
 
 // ---- Built-in command palette registry (F-004) ----
@@ -2110,6 +2180,24 @@ pub(crate) enum BuiltinCommand {
     FoldAll,
     ExpandAll,
     OpenPluginManager,
+    Copy,
+    Cut,
+    Paste,
+    Undo,
+    Redo,
+}
+
+/// A clipboard / history action the palette requests; drained in `frame_tick`
+/// by injecting the matching egui event into the focused central editor so
+/// egui's `TextEdit` performs the operation with its own selection + undo
+/// state (no parallel editing model to keep in sync).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditorAction {
+    Copy,
+    Cut,
+    Paste,
+    Undo,
+    Redo,
 }
 
 pub(crate) struct BuiltinEntry {
@@ -2131,6 +2219,16 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Close all tabs",
         shortcut: "",
         action: BuiltinCommand::CloseAllTabs,
+    },
+    BuiltinEntry {
+        label: "Copy",
+        shortcut: "Ctrl+C",
+        action: BuiltinCommand::Copy,
+    },
+    BuiltinEntry {
+        label: "Cut",
+        shortcut: "Ctrl+X",
+        action: BuiltinCommand::Cut,
     },
     BuiltinEntry {
         label: "Cycle theme",
@@ -2183,9 +2281,19 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         action: BuiltinCommand::OpenSettings,
     },
     BuiltinEntry {
+        label: "Paste",
+        shortcut: "Ctrl+V",
+        action: BuiltinCommand::Paste,
+    },
+    BuiltinEntry {
         label: "Previous tab",
         shortcut: "",
         action: BuiltinCommand::CycleTabPrev,
+    },
+    BuiltinEntry {
+        label: "Redo",
+        shortcut: "Ctrl+Shift+Z",
+        action: BuiltinCommand::Redo,
     },
     BuiltinEntry {
         label: "Save",
@@ -2226,6 +2334,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Toggle word wrap",
         shortcut: "",
         action: BuiltinCommand::ToggleWordWrap,
+    },
+    BuiltinEntry {
+        label: "Undo",
+        shortcut: "Ctrl+Z",
+        action: BuiltinCommand::Undo,
     },
 ];
 
@@ -2366,6 +2479,28 @@ pub(crate) fn toolbar_label(id: &str, icons: bool) -> &'static str {
 
 fn ui_color(theme: &Theme, key: &str, default: Rgba) -> Color32 {
     scribe_render::color32(theme.ui(key, default))
+}
+
+/// Build a synthetic key-press egui event (used to drive `TextEdit`'s native
+/// undo/redo from the command palette). `physical_key` is left `None` — egui's
+/// editing commands match on the logical `key` + `modifiers`.
+fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+/// Read the OS clipboard text for a palette-driven Paste. Uses `arboard`
+/// (already in the dependency tree via eframe) so we can pull text on demand —
+/// egui exposes no clipboard *read* API outside its own paste-event flow.
+/// Returns a short error string on any failure (e.g. Wayland without focus).
+fn read_clipboard_text() -> Result<String, String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    cb.get_text().map_err(|e| e.to_string())
 }
 
 /// Open `dir` in the OS file manager (Explorer / Finder / xdg-open).
@@ -2667,6 +2802,10 @@ impl ScribeApp {
     /// `eframe::Frame`. Drives every top-level panel via the deprecated-but-
     /// functional `Panel::show(ctx, …)` path.
     pub(crate) fn frame_tick(&mut self, ctx: &egui::Context) {
+        // Drain a palette-requested clipboard/history action BEFORE any panel
+        // renders, so the injected event reaches the central editor (shown
+        // later this frame) and egui's TextEdit performs it natively.
+        self.drain_pending_editor_action(ctx);
         // F-020 — capture the live window geometry each frame so save_config
         // (called on settings change OR on eframe::App::save) records the
         // latest position + size. Cheap (one input-read clone).
@@ -5321,6 +5460,41 @@ def";
                 }
                 _ => app.execute_builtin(entry.action),
             }
+        }
+    }
+
+    /// Clipboard/history palette commands record a pending editor action
+    /// (drained into the focused editor as an egui event by `frame_tick`).
+    /// `execute_builtin` itself must never touch the OS clipboard so it stays
+    /// headless-test-safe.
+    #[test]
+    fn clipboard_palette_commands_set_pending_action() {
+        let mut app = ScribeApp::new_test(Config::default());
+        for (cmd, want) in [
+            (BuiltinCommand::Copy, EditorAction::Copy),
+            (BuiltinCommand::Cut, EditorAction::Cut),
+            (BuiltinCommand::Paste, EditorAction::Paste),
+            (BuiltinCommand::Undo, EditorAction::Undo),
+            (BuiltinCommand::Redo, EditorAction::Redo),
+        ] {
+            app.pending_editor_action = None;
+            app.execute_builtin(cmd);
+            assert_eq!(app.pending_editor_action, Some(want), "{cmd:?}");
+        }
+    }
+
+    /// The five clipboard/history actions are all reachable from the palette
+    /// AND the cheatsheet (discoverability — they previously worked only via
+    /// unlisted chords).
+    #[test]
+    fn clipboard_actions_are_discoverable() {
+        let palette: Vec<&str> = BUILTIN_COMMANDS.iter().map(|e| e.label).collect();
+        for label in ["Copy", "Cut", "Paste", "Undo", "Redo"] {
+            assert!(palette.contains(&label), "palette missing {label}");
+        }
+        let chords: Vec<&str> = KEYBOARD_SHORTCUTS.iter().map(|e| e.chord).collect();
+        for chord in ["Ctrl+C", "Ctrl+X", "Ctrl+V", "Ctrl+Z", "Ctrl+Shift+Z"] {
+            assert!(chords.contains(&chord), "cheatsheet missing {chord}");
         }
     }
 
