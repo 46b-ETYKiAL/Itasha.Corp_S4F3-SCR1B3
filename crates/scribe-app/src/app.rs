@@ -230,6 +230,13 @@ pub struct ScribeApp {
     /// is the editor's "what can it do?" surface when the user can't
     /// remember the shortcut for an operation.
     cheatsheet_open: bool,
+    /// F-015 from docs/audits/overlooked-surfaces-2026-05-29.md: Ctrl+G
+    /// "go to line" modal. `goto_open` is the modal-open flag, `goto_query`
+    /// is the typed text (accepts `N` or `N:C`), `focus_goto` is the
+    /// one-shot focus request when the modal opens.
+    goto_open: bool,
+    goto_query: String,
+    focus_goto: bool,
     /// Open folder for the file-tree sidebar (None = sidebar hidden).
     file_tree_root: Option<PathBuf>,
     /// LSP: per-language server registry + the active server connection.
@@ -456,6 +463,9 @@ impl ScribeApp {
             palette_query: String::new(),
             settings_open: false,
             cheatsheet_open: false,
+            goto_open: false,
+            goto_query: String::new(),
+            focus_goto: false,
             file_tree_root: None,
             lsp_registry: LspRegistry::with_defaults(),
             lsp: None,
@@ -1303,6 +1313,31 @@ impl ScribeApp {
         }
     }
 
+    /// F-015 — Scroll the active buffer so the given 1-based line is in the
+    /// viewport. The minimap renderer already drives `pending_scroll` for
+    /// click-jump; we reuse that pipe by computing the approximate Y of
+    /// `line` from the current per-line gutter heights (one-frame lag is
+    /// fine — same lag the minimap accepts).
+    fn goto_line(&mut self, line_1based: usize) {
+        if self.active >= self.tabs.len() {
+            return;
+        }
+        let line0 = line_1based.saturating_sub(1);
+        // Prefer the captured per-line gutter Ys (most accurate; populated
+        // each frame when line numbers render). Fall back to a simple
+        // line-height * index estimate otherwise.
+        if let Some(&y) = self.line_gutter.get(line0) {
+            // line_gutter Ys are screen-Y; the editor scroll-pipe wants the
+            // vertical offset INSIDE the scroll area. The minimap already
+            // assumes scroll-area = full window vertically — keep that.
+            self.pending_scroll = Some(y.max(0.0));
+        } else {
+            let lh = self.config.fonts.editor_size * self.config.fonts.line_height;
+            self.pending_scroll = Some((line0 as f32) * lh);
+        }
+        self.status = format!("go to line {line_1based}");
+    }
+
     /// Open the identifier-completion popup for the prefix ending at `char_idx`
     /// in the active buffer. Sources suggestions from the buffer's own words
     /// (zero network / LSP dependency).
@@ -1530,6 +1565,10 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
     ShortcutEntry {
         chord: "Ctrl+/",
         action: "Toggle line comment (per-language prefix)",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+G",
+        action: "Go to line (or line:column)",
     },
     ShortcutEntry {
         chord: "Ctrl+Space",
@@ -1806,6 +1845,31 @@ fn char_to_byte(s: &str, ci: usize) -> usize {
     s.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(s.len())
 }
 
+/// Parse a Ctrl+G query string into `(line, column)`. Accepts:
+/// - `"42"` → `Some((42, None))`
+/// - `"42:10"` → `Some((42, Some(10)))`
+/// - empty or non-numeric → `None`
+///
+/// Closes F-015 from `docs/audits/overlooked-surfaces-2026-05-29.md`.
+pub(crate) fn parse_goto_query(s: &str) -> Option<(usize, Option<usize>)> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some((l, c)) = s.split_once(':') {
+        if let (Ok(line), Ok(col)) = (l.parse::<usize>(), c.parse::<usize>()) {
+            if line > 0 {
+                return Some((line, Some(col.max(1))));
+            }
+        }
+        // fall through to plain-line parse
+    }
+    s.parse::<usize>()
+        .ok()
+        .filter(|&n| n > 0)
+        .map(|n| (n, None))
+}
+
 /// Translate an egui [`egui::epaint::text::cursor::CCursor`] char index into
 /// a human-visible `(1-based line, 1-based column)` pair. Counts a literal
 /// `\n` as a line break; the column resets on every newline.
@@ -2067,10 +2131,17 @@ impl ScribeApp {
             if i.key_pressed(egui::Key::F1) {
                 self.cheatsheet_open = !self.cheatsheet_open;
             }
+            // F-015 — Ctrl+G opens the go-to-line modal.
+            if cmd && i.key_pressed(egui::Key::G) {
+                self.goto_open = true;
+                self.focus_goto = true;
+                self.goto_query.clear();
+            }
             if i.key_pressed(egui::Key::Escape) {
                 self.find_open = false;
                 self.palette_open = false;
                 self.cheatsheet_open = false;
+                self.goto_open = false;
             }
         });
         // Ctrl/Cmd+Space requests identifier completion at the cursor.
@@ -2408,6 +2479,53 @@ impl ScribeApp {
             });
             if !still_open {
                 self.cheatsheet_open = false;
+            }
+        }
+
+        // ---- Go-to-line modal (Ctrl+G) ----
+        //
+        // F-015 from docs/audits/overlooked-surfaces-2026-05-29.md. Accepts
+        // a 1-based line number, or `N:C` for line + column. On Enter, the
+        // editor's scroll-to-line path (existing `pending_scroll`) takes
+        // the modal's target.
+        if self.goto_open {
+            let mut want_apply = false;
+            let mut want_close = false;
+            egui::Window::new(RichText::new("⇁ go to line").color(accent).monospace())
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        let r = ui.text_edit_singleline(&mut self.goto_query);
+                        if self.focus_goto {
+                            r.request_focus();
+                            self.focus_goto = false;
+                        }
+                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            want_apply = true;
+                        }
+                        if ui.button("Go").clicked() {
+                            want_apply = true;
+                        }
+                        if ui.button("Close").clicked() {
+                            want_close = true;
+                        }
+                    });
+                    ui.label(
+                        RichText::new("line, or line:column (e.g. 42:10)")
+                            .color(muted)
+                            .small(),
+                    );
+                });
+            if want_apply {
+                if let Some((line, _col)) = parse_goto_query(&self.goto_query) {
+                    self.goto_line(line);
+                    self.goto_open = false;
+                }
+            }
+            if want_close {
+                self.goto_open = false;
             }
         }
 
@@ -3653,6 +3771,34 @@ world";
 def";
         let (line, col) = line_col_from_char_index(s, 99);
         assert_eq!((line, col), (2, 4));
+    }
+
+    /// F-015 parser: accepts plain line number, line:col, and rejects garbage.
+    #[test]
+    fn parse_goto_query_accepts_line_and_line_col() {
+        assert_eq!(parse_goto_query("42"), Some((42, None)));
+        assert_eq!(parse_goto_query("42:10"), Some((42, Some(10))));
+        assert_eq!(parse_goto_query("  42  "), Some((42, None)));
+        assert_eq!(parse_goto_query("42:"), None);
+        assert_eq!(parse_goto_query(":10"), None);
+        assert_eq!(parse_goto_query("0"), None);
+        assert_eq!(parse_goto_query("abc"), None);
+        assert_eq!(parse_goto_query(""), None);
+        // Column clamps to 1.
+        assert_eq!(parse_goto_query("42:0"), Some((42, Some(1))));
+    }
+
+    /// F-015 method: goto_line sets pending_scroll non-None for a valid
+    /// line on an active buffer.
+    #[test]
+    fn goto_line_sets_pending_scroll() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "a\nb\nc\nd\ne\n".into();
+        app.goto_line(3);
+        assert!(
+            app.pending_scroll.is_some(),
+            "goto_line should request scroll"
+        );
     }
 
     /// F-014: F1 toggles the cheatsheet open + a second F1 closes it.
