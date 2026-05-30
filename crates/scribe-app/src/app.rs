@@ -2398,10 +2398,8 @@ impl ScribeApp {
                             // egui CursorRange. This drives the status-bar "Ln N, Col N"
                             // and "(N chars selected)" indicators.
                             let text_ref = &self.tabs[active].text;
-                            self.last_cursor_line_col = Some(line_col_from_char_index(
-                                text_ref,
-                                cc.index,
-                            ));
+                            self.last_cursor_line_col =
+                                Some(line_col_from_char_index(text_ref, cc.index));
                             self.last_selection_chars =
                                 range.primary.index.abs_diff(range.secondary.index);
                         }
@@ -3324,7 +3322,7 @@ mod e2e {
         assert_eq!(line_col_from_char_index(s, 5), (1, 6)); // before \n
         assert_eq!(line_col_from_char_index(s, 6), (2, 1)); // after \n
         assert_eq!(line_col_from_char_index(s, 11), (2, 6)); // end
-        // Multi-byte: each codepoint advances column once, not byte-count times.
+                                                             // Multi-byte: each codepoint advances column once, not byte-count times.
         let cjk = "日本\n語";
         assert_eq!(line_col_from_char_index(cjk, 1), (1, 2));
         assert_eq!(line_col_from_char_index(cjk, 2), (1, 3));
