@@ -3868,6 +3868,38 @@ impl ScribeApp {
                     return;
                 }
 
+                // F-033 / F-034 from docs/audits/overlooked-surfaces-2026-05-29.md:
+                // compute brace-delimited definition scopes once for the
+                // breadcrumb bar (above the editor) and the sticky-scroll
+                // headers (pinned at the viewport top). Skipped for very large
+                // buffers to keep the per-frame O(n) scan bounded.
+                let scopes = if self.tabs[active].text.len() <= 500_000 {
+                    crate::editor_features::symbol_scopes(&self.tabs[active].text)
+                } else {
+                    Vec::new()
+                };
+                // Breadcrumb bar (F-033): the enclosing-symbol path of the
+                // cursor line, outermost first (`mod foo › impl Bar › fn baz`).
+                if !scopes.is_empty() {
+                    let cursor_line0 = self
+                        .last_cursor_line_col
+                        .map(|(l, _)| l.saturating_sub(1))
+                        .unwrap_or(0);
+                    let crumbs = crate::editor_features::breadcrumb_at(&scopes, cursor_line0);
+                    if !crumbs.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            for (i, s) in crumbs.iter().enumerate() {
+                                if i > 0 {
+                                    ui.label(RichText::new("›").color(muted).small());
+                                }
+                                ui.label(RichText::new(&s.label).color(accent).small().monospace());
+                            }
+                        });
+                        ui.separator();
+                    }
+                }
+
                 // Tab inserts the configured number of spaces (when insert_spaces is
                 // on) rather than a literal tab — honours editor.tab_width /
                 // insert_spaces. Consume the key before the TextEdit can see it.
@@ -3883,6 +3915,9 @@ impl ScribeApp {
                 // Scope the layouter (which borrows `self.hl`) so it drops before
                 // the `&mut self` completion calls below.
                 let mut new_gutter: Vec<f32> = Vec::new();
+                // F-034: a clicked sticky header records its target line here;
+                // it is applied to `pending_scroll` after the hl borrow drops.
+                let mut sticky_jump: Option<usize> = None;
                 let anchor: Option<(egui::Pos2, usize)> = {
                     let hl = &self.hl;
                     let ext_ref = ext.as_deref();
@@ -3961,9 +3996,64 @@ impl ScribeApp {
                         sa_out.content_size.y.max(1.0),
                         sa_out.inner_rect.height().max(1.0),
                     );
+                    // F-034 sticky scroll: pin the enclosing definition headers
+                    // at the top of the viewport once their own header line has
+                    // scrolled above it. Drawn with an opaque chrome fill so the
+                    // pinned line occludes the scrolled body behind it. Clicking
+                    // a pinned header jumps to that definition.
+                    if !scopes.is_empty() {
+                        let lh_px = (font.size * line_height).max(1.0);
+                        let first_visible_line = (sa_out.state.offset.y / lh_px).floor() as usize;
+                        let pinned =
+                            crate::editor_features::sticky_chain_at(&scopes, first_visible_line, 5);
+                        let vp = sa_out.inner_rect;
+                        let bg = Color32::from_rgb(panel.r(), panel.g(), panel.b());
+                        let painter = ui.painter_at(vp);
+                        for (i, s) in pinned.iter().enumerate() {
+                            let y = vp.top() + (i as f32) * lh_px;
+                            let row = egui::Rect::from_min_max(
+                                egui::pos2(vp.left(), y),
+                                egui::pos2(vp.right(), y + lh_px),
+                            );
+                            painter.rect_filled(row, 0.0, bg);
+                            let indent = 6.0 + (s.depth as f32) * 12.0;
+                            painter.text(
+                                egui::pos2(vp.left() + indent, y + lh_px * 0.5),
+                                egui::Align2::LEFT_CENTER,
+                                &s.label,
+                                font.clone(),
+                                accent,
+                            );
+                            if i + 1 == pinned.len() {
+                                // Underline the bottom of the pinned stack so it
+                                // reads as a header band, not part of the buffer.
+                                painter.line_segment(
+                                    [
+                                        egui::pos2(vp.left(), row.bottom()),
+                                        egui::pos2(vp.right(), row.bottom()),
+                                    ],
+                                    egui::Stroke::new(1.0, muted),
+                                );
+                            }
+                            let resp = ui.interact(
+                                row,
+                                ui.id().with(("scr1b3-sticky", i)),
+                                egui::Sense::click(),
+                            );
+                            if resp.clicked() {
+                                sticky_jump = Some(s.start_line);
+                            }
+                        }
+                    }
                     a
                 };
                 self.line_gutter = new_gutter;
+                // F-034: apply a sticky-header click now that the hl borrow is
+                // released. Scrolls so the clicked definition sits at the top.
+                if let Some(line0) = sticky_jump {
+                    let lh_px = (font.size * line_height).max(1.0);
+                    self.pending_scroll = Some((line0 as f32) * lh_px);
+                }
 
                 // Completion: open on Ctrl+Space, accept on Enter/Tab, render popup.
                 let cursor_idx = anchor.map(|(_, i)| i);
