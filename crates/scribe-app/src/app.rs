@@ -1330,6 +1330,105 @@ impl ScribeApp {
         }
     }
 
+    /// F-017 — Swap the cursor line with the neighbour `dir` rows away (-1 =
+    /// up, +1 = down). No-op at the buffer's first/last line. The cursor
+    /// "line" is read from `last_cursor_line_col`; if absent, defaults to
+    /// line 0 (start of buffer) so the action is still observable on a
+    /// fresh buffer.
+    fn move_cursor_line(&mut self, dir: i32) {
+        if self.active >= self.tabs.len() {
+            return;
+        }
+        let ln = self
+            .last_cursor_line_col
+            .map(|(l, _)| l.saturating_sub(1))
+            .unwrap_or(0);
+        let text = &mut self.tabs[self.active].text;
+        let trailing_nl = text.ends_with('\n');
+        let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        // split('\n') with a trailing newline produces a trailing "" — drop it.
+        if trailing_nl && lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        if lines.is_empty() {
+            return;
+        }
+        let target = (ln as i32) + dir;
+        if target < 0 || (target as usize) >= lines.len() {
+            return;
+        }
+        lines.swap(ln, target as usize);
+        // Track the cursor to the moved line.
+        let new_ln = target as usize + 1;
+        let new_col = self.last_cursor_line_col.map(|(_, c)| c).unwrap_or(1);
+        self.last_cursor_line_col = Some((new_ln, new_col));
+        *text = lines.join("\n");
+        if trailing_nl {
+            text.push('\n');
+        }
+    }
+
+    /// F-017 — Duplicate the cursor line in-place: the new copy lands on the
+    /// row immediately below.
+    fn duplicate_cursor_line(&mut self) {
+        if self.active >= self.tabs.len() {
+            return;
+        }
+        let ln = self
+            .last_cursor_line_col
+            .map(|(l, _)| l.saturating_sub(1))
+            .unwrap_or(0);
+        let text = &mut self.tabs[self.active].text;
+        let trailing_nl = text.ends_with('\n');
+        let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        if trailing_nl && lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        if ln >= lines.len() {
+            return;
+        }
+        let copy = lines[ln].clone();
+        lines.insert(ln + 1, copy);
+        *text = lines.join("\n");
+        if trailing_nl {
+            text.push('\n');
+        }
+    }
+
+    /// F-017 — Join the cursor line with the next: trims the trailing
+    /// whitespace of the cursor line + the leading whitespace of the next,
+    /// joins them with a single space (the standard editor convention).
+    fn join_cursor_line_with_next(&mut self) {
+        if self.active >= self.tabs.len() {
+            return;
+        }
+        let ln = self
+            .last_cursor_line_col
+            .map(|(l, _)| l.saturating_sub(1))
+            .unwrap_or(0);
+        let text = &mut self.tabs[self.active].text;
+        let trailing_nl = text.ends_with('\n');
+        let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        if trailing_nl && lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        if ln + 1 >= lines.len() {
+            return;
+        }
+        let next = lines.remove(ln + 1);
+        let cur = lines[ln].trim_end().to_string();
+        let nxt = next.trim_start();
+        lines[ln] = if cur.is_empty() || nxt.is_empty() {
+            format!("{cur}{nxt}")
+        } else {
+            format!("{cur} {nxt}")
+        };
+        *text = lines.join("\n");
+        if trailing_nl {
+            text.push('\n');
+        }
+    }
+
     /// F-015 — Scroll the active buffer so the given 1-based line is in the
     /// viewport. The minimap renderer already drives `pending_scroll` for
     /// click-jump; we reuse that pipe by computing the approximate Y of
@@ -1528,6 +1627,14 @@ struct Pending {
     toggle_comment: bool,
     toggle_fullscreen: bool,
     files_to_open: Vec<PathBuf>,
+    /// F-017 from docs/audits/overlooked-surfaces-2026-05-29.md:
+    /// Alt+Up / Alt+Down swap the cursor line with its neighbour;
+    /// Ctrl+Shift+D duplicates the cursor line in-place; Ctrl+J joins
+    /// the cursor line with the next.
+    move_line_up: bool,
+    move_line_down: bool,
+    duplicate_line: bool,
+    join_lines: bool,
 }
 
 // ---- Keyboard shortcut cheatsheet table (F-014) ----
@@ -1586,6 +1693,22 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
     ShortcutEntry {
         chord: "Ctrl+G",
         action: "Go to line (or line:column)",
+    },
+    ShortcutEntry {
+        chord: "Alt+Up",
+        action: "Move cursor line up",
+    },
+    ShortcutEntry {
+        chord: "Alt+Down",
+        action: "Move cursor line down",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+D",
+        action: "Duplicate cursor line",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+J",
+        action: "Join cursor line with next",
     },
     ShortcutEntry {
         chord: "Ctrl+Space",
@@ -2135,6 +2258,20 @@ impl ScribeApp {
             }
             if i.key_pressed(egui::Key::F11) {
                 act.toggle_fullscreen = true;
+            }
+            // F-017 — Alt+Up/Down move the cursor line; Ctrl+Shift+D
+            // duplicates; Ctrl+J joins next.
+            if i.modifiers.alt && i.key_pressed(egui::Key::ArrowUp) {
+                act.move_line_up = true;
+            }
+            if i.modifiers.alt && i.key_pressed(egui::Key::ArrowDown) {
+                act.move_line_down = true;
+            }
+            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::D) {
+                act.duplicate_line = true;
+            }
+            if cmd && i.key_pressed(egui::Key::J) {
+                act.join_lines = true;
             }
             // F-011 — drag-drop file open. egui collects DroppedFile entries
             // into RawInput.dropped_files; consume them here so the deferred
@@ -3006,6 +3143,18 @@ impl ScribeApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
                 !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)),
             ));
+        }
+        if act.move_line_up {
+            self.move_cursor_line(-1);
+        }
+        if act.move_line_down {
+            self.move_cursor_line(1);
+        }
+        if act.duplicate_line {
+            self.duplicate_cursor_line();
+        }
+        if act.join_lines {
+            self.join_cursor_line_with_next();
         }
         for p in act.files_to_open.drain(..) {
             self.open_path(p);
@@ -3921,6 +4070,57 @@ def";
         app.replace_query = "x".into();
         app.replace_in_active(true);
         assert_eq!(app.tabs[0].text, "x x x");
+    }
+
+    /// F-017 — move-line-down swaps the cursor line with its neighbour.
+    #[test]
+    fn move_cursor_line_down_swaps_lines() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "alpha\nbeta\ngamma\n".into();
+        app.last_cursor_line_col = Some((1, 1)); // 1-based line 1 = "alpha"
+        app.move_cursor_line(1);
+        assert_eq!(app.tabs[0].text, "beta\nalpha\ngamma\n");
+        assert_eq!(app.last_cursor_line_col, Some((2, 1)));
+    }
+
+    /// F-017 — move-line-up at line 1 is a no-op.
+    #[test]
+    fn move_cursor_line_up_at_top_is_noop() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "alpha\nbeta\n".into();
+        app.last_cursor_line_col = Some((1, 1));
+        app.move_cursor_line(-1);
+        assert_eq!(app.tabs[0].text, "alpha\nbeta\n");
+    }
+
+    /// F-017 — duplicate inserts a copy on the row below.
+    #[test]
+    fn duplicate_cursor_line_inserts_copy() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "alpha\nbeta\n".into();
+        app.last_cursor_line_col = Some((1, 1));
+        app.duplicate_cursor_line();
+        assert_eq!(app.tabs[0].text, "alpha\nalpha\nbeta\n");
+    }
+
+    /// F-017 — join glues cursor line + next with a single space.
+    #[test]
+    fn join_cursor_line_with_next_uses_single_space() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "hello   \n   world\n".into();
+        app.last_cursor_line_col = Some((1, 1));
+        app.join_cursor_line_with_next();
+        assert_eq!(app.tabs[0].text, "hello world\n");
+    }
+
+    /// F-017 — join at last line is a no-op.
+    #[test]
+    fn join_cursor_line_with_next_at_last_line_is_noop() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "only".into();
+        app.last_cursor_line_col = Some((1, 1));
+        app.join_cursor_line_with_next();
+        assert_eq!(app.tabs[0].text, "only");
     }
 
     #[test]
