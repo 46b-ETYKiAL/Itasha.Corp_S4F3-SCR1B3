@@ -252,6 +252,15 @@ pub struct ScribeApp {
     /// (when `config.editor.first_run_completed` is false); reachable
     /// thereafter via the Help menu / command palette.
     welcome_open: bool,
+    /// F-010 from docs/audits/overlooked-surfaces-2026-05-29.md: when true,
+    /// the fuzzy file-finder modal renders this frame. Opened via Ctrl+P.
+    fuzzy_open: bool,
+    /// Typed query string for the fuzzy finder.
+    fuzzy_query: String,
+    /// Pre-scanned project file paths (built on first Ctrl+P; reused).
+    fuzzy_index: Vec<PathBuf>,
+    /// One-shot focus request for the fuzzy-finder input when it opens.
+    focus_fuzzy: bool,
     /// F-015 from docs/audits/overlooked-surfaces-2026-05-29.md: Ctrl+G
     /// "go to line" modal. `goto_open` is the modal-open flag, `goto_query`
     /// is the typed text (accepts `N` or `N:C`), `focus_goto` is the
@@ -498,6 +507,10 @@ impl ScribeApp {
             cheatsheet_open: false,
             recent_open: false,
             welcome_open: welcome_on_launch,
+            fuzzy_open: false,
+            fuzzy_query: String::new(),
+            fuzzy_index: Vec::new(),
+            focus_fuzzy: false,
             goto_open: false,
             goto_query: String::new(),
             focus_goto: false,
@@ -1715,6 +1728,9 @@ struct Pending {
     /// cycle keyboard chord + F-031 minimap-toggle keyboard chord.
     cycle_theme: bool,
     toggle_minimap: bool,
+    /// F-010 from docs/audits/overlooked-surfaces-2026-05-29.md: open the
+    /// Ctrl+P fuzzy file finder.
+    open_fuzzy: bool,
 }
 
 // ---- Keyboard shortcut cheatsheet table (F-014) ----
@@ -1777,6 +1793,10 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
     ShortcutEntry {
         chord: "Ctrl+R",
         action: "Open a recent file (MRU list)",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+P",
+        action: "Fuzzy-find a file in the project",
     },
     ShortcutEntry {
         chord: "Alt+Up",
@@ -2412,6 +2432,12 @@ impl ScribeApp {
             if cmd && i.key_pressed(egui::Key::R) {
                 self.recent_open = true;
             }
+            // F-010 — Ctrl+P opens the fuzzy file finder (rebuilds the
+            // file index on first open so cold-start cost lands here,
+            // not on launch).
+            if cmd && i.key_pressed(egui::Key::P) && !i.modifiers.shift {
+                act.open_fuzzy = true;
+            }
             if i.key_pressed(egui::Key::Escape) {
                 self.find_open = false;
                 self.palette_open = false;
@@ -2419,6 +2445,7 @@ impl ScribeApp {
                 self.goto_open = false;
                 self.recent_open = false;
                 self.welcome_open = false;
+                self.fuzzy_open = false;
             }
         });
         // Ctrl/Cmd+Space requests identifier completion at the cursor.
@@ -3002,6 +3029,61 @@ impl ScribeApp {
             }
         }
 
+        // ---- Fuzzy file finder modal (Ctrl+P) ----
+        //
+        // F-010 from docs/audits/overlooked-surfaces-2026-05-29.md. Pre-
+        // scanned project paths filtered by a stdlib-only subsequence
+        // scorer (crate::fuzzy). Up to 200 ranked matches.
+        if self.fuzzy_open {
+            let mut chosen: Option<PathBuf> = None;
+            let mut still_open = true;
+            egui::Window::new(RichText::new("⌕  open file").color(accent).monospace())
+                .open(&mut still_open)
+                .collapsible(false)
+                .resizable(true)
+                .default_width(560.0)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+                .show(ctx, |ui| {
+                    let r = ui.text_edit_singleline(&mut self.fuzzy_query);
+                    if self.focus_fuzzy {
+                        r.request_focus();
+                        self.focus_fuzzy = false;
+                    }
+                    ui.label(
+                        RichText::new(format!(
+                            "indexed {} files (Ctrl+P, Esc to close)",
+                            self.fuzzy_index.len()
+                        ))
+                        .color(muted)
+                        .small(),
+                    );
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            let ranked =
+                                crate::fuzzy::rank(&self.fuzzy_index, &self.fuzzy_query, 200);
+                            if ranked.is_empty() {
+                                ui.label(
+                                    RichText::new("no match").color(muted).small().monospace(),
+                                );
+                            }
+                            for p in ranked {
+                                let label = RichText::new(p.display().to_string()).monospace();
+                                if ui.selectable_label(false, label).clicked() {
+                                    chosen = Some(p);
+                                }
+                            }
+                        });
+                });
+            if let Some(p) = chosen {
+                self.open_path(p);
+                self.fuzzy_open = false;
+            } else if !still_open {
+                self.fuzzy_open = false;
+            }
+        }
+
         // Spellcheck status (computed before the status-bar closure borrows self).
         let spell_on = self.config.spellcheck.enabled;
         let spell_misspellings = self.spell_count();
@@ -3519,6 +3601,22 @@ impl ScribeApp {
                     "off"
                 }
             );
+        }
+        if act.open_fuzzy {
+            // Lazy-build the index on first open so cold-start latency
+            // lands here, not in build(). Rebuild whenever the project
+            // root changes.
+            if self.fuzzy_index.is_empty() {
+                let root = self
+                    .file_tree_root
+                    .clone()
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                self.fuzzy_index = crate::fuzzy::scan_project(&root, crate::fuzzy::FUZZY_SCAN_CAP);
+            }
+            self.fuzzy_open = true;
+            self.focus_fuzzy = true;
+            self.fuzzy_query.clear();
         }
         for p in act.files_to_open.drain(..) {
             self.open_path(p);
