@@ -10,14 +10,38 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod cli;
 mod editor_features;
 mod filetree;
 mod grid;
 mod settings;
 
+use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
 
-fn main() -> eframe::Result<()> {
+fn main() -> ExitCode {
+    // F-007 fix from docs/audits/overlooked-surfaces-2026-05-29.md: parse
+    // --help / --version / PATH[:LINE[:COLUMN]] BEFORE we spin up eframe so
+    // the binary behaves like a normal CLI for the "scr1b3 --help" / "scr1b3
+    // --version" surfaces every shell user expects.
+    let cli_action = cli::parse(std::env::args().skip(1));
+    match cli_action {
+        cli::Action::Help => {
+            println!("{}", cli::help_text());
+            return ExitCode::SUCCESS;
+        }
+        cli::Action::Version => {
+            println!("{}", cli::version_text());
+            return ExitCode::SUCCESS;
+        }
+        cli::Action::Error(msg) => {
+            eprintln!("scr1b3: {msg}");
+            eprintln!("try 'scr1b3 --help' for usage");
+            return ExitCode::from(2);
+        }
+        cli::Action::Launch { .. } => {}
+    }
+
     // Local-only structured logging. OFF-by-default verbosity; honors RUST_LOG.
     // No remote telemetry — ever.
     let _ = tracing_subscriber::fmt()
@@ -51,9 +75,14 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    let cli_path = std::env::args().nth(1);
+    // Re-parse here so we can hand the path to ScribeApp::new. (Parsing is
+    // pure and idempotent — same args, same Action.)
+    let cli_path = match cli::parse(std::env::args().skip(1)) {
+        cli::Action::Launch { path: Some(p), .. } => p.to_string_lossy().into_owned().into(),
+        _ => None,
+    };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         scribe_core::PRODUCT_NAME,
         native_options,
         Box::new(move |cc| {
@@ -61,5 +90,12 @@ fn main() -> eframe::Result<()> {
                 cc, config, config_err, cli_path,
             )))
         }),
-    )
+    );
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("scr1b3: fatal: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
