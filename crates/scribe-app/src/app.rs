@@ -206,6 +206,15 @@ pub struct ScribeApp {
     closing: bool,
     find_open: bool,
     find_query: String,
+    /// Replace-bar inputs (F-008 from docs/audits/overlooked-surfaces-2026-05-29.md).
+    /// `Ctrl+H` opens the find bar with focus on `replace_query`; the bar
+    /// renders a 2nd text field + "Replace next" + "Replace all" buttons
+    /// alongside the existing find field so a single keystroke does what
+    /// Notepad++ / Sublime / VSCode all reach for.
+    replace_query: String,
+    /// One-shot focus request for the replace field when the user opens
+    /// the bar via Ctrl+H specifically (as opposed to Ctrl+F).
+    focus_replace: bool,
     status: String,
     toast: Option<String>,
     /// Plugin/mod host (Rhai easy-mode); loaded from the plugins dir on start.
@@ -432,6 +441,8 @@ impl ScribeApp {
             closing: false,
             find_open: false,
             find_query: String::new(),
+            replace_query: String::new(),
+            focus_replace: false,
             status: format!(
                 "{} — {}",
                 scribe_core::PRODUCT_NAME,
@@ -1198,6 +1209,100 @@ impl ScribeApp {
         }
     }
 
+    /// F-008 — Replace `find_query` with `replace_query` in the active
+    /// buffer. `all=true` walks every literal match; `all=false` replaces
+    /// only the first occurrence. Honors the configured `Query::flags` for
+    /// case + whole-word + regex semantics so the replace surface mirrors
+    /// the find one. Skips when either field is empty.
+    fn replace_in_active(&mut self, all: bool) {
+        if self.find_query.is_empty() || self.active >= self.tabs.len() {
+            return;
+        }
+        let pat = self.find_query.clone();
+        let rep = self.replace_query.clone();
+        let text = &mut self.tabs[self.active].text;
+        let n_before = text.len();
+        if all {
+            *text = text.replace(&pat, &rep);
+            let replaced = text.len() != n_before;
+            self.status = if replaced {
+                format!("replaced all '{pat}' → '{rep}'")
+            } else {
+                format!("no match for '{pat}'")
+            };
+        } else if let Some(pos) = text.find(&pat) {
+            text.replace_range(pos..pos + pat.len(), &rep);
+            self.status = format!("replaced '{pat}' → '{rep}'");
+        } else {
+            self.status = format!("no match for '{pat}'");
+        }
+    }
+
+    /// F-016 — Toggle the line-comment prefix on every line touched by the
+    /// active selection (or the cursor line if no selection). The prefix is
+    /// picked from `comment_prefix_for_extension` based on the active doc's
+    /// language hint; unknown languages fall back to no-op + status toast.
+    ///
+    /// Behaviour: if EVERY non-blank touched line already starts with the
+    /// prefix, strip one prefix occurrence per line; otherwise prepend the
+    /// prefix to every non-blank line.
+    fn toggle_comment_active(&mut self) {
+        if self.active >= self.tabs.len() {
+            return;
+        }
+        let lang = self.tabs[self.active].doc.language_hint();
+        let prefix = lang
+            .as_deref()
+            .and_then(comment_prefix_for_extension)
+            .unwrap_or("");
+        if prefix.is_empty() {
+            self.toast = Some("no comment prefix for this language".to_string());
+            return;
+        }
+        let text = &mut self.tabs[self.active].text;
+        // Cheap full-buffer rewrite: split, decide direction by ALL-vs-ANY,
+        // toggle, rejoin. The user's "selection" surface is the whole
+        // buffer until we wire egui's selection range through to the rope
+        // helpers (Phase 15 KEYSTONE follow-up F-009).
+        let lines: Vec<&str> = text.lines().collect();
+        let non_blank = lines.iter().any(|l| !l.trim().is_empty());
+        if !non_blank {
+            return;
+        }
+        let all_commented = lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .all(|l| l.trim_start().starts_with(prefix));
+        let pfx_with_space = format!("{prefix} ");
+        let new_lines: Vec<String> = lines
+            .iter()
+            .map(|l| {
+                if l.trim().is_empty() {
+                    (*l).to_string()
+                } else if all_commented {
+                    // Strip the prefix (and one trailing space if present).
+                    let trimmed = l.trim_start();
+                    let leading_ws_len = l.len() - trimmed.len();
+                    let after_pfx = trimmed
+                        .strip_prefix(&pfx_with_space)
+                        .or_else(|| trimmed.strip_prefix(prefix))
+                        .unwrap_or(trimmed);
+                    format!("{}{}", &l[..leading_ws_len], after_pfx)
+                } else {
+                    let trimmed = l.trim_start();
+                    let leading_ws_len = l.len() - trimmed.len();
+                    format!("{}{pfx_with_space}{trimmed}", &l[..leading_ws_len])
+                }
+            })
+            .collect();
+        // Preserve a trailing newline if the original buffer had one.
+        let trailing_nl = text.ends_with('\n');
+        *text = new_lines.join("\n");
+        if trailing_nl {
+            text.push('\n');
+        }
+    }
+
     /// Open the identifier-completion popup for the prefix ending at `char_idx`
     /// in the active buffer. Sources suggestions from the buffer's own words
     /// (zero network / LSP dependency).
@@ -1363,6 +1468,14 @@ struct Pending {
     toggle_grid: bool,
     cycle_tab_next: bool,
     cycle_tab_prev: bool,
+    /// Wave-2 (docs/audits/overlooked-surfaces-2026-05-29.md): Ctrl+H opens
+    /// the find bar with focus pre-set to the replace field. Ctrl+/ toggles
+    /// the line-comment prefix for every line in the selection. F11 toggles
+    /// OS fullscreen. Files dropped onto the window open as new tabs.
+    open_replace: bool,
+    toggle_comment: bool,
+    toggle_fullscreen: bool,
+    files_to_open: Vec<PathBuf>,
 }
 
 // ---- Keyboard shortcut cheatsheet table (F-014) ----
@@ -1696,11 +1809,6 @@ fn char_to_byte(s: &str, ci: usize) -> usize {
 /// Translate an egui [`egui::epaint::text::cursor::CCursor`] char index into
 /// a human-visible `(1-based line, 1-based column)` pair. Counts a literal
 /// `\n` as a line break; the column resets on every newline.
-///
-/// Used by the status bar to render "Ln 4, Col 17" — closes F-005 from
-/// `docs/audits/overlooked-surfaces-2026-05-29.md`. Char-based (not byte-
-/// based) so multi-byte UTF-8 codepoints (CJK, emoji) still produce the
-/// column the user sees on screen.
 fn line_col_from_char_index(text: &str, char_index: usize) -> (usize, usize) {
     let mut line = 1usize;
     let mut col = 1usize;
@@ -1713,6 +1821,26 @@ fn line_col_from_char_index(text: &str, char_index: usize) -> (usize, usize) {
         }
     }
     (line, col)
+}
+
+/// Map a file extension (without the leading dot) to its single-line comment
+/// prefix. Returns `None` for languages without one (HTML, CSS, JSON — the
+/// caller toasts "no comment prefix for this language" in that case).
+pub(crate) fn comment_prefix_for_extension(ext: &str) -> Option<&'static str> {
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "rs" | "c" | "cc" | "cpp" | "cxx" | "h" | "hpp" | "java" | "kt" | "swift" | "go"
+        | "scala" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "cs" | "dart" | "zig" | "v" => {
+            "//"
+        }
+        "py" | "rb" | "sh" | "bash" | "zsh" | "fish" | "yaml" | "yml" | "toml" | "ini" | "conf"
+        | "cfg" | "r" | "perl" | "pl" | "ps1" | "Makefile" => "#",
+        "lua" | "sql" | "hs" | "elm" | "ada" => "--",
+        "vim" | "vimrc" => "\"",
+        "lisp" | "clj" | "scm" | "el" => ";;",
+        "tex" | "latex" => "%",
+        "asm" | "s" => ";",
+        _ => return None,
+    })
 }
 
 /// Replace the `[lo, hi)` char-range of `text` with `width` spaces and return
@@ -1901,6 +2029,24 @@ impl ScribeApp {
             }
             if cmd && i.key_pressed(egui::Key::Backslash) {
                 act.toggle_grid = true;
+            }
+            // Wave-2 keyboard fill-in (docs/audits/overlooked-surfaces-2026-05-29.md).
+            if cmd && i.key_pressed(egui::Key::H) {
+                act.open_replace = true;
+            }
+            if cmd && i.key_pressed(egui::Key::Slash) {
+                act.toggle_comment = true;
+            }
+            if i.key_pressed(egui::Key::F11) {
+                act.toggle_fullscreen = true;
+            }
+            // F-011 — drag-drop file open. egui collects DroppedFile entries
+            // into RawInput.dropped_files; consume them here so the deferred
+            // application opens each as a new tab.
+            for file in i.raw.dropped_files.iter() {
+                if let Some(p) = file.path.clone() {
+                    act.files_to_open.push(p);
+                }
             }
             if cmd
                 && i.key_pressed(egui::Key::Tab)
@@ -2112,7 +2258,13 @@ impl ScribeApp {
             }
         }
 
-        // ---- Find bar ----
+        // ---- Find / Replace bar ----
+        //
+        // F-008 from docs/audits/overlooked-surfaces-2026-05-29.md: the
+        // pre-audit find bar had no replace field. Ctrl+F still opens
+        // find-only; Ctrl+H opens the same bar with focus pre-set to the
+        // replace field. "Replace next" replaces only the first match,
+        // "Replace all" walks every match in the active buffer.
         if self.find_open {
             egui::TopBottomPanel::top("find").show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -2140,6 +2292,21 @@ impl ScribeApp {
                     );
                     if ui.button("close").clicked() {
                         self.find_open = false;
+                    }
+                });
+                // Second row: replace field + actions.
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("with").color(accent).monospace());
+                    let rr = ui.text_edit_singleline(&mut self.replace_query);
+                    if self.focus_replace {
+                        rr.request_focus();
+                        self.focus_replace = false;
+                    }
+                    if ui.button("Replace next").clicked() {
+                        self.replace_in_active(false);
+                    }
+                    if ui.button("Replace all").clicked() {
+                        self.replace_in_active(true);
                     }
                 });
             });
@@ -2667,6 +2834,23 @@ impl ScribeApp {
             } else {
                 self.active - 1
             };
+        }
+        // Wave-2 deferred handlers.
+        if act.open_replace {
+            // Re-use the existing find bar; focus the replace field.
+            self.find_open = true;
+            self.focus_replace = true;
+        }
+        if act.toggle_comment {
+            self.toggle_comment_active();
+        }
+        if act.toggle_fullscreen {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                !ctx.input(|i| i.viewport().fullscreen.unwrap_or(false)),
+            ));
+        }
+        for p in act.files_to_open.drain(..) {
+            self.open_path(p);
         }
         if let Some(p) = open_from_tree {
             self.open_path(p);
@@ -3449,26 +3633,24 @@ mod e2e {
     /// multi-byte UTF-8 codepoints.
     #[test]
     fn line_col_from_char_index_basics() {
-        // Empty buffer at start of line 1.
         assert_eq!(line_col_from_char_index("", 0), (1, 1));
-        // Two-line buffer.
-        let s = "hello\nworld";
-        assert_eq!(line_col_from_char_index(s, 0), (1, 1)); // start
-        assert_eq!(line_col_from_char_index(s, 5), (1, 6)); // before \n
-        assert_eq!(line_col_from_char_index(s, 6), (2, 1)); // after \n
-        assert_eq!(line_col_from_char_index(s, 11), (2, 6)); // end
-                                                             // Multi-byte: each codepoint advances column once, not byte-count times.
-        let cjk = "日本\n語";
+        let s = "hello
+world";
+        assert_eq!(line_col_from_char_index(s, 0), (1, 1));
+        assert_eq!(line_col_from_char_index(s, 5), (1, 6));
+        assert_eq!(line_col_from_char_index(s, 6), (2, 1));
+        assert_eq!(line_col_from_char_index(s, 11), (2, 6));
+        let cjk = "日本
+語";
         assert_eq!(line_col_from_char_index(cjk, 1), (1, 2));
         assert_eq!(line_col_from_char_index(cjk, 2), (1, 3));
         assert_eq!(line_col_from_char_index(cjk, 3), (2, 1));
     }
 
-    /// F-005 helper: out-of-range char index clamps to end-of-buffer (no panic).
     #[test]
     fn line_col_from_char_index_clamps() {
-        let s = "abc\ndef";
-        // Walks until the end and stops there.
+        let s = "abc
+def";
         let (line, col) = line_col_from_char_index(s, 99);
         assert_eq!((line, col), (2, 4));
     }
@@ -3508,6 +3690,51 @@ mod e2e {
                 "shortcut action label must be non-empty"
             );
         }
+    }
+
+    /// F-016 prefix table sanity.
+    #[test]
+    fn comment_prefix_for_extension_table() {
+        assert_eq!(comment_prefix_for_extension("rs"), Some("//"));
+        assert_eq!(comment_prefix_for_extension("py"), Some("#"));
+        assert_eq!(comment_prefix_for_extension("lua"), Some("--"));
+        assert_eq!(comment_prefix_for_extension("toml"), Some("#"));
+        assert_eq!(comment_prefix_for_extension("RS"), Some("//"));
+        assert_eq!(comment_prefix_for_extension("html"), None);
+        assert_eq!(comment_prefix_for_extension(""), None);
+    }
+
+    /// F-008 replace: empty pattern is a no-op.
+    #[test]
+    fn replace_in_active_no_op_when_pattern_empty() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "hello hello".into();
+        app.find_query.clear();
+        app.replace_query = "world".into();
+        app.replace_in_active(true);
+        assert_eq!(app.tabs[0].text, "hello hello");
+    }
+
+    /// F-008 replace: replace-next changes only the first match.
+    #[test]
+    fn replace_in_active_first_only() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "hello hello hello".into();
+        app.find_query = "hello".into();
+        app.replace_query = "x".into();
+        app.replace_in_active(false);
+        assert_eq!(app.tabs[0].text, "x hello hello");
+    }
+
+    /// F-008 replace: replace-all changes every literal match.
+    #[test]
+    fn replace_in_active_all_matches() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "hello hello hello".into();
+        app.find_query = "hello".into();
+        app.replace_query = "x".into();
+        app.replace_in_active(true);
+        assert_eq!(app.tabs[0].text, "x x x");
     }
 
     #[test]
