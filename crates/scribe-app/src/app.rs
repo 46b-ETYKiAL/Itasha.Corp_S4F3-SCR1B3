@@ -215,6 +215,11 @@ pub struct ScribeApp {
     /// One-shot focus request for the replace field when the user opens
     /// the bar via Ctrl+H specifically (as opposed to Ctrl+F).
     focus_replace: bool,
+    /// F-038 from docs/audits/overlooked-surfaces-2026-05-29.md: persistent
+    /// banner rendered above the editor whenever the config file failed to
+    /// parse on launch. Offers "Open config" / "Restore default" / "Dismiss"
+    /// actions. Distinct from `toast` (which auto-clears).
+    config_error_banner: Option<String>,
     status: String,
     toast: Option<String>,
     /// Plugin/mod host (Rhai easy-mode); loaded from the plugins dir on start.
@@ -394,6 +399,10 @@ impl ScribeApp {
         let theme = load_theme(&config.appearance.theme);
 
         let mut tabs = Vec::new();
+        // F-038 — keep the parse error in a persistent banner field rather
+        // than only a one-shot toast. The banner sits above the editor and
+        // surfaces "Open config / Restore default / Dismiss" actions.
+        let config_error_banner: Option<String> = config_err.as_ref().cloned();
         let mut toast = config_err.map(|e| format!("config: {e} (using defaults)"));
         if let Some(p) = cli_path {
             match EditorTab::from_path(PathBuf::from(&p)) {
@@ -454,6 +463,7 @@ impl ScribeApp {
             find_query: String::new(),
             replace_query: String::new(),
             focus_replace: false,
+            config_error_banner,
             status: format!(
                 "{} — {}",
                 scribe_core::PRODUCT_NAME,
@@ -2515,6 +2525,45 @@ impl ScribeApp {
             }
         }
 
+        // ---- Config-error banner (F-038) ----
+        //
+        // Persistent top banner when the config TOML failed to parse on
+        // launch. Surfaces the error message + actionable choices:
+        // "Open config" (opens the TOML file as a new tab so the user can
+        // hand-edit it), "Restore default" (overwrites the file with the
+        // default Config and reloads), and "Dismiss" (clears the banner
+        // for the session — the user took ownership of the warning).
+        let mut want_open_cfg = false;
+        let mut want_restore_cfg = false;
+        let mut want_dismiss_cfg = false;
+        if let Some(msg) = self.config_error_banner.clone() {
+            egui::TopBottomPanel::top("config-error-banner")
+                .frame(
+                    egui::Frame::default()
+                        .fill(warn.linear_multiply(0.20))
+                        .inner_margin(egui::Margin::same(6)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("⚠").color(warn).strong());
+                        ui.label(
+                            RichText::new(format!("Config has errors: {msg}"))
+                                .color(warn)
+                                .monospace(),
+                        );
+                        if ui.button("Open config").clicked() {
+                            want_open_cfg = true;
+                        }
+                        if ui.button("Restore default").clicked() {
+                            want_restore_cfg = true;
+                        }
+                        if ui.button("Dismiss").clicked() {
+                            want_dismiss_cfg = true;
+                        }
+                    });
+                });
+        }
+
         // ---- Find / Replace bar ----
         //
         // F-008 from docs/audits/overlooked-surfaces-2026-05-29.md: the
@@ -3234,6 +3283,30 @@ impl ScribeApp {
         }
         if start_lsp {
             self.start_lsp_for_active();
+        }
+        // F-038 — apply deferred config-banner actions.
+        if want_open_cfg {
+            if let Some(p) = Config::config_file_path() {
+                // Ensure the file actually exists before trying to open it
+                // (cold install: write defaults first so the user can edit).
+                if !p.exists() {
+                    if let Some(parent) = p.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&p, self.config.to_toml_string());
+                }
+                self.open_path(p);
+            }
+        }
+        if want_restore_cfg {
+            self.config = Config::default();
+            self.save_config();
+            self.reapply_theme(ctx);
+            self.config_error_banner = None;
+            self.status = "config restored to defaults".to_string();
+        }
+        if want_dismiss_cfg {
+            self.config_error_banner = None;
         }
 
         // Persist the open-file session when it changes (for restore-on-launch).
