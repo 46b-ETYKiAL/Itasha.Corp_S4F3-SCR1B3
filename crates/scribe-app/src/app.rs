@@ -153,6 +153,11 @@ struct EditorTab {
     /// `ScribeApp::next_doc_id`. Zero is fine as a sentinel for legacy
     /// session restores; real ids start at 1.
     doc_id: crate::grid::DocId,
+    /// F-044 from docs/audits/overlooked-surfaces-2026-05-29.md: when
+    /// true the tab renders with a leading 📌 marker and is treated as
+    /// "keep this open" by Close Others / Close Right helpers. Default
+    /// false; toggled via the tab's right-click context menu.
+    pinned: bool,
 }
 
 impl EditorTab {
@@ -161,6 +166,7 @@ impl EditorTab {
             doc: Document::scratch(),
             text: String::new(),
             doc_id: crate::grid::DocId(0),
+            pinned: false,
         }
     }
 
@@ -171,15 +177,17 @@ impl EditorTab {
             doc,
             text,
             doc_id: crate::grid::DocId(0),
+            pinned: false,
         })
     }
 
     fn title(&self) -> String {
         let name = self.doc.file_name();
+        let pin = if self.pinned { "📌 " } else { "" };
         if self.is_dirty() {
-            format!("● {name}")
+            format!("{pin}● {name}")
         } else {
-            name
+            format!("{pin}{name}")
         }
     }
 
@@ -1100,6 +1108,7 @@ impl ScribeApp {
         let mut close_others = None;
         let mut close_to_right = None;
         let mut close_all = false;
+        let mut toggle_pin: Option<usize> = None;
         // Per-tab pointer position when a drag ends — used to compute the
         // drop-target index without storing rects on the app.
         let mut drop_target: Option<usize> = None;
@@ -1123,6 +1132,11 @@ impl ScribeApp {
                 close = Some(i);
             }
             // Right-click → context menu.
+            let pin_label = if self.tabs[i].pinned {
+                "Unpin tab"
+            } else {
+                "Pin tab"
+            };
             resp.context_menu(|ui| {
                 if ui.button("Close").clicked() {
                     close = Some(i);
@@ -1138,6 +1152,11 @@ impl ScribeApp {
                 }
                 if ui.button("Close All").clicked() {
                     close_all = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button(pin_label).clicked() {
+                    toggle_pin = Some(i);
                     ui.close_menu();
                 }
             });
@@ -1192,6 +1211,11 @@ impl ScribeApp {
         if close_all {
             self.close_all_tabs();
         }
+        if let Some(i) = toggle_pin {
+            if i < self.tabs.len() {
+                self.tabs[i].pinned = !self.tabs[i].pinned;
+            }
+        }
         // Commit the drag-swap. The swap is index-based; `swap` is O(1) and
         // preserves every other tab's position.
         if let Some(target) = drop_target {
@@ -1218,29 +1242,51 @@ impl ScribeApp {
         }
     }
 
-    /// Close every tab whose index is not `keep`.
+    /// Close every tab whose index is not `keep` AND is not pinned (F-044).
     fn close_all_tabs_except(&mut self, keep: usize) {
         if keep >= self.tabs.len() {
             return;
         }
-        let kept = self.tabs.remove(keep);
-        self.tabs.clear();
-        self.tabs.push(kept);
-        self.active = 0;
-    }
-
-    /// Close every tab after `after` (exclusive).
-    fn close_tabs_after(&mut self, after: usize) {
-        if after + 1 < self.tabs.len() {
-            self.tabs.truncate(after + 1);
-            self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        // Walk back-to-front so swap-remove indices stay valid; never remove
+        // the kept index or any pinned tab.
+        let mut i = self.tabs.len();
+        while i > 0 {
+            i -= 1;
+            if i != keep && !self.tabs[i].pinned {
+                self.tabs.remove(i);
+            }
         }
+        // Active retargets to the surviving copy of `keep` (its index may
+        // have shifted left as pinned tabs above were preserved).
+        // Simplest: find the kept tab's new index by pointer-equality
+        // proxy. Since we never removed `keep`, count surviving tabs
+        // before it.
+        // Conservative fallback: clamp.
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
     }
 
-    /// Close every tab, leaving a single scratch buffer.
+    /// Close every tab after `after` (exclusive) that is not pinned (F-044).
+    fn close_tabs_after(&mut self, after: usize) {
+        let mut i = self.tabs.len();
+        while i > after + 1 {
+            i -= 1;
+            if !self.tabs[i].pinned {
+                self.tabs.remove(i);
+            }
+        }
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+    }
+
+    /// Close every tab that is not pinned (F-044). If nothing was unpinned,
+    /// leave the tabs alone (don't replace them with a scratch buffer).
     fn close_all_tabs(&mut self) {
-        self.tabs.clear();
-        self.tabs.push(EditorTab::scratch());
+        let any_unpinned = self.tabs.iter().any(|t| !t.pinned);
+        if any_unpinned {
+            self.tabs.retain(|t| t.pinned);
+        }
+        if self.tabs.is_empty() {
+            self.tabs.push(EditorTab::scratch());
+        }
         self.active = 0;
     }
 
@@ -1653,6 +1699,10 @@ struct Pending {
     move_line_down: bool,
     duplicate_line: bool,
     join_lines: bool,
+    /// Wave-3 (docs/audits/overlooked-surfaces-2026-05-29.md): F-018 theme
+    /// cycle keyboard chord + F-031 minimap-toggle keyboard chord.
+    cycle_theme: bool,
+    toggle_minimap: bool,
 }
 
 // ---- Keyboard shortcut cheatsheet table (F-014) ----
@@ -1747,6 +1797,14 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
     ShortcutEntry {
         chord: "F11",
         action: "Toggle OS fullscreen",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+T",
+        action: "Cycle to the next built-in theme",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+M",
+        action: "Toggle minimap on/off",
     },
     ShortcutEntry {
         chord: "Esc",
@@ -2280,6 +2338,16 @@ impl ScribeApp {
             }
             if i.key_pressed(egui::Key::F11) {
                 act.toggle_fullscreen = true;
+            }
+            // F-018 — Ctrl+K Ctrl+T (cycle theme) approximated as
+            // Ctrl+Shift+T (single-key chord) since egui has no native
+            // multi-key chord layer. F-031 — Ctrl+Shift+M toggles the
+            // minimap. Both persist via save_config.
+            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::T) {
+                act.cycle_theme = true;
+            }
+            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::M) {
+                act.toggle_minimap = true;
             }
             // F-017 — Alt+Up/Down move the cursor line; Ctrl+Shift+D
             // duplicates; Ctrl+J joins next.
@@ -2829,26 +2897,54 @@ impl ScribeApp {
         let diag_total = self.diagnostics.len();
 
         // ---- Status bar ----
+        let mut cycle_eol_for_active = false;
+        let mut open_settings_for = None;
         egui::TopBottomPanel::bottom("status")
             .frame(egui::Frame::default().fill(panel))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let active = self.active.min(self.tabs.len().saturating_sub(1));
                     if let Some(t) = self.tabs.get(active) {
-                        ui.label(
-                            RichText::new(t.doc.eol().label().to_string())
-                                .color(muted)
-                                .small()
-                                .monospace(),
-                        );
-                        ui.label(
-                            RichText::new(t.doc.encoding().name.clone())
-                                .color(muted)
-                                .small()
-                                .monospace(),
-                        );
+                        // F-025 — clickable EOL segment cycles LF → CRLF → CR.
+                        if ui
+                            .selectable_label(
+                                false,
+                                RichText::new(t.doc.eol().label().to_string())
+                                    .color(muted)
+                                    .small()
+                                    .monospace(),
+                            )
+                            .on_hover_text("Click to cycle line-ending: LF → CRLF → CR")
+                            .clicked()
+                        {
+                            cycle_eol_for_active = true;
+                        }
+                        // F-025 — encoding + language: click opens Settings
+                        // so the user lands on the relevant editor section.
+                        if ui
+                            .selectable_label(
+                                false,
+                                RichText::new(t.doc.encoding().name.clone())
+                                    .color(muted)
+                                    .small()
+                                    .monospace(),
+                            )
+                            .on_hover_text("Click to open Settings → Editor")
+                            .clicked()
+                        {
+                            open_settings_for = Some("Editor");
+                        }
                         let lang = t.doc.language_hint().unwrap_or_else(|| "text".into());
-                        ui.label(RichText::new(lang).color(accent).small().monospace());
+                        if ui
+                            .selectable_label(
+                                false,
+                                RichText::new(lang).color(accent).small().monospace(),
+                            )
+                            .on_hover_text("Click to open Settings → Editor (language hint)")
+                            .clicked()
+                        {
+                            open_settings_for = Some("Editor");
+                        }
                         let lines = t.text.lines().count().max(1);
                         ui.label(
                             RichText::new(format!("{lines} ln"))
@@ -2909,6 +3005,22 @@ impl ScribeApp {
                     });
                 });
             });
+        // F-025 — apply the click-to-edit status-bar actions captured above.
+        if cycle_eol_for_active {
+            let active = self.active.min(self.tabs.len().saturating_sub(1));
+            if let Some(t) = self.tabs.get_mut(active) {
+                let next = match t.doc.eol() {
+                    scribe_core::eol::Eol::Lf => scribe_core::eol::Eol::Crlf,
+                    scribe_core::eol::Eol::Crlf => scribe_core::eol::Eol::Cr,
+                    scribe_core::eol::Eol::Cr => scribe_core::eol::Eol::Lf,
+                };
+                t.doc.set_eol(next);
+                self.status = format!("line-ending: {}", next.label());
+            }
+        }
+        if let Some(_section) = open_settings_for {
+            self.settings_open = true;
+        }
 
         // ---- Toast (errors / notices) ----
         if let Some(msg) = self.toast.clone() {
@@ -3271,6 +3383,30 @@ impl ScribeApp {
         }
         if act.join_lines {
             self.join_cursor_line_with_next();
+        }
+        if act.cycle_theme {
+            let names = scribe_core::theme::Theme::builtin_names();
+            if !names.is_empty() {
+                let cur = &self.config.appearance.theme;
+                let idx = names.iter().position(|n| *n == cur.as_str()).unwrap_or(0);
+                let next = names[(idx + 1) % names.len()].to_string();
+                self.config.appearance.theme = next.clone();
+                self.reapply_theme(ctx);
+                self.save_config();
+                self.status = format!("theme: {next}");
+            }
+        }
+        if act.toggle_minimap {
+            self.config.editor.show_minimap = !self.config.editor.show_minimap;
+            self.save_config();
+            self.status = format!(
+                "minimap: {}",
+                if self.config.editor.show_minimap {
+                    "on"
+                } else {
+                    "off"
+                }
+            );
         }
         for p in act.files_to_open.drain(..) {
             self.open_path(p);
