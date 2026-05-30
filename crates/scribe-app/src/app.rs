@@ -291,6 +291,9 @@ pub struct ScribeApp {
     /// visible-list every render so arrow keys move through the same
     /// entries the user sees.
     file_tree_state: crate::filetree::FileTreeState,
+    /// F-039 + F-040: the plugin-manager modal (Loaded / Registry / Install).
+    /// Surfaces the Phase-20 plugin foundation that was built but unwired.
+    plugin_manager: crate::plugin_manager::PluginManagerState,
     /// LSP: per-language server registry + the active server connection.
     lsp_registry: LspRegistry,
     lsp: Option<LspClient>,
@@ -537,6 +540,7 @@ impl ScribeApp {
             focus_goto: false,
             file_tree_root: None,
             file_tree_state: crate::filetree::FileTreeState::default(),
+            plugin_manager: crate::plugin_manager::PluginManagerState::default(),
             lsp_registry: LspRegistry::with_defaults(),
             lsp: None,
             lsp_lang: None,
@@ -1055,6 +1059,25 @@ impl ScribeApp {
         }
     }
 
+    /// Build the plugin-manager Loaded-tab rows by re-running discovery over
+    /// the plugins dir and folding in the user's `config.plugins.disabled`
+    /// set. Re-discovering (rather than reading the live `PluginHost`) means
+    /// the modal shows plugins that are present on disk even when they are
+    /// currently disabled — disabled plugins are never loaded into the host.
+    fn discovered_plugin_rows(&self, plugins_dir: &Path) -> Vec<crate::plugin_manager::LoadedRow> {
+        let (found, _errors) = plugin::discover(plugins_dir);
+        found
+            .into_iter()
+            .map(|p| crate::plugin_manager::LoadedRow {
+                enabled: !self.config.plugins.disabled.contains(&p.manifest.id),
+                id: p.manifest.id,
+                name: p.manifest.name,
+                version: p.manifest.version,
+                description: p.manifest.description,
+            })
+            .collect()
+    }
+
     /// F-020 — sample the current viewport inner rect + outer position and
     /// record it on `self.config.window.last_geometry` so the next launch
     /// restores it. Called from the eframe `save()` lifecycle hook and
@@ -1169,6 +1192,11 @@ impl ScribeApp {
             BuiltinCommand::ExpandAll => {
                 self.folds.clear();
                 self.status = String::from("expanded all");
+            }
+            BuiltinCommand::OpenPluginManager => {
+                self.plugin_manager
+                    .ensure_defaults(Config::config_dir().as_deref());
+                self.plugin_manager.open = true;
             }
         }
     }
@@ -2081,6 +2109,7 @@ pub(crate) enum BuiltinCommand {
     StartLsp,
     FoldAll,
     ExpandAll,
+    OpenPluginManager,
 }
 
 pub(crate) struct BuiltinEntry {
@@ -2122,6 +2151,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Fold all regions",
         shortcut: "Ctrl+Shift+[",
         action: BuiltinCommand::FoldAll,
+    },
+    BuiltinEntry {
+        label: "Manage plugins",
+        shortcut: "",
+        action: BuiltinCommand::OpenPluginManager,
     },
     BuiltinEntry {
         label: "New file",
@@ -2332,6 +2366,20 @@ pub(crate) fn toolbar_label(id: &str, icons: bool) -> &'static str {
 
 fn ui_color(theme: &Theme, key: &str, default: Rgba) -> Color32 {
     scribe_render::color32(theme.ui(key, default))
+}
+
+/// Open `dir` in the OS file manager (Explorer / Finder / xdg-open).
+/// Best-effort — a failure is silent because "couldn't reveal the folder"
+/// is a non-fatal convenience action. Used by the plugin manager's
+/// "open folder" button (F-039) so users can drop a plugin in directly.
+fn open_in_file_manager(dir: &Path) {
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+    let _ = std::process::Command::new(program).arg(dir).spawn();
 }
 
 /// The fill color for chrome panels (titlebar/toolbar/status/sidebars/gutter).
@@ -3168,6 +3216,13 @@ impl ScribeApp {
         // ---- Settings window (deep customization, live preview) ----
         if self.settings_open {
             let changed = crate::settings::show(ctx, &mut self.config, &mut self.settings_open);
+            // F-039 — the Plugins section's "Manage plugins…" button stashes a
+            // request flag; pick it up and open the plugin-manager modal.
+            if crate::settings::take_open_plugin_manager_request(ctx) {
+                self.plugin_manager
+                    .ensure_defaults(Config::config_dir().as_deref());
+                self.plugin_manager.open = true;
+            }
             if changed {
                 self.reapply_theme(ctx);
                 // F-035 — push the always-on-top flag to the viewport
@@ -3227,6 +3282,35 @@ impl ScribeApp {
             });
             if !still_open {
                 self.cheatsheet_open = false;
+            }
+        }
+
+        // ---- Plugin manager modal (F-039 + F-040) ----
+        //
+        // Surfaces the Phase-20 plugin foundation. The host builds the Loaded
+        // rows from `discover()` + `config.plugins.disabled`, passes the
+        // plugins dir, and applies whatever action the modal returns.
+        if self.plugin_manager.open {
+            let plugins_dir = Config::config_dir()
+                .map(|d| d.join("plugins"))
+                .unwrap_or_else(|| PathBuf::from("plugins"));
+            let loaded = self.discovered_plugin_rows(&plugins_dir);
+            let action = self
+                .plugin_manager
+                .show(ctx, accent, muted, &loaded, &plugins_dir);
+            if let Some(id) = action.toggle_disabled {
+                if let Some(pos) = self.config.plugins.disabled.iter().position(|d| *d == id) {
+                    self.config.plugins.disabled.remove(pos);
+                } else {
+                    self.config.plugins.disabled.push(id);
+                }
+                self.save_config();
+            }
+            if action.open_plugins_dir {
+                // Best-effort: create the dir so the reveal lands somewhere,
+                // then open it in the OS file manager.
+                let _ = std::fs::create_dir_all(&plugins_dir);
+                open_in_file_manager(&plugins_dir);
             }
         }
 

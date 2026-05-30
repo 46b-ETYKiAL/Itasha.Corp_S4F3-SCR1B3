@@ -29,3 +29,4 @@ window-vibrancy = "0.7"                        # OS glass/acrylic/mica/vibrancy
 [dev-dependencies]
 tempfile = "3"
 toml = { workspace = true }                    # Tree<Pane> round-trip test (Phase 18 T18.2)
+minisign = "0.7"                               # sign in plugin-manager verify tests (round-trip only)
