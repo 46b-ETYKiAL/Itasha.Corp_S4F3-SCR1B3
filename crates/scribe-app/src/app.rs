@@ -216,6 +216,11 @@ pub struct ScribeApp {
     palette_open: bool,
     palette_query: String,
     settings_open: bool,
+    /// F-014 from docs/audits/overlooked-surfaces-2026-05-29.md: an in-app
+    /// modal listing every wired keyboard shortcut. Opens on F1. The modal
+    /// is the editor's "what can it do?" surface when the user can't
+    /// remember the shortcut for an operation.
+    cheatsheet_open: bool,
     /// Open folder for the file-tree sidebar (None = sidebar hidden).
     file_tree_root: Option<PathBuf>,
     /// LSP: per-language server registry + the active server connection.
@@ -439,6 +444,7 @@ impl ScribeApp {
             palette_open: false,
             palette_query: String::new(),
             settings_open: false,
+            cheatsheet_open: false,
             file_tree_root: None,
             lsp_registry: LspRegistry::with_defaults(),
             lsp: None,
@@ -1359,6 +1365,81 @@ struct Pending {
     cycle_tab_prev: bool,
 }
 
+// ---- Keyboard shortcut cheatsheet table (F-014) ----
+
+pub(crate) struct ShortcutEntry {
+    pub chord: &'static str,
+    pub action: &'static str,
+}
+
+/// The canonical "what shortcuts does SCR1B3 ship?" table. Rendered by the
+/// F1 cheatsheet modal. Add new wired shortcuts HERE so the modal stays in
+/// sync — every shortcut the editor actually responds to must appear in
+/// this list. Grouped loosely top-to-bottom: file ops → tab/buffer ops →
+/// find/replace → window/help.
+pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
+    ShortcutEntry {
+        chord: "Ctrl+N",
+        action: "New file",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+O",
+        action: "Open file…",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+S",
+        action: "Save active buffer",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+W",
+        action: "Close active tab",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Tab",
+        action: "Cycle to next tab",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+Tab",
+        action: "Cycle to previous tab",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+\\",
+        action: "Toggle multi-note grid",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+F",
+        action: "Find in buffer",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+H",
+        action: "Find + replace in buffer",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+/",
+        action: "Toggle line comment (per-language prefix)",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Space",
+        action: "Identifier completion (popup)",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+P",
+        action: "Command palette",
+    },
+    ShortcutEntry {
+        chord: "F1",
+        action: "Show this keyboard cheatsheet",
+    },
+    ShortcutEntry {
+        chord: "F11",
+        action: "Toggle OS fullscreen",
+    },
+    ShortcutEntry {
+        chord: "Esc",
+        action: "Close find / palette / cheatsheet / completion popup",
+    },
+];
+
 /// Quick-access toolbar action registry: `(id, human-readable label)`. The id
 /// `"sep"` renders a divider. Shared by the toolbar renderer and the Settings
 /// toolbar editor (add / remove / reorder).
@@ -1835,9 +1916,15 @@ impl ScribeApp {
             {
                 act.cycle_tab_prev = true;
             }
+            // F-014: F1 toggles the keyboard cheatsheet — universal "help"
+            // convention. The Esc handler below closes it like any overlay.
+            if i.key_pressed(egui::Key::F1) {
+                self.cheatsheet_open = !self.cheatsheet_open;
+            }
             if i.key_pressed(egui::Key::Escape) {
                 self.find_open = false;
                 self.palette_open = false;
+                self.cheatsheet_open = false;
             }
         });
         // Ctrl/Cmd+Space requests identifier completion at the cursor.
@@ -2106,6 +2193,54 @@ impl ScribeApp {
             if changed {
                 self.reapply_theme(ctx);
                 self.save_config();
+            }
+        }
+
+        // ---- Keyboard cheatsheet (F1) ----
+        //
+        // F-014 from docs/audits/overlooked-surfaces-2026-05-29.md. Lists
+        // every wired shortcut so the user doesn't have to guess. The table
+        // is rendered as a markdown-like 2-column grid; the data lives in
+        // KEYBOARD_SHORTCUTS so any future shortcut addition lands in one
+        // place + the modal stays current.
+        if self.cheatsheet_open {
+            let mut still_open = true;
+            egui::Window::new(
+                RichText::new("⌨  keyboard shortcuts")
+                    .color(accent)
+                    .monospace(),
+            )
+            .open(&mut still_open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(420.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("cheatsheet-grid")
+                            .num_columns(2)
+                            .spacing([24.0, 6.0])
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for entry in KEYBOARD_SHORTCUTS {
+                                    ui.label(RichText::new(entry.chord).color(accent).monospace());
+                                    ui.label(RichText::new(entry.action).color(muted).small());
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("press F1 or Esc to close")
+                        .color(muted)
+                        .small()
+                        .monospace(),
+                );
+            });
+            if !still_open {
+                self.cheatsheet_open = false;
             }
         }
 
@@ -3336,6 +3471,43 @@ mod e2e {
         // Walks until the end and stops there.
         let (line, col) = line_col_from_char_index(s, 99);
         assert_eq!((line, col), (2, 4));
+    }
+
+    /// F-014: F1 toggles the cheatsheet open + a second F1 closes it.
+    #[test]
+    fn input_f1_toggles_cheatsheet() {
+        let mut app = ScribeApp::new_test(Config::default());
+        assert!(!app.cheatsheet_open);
+        let d = Driver::new();
+        d.idle(&mut app);
+        d.key(&mut app, egui::Key::F1, egui::Modifiers::NONE);
+        assert!(app.cheatsheet_open, "F1 opens the cheatsheet");
+        d.key(&mut app, egui::Key::F1, egui::Modifiers::NONE);
+        assert!(!app.cheatsheet_open, "second F1 closes the cheatsheet");
+    }
+
+    /// F-014: Esc closes the cheatsheet as a normal overlay.
+    #[test]
+    fn input_esc_closes_cheatsheet() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.cheatsheet_open = true;
+        let d = Driver::new();
+        d.idle(&mut app);
+        d.key(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!app.cheatsheet_open, "Esc closes the cheatsheet");
+    }
+
+    /// F-014 registry sanity: every entry has a non-empty chord + action.
+    #[test]
+    fn keyboard_shortcuts_registry_is_populated() {
+        assert!(!KEYBOARD_SHORTCUTS.is_empty(), "registry must be populated");
+        for entry in KEYBOARD_SHORTCUTS {
+            assert!(!entry.chord.is_empty(), "shortcut chord must be non-empty");
+            assert!(
+                !entry.action.is_empty(),
+                "shortcut action label must be non-empty"
+            );
+        }
     }
 
     #[test]
