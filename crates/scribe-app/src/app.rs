@@ -269,6 +269,15 @@ pub struct ScribeApp {
     /// pattern in `draw_tab_strip` (F-001 fix from the 2026-05-29 overlooked-
     /// surfaces audit).
     dragged_tab: Option<usize>,
+    /// Last-frame cursor position in the active buffer, expressed as
+    /// `(1-based line, 1-based column)`. Sampled from the central panel's
+    /// `TextEditOutput::cursor_range.primary` on every paint and rendered
+    /// in the status bar — closes F-005 ("Ln 4, Col 17") from the
+    /// 2026-05-29 overlooked-surfaces audit.
+    last_cursor_line_col: Option<(usize, usize)>,
+    /// Selection length in characters, if the cursor range is non-empty.
+    /// Drives the status-bar segment "(N chars selected)". Closes F-024.
+    last_selection_chars: usize,
 }
 
 /// State for the open completion popup.
@@ -453,6 +462,8 @@ impl ScribeApp {
             next_doc_id: crate::grid::DocIdAllocator::default(),
             grid_close_queue: Vec::new(),
             dragged_tab: None,
+            last_cursor_line_col: None,
+            last_selection_chars: 0,
         }
     }
 
@@ -1601,6 +1612,28 @@ fn char_to_byte(s: &str, ci: usize) -> usize {
     s.char_indices().nth(ci).map(|(b, _)| b).unwrap_or(s.len())
 }
 
+/// Translate an egui [`egui::epaint::text::cursor::CCursor`] char index into
+/// a human-visible `(1-based line, 1-based column)` pair. Counts a literal
+/// `\n` as a line break; the column resets on every newline.
+///
+/// Used by the status bar to render "Ln 4, Col 17" — closes F-005 from
+/// `docs/audits/overlooked-surfaces-2026-05-29.md`. Char-based (not byte-
+/// based) so multi-byte UTF-8 codepoints (CJK, emoji) still produce the
+/// column the user sees on screen.
+fn line_col_from_char_index(text: &str, char_index: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut col = 1usize;
+    for ch in text.chars().take(char_index) {
+        if ch == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
 /// Replace the `[lo, hi)` char-range of `text` with `width` spaces and return
 /// `(new_text, new_caret_char_index)`. Pure core of the Tab→spaces handler so it
 /// can be unit-tested without a live `TextEdit`.
@@ -2110,6 +2143,28 @@ impl ScribeApp {
                                 .small()
                                 .monospace(),
                         );
+                        // F-005 / F-024 from docs/audits/overlooked-surfaces-2026-05-29.md:
+                        // Render the caret position ("Ln 4, Col 17") + the selection
+                        // length when non-empty. Every editor on Earth ships this
+                        // indicator; SCR1B3 used to omit it.
+                        if let Some((ln, col)) = self.last_cursor_line_col {
+                            ui.label(
+                                RichText::new(format!("Ln {ln}, Col {col}"))
+                                    .color(muted)
+                                    .small()
+                                    .monospace(),
+                            );
+                        }
+                        if self.last_selection_chars > 0 {
+                            let sel = self.last_selection_chars;
+                            let noun = if sel == 1 { "char" } else { "chars" };
+                            ui.label(
+                                RichText::new(format!("({sel} {noun} sel)"))
+                                    .color(accent)
+                                    .small()
+                                    .monospace(),
+                            );
+                        }
                         if t.doc.is_read_only_large() {
                             ui.label(
                                 RichText::new("[ large file: read-only ]")
@@ -2337,6 +2392,16 @@ impl ScribeApp {
                             let rect = out.galley.pos_from_cursor(cc);
                             let pos = out.galley_pos + egui::vec2(rect.min.x, rect.max.y);
                             a = Some((pos, cc.index));
+                            // F-005 / F-024 from docs/audits/overlooked-surfaces-2026-05-29.md:
+                            // compute the human-visible (1-based) line + column and the
+                            // selection-length-in-chars from the rope buffer + the
+                            // egui CursorRange. This drives the status-bar "Ln N, Col N"
+                            // and "(N chars selected)" indicators.
+                            let text_ref = &self.tabs[active].text;
+                            self.last_cursor_line_col =
+                                Some(line_col_from_char_index(text_ref, cc.index));
+                            self.last_selection_chars =
+                                range.primary.index.abs_diff(range.secondary.index);
                         }
                         // Capture each logical line's screen Y for the gutter (a row
                         // starts a logical line iff the previous row ended with \n).
@@ -3243,6 +3308,34 @@ mod e2e {
         assert!(app.find_open, "Ctrl+F opens the find bar");
         d.key(&mut app, egui::Key::Escape, egui::Modifiers::NONE);
         assert!(!app.find_open, "Escape closes the find bar");
+    }
+
+    /// F-005 helper: line:col math handles plain ASCII, end-of-buffer, and
+    /// multi-byte UTF-8 codepoints.
+    #[test]
+    fn line_col_from_char_index_basics() {
+        // Empty buffer at start of line 1.
+        assert_eq!(line_col_from_char_index("", 0), (1, 1));
+        // Two-line buffer.
+        let s = "hello\nworld";
+        assert_eq!(line_col_from_char_index(s, 0), (1, 1)); // start
+        assert_eq!(line_col_from_char_index(s, 5), (1, 6)); // before \n
+        assert_eq!(line_col_from_char_index(s, 6), (2, 1)); // after \n
+        assert_eq!(line_col_from_char_index(s, 11), (2, 6)); // end
+                                                             // Multi-byte: each codepoint advances column once, not byte-count times.
+        let cjk = "日本\n語";
+        assert_eq!(line_col_from_char_index(cjk, 1), (1, 2));
+        assert_eq!(line_col_from_char_index(cjk, 2), (1, 3));
+        assert_eq!(line_col_from_char_index(cjk, 3), (2, 1));
+    }
+
+    /// F-005 helper: out-of-range char index clamps to end-of-buffer (no panic).
+    #[test]
+    fn line_col_from_char_index_clamps() {
+        let s = "abc\ndef";
+        // Walks until the end and stops there.
+        let (line, col) = line_col_from_char_index(s, 99);
+        assert_eq!((line, col), (2, 4));
     }
 
     #[test]
