@@ -287,6 +287,10 @@ pub struct ScribeApp {
     focus_goto: bool,
     /// Open folder for the file-tree sidebar (None = sidebar hidden).
     file_tree_root: Option<PathBuf>,
+    /// F-041: keyboard nav state for the sidebar. The struct rebuilds its
+    /// visible-list every render so arrow keys move through the same
+    /// entries the user sees.
+    file_tree_state: crate::filetree::FileTreeState,
     /// LSP: per-language server registry + the active server connection.
     lsp_registry: LspRegistry,
     lsp: Option<LspClient>,
@@ -532,6 +536,7 @@ impl ScribeApp {
             goto_query: String::new(),
             focus_goto: false,
             file_tree_root: None,
+            file_tree_state: crate::filetree::FileTreeState::default(),
             lsp_registry: LspRegistry::with_defaults(),
             lsp: None,
             lsp_lang: None,
@@ -3605,11 +3610,29 @@ impl ScribeApp {
                     });
                     ui.separator();
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        if let Some(p) = crate::filetree::show(ui, &root) {
+                        if let Some(p) = self.file_tree_state.show(ui, &root) {
                             open_from_tree = Some(p);
                         }
                     });
                 });
+            // F-041: arrow-key / Enter / Home / End nav for the sidebar.
+            // Only fires when no modal is open AND the editor isn't focused
+            // (egui owns key events when a TextEdit holds focus, so we don't
+            // need to gate explicitly on that — `consume_key` is a no-op
+            // when the key was already routed to a widget).
+            let modal_open = self.palette_open
+                || self.find_open
+                || self.fuzzy_open
+                || self.goto_open
+                || self.recent_open
+                || self.cheatsheet_open
+                || self.settings_open
+                || self.welcome_open;
+            if !modal_open {
+                if let Some(p) = self.file_tree_state.handle_input(ctx) {
+                    open_from_tree = Some(p);
+                }
+            }
         }
 
         let active = self.active.min(self.tabs.len().saturating_sub(1));
