@@ -262,6 +262,27 @@ pub struct EditorConfig {
     /// modal on subsequent launches.
     #[serde(default)]
     pub first_run_completed: bool,
+    /// F-021 from docs/audits/overlooked-surfaces-2026-05-29.md: per-file
+    /// scroll-offset map (path string → vertical pixel offset). Captured
+    /// on tab close + open, restored on next open of the same path. Capped
+    /// at [`SCROLL_POS_CAP`].
+    #[serde(default)]
+    pub scroll_positions: std::collections::HashMap<String, f32>,
+}
+
+/// Cap on the scroll-position memory map (F-021). Older entries are evicted
+/// in arbitrary order — the map is best-effort, not history.
+pub const SCROLL_POS_CAP: usize = 200;
+
+/// Insert / update `path`'s scroll offset, capping the map at
+/// [`SCROLL_POS_CAP`] entries.
+pub fn record_scroll_pos(map: &mut std::collections::HashMap<String, f32>, path: &str, y: f32) {
+    if map.len() >= SCROLL_POS_CAP && !map.contains_key(path) {
+        if let Some(first) = map.keys().next().cloned() {
+            map.remove(&first);
+        }
+    }
+    map.insert(path.to_string(), y);
 }
 
 /// Cap on the recent-files MRU list. 20 is the universal editor
@@ -314,6 +335,7 @@ impl Default for EditorConfig {
             grid_enabled: false,
             recent_files: Vec::new(),
             first_run_completed: false,
+            scroll_positions: std::collections::HashMap::new(),
         }
     }
 }
@@ -814,5 +836,32 @@ mod tests {
         let s = c2.to_toml_string();
         let back: Config = toml::from_str(&s).expect("config TOML round-trip");
         assert!(back.editor.first_run_completed);
+    }
+
+    /// F-021 helper: record_scroll_pos inserts + caps at SCROLL_POS_CAP.
+    #[test]
+    fn record_scroll_pos_caps_and_round_trips() {
+        use super::{record_scroll_pos, SCROLL_POS_CAP};
+        let mut m = std::collections::HashMap::<String, f32>::new();
+        record_scroll_pos(&mut m, "/a/b.rs", 100.0);
+        record_scroll_pos(&mut m, "/c/d.rs", 200.0);
+        record_scroll_pos(&mut m, "/a/b.rs", 150.0); // update in place
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.get("/a/b.rs").copied(), Some(150.0));
+        for n in 0..(SCROLL_POS_CAP + 10) {
+            record_scroll_pos(&mut m, &format!("/fill/{n}.rs"), n as f32);
+        }
+        assert_eq!(m.len(), SCROLL_POS_CAP);
+        // Round-trip a small map.
+        let mut c = Config::default();
+        c.editor
+            .scroll_positions
+            .insert("/x/y.rs".to_string(), 250.0);
+        let s = c.to_toml_string();
+        let back: Config = toml::from_str(&s).expect("config TOML round-trip");
+        assert_eq!(
+            back.editor.scroll_positions.get("/x/y.rs").copied(),
+            Some(250.0)
+        );
     }
 }

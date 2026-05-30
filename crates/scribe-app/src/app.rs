@@ -728,6 +728,12 @@ impl ScribeApp {
                 self.tabs.push(t);
                 self.active = self.tabs.len() - 1;
                 self.status = format!("opened {}", path.display());
+                // F-021 — restore the prior per-file scroll position
+                // (best-effort; the picker accepts a 1-frame lag).
+                let key = path.display().to_string();
+                if let Some(&y) = self.config.editor.scroll_positions.get(&key) {
+                    self.pending_scroll = Some(y);
+                }
                 // F-012 — record on the MRU recent-files list + persist.
                 scribe_core::config::record_recent_file(&mut self.config.editor.recent_files, path);
                 self.save_config();
@@ -1317,6 +1323,19 @@ impl ScribeApp {
 
     fn close_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() {
+            // F-021 — capture the current scroll position so the next open
+            // of the same path restores it. Uses the last-frame
+            // scroll_metrics value the central panel records.
+            if let Some(path) = self.tabs[idx].doc.path().map(|p| p.to_path_buf()) {
+                let key = path.display().to_string();
+                let y = self.scroll_metrics.0;
+                scribe_core::config::record_scroll_pos(
+                    &mut self.config.editor.scroll_positions,
+                    &key,
+                    y,
+                );
+                self.save_config();
+            }
             self.tabs.remove(idx);
             if self.tabs.is_empty() {
                 self.tabs.push(EditorTab::scratch());
@@ -3140,8 +3159,18 @@ impl ScribeApp {
                             open_settings_for = Some("Editor");
                         }
                         let lines = t.text.lines().count().max(1);
+                        // F-024 — word + line counters in the status bar.
+                        // Both are cheap (single-pass split) on the buffers
+                        // SCR1B3 targets (multi-GB files go through the rope
+                        // browser which sets is_read_only_large and short-
+                        // circuits this segment).
+                        let words = if t.doc.is_read_only_large() {
+                            0
+                        } else {
+                            t.text.split_whitespace().count()
+                        };
                         ui.label(
-                            RichText::new(format!("{lines} ln"))
+                            RichText::new(format!("{lines} ln · {words} w"))
                                 .color(muted)
                                 .small()
                                 .monospace(),
