@@ -230,6 +230,10 @@ pub struct ScribeApp {
     /// is the editor's "what can it do?" surface when the user can't
     /// remember the shortcut for an operation.
     cheatsheet_open: bool,
+    /// F-012 from docs/audits/overlooked-surfaces-2026-05-29.md: when true,
+    /// the recent-files modal renders this frame. Opened via Ctrl+R, the
+    /// command palette, or the toolbar's "Recent" button.
+    recent_open: bool,
     /// F-015 from docs/audits/overlooked-surfaces-2026-05-29.md: Ctrl+G
     /// "go to line" modal. `goto_open` is the modal-open flag, `goto_query`
     /// is the typed text (accepts `N` or `N:C`), `focus_goto` is the
@@ -463,6 +467,7 @@ impl ScribeApp {
             palette_query: String::new(),
             settings_open: false,
             cheatsheet_open: false,
+            recent_open: false,
             goto_open: false,
             goto_query: String::new(),
             focus_goto: false,
@@ -680,6 +685,9 @@ impl ScribeApp {
                 self.tabs.push(t);
                 self.active = self.tabs.len() - 1;
                 self.status = format!("opened {}", path.display());
+                // F-012 — record on the MRU recent-files list + persist.
+                scribe_core::config::record_recent_file(&mut self.config.editor.recent_files, path);
+                self.save_config();
             }
             Err(e) => self.toast = Some(format!("open failed: {e}")),
         }
@@ -1695,6 +1703,10 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
         action: "Go to line (or line:column)",
     },
     ShortcutEntry {
+        chord: "Ctrl+R",
+        action: "Open a recent file (MRU list)",
+    },
+    ShortcutEntry {
         chord: "Alt+Up",
         action: "Move cursor line up",
     },
@@ -2306,11 +2318,16 @@ impl ScribeApp {
                 self.focus_goto = true;
                 self.goto_query.clear();
             }
+            // F-012 — Ctrl+R opens the recent-files modal.
+            if cmd && i.key_pressed(egui::Key::R) {
+                self.recent_open = true;
+            }
             if i.key_pressed(egui::Key::Escape) {
                 self.find_open = false;
                 self.palette_open = false;
                 self.cheatsheet_open = false;
                 self.goto_open = false;
+                self.recent_open = false;
             }
         });
         // Ctrl/Cmd+Space requests identifier completion at the cursor.
@@ -2703,6 +2720,56 @@ impl ScribeApp {
             }
             if want_close {
                 self.goto_open = false;
+            }
+        }
+
+        // ---- Recent files modal (Ctrl+R) ----
+        //
+        // F-012 from docs/audits/overlooked-surfaces-2026-05-29.md. Pops
+        // a list of the MRU recent files. Click an entry → open. Esc →
+        // close. Persists nothing — the recent list itself is owned by
+        // EditorConfig::recent_files (already saved on every open).
+        if self.recent_open {
+            let mut chosen: Option<PathBuf> = None;
+            let mut still_open = true;
+            egui::Window::new(RichText::new("⌖  recent files").color(accent).monospace())
+                .open(&mut still_open)
+                .collapsible(false)
+                .resizable(true)
+                .default_width(520.0)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
+                .show(ctx, |ui| {
+                    if self.config.editor.recent_files.is_empty() {
+                        ui.label(
+                            RichText::new("no recent files yet — open something first")
+                                .color(muted)
+                                .small(),
+                        );
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .max_height(360.0)
+                            .show(ui, |ui| {
+                                for p in &self.config.editor.recent_files {
+                                    let label = RichText::new(p.display().to_string()).monospace();
+                                    if ui.selectable_label(false, label).clicked() {
+                                        chosen = Some(p.clone());
+                                    }
+                                }
+                            });
+                    }
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("press Ctrl+R or Esc to close")
+                            .color(muted)
+                            .small()
+                            .monospace(),
+                    );
+                });
+            if let Some(p) = chosen {
+                self.open_path(p);
+                self.recent_open = false;
+            } else if !still_open {
+                self.recent_open = false;
             }
         }
 

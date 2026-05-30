@@ -251,6 +251,27 @@ pub struct EditorConfig {
     /// opt in.
     #[serde(default)]
     pub grid_enabled: bool,
+    /// F-012 from docs/audits/overlooked-surfaces-2026-05-29.md: MRU
+    /// list of recently-opened file paths. Capped at
+    /// [`RECENT_FILES_MAX`]; freshly opened paths push to the front and
+    /// duplicates collapse to the front position.
+    #[serde(default)]
+    pub recent_files: Vec<PathBuf>,
+}
+
+/// Cap on the recent-files MRU list. 20 is the universal editor
+/// convention (VSCode, Sublime, Notepad++).
+pub const RECENT_FILES_MAX: usize = 20;
+
+/// Push `path` to the front of `recent` (MRU semantics), dedup by exact
+/// path equality, and cap the list at [`RECENT_FILES_MAX`]. Pure helper so
+/// the open-path codepath stays testable without the egui shell.
+pub fn record_recent_file(recent: &mut Vec<PathBuf>, path: PathBuf) {
+    recent.retain(|p| p != &path);
+    recent.insert(0, path);
+    if recent.len() > RECENT_FILES_MAX {
+        recent.truncate(RECENT_FILES_MAX);
+    }
 }
 
 /// Tab-strip position relative to the editor surface. `Top` keeps the tab
@@ -286,6 +307,7 @@ impl Default for EditorConfig {
             restore_session: true,
             tab_bar_position: TabBarPosition::Top,
             grid_enabled: false,
+            recent_files: Vec::new(),
         }
     }
 }
@@ -745,5 +767,34 @@ mod tests {
         let s = c2.to_toml_string();
         let back: Config = toml::from_str(&s).expect("config TOML round-trip");
         assert!(back.window.always_on_top);
+    }
+
+    /// F-012 helper: record_recent_file pushes to the front, dedups, caps.
+    #[test]
+    fn record_recent_file_mru_dedup_cap() {
+        use super::{record_recent_file, RECENT_FILES_MAX};
+        let mut r: Vec<PathBuf> = Vec::new();
+        record_recent_file(&mut r, PathBuf::from("/a/b.txt"));
+        record_recent_file(&mut r, PathBuf::from("/c/d.txt"));
+        record_recent_file(&mut r, PathBuf::from("/a/b.txt")); // dedup → front
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0], PathBuf::from("/a/b.txt"));
+        assert_eq!(r[1], PathBuf::from("/c/d.txt"));
+        // Cap test.
+        for n in 0..(RECENT_FILES_MAX + 5) {
+            record_recent_file(&mut r, PathBuf::from(format!("/fill/{n}.txt")));
+        }
+        assert_eq!(r.len(), RECENT_FILES_MAX);
+    }
+
+    /// F-012: recent_files round-trips through TOML.
+    #[test]
+    fn recent_files_round_trip() {
+        let mut c = Config::default();
+        c.editor.recent_files = vec![PathBuf::from("/x/y.rs"), PathBuf::from("/p/q.py")];
+        let s = c.to_toml_string();
+        let back: Config = toml::from_str(&s).expect("config TOML round-trip");
+        assert_eq!(back.editor.recent_files.len(), 2);
+        assert_eq!(back.editor.recent_files[0], PathBuf::from("/x/y.rs"));
     }
 }
