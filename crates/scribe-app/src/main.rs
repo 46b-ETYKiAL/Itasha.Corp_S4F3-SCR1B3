@@ -15,6 +15,7 @@ mod editor_features;
 mod filetree;
 mod fuzzy;
 mod grid;
+mod plugin_manager;
 mod settings;
 
 use std::process::ExitCode;

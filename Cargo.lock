@@ -3348,6 +3348,7 @@ dependencies = [
  "egui",
  "egui-phosphor",
  "egui_tiles",
+ "minisign",
  "notify 8.2.0",
  "notify-debouncer-mini",
  "rfd",

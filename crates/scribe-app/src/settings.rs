@@ -26,6 +26,27 @@ const CATEGORIES: &[&str] = &[
     "Toolbar",
 ];
 
+/// egui temp-data key the Plugins section sets when "Manage plugins…" is
+/// clicked. The host reads + clears it after [`show`] returns and opens its
+/// own plugin-manager modal — settings owns no modal state of its own.
+fn open_plugin_manager_id() -> egui::Id {
+    egui::Id::new("scr1b3_open_plugin_manager")
+}
+
+/// Host-side accessor: returns `true` (and clears the flag) when the Plugins
+/// section requested the plugin manager this frame.
+pub fn take_open_plugin_manager_request(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| {
+        let id = open_plugin_manager_id();
+        if d.get_temp::<bool>(id).unwrap_or(false) {
+            d.remove::<bool>(id);
+            true
+        } else {
+            false
+        }
+    })
+}
+
 /// Whether a category section should render: its own tab when not searching, or
 /// any-label-matches when a search query is active (cross-category results).
 fn section_visible(selected: &str, q: &str, category: &str, labels: &[&str]) -> bool {
@@ -618,6 +639,13 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 .weak()
                 .small(),
         );
+        // F-039 — open the plugin manager (Loaded / Registry / Install). The
+        // request is stashed in egui temp data; the host reads + clears it
+        // after `show` returns so it can open its own modal state.
+        if ui.button("Manage plugins…").clicked() {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(open_plugin_manager_id(), true));
+        }
         space(ui);
     }
 
