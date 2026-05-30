@@ -13,6 +13,7 @@ mod app;
 mod cli;
 mod editor_features;
 mod filetree;
+mod fuzzy;
 mod grid;
 mod settings;
 
