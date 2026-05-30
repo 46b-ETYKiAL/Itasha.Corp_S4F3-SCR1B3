@@ -1072,6 +1072,89 @@ impl ScribeApp {
         self.active = self.tabs.len() - 1;
     }
 
+    /// Dispatch a [`BuiltinCommand`] selected from the command palette.
+    ///
+    /// Every editor action surfaced in `BUILTIN_COMMANDS` routes through here
+    /// so the keyboard shortcut and the palette entry produce identical state
+    /// changes (no drift between the two surfaces). Touches `self.config`
+    /// then persists via `save_config` so toggles survive a restart.
+    fn execute_builtin(&mut self, cmd: BuiltinCommand) {
+        match cmd {
+            BuiltinCommand::NewFile => self.new_tab(),
+            BuiltinCommand::OpenFile => self.open_dialog(),
+            BuiltinCommand::OpenFolder => {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    self.status = format!("folder: {}", folder.display());
+                    self.file_tree_root = Some(folder);
+                }
+            }
+            BuiltinCommand::Save => self.save_active(),
+            BuiltinCommand::CloseActiveTab => self.close_tab(self.active),
+            BuiltinCommand::CloseAllTabs => {
+                self.tabs.clear();
+                self.tabs.push(EditorTab::scratch());
+                self.active = 0;
+            }
+            BuiltinCommand::CycleTabNext => {
+                if !self.tabs.is_empty() {
+                    self.active = (self.active + 1) % self.tabs.len();
+                }
+            }
+            BuiltinCommand::CycleTabPrev => {
+                if !self.tabs.is_empty() {
+                    self.active = if self.active == 0 {
+                        self.tabs.len() - 1
+                    } else {
+                        self.active - 1
+                    };
+                }
+            }
+            BuiltinCommand::ToggleSplitView => {
+                self.split_view = !self.split_view;
+            }
+            BuiltinCommand::ToggleMinimap => {
+                self.config.editor.show_minimap = !self.config.editor.show_minimap;
+                self.save_config();
+            }
+            BuiltinCommand::ToggleSpellcheck => {
+                self.config.spellcheck.enabled = !self.config.spellcheck.enabled;
+                self.save_config();
+            }
+            BuiltinCommand::ToggleWordWrap => {
+                self.config.editor.word_wrap = !self.config.editor.word_wrap;
+                self.save_config();
+            }
+            BuiltinCommand::ToggleLineNumbers => {
+                self.config.editor.show_line_numbers = !self.config.editor.show_line_numbers;
+                self.save_config();
+            }
+            BuiltinCommand::OpenSettings => {
+                self.settings_open = true;
+            }
+            BuiltinCommand::OpenFind => {
+                self.find_open = true;
+                self.focus_find = true;
+            }
+            BuiltinCommand::OpenPalette => {
+                // Self-referential entry — leaves the palette open as it was.
+                self.palette_open = true;
+                self.focus_palette = true;
+            }
+            BuiltinCommand::CycleTheme => {
+                let names = scribe_core::theme::Theme::builtin_names();
+                if !names.is_empty() {
+                    let cur = &self.config.appearance.theme;
+                    let idx = names.iter().position(|n| *n == cur.as_str()).unwrap_or(0);
+                    let next = names[(idx + 1) % names.len()].to_string();
+                    self.config.appearance.theme = next.clone();
+                    self.save_config();
+                    self.status = format!("theme: {next}");
+                }
+            }
+            BuiltinCommand::StartLsp => self.start_lsp_for_active(),
+        }
+    }
+
     fn open_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new().pick_file() {
             match EditorTab::from_path(path.clone()) {
@@ -1932,6 +2015,139 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
     ShortcutEntry {
         chord: "Esc",
         action: "Close find / palette / cheatsheet / completion popup",
+    },
+];
+
+// ---- Built-in command palette registry (F-004) ----
+//
+// Every editor action a user can take without writing a plugin. Each entry
+// is exposed in the Ctrl+Shift+P palette so the editor is self-discoverable
+// on first launch (the old "plugin only" palette showed nothing on a fresh
+// install). The shortcut column displays the key chord when one is wired.
+// Invocation routes through `execute_builtin` (below) so the palette and
+// the keyboard chord produce identical state changes.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinCommand {
+    NewFile,
+    OpenFile,
+    OpenFolder,
+    Save,
+    CloseActiveTab,
+    CloseAllTabs,
+    CycleTabNext,
+    CycleTabPrev,
+    ToggleSplitView,
+    ToggleMinimap,
+    ToggleSpellcheck,
+    ToggleWordWrap,
+    ToggleLineNumbers,
+    OpenSettings,
+    OpenFind,
+    OpenPalette,
+    CycleTheme,
+    StartLsp,
+}
+
+pub(crate) struct BuiltinEntry {
+    pub label: &'static str,
+    pub shortcut: &'static str,
+    pub action: BuiltinCommand,
+}
+
+/// The full registry, alphabetised by label so the palette is stable across
+/// launches. Add new editor actions HERE so the palette stays the canonical
+/// self-discovery surface.
+pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
+    BuiltinEntry {
+        label: "Close active tab",
+        shortcut: "",
+        action: BuiltinCommand::CloseActiveTab,
+    },
+    BuiltinEntry {
+        label: "Close all tabs",
+        shortcut: "",
+        action: BuiltinCommand::CloseAllTabs,
+    },
+    BuiltinEntry {
+        label: "Cycle theme",
+        shortcut: "",
+        action: BuiltinCommand::CycleTheme,
+    },
+    BuiltinEntry {
+        label: "Find in buffer",
+        shortcut: "Ctrl+F",
+        action: BuiltinCommand::OpenFind,
+    },
+    BuiltinEntry {
+        label: "New file",
+        shortcut: "Ctrl+N",
+        action: BuiltinCommand::NewFile,
+    },
+    BuiltinEntry {
+        label: "Next tab",
+        shortcut: "",
+        action: BuiltinCommand::CycleTabNext,
+    },
+    BuiltinEntry {
+        label: "Open file…",
+        shortcut: "Ctrl+O",
+        action: BuiltinCommand::OpenFile,
+    },
+    BuiltinEntry {
+        label: "Open folder…",
+        shortcut: "",
+        action: BuiltinCommand::OpenFolder,
+    },
+    BuiltinEntry {
+        label: "Open settings",
+        shortcut: "",
+        action: BuiltinCommand::OpenSettings,
+    },
+    BuiltinEntry {
+        label: "Previous tab",
+        shortcut: "",
+        action: BuiltinCommand::CycleTabPrev,
+    },
+    BuiltinEntry {
+        label: "Save",
+        shortcut: "Ctrl+S",
+        action: BuiltinCommand::Save,
+    },
+    BuiltinEntry {
+        label: "Show command palette",
+        shortcut: "Ctrl+Shift+P",
+        action: BuiltinCommand::OpenPalette,
+    },
+    BuiltinEntry {
+        label: "Start language server for current file",
+        shortcut: "",
+        action: BuiltinCommand::StartLsp,
+    },
+    BuiltinEntry {
+        label: "Toggle line numbers",
+        shortcut: "",
+        action: BuiltinCommand::ToggleLineNumbers,
+    },
+    BuiltinEntry {
+        label: "Toggle minimap",
+        shortcut: "",
+        action: BuiltinCommand::ToggleMinimap,
+    },
+    BuiltinEntry {
+        label: "Toggle spellcheck",
+        shortcut: "",
+        action: BuiltinCommand::ToggleSpellcheck,
+    },
+    BuiltinEntry {
+        label: "Toggle split view",
+        shortcut: "",
+        action: BuiltinCommand::ToggleSplitView,
+    },
+    BuiltinEntry {
+        label: "Toggle word wrap",
+        shortcut: "",
+        action: BuiltinCommand::ToggleWordWrap,
     },
 ];
 
@@ -2821,7 +3037,16 @@ impl ScribeApp {
             });
         }
 
-        // ---- Command palette (plugin + future builtin commands) ----
+        // ---- Command palette (built-in + plugin commands) ----
+        //
+        // F-004 fix from docs/audits/overlooked-surfaces-2026-05-29.md:
+        // the palette previously surfaced only plugin commands. On a fresh
+        // install (zero plugins loaded), opening Ctrl+Shift+P showed
+        // "no plugin commands yet" — the editor's primary self-discovery
+        // surface was empty. Now every built-in editor action is listed
+        // alphabetically alongside plugin commands and the fuzzy filter
+        // searches both.
+        let mut run_builtin: Option<BuiltinCommand> = None;
         if self.palette_open {
             egui::Window::new(RichText::new("⌘ command palette").color(accent).monospace())
                 .collapsible(false)
@@ -2834,32 +3059,54 @@ impl ScribeApp {
                         self.focus_palette = false;
                     }
                     let q = self.palette_query.to_lowercase();
-                    egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-                        let mut any = false;
-                        for c in &self.plugin_cmds {
-                            if q.is_empty()
-                                || c.label.to_lowercase().contains(&q)
-                                || c.id.contains(&q)
-                            {
-                                any = true;
-                                if ui
-                                    .selectable_label(false, format!("{}  ·  {}", c.label, c.plugin_id))
-                                    .clicked()
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            let mut any = false;
+                            // Built-in commands first — universally available even
+                            // with zero plugins.
+                            for cmd in BUILTIN_COMMANDS {
+                                let label = cmd.label;
+                                let shortcut = cmd.shortcut;
+                                if q.is_empty()
+                                    || label.to_lowercase().contains(&q)
+                                    || shortcut.to_lowercase().contains(&q)
                                 {
-                                    run_cmd = Some(c.id.clone());
+                                    any = true;
+                                    let display = if shortcut.is_empty() {
+                                        label.to_string()
+                                    } else {
+                                        format!("{label}  ·  {shortcut}")
+                                    };
+                                    if ui.selectable_label(false, display).clicked() {
+                                        run_builtin = Some(cmd.action);
+                                    }
                                 }
                             }
-                        }
-                        if self.plugin_cmds.is_empty() {
-                            ui.label(
-                                RichText::new("no plugin commands yet — drop a mod into the plugins dir (see PLUGINS.md)")
-                                    .color(muted)
-                                    .small(),
-                            );
-                        } else if !any {
-                            ui.label(RichText::new("no match").color(muted).small());
-                        }
-                    });
+                            if !self.plugin_cmds.is_empty() {
+                                ui.separator();
+                            }
+                            for c in &self.plugin_cmds {
+                                if q.is_empty()
+                                    || c.label.to_lowercase().contains(&q)
+                                    || c.id.contains(&q)
+                                {
+                                    any = true;
+                                    if ui
+                                        .selectable_label(
+                                            false,
+                                            format!("{}  ·  {}", c.label, c.plugin_id),
+                                        )
+                                        .clicked()
+                                    {
+                                        run_cmd = Some(c.id.clone());
+                                    }
+                                }
+                            }
+                            if !any {
+                                ui.label(RichText::new("no match").color(muted).small());
+                            }
+                        });
                 });
         }
 
@@ -3620,6 +3867,10 @@ impl ScribeApp {
         }
         if let Some(cmd) = run_cmd {
             self.run_plugin_command(&cmd);
+            self.palette_open = false;
+        }
+        if let Some(builtin) = run_builtin {
+            self.execute_builtin(builtin);
             self.palette_open = false;
         }
         if save_cfg {
@@ -4760,6 +5011,85 @@ def";
                 .unwrap_or("")
                 .contains("changed on disk"),
             "toast should warn about external change"
+        );
+    }
+
+    /// F-004 sanity: BUILTIN_COMMANDS is non-empty and every entry's label
+    /// is unique (no two entries collide in the palette).
+    #[test]
+    fn builtin_commands_registry_is_populated_and_unique() {
+        assert!(!BUILTIN_COMMANDS.is_empty(), "registry must be populated");
+        let mut labels: Vec<&'static str> = BUILTIN_COMMANDS.iter().map(|e| e.label).collect();
+        labels.sort_unstable();
+        let unique_len = labels
+            .iter()
+            .fold(Vec::<&'static str>::new(), |mut acc, l| {
+                if !acc.last().is_some_and(|p| *p == *l) {
+                    acc.push(l);
+                }
+                acc
+            })
+            .len();
+        assert_eq!(
+            labels.len(),
+            unique_len,
+            "duplicate command label in registry"
+        );
+    }
+
+    /// F-004 sanity: every BuiltinCommand variant the registry references is
+    /// dispatchable. We assert this by running execute_builtin on each entry
+    /// and confirming it doesn't panic.
+    #[test]
+    fn every_builtin_command_dispatches_without_panic() {
+        let mut app = ScribeApp::new_test(Config::default());
+        for entry in BUILTIN_COMMANDS {
+            // The three rfd-touching variants would either hang the test
+            // runner waiting for user input (Linux/Windows) or panic in
+            // rfd's macOS backend (no NSApplication main thread on CI):
+            //   - OpenFile / OpenFolder call rfd::FileDialog directly.
+            //   - Save falls through to save_as → rfd::FileDialog when the
+            //     active buffer has no path. After CloseAllTabs in this
+            //     same loop the active tab IS a pathless scratch, so the
+            //     fall-through fires. Easier to skip than to keep the
+            //     fixture path alive across CloseAllTabs side-effects.
+            match entry.action {
+                BuiltinCommand::OpenFile | BuiltinCommand::OpenFolder | BuiltinCommand::Save => {
+                    continue
+                }
+                _ => app.execute_builtin(entry.action),
+            }
+        }
+    }
+
+    /// F-004: ToggleWordWrap from the palette flips the config and persists
+    /// the change in-memory.
+    #[test]
+    fn execute_builtin_toggle_word_wrap_flips_config() {
+        let mut app = ScribeApp::new_test(Config::default());
+        let before = app.config.editor.word_wrap;
+        app.execute_builtin(BuiltinCommand::ToggleWordWrap);
+        assert_eq!(app.config.editor.word_wrap, !before);
+    }
+
+    /// F-004: CycleTheme advances through the built-in theme list.
+    #[test]
+    fn execute_builtin_cycle_theme_advances() {
+        let mut app = ScribeApp::new_test(Config::default());
+        let names = scribe_core::theme::Theme::builtin_names();
+        if names.len() < 2 {
+            return; // nothing to cycle
+        }
+        let before = app.config.appearance.theme.clone();
+        app.execute_builtin(BuiltinCommand::CycleTheme);
+        let after = app.config.appearance.theme.clone();
+        assert_ne!(
+            before, after,
+            "CycleTheme should change the active theme name"
+        );
+        assert!(
+            names.iter().any(|n| *n == after),
+            "post-cycle theme must be a known built-in"
         );
     }
 
