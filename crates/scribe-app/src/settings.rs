@@ -62,6 +62,30 @@ fn row_visible(q: &str, label: &str) -> bool {
     q.is_empty() || label.to_lowercase().contains(q)
 }
 
+/// F-037 — a per-setting "restore default" affordance. Renders a small ↺
+/// button that is enabled only when `cur != def`; clicking it resets the
+/// field and returns `true` so the caller marks settings dirty. Placed at the
+/// end of a setting's row, it gives every scalar setting its own one-click
+/// revert without a global "reset everything" sledgehammer.
+fn reset_to_default<T: PartialEq + Clone>(ui: &mut egui::Ui, cur: &mut T, def: &T) -> bool {
+    let differs = *cur != *def;
+    let resp = ui
+        .add_enabled(
+            differs,
+            egui::Button::new(egui::RichText::new("↺").small()).frame(false),
+        )
+        .on_hover_text(if differs {
+            "Restore default"
+        } else {
+            "Already default"
+        });
+    if differs && resp.clicked() {
+        *cur = def.clone();
+        return true;
+    }
+    false
+}
+
 /// Human label for a toolbar action id (`"sep"` → separator).
 fn action_label(id: &str) -> String {
     if id == "sep" {
@@ -146,6 +170,9 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
 fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -> bool {
     let mut changed = false;
     let space = |ui: &mut egui::Ui| ui.add_space(10.0);
+    // F-037 — the default config, used by `reset_to_default` for every
+    // per-setting ↺ revert button. Cheap to construct once per render.
+    let def = Config::default();
 
     // ---- Appearance ----
     if section_visible(
@@ -178,6 +205,8 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                             }
                         }
                     });
+                changed |=
+                    reset_to_default(ui, &mut config.appearance.theme, &def.appearance.theme);
             });
             if row_visible(q, "theme custom name") {
                 changed |= ui
@@ -209,47 +238,75 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             }
         }
         if row_visible(q, "follow os dark light") {
-            changed |= ui
-                .checkbox(
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.appearance.follow_os_theme,
+                        "Follow OS dark/light",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
                     &mut config.appearance.follow_os_theme,
-                    "Follow OS dark/light",
-                )
-                .changed();
+                    &def.appearance.follow_os_theme,
+                );
+            });
         }
         if row_visible(q, "frameless window") {
-            changed |= ui
-                .checkbox(
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.appearance.frameless,
+                        "Frameless window (restart to apply)",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
                     &mut config.appearance.frameless,
-                    "Frameless window (restart to apply)",
-                )
-                .changed();
+                    &def.appearance.frameless,
+                );
+            });
         }
         if row_visible(q, "toolbar icons words phosphor") {
-            changed |= ui
-                .checkbox(
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.appearance.toolbar_icons,
+                        "Toolbar shows icons (Phosphor Thin) instead of words",
+                    )
+                    .on_hover_text(
+                        "When off, the quick-access toolbar renders text labels (the default). \
+                         When on, items render as Phosphor Thin icon glyphs — compact, brand-aligned.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
                     &mut config.appearance.toolbar_icons,
-                    "Toolbar shows icons (Phosphor Thin) instead of words",
-                )
-                .on_hover_text(
-                    "When off, the quick-access toolbar renders text labels (the default). \
-                     When on, items render as Phosphor Thin icon glyphs — compact, brand-aligned.",
-                )
-                .changed();
+                    &def.appearance.toolbar_icons,
+                );
+            });
         }
         if row_visible(q, "kanji jp glyph japanese instrument label") {
-            changed |= ui
-                .checkbox(
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.appearance.jp_glyph_labels,
+                        "Toolbar — show kanji instrument labels (additive)",
+                    )
+                    .on_hover_text(
+                        "Adds a small, dim kanji to each toolbar action whose canonical \
+                         Japanese term is verified (e.g. New → 新, Save → 保, Find → 検). \
+                         English-redundant — the kanji never replaces the label. \
+                         Actions whose canonical kanji is uncertain stay English-only \
+                         (Folklore-Consultant gate, DECISION-2026-005).",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
                     &mut config.appearance.jp_glyph_labels,
-                    "Toolbar — show kanji instrument labels (additive)",
-                )
-                .on_hover_text(
-                    "Adds a small, dim kanji to each toolbar action whose canonical \
-                     Japanese term is verified (e.g. New → 新, Save → 保, Find → 検). \
-                     English-redundant — the kanji never replaces the label. \
-                     Actions whose canonical kanji is uncertain stay English-only \
-                     (Folklore-Consultant gate, DECISION-2026-005).",
-                )
-                .changed();
+                    &def.appearance.jp_glyph_labels,
+                );
+            });
         }
         space(ui);
     }
@@ -259,16 +316,25 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
     if section_visible(sel, q, "Fonts", &["size", "line height"]) {
         ui.heading("Fonts");
         if row_visible(q, "editor size") {
-            changed |= ui
-                .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0).text("size"))
-                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0).text("size"))
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.fonts.editor_size, &def.fonts.editor_size);
+            });
         }
         if row_visible(q, "line height") {
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5).text("line height"),
-                )
-                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5)
+                            .text("line height"),
+                    )
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.fonts.line_height, &def.fonts.line_height);
+            });
         }
         space(ui);
     }
@@ -289,29 +355,58 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
     ) {
         ui.heading("Editor");
         if row_visible(q, "tab width") {
-            changed |= ui
-                .add(egui::Slider::new(&mut config.editor.tab_width, 1..=8).text("tab width"))
-                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(egui::Slider::new(&mut config.editor.tab_width, 1..=8).text("tab width"))
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.editor.tab_width, &def.editor.tab_width);
+            });
         }
         if row_visible(q, "insert spaces") {
-            changed |= ui
-                .checkbox(&mut config.editor.insert_spaces, "Insert spaces (Tab key)")
-                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut config.editor.insert_spaces, "Insert spaces (Tab key)")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.insert_spaces,
+                    &def.editor.insert_spaces,
+                );
+            });
         }
         if row_visible(q, "line numbers") {
-            changed |= ui
-                .checkbox(&mut config.editor.show_line_numbers, "Line numbers")
-                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut config.editor.show_line_numbers, "Line numbers")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.show_line_numbers,
+                    &def.editor.show_line_numbers,
+                );
+            });
         }
         if row_visible(q, "word wrap") {
-            changed |= ui
-                .checkbox(&mut config.editor.word_wrap, "Word wrap")
-                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut config.editor.word_wrap, "Word wrap")
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.editor.word_wrap, &def.editor.word_wrap);
+            });
         }
         if row_visible(q, "minimap") {
-            changed |= ui
-                .checkbox(&mut config.editor.show_minimap, "Minimap")
-                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut config.editor.show_minimap, "Minimap")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.show_minimap,
+                    &def.editor.show_minimap,
+                );
+            });
         }
         if row_visible(q, "tab bar position top bottom left right") {
             // T18.4: position the open-tab strip relative to the editor.
@@ -342,30 +437,49 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                             }
                         }
                     });
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.tab_bar_position,
+                    &def.editor.tab_bar_position,
+                );
             });
         }
         if row_visible(q, "restore session") {
-            changed |= ui
-                .checkbox(&mut config.editor.restore_session, "Restore session")
-                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut config.editor.restore_session, "Restore session")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.restore_session,
+                    &def.editor.restore_session,
+                );
+            });
         }
         if row_visible(q, "multi-note grid panes split editor central") {
             // Phase 18 T18.2 — toggle the multi-note grid. When ON, the
             // central editor surface renders every open tab as a movable,
             // resizable pane via egui_tiles. The single-pane code path
             // is unchanged for users who don't opt in.
-            changed |= ui
-                .checkbox(
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.editor.grid_enabled,
+                        "Multi-note grid (experimental)",
+                    )
+                    .on_hover_text(
+                        "Render every open tab as a movable / resizable pane in the central \
+                         editor. Drag tabs between panes to rearrange; drag the splitter to resize. \
+                         Cap of 6 panes lands in a follow-up; for now use the close ✕ on each pane \
+                         to dismiss.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
                     &mut config.editor.grid_enabled,
-                    "Multi-note grid (experimental)",
-                )
-                .on_hover_text(
-                    "Render every open tab as a movable / resizable pane in the central \
-                     editor. Drag tabs between panes to rearrange; drag the splitter to resize. \
-                     Cap of 6 panes lands in a follow-up; for now use the close ✕ on each pane \
-                     to dismiss.",
-                )
-                .changed();
+                    &def.editor.grid_enabled,
+                );
+            });
         }
         space(ui);
     }
@@ -386,31 +500,60 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ],
     ) {
         ui.heading("CRT effect");
-        changed |= ui
-            .checkbox(&mut config.effects.crt_enabled, "Enable CRT post-process")
-            .changed();
+        ui.horizontal(|ui| {
+            changed |= ui
+                .checkbox(&mut config.effects.crt_enabled, "Enable CRT post-process")
+                .changed();
+            changed |= reset_to_default(
+                ui,
+                &mut config.effects.crt_enabled,
+                &def.effects.crt_enabled,
+            );
+        });
         ui.add_enabled_ui(config.effects.crt_enabled, |ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut config.effects.scanline, 0.0..=1.0).text("scanline"))
-                .changed();
-            changed |= ui
-                .add(egui::Slider::new(&mut config.effects.phosphor_glow, 0.0..=1.0).text("glow"))
-                .changed();
-            changed |= ui
-                .add(egui::Slider::new(&mut config.effects.bloom, 0.0..=1.0).text("bloom"))
-                .changed();
-            changed |= ui
-                .add(egui::Slider::new(&mut config.effects.vignette, 0.0..=1.0).text("vignette"))
-                .changed();
-            changed |= ui
-                .add(egui::Slider::new(&mut config.effects.curvature, 0.0..=1.0).text("curvature"))
-                .changed();
-            changed |= ui
-                .checkbox(
+            for (label, cur, dflt) in [
+                (
+                    "scanline",
+                    &mut config.effects.scanline,
+                    def.effects.scanline,
+                ),
+                (
+                    "glow",
+                    &mut config.effects.phosphor_glow,
+                    def.effects.phosphor_glow,
+                ),
+                ("bloom", &mut config.effects.bloom, def.effects.bloom),
+                (
+                    "vignette",
+                    &mut config.effects.vignette,
+                    def.effects.vignette,
+                ),
+                (
+                    "curvature",
+                    &mut config.effects.curvature,
+                    def.effects.curvature,
+                ),
+            ] {
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(cur, 0.0..=1.0).text(label))
+                        .changed();
+                    changed |= reset_to_default(ui, cur, &dflt);
+                });
+            }
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.effects.respect_reduced_motion,
+                        "Respect reduced motion",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
                     &mut config.effects.respect_reduced_motion,
-                    "Respect reduced motion",
-                )
-                .changed();
+                    &def.effects.respect_reduced_motion,
+                );
+            });
         });
         space(ui);
     }
@@ -433,49 +576,113 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.heading("Motion");
         // Master OFF by default — calm-surface principle (DECISION-2026-005);
         // animation is opt-in so idle frames cost the same as plain egui.
-        changed |= ui
-            .checkbox(&mut config.motion.enabled, "Enable motion (master)")
-            .on_hover_text(
-                "When off, every animation is suppressed regardless of the per-effect \
-                 toggles below — idle frames cost the same as plain egui.",
-            )
-            .changed();
+        ui.horizontal(|ui| {
+            changed |= ui
+                .checkbox(&mut config.motion.enabled, "Enable motion (master)")
+                .on_hover_text(
+                    "When off, every animation is suppressed regardless of the per-effect \
+                     toggles below — idle frames cost the same as plain egui.",
+                )
+                .changed();
+            changed |= reset_to_default(ui, &mut config.motion.enabled, &def.motion.enabled);
+        });
         ui.add_enabled_ui(config.motion.enabled, |ui| {
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut config.motion.intensity, 0.0..=1.0)
-                        .text("Global intensity"),
-                )
-                .changed();
-            changed |= ui
-                .checkbox(
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut config.motion.intensity, 0.0..=1.0)
+                            .text("Global intensity"),
+                    )
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.motion.intensity, &def.motion.intensity);
+            });
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.motion.respect_reduced_motion,
+                        "Respect OS reduced-motion",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
                     &mut config.motion.respect_reduced_motion,
-                    "Respect OS reduced-motion",
-                )
-                .changed();
-            changed |= ui
-                .checkbox(
+                    &def.motion.respect_reduced_motion,
+                );
+            });
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.motion.respect_battery,
+                        "Disable on battery (laptop power-save)",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
                     &mut config.motion.respect_battery,
-                    "Disable on battery (laptop power-save)",
-                )
-                .changed();
+                    &def.motion.respect_battery,
+                );
+            });
             ui.add_space(4.0);
             ui.label(egui::RichText::new("Per-effect catalog").weak().small());
-            for (label, field) in [
-                ("Hover lift", &mut config.motion.hover),
-                ("Focus ring pulse", &mut config.motion.focus_ring),
-                ("Panel slide", &mut config.motion.panel_slide),
-                ("Tab underline", &mut config.motion.tab_underline),
-                ("Palette lift-in", &mut config.motion.palette_lift),
-                ("Cursor blink", &mut config.motion.cursor_blink),
-                ("Status-bar breathe", &mut config.motion.status_breathe),
-                ("Toast slide", &mut config.motion.toast),
-                ("Error glitch flash", &mut config.motion.error_glitch),
-                ("ASCII boot splash", &mut config.motion.ascii_boot_splash),
-                ("Idle pulse", &mut config.motion.idle_pulse),
-                ("Transition fade", &mut config.motion.transition_fade),
+            for (label, field, dflt) in [
+                ("Hover lift", &mut config.motion.hover, def.motion.hover),
+                (
+                    "Focus ring pulse",
+                    &mut config.motion.focus_ring,
+                    def.motion.focus_ring,
+                ),
+                (
+                    "Panel slide",
+                    &mut config.motion.panel_slide,
+                    def.motion.panel_slide,
+                ),
+                (
+                    "Tab underline",
+                    &mut config.motion.tab_underline,
+                    def.motion.tab_underline,
+                ),
+                (
+                    "Palette lift-in",
+                    &mut config.motion.palette_lift,
+                    def.motion.palette_lift,
+                ),
+                (
+                    "Cursor blink",
+                    &mut config.motion.cursor_blink,
+                    def.motion.cursor_blink,
+                ),
+                (
+                    "Status-bar breathe",
+                    &mut config.motion.status_breathe,
+                    def.motion.status_breathe,
+                ),
+                ("Toast slide", &mut config.motion.toast, def.motion.toast),
+                (
+                    "Error glitch flash",
+                    &mut config.motion.error_glitch,
+                    def.motion.error_glitch,
+                ),
+                (
+                    "ASCII boot splash",
+                    &mut config.motion.ascii_boot_splash,
+                    def.motion.ascii_boot_splash,
+                ),
+                (
+                    "Idle pulse",
+                    &mut config.motion.idle_pulse,
+                    def.motion.idle_pulse,
+                ),
+                (
+                    "Transition fade",
+                    &mut config.motion.transition_fade,
+                    def.motion.transition_fade,
+                ),
             ] {
-                changed |= ui.checkbox(field, label).changed();
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(field, label).changed();
+                    changed |= reset_to_default(ui, field, &dflt);
+                });
             }
         });
         space(ui);
@@ -491,25 +698,39 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.heading("Window");
         // F-035 — always-on-top toggle. Takes effect immediately via the
         // ViewportCommand the app issues when this checkbox flips.
-        changed |= ui
-            .checkbox(&mut config.window.always_on_top, "Always on top")
-            .on_hover_text("Keep the SCR1B3 window above other windows.")
-            .changed();
+        ui.horizontal(|ui| {
+            changed |= ui
+                .checkbox(&mut config.window.always_on_top, "Always on top")
+                .on_hover_text("Keep the SCR1B3 window above other windows.")
+                .changed();
+            changed |= reset_to_default(
+                ui,
+                &mut config.window.always_on_top,
+                &def.window.always_on_top,
+            );
+        });
         ui.add_space(4.0);
         ui.heading("Window (transparency / glass)");
         // Master on/off switch for the whole transparency system. Off by default:
         // a normal opaque window is fast and never leaves a DWM ghost on close.
-        changed |= ui
-            .checkbox(
+        ui.horizontal(|ui| {
+            changed |= ui
+                .checkbox(
+                    &mut config.window.transparency_enabled,
+                    "Enable window transparency (master)",
+                )
+                .on_hover_text(
+                    "Master switch. When off, the window is fully opaque regardless of \
+                     the mode below. Turn on to use transparent / glass / mica / vibrancy. \
+                     Restart to apply the surface change.",
+                )
+                .changed();
+            changed |= reset_to_default(
+                ui,
                 &mut config.window.transparency_enabled,
-                "Enable window transparency (master)",
-            )
-            .on_hover_text(
-                "Master switch. When off, the window is fully opaque regardless of \
-                 the mode below. Turn on to use transparent / glass / mica / vibrancy. \
-                 Restart to apply the surface change.",
-            )
-            .changed();
+                &def.window.transparency_enabled,
+            );
+        });
         ui.add_enabled_ui(config.window.transparency_enabled, |ui| {
             let wmodes = [
                 (WindowMode::Opaque, "opaque"),
@@ -518,41 +739,57 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 (WindowMode::Mica, "mica (Win11)"),
                 (WindowMode::Vibrancy, "vibrancy (macOS)"),
             ];
-            egui::ComboBox::from_label("mode (restart to apply blur)")
-                .selected_text(
-                    wmodes
-                        .iter()
-                        .find(|(m, _)| *m == config.window.mode)
-                        .map(|(_, s)| *s)
-                        .unwrap_or("opaque"),
-                )
-                .show_ui(ui, |ui| {
-                    for (m, label) in wmodes {
-                        if ui
-                            .selectable_value(&mut config.window.mode, m, label)
-                            .changed()
-                        {
-                            changed = true;
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_label("mode (restart to apply blur)")
+                    .selected_text(
+                        wmodes
+                            .iter()
+                            .find(|(m, _)| *m == config.window.mode)
+                            .map(|(_, s)| *s)
+                            .unwrap_or("opaque"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (m, label) in wmodes {
+                            if ui
+                                .selectable_value(&mut config.window.mode, m, label)
+                                .changed()
+                            {
+                                changed = true;
+                            }
                         }
-                    }
-                });
-            ui.add_enabled_ui(config.window.mode.is_translucent(), |ui| {
-                changed |= ui
-                    .add(egui::Slider::new(&mut config.window.opacity, 0.30..=1.0).text("opacity"))
-                    .changed();
+                    });
+                changed |= reset_to_default(ui, &mut config.window.mode, &def.window.mode);
             });
-            changed |= ui
-                .horizontal(|ui| {
-                    ui.label("tint");
-                    ui.text_edit_singleline(&mut config.window.tint).changed()
-                })
-                .inner;
-            changed |= ui
-                .add(
-                    egui::Slider::new(&mut config.window.tint_strength, 0.0..=1.0)
-                        .text("tint strength"),
-                )
-                .changed();
+            ui.add_enabled_ui(config.window.mode.is_translucent(), |ui| {
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(&mut config.window.opacity, 0.30..=1.0)
+                                .text("opacity"),
+                        )
+                        .changed();
+                    changed |=
+                        reset_to_default(ui, &mut config.window.opacity, &def.window.opacity);
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.label("tint");
+                changed |= ui.text_edit_singleline(&mut config.window.tint).changed();
+                changed |= reset_to_default(ui, &mut config.window.tint, &def.window.tint);
+            });
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut config.window.tint_strength, 0.0..=1.0)
+                            .text("tint strength"),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.window.tint_strength,
+                    &def.window.tint_strength,
+                );
+            });
         }); // end add_enabled_ui(transparency_enabled)
         space(ui);
     }
@@ -571,29 +808,58 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ],
     ) {
         ui.heading("Spellcheck (offline)");
-        changed |= ui
-            .checkbox(&mut config.spellcheck.enabled, "Enable")
-            .changed();
+        ui.horizontal(|ui| {
+            changed |= ui
+                .checkbox(&mut config.spellcheck.enabled, "Enable")
+                .changed();
+            changed |=
+                reset_to_default(ui, &mut config.spellcheck.enabled, &def.spellcheck.enabled);
+        });
         ui.add_enabled_ui(config.spellcheck.enabled, |ui| {
-            changed |= ui
-                .horizontal(|ui| {
-                    ui.label("Language");
-                    ui.text_edit_singleline(&mut config.spellcheck.language)
-                        .changed()
-                })
-                .inner;
-            changed |= ui
-                .checkbox(&mut config.spellcheck.check_comments, "Check comments")
-                .changed();
-            changed |= ui
-                .checkbox(&mut config.spellcheck.check_strings, "Check strings")
-                .changed();
-            changed |= ui
-                .checkbox(
+            ui.horizontal(|ui| {
+                ui.label("Language");
+                changed |= ui
+                    .text_edit_singleline(&mut config.spellcheck.language)
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.spellcheck.language,
+                    &def.spellcheck.language,
+                );
+            });
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut config.spellcheck.check_comments, "Check comments")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.spellcheck.check_comments,
+                    &def.spellcheck.check_comments,
+                );
+            });
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut config.spellcheck.check_strings, "Check strings")
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.spellcheck.check_strings,
+                    &def.spellcheck.check_strings,
+                );
+            });
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.spellcheck.check_identifiers,
+                        "Check identifiers",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
                     &mut config.spellcheck.check_identifiers,
-                    "Check identifiers",
-                )
-                .changed();
+                    &def.spellcheck.check_identifiers,
+                );
+            });
         });
         space(ui);
     }
@@ -607,33 +873,55 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             (UpdateMode::Manual, "manual"),
             (UpdateMode::Auto, "auto"),
         ];
-        egui::ComboBox::from_label("mode")
-            .selected_text(
-                modes
-                    .iter()
-                    .find(|(m, _)| *m == config.updates.mode)
-                    .map(|(_, s)| *s)
-                    .unwrap_or("notify"),
-            )
-            .show_ui(ui, |ui| {
-                for (m, label) in modes {
-                    if ui
-                        .selectable_value(&mut config.updates.mode, m, label)
-                        .changed()
-                    {
-                        changed = true;
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_label("mode")
+                .selected_text(
+                    modes
+                        .iter()
+                        .find(|(m, _)| *m == config.updates.mode)
+                        .map(|(_, s)| *s)
+                        .unwrap_or("notify"),
+                )
+                .show_ui(ui, |ui| {
+                    for (m, label) in modes {
+                        if ui
+                            .selectable_value(&mut config.updates.mode, m, label)
+                            .changed()
+                        {
+                            changed = true;
+                        }
                     }
-                }
+                });
+            changed |= reset_to_default(ui, &mut config.updates.mode, &def.updates.mode);
+        });
+        if row_visible(q, "check interval hours") {
+            ui.horizontal(|ui| {
+                ui.label("Check interval (hours)");
+                changed |= ui
+                    .add(egui::Slider::new(
+                        &mut config.updates.check_interval_hours,
+                        1..=168,
+                    ))
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.updates.check_interval_hours,
+                    &def.updates.check_interval_hours,
+                );
             });
+        }
         space(ui);
     }
 
     // ---- Plugins ----
     if section_visible(sel, q, "Plugins", &["plugin", "mod"]) {
         ui.heading("Plugins");
-        changed |= ui
-            .checkbox(&mut config.plugins.enabled, "Enable plugin/mod system")
-            .changed();
+        ui.horizontal(|ui| {
+            changed |= ui
+                .checkbox(&mut config.plugins.enabled, "Enable plugin/mod system")
+                .changed();
+            changed |= reset_to_default(ui, &mut config.plugins.enabled, &def.plugins.enabled);
+        });
         ui.label(
             egui::RichText::new("Drop mods into the plugins dir — see PLUGINS.md")
                 .weak()
@@ -695,25 +983,46 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     // are clamped at render time so a malformed user toml can't produce a
     // 4000-px-tall toolbar.
     ui.label(egui::RichText::new("Sizing").strong().small());
-    changed |= ui
-        .add(
-            egui::Slider::new(&mut config.toolbar.button_size_px, 16.0..=64.0)
-                .text("Button height (px)"),
-        )
-        .changed();
-    changed |= ui
-        .add(
-            egui::Slider::new(&mut config.toolbar.button_spacing_px, 0.0..=24.0)
-                .text("Button spacing (px)"),
-        )
-        .changed();
-    changed |= ui
-        .add(
-            egui::Slider::new(&mut config.toolbar.icon_size_px, 10.0..=32.0)
-                .text("Icon glyph size (px)"),
-        )
-        .on_hover_text("Active only when 'Toolbar shows icons' (Appearance) is on.")
-        .changed();
+    ui.horizontal(|ui| {
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut config.toolbar.button_size_px, 16.0..=64.0)
+                    .text("Button height (px)"),
+            )
+            .changed();
+        changed |= reset_to_default(
+            ui,
+            &mut config.toolbar.button_size_px,
+            &ToolbarConfig::default_button_size(),
+        );
+    });
+    ui.horizontal(|ui| {
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut config.toolbar.button_spacing_px, 0.0..=24.0)
+                    .text("Button spacing (px)"),
+            )
+            .changed();
+        changed |= reset_to_default(
+            ui,
+            &mut config.toolbar.button_spacing_px,
+            &ToolbarConfig::default_button_spacing(),
+        );
+    });
+    ui.horizontal(|ui| {
+        changed |= ui
+            .add(
+                egui::Slider::new(&mut config.toolbar.icon_size_px, 10.0..=32.0)
+                    .text("Icon glyph size (px)"),
+            )
+            .on_hover_text("Active only when 'Toolbar shows icons' (Appearance) is on.")
+            .changed();
+        changed |= reset_to_default(
+            ui,
+            &mut config.toolbar.icon_size_px,
+            &ToolbarConfig::default_icon_size(),
+        );
+    });
     if ui.small_button("Reset sizing to defaults").clicked() {
         config.toolbar.button_size_px = scribe_core::config::ToolbarConfig::default_button_size();
         config.toolbar.button_spacing_px =
