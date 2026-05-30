@@ -158,6 +158,15 @@ struct EditorTab {
     /// "keep this open" by Close Others / Close Right helpers. Default
     /// false; toggled via the tab's right-click context menu.
     pinned: bool,
+    /// F-022 from docs/audits/overlooked-surfaces-2026-05-29.md: per-tab
+    /// disk mtime captured at open / save time. Used by the per-frame
+    /// poll to detect external edits (git pull, hot-reload tools, etc.)
+    /// and either silently reload (if the tab is clean) or warn the user
+    /// (if local edits would be clobbered on save).
+    disk_mtime: Option<std::time::SystemTime>,
+    /// The exact text last read from / written to disk. When the buffer
+    /// still matches this, an external change can be silently re-read.
+    disk_text: String,
 }
 
 impl EditorTab {
@@ -167,17 +176,25 @@ impl EditorTab {
             text: String::new(),
             doc_id: crate::grid::DocId(0),
             pinned: false,
+            disk_mtime: None,
+            disk_text: String::new(),
         }
     }
 
     fn from_path(path: PathBuf) -> Result<Self, String> {
         let doc = Document::open(&path).map_err(|e| e.to_string())?;
         let text = doc.text();
+        let disk_mtime = doc
+            .path()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
         Ok(Self {
             doc,
-            text,
+            text: text.clone(),
             doc_id: crate::grid::DocId(0),
             pinned: false,
+            disk_mtime,
+            disk_text: text,
         })
     }
 
@@ -1083,9 +1100,64 @@ impl ScribeApp {
         match self.tabs[active].doc.save() {
             Ok(()) => {
                 self.status = format!("saved {}", self.tabs[active].doc.file_name());
+                // F-022 — refresh the disk fingerprint after a successful
+                // save so the next poll doesn't false-positive.
+                self.tabs[active].disk_text = self.tabs[active].text.clone();
+                if let Some(p) = self.tabs[active].doc.path() {
+                    if let Ok(m) = std::fs::metadata(p).and_then(|m| m.modified()) {
+                        self.tabs[active].disk_mtime = Some(m);
+                    }
+                }
                 self.fire_save_hooks(active);
             }
             Err(e) => self.toast = Some(format!("save failed: {e}")),
+        }
+    }
+
+    /// F-022 — Poll every file-backed tab's mtime. If a tab's disk mtime
+    /// advanced AND the buffer is still clean (text == disk_text), re-read
+    /// the file in place + surface a status toast. If the buffer is dirty,
+    /// flag the user so save doesn't silently clobber their edits.
+    fn poll_external_disk_changes(&mut self) {
+        // Snapshot first so we don't hold &mut self while mutating tabs.
+        let mut to_reload: Vec<usize> = Vec::new();
+        let mut to_warn: Vec<usize> = Vec::new();
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let Some(path) = tab.doc.path() else { continue };
+            let Ok(m) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+                continue;
+            };
+            if Some(m) != tab.disk_mtime {
+                if tab.text == tab.disk_text {
+                    to_reload.push(i);
+                } else {
+                    to_warn.push(i);
+                }
+            }
+        }
+        for i in to_reload {
+            let Some(path) = self.tabs[i].doc.path().map(|p| p.to_path_buf()) else {
+                continue;
+            };
+            if let Ok(fresh) = std::fs::read_to_string(&path) {
+                self.tabs[i].text = fresh.clone();
+                self.tabs[i].doc.set_text(&fresh);
+                self.tabs[i].disk_text = fresh;
+                if let Ok(m) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                    self.tabs[i].disk_mtime = Some(m);
+                }
+                self.status = format!("reloaded {} (external edit)", path.display());
+            }
+        }
+        for i in to_warn {
+            if let Some(name) = self.tabs[i].doc.path().map(|p| p.display().to_string()) {
+                self.toast = Some(format!(
+                    "⚠ {name} changed on disk while you have local edits. Save will overwrite."
+                ));
+                // Don't refresh disk_mtime — keep showing the warning until
+                // the user explicitly saves (which sets a fresh mtime) or
+                // closes/reopens the tab.
+            }
         }
     }
 
@@ -2291,6 +2363,10 @@ impl ScribeApp {
         // (called on settings change OR on eframe::App::save) records the
         // latest position + size. Cheap (one input-read clone).
         self.capture_window_geometry(ctx);
+        // F-022 — poll the disk mtimes of every open file-backed tab. Cheap
+        // when nothing changed (one stat per tab); silent reload when the
+        // buffer is clean; status toast when local edits would be clobbered.
+        self.poll_external_disk_changes();
         // Phase 18 T18.2 — keep the grid in step with the editor.grid_enabled
         // config preference (toggled in Settings or via TOML edit + watcher).
         // This is cheap on the common path (config unchanged + ids already
@@ -4636,6 +4712,55 @@ def";
         app.last_cursor_line_col = Some((1, 1));
         app.join_cursor_line_with_next();
         assert_eq!(app.tabs[0].text, "only");
+    }
+
+    /// F-022 — external edit + clean buffer: silent reload picks up the new
+    /// content. The poller is driven manually here (frame_tick is heavy).
+    #[test]
+    fn external_disk_change_reloads_clean_buffer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, "first").expect("write seed");
+        let mut app = ScribeApp::new_test(Config::default());
+        app.open_path(path.clone());
+        let opened_idx = app.tabs.len() - 1;
+        assert_eq!(app.tabs[opened_idx].text, "first");
+        // Simulate external write — sleep is required because filesystems
+        // typically only track mtime at second resolution.
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        std::fs::write(&path, "second").expect("write update");
+        app.poll_external_disk_changes();
+        assert_eq!(
+            app.tabs[opened_idx].text, "second",
+            "clean buffer reloads from disk silently"
+        );
+    }
+
+    /// F-022 — external edit + dirty buffer: do NOT reload; surface a toast.
+    #[test]
+    fn external_disk_change_warns_when_buffer_dirty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, "first").expect("write seed");
+        let mut app = ScribeApp::new_test(Config::default());
+        app.open_path(path.clone());
+        let opened_idx = app.tabs.len() - 1;
+        // Make local edits.
+        app.tabs[opened_idx].text = "local edits".to_string();
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        std::fs::write(&path, "second").expect("write update");
+        app.poll_external_disk_changes();
+        assert_eq!(
+            app.tabs[opened_idx].text, "local edits",
+            "dirty buffer must NOT be silently overwritten"
+        );
+        assert!(
+            app.toast
+                .as_deref()
+                .unwrap_or("")
+                .contains("changed on disk"),
+            "toast should warn about external change"
+        );
     }
 
     #[test]
