@@ -5,9 +5,9 @@
 //! found as a file path — `scr1b3 --help` opened an empty editor trying to
 //! `open file '--help'`, same for `--version`. Every shell user expects
 //! `--help` to print help and exit. This module fixes that without adding
-//! a third-party arg-parser dep (per
-//! `.s4f3/rules/dependency-management.md` "Prefer stdlib over third-party
-//! when feasible").
+//! a third-party arg-parser dep — stdlib is sufficient for the parser
+//! grammar SCR1B3 needs, and avoiding a dep keeps the supply-chain
+//! surface tight (see CONTRIBUTING.md).
 //!
 //! ## Grammar
 //!
