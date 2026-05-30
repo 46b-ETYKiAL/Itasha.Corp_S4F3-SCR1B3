@@ -1040,9 +1040,9 @@ impl ScribeApp {
             let label = RichText::new(t.title()).color(if selected { accent } else { muted });
             // `click_and_drag` so the same widget services left-click switch,
             // middle-click close, right-click context, and drag-rearrange.
-            let resp = ui.add(egui::SelectableLabel::new(selected, label)).interact(
-                egui::Sense::click_and_drag(),
-            );
+            let resp = ui
+                .add(egui::SelectableLabel::new(selected, label))
+                .interact(egui::Sense::click_and_drag());
             if resp.clicked() {
                 switch_to = Some(i);
             }
@@ -2451,7 +2451,11 @@ impl ScribeApp {
             self.save_config();
             self.status = format!(
                 "multi-note grid: {}",
-                if self.config.editor.grid_enabled { "on" } else { "off" }
+                if self.config.editor.grid_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
             );
         }
         if act.cycle_tab_next && !self.tabs.is_empty() {
@@ -3279,7 +3283,10 @@ mod e2e {
         d.key(&mut app, egui::Key::Backslash, egui::Modifiers::COMMAND);
         assert!(app.config.editor.grid_enabled, "Ctrl+\\\\ turns grid on");
         d.key(&mut app, egui::Key::Backslash, egui::Modifiers::COMMAND);
-        assert!(!app.config.editor.grid_enabled, "Ctrl+\\\\ toggles back off");
+        assert!(
+            !app.config.editor.grid_enabled,
+            "Ctrl+\\\\ toggles back off"
+        );
     }
 
     /// F-006 wave-1: Ctrl+Tab cycles to the next tab; Ctrl+Shift+Tab cycles
@@ -3325,7 +3332,11 @@ mod e2e {
         app.tabs.push(EditorTab::scratch());
         app.tabs.push(EditorTab::scratch());
         app.close_all_tabs();
-        assert_eq!(app.tabs.len(), 1, "close_all_tabs leaves the scratch buffer");
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "close_all_tabs leaves the scratch buffer"
+        );
     }
 
     /// F-001 fix: tab swap preserves the active-tab pointer to the same
