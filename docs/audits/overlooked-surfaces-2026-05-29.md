@@ -273,7 +273,7 @@ posture_verdict: "Editor surface is ~40% complete. Core engine (rope/syntect/tre
 
 | Field | Value |
 |---|---|
-| Surface | The plan-565 / C0PL4ND dossier mentioned a `--screenshot` flag for headless verification. SCR1B3's `main.rs` has no flag parser. |
+| Surface | A sibling terminal-app dossier mentioned a `--screenshot` flag for headless verification. SCR1B3's `main.rs` has no flag parser. |
 | Severity | **P2** — useful for E2E CI smoke testing |
 | Fix | Folds into F-007 (CLI). Add `--screenshot path.png` which runs the egui frame once and dumps the framebuffer. |
 
