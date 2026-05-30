@@ -1152,6 +1152,19 @@ impl ScribeApp {
                 }
             }
             BuiltinCommand::StartLsp => self.start_lsp_for_active(),
+            BuiltinCommand::FoldAll => {
+                if self.active < self.tabs.len() {
+                    let text = self.tabs[self.active].text.clone();
+                    let regions = crate::editor_features::fold_regions(&text);
+                    self.folds = regions.iter().map(|r| r.start_line).collect();
+                    self.fold_view = true;
+                    self.status = format!("folded {} region(s)", regions.len());
+                }
+            }
+            BuiltinCommand::ExpandAll => {
+                self.folds.clear();
+                self.status = String::from("expanded all");
+            }
         }
     }
 
@@ -1905,6 +1918,12 @@ struct Pending {
     /// F-010 from docs/audits/overlooked-surfaces-2026-05-29.md: open the
     /// Ctrl+P fuzzy file finder.
     open_fuzzy: bool,
+    /// F-032 from docs/audits/overlooked-surfaces-2026-05-29.md:
+    /// Ctrl+Shift+[ folds every region in the active buffer (and switches
+    /// the editor into fold view so the change is visible); Ctrl+Shift+]
+    /// expands every region.
+    fold_all: bool,
+    expand_all: bool,
 }
 
 // ---- Keyboard shortcut cheatsheet table (F-014) ----
@@ -2016,6 +2035,14 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
         chord: "Esc",
         action: "Close find / palette / cheatsheet / completion popup",
     },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+[",
+        action: "Fold every region in the active buffer",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+]",
+        action: "Expand every folded region",
+    },
 ];
 
 // ---- Built-in command palette registry (F-004) ----
@@ -2047,6 +2074,8 @@ pub(crate) enum BuiltinCommand {
     OpenPalette,
     CycleTheme,
     StartLsp,
+    FoldAll,
+    ExpandAll,
 }
 
 pub(crate) struct BuiltinEntry {
@@ -2075,9 +2104,19 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         action: BuiltinCommand::CycleTheme,
     },
     BuiltinEntry {
+        label: "Expand all folds",
+        shortcut: "Ctrl+Shift+]",
+        action: BuiltinCommand::ExpandAll,
+    },
+    BuiltinEntry {
         label: "Find in buffer",
         shortcut: "Ctrl+F",
         action: BuiltinCommand::OpenFind,
+    },
+    BuiltinEntry {
+        label: "Fold all regions",
+        shortcut: "Ctrl+Shift+[",
+        action: BuiltinCommand::FoldAll,
     },
     BuiltinEntry {
         label: "New file",
@@ -2691,6 +2730,17 @@ impl ScribeApp {
             }
             if cmd && i.modifiers.shift && i.key_pressed(egui::Key::M) {
                 act.toggle_minimap = true;
+            }
+            // F-032 — Ctrl+Shift+[ folds every region in the active buffer,
+            // Ctrl+Shift+] expands every region. Switches the editor into
+            // fold-view mode so the user sees the change immediately
+            // (otherwise the fold set is updated but the normal central
+            // panel doesn't honor it).
+            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::OpenBracket) {
+                act.fold_all = true;
+            }
+            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::CloseBracket) {
+                act.expand_all = true;
             }
             // F-017 — Alt+Up/Down move the cursor line; Ctrl+Shift+D
             // duplicates; Ctrl+J joins next.
@@ -3958,6 +4008,21 @@ impl ScribeApp {
                 }
             );
         }
+        // F-032: Ctrl+Shift+[ / Ctrl+Shift+] — fold-all / expand-all.
+        // Re-extract regions against the current buffer so the action is
+        // always applied to what the user sees, then switch on fold-view
+        // so the change is visible in the central panel.
+        if act.fold_all && self.active < self.tabs.len() {
+            let text = self.tabs[self.active].text.clone();
+            let regions = crate::editor_features::fold_regions(&text);
+            self.folds = regions.iter().map(|r| r.start_line).collect();
+            self.fold_view = true;
+            self.status = format!("folded {} region(s)", regions.len());
+        }
+        if act.expand_all {
+            self.folds.clear();
+            self.status = String::from("expanded all");
+        }
         if act.open_fuzzy {
             // Lazy-build the index on first open so cold-start latency
             // lands here, not in build(). Rebuild whenever the project
@@ -5091,6 +5156,27 @@ def";
             names.iter().any(|n| *n == after),
             "post-cycle theme must be a known built-in"
         );
+    }
+
+    /// F-032: FoldAll switches fold view on and records every detected
+    /// region's start line. ExpandAll then clears the recorded fold set.
+    /// Uses a small Rust snippet so `fold_regions` finds at least one
+    /// brace-delimited region.
+    #[test]
+    fn execute_builtin_fold_then_expand_round_trips() {
+        let mut app = ScribeApp::new_test(Config::default());
+        // Replace the scratch tab text with code that has a foldable
+        // region. The fold extractor scans for matched braces so any
+        // multi-line braced block produces a region.
+        app.tabs[app.active].text = "fn x() {\n    1;\n}\n".to_string();
+        app.execute_builtin(BuiltinCommand::FoldAll);
+        assert!(app.fold_view, "FoldAll should switch fold view on");
+        assert!(
+            !app.folds.is_empty(),
+            "FoldAll should record at least one fold for a braced region"
+        );
+        app.execute_builtin(BuiltinCommand::ExpandAll);
+        assert!(app.folds.is_empty(), "ExpandAll should clear the fold set");
     }
 
     #[test]
