@@ -3921,7 +3921,9 @@ impl ScribeApp {
         let overlay_open = self.find_open || self.palette_open || self.settings_open;
 
         // ---- Minimap (rightmost strip) ----
-        if self.config.editor.show_minimap {
+        // Skipped for read-only huge files: the minimap hashes + lays out the
+        // whole buffer, which defeats the viewport-culled browse path below.
+        if self.config.editor.show_minimap && !read_only {
             self.show_minimap(ctx, panel, accent);
         }
 
@@ -3963,7 +3965,11 @@ impl ScribeApp {
 
         // ---- Line-number gutter (sticky left strip; numbers are synced to the
         // editor galley rows captured last frame — one-frame lag, like minimap).
-        if show_line_numbers && !self.fold_view {
+        // The external gutter is driven by the TextEdit's per-line galley Ys
+        // (`line_gutter`). The read-only RopeEditor draws its OWN gutter, so
+        // skip this one there (and avoid the O(n) `lines().count()` on a
+        // 256 MiB+ buffer).
+        if show_line_numbers && !self.fold_view && !read_only {
             let total = self.tabs[active].text.lines().count().max(1);
             let digits = total.to_string().len().max(2);
             let gutter_w = digits as f32 * (font.size * 0.62) + 16.0;
@@ -4004,6 +4010,26 @@ impl ScribeApp {
                 // Folded read-only preview is a distinct surface (no live editing).
                 if self.fold_view {
                     self.show_fold_view(ui, font.clone(), ext.as_deref());
+                    return;
+                }
+
+                // Read-only huge-file browse (KEYSTONE): a file past the
+                // 256 MiB threshold opens read-only. Rendering it through the
+                // viewport-culled RopeEditor — instead of laying out the whole
+                // multi-hundred-MiB string in a TextEdit every frame — is the
+                // O(viewport) browse path. Read-only ⇒ no editing regression;
+                // the widget draws its own line numbers + viewport-scoped
+                // syntax highlighting (F-030).
+                if read_only {
+                    let rope = self.tabs[active].doc.rope().clone();
+                    let mut buf = scribe_core::buffer::Buffer::Rope(rope);
+                    let fg = ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
+                    scribe_render::RopeEditor::new(&mut buf, font.clone(), gutter_row_h)
+                        .with_text_color(fg)
+                        .with_gutter_color(muted)
+                        .with_line_numbers(show_line_numbers)
+                        .with_syntax(&self.hl, ext.clone())
+                        .show(ui);
                     return;
                 }
 
