@@ -59,10 +59,16 @@ where
         }
     }
     match positional.len() {
-        0 => Action::Launch { path: None, jump: None },
+        0 => Action::Launch {
+            path: None,
+            jump: None,
+        },
         1 => {
             let (path, jump) = split_path_jump(&positional[0]);
-            Action::Launch { path: Some(path), jump }
+            Action::Launch {
+                path: Some(path),
+                jump,
+            }
         }
         n => Action::Error(format!("expected 0 or 1 positional argument, got {n}")),
     }
@@ -151,7 +157,10 @@ mod tests {
     fn parses_no_args_as_launch_empty() {
         assert_eq!(
             parse_strs(&[]),
-            Action::Launch { path: None, jump: None }
+            Action::Launch {
+                path: None,
+                jump: None
+            }
         );
     }
 
@@ -180,7 +189,10 @@ mod tests {
     #[test]
     fn parses_plain_path() {
         match parse_strs(&["foo.rs"]) {
-            Action::Launch { path: Some(p), jump: None } => {
+            Action::Launch {
+                path: Some(p),
+                jump: None,
+            } => {
                 assert_eq!(p, PathBuf::from("foo.rs"));
             }
             other => panic!("expected Launch, got {other:?}"),
@@ -190,7 +202,10 @@ mod tests {
     #[test]
     fn parses_path_with_line() {
         match parse_strs(&["foo.rs:42"]) {
-            Action::Launch { path: Some(p), jump: Some((42, None)) } => {
+            Action::Launch {
+                path: Some(p),
+                jump: Some((42, None)),
+            } => {
                 assert_eq!(p, PathBuf::from("foo.rs"));
             }
             other => panic!("expected Launch+jump, got {other:?}"),
@@ -200,7 +215,10 @@ mod tests {
     #[test]
     fn parses_path_with_line_and_column() {
         match parse_strs(&["src/main.rs:42:10"]) {
-            Action::Launch { path: Some(p), jump: Some((42, Some(10))) } => {
+            Action::Launch {
+                path: Some(p),
+                jump: Some((42, Some(10))),
+            } => {
                 assert_eq!(p, PathBuf::from("src/main.rs"));
             }
             other => panic!("expected Launch+jump, got {other:?}"),
@@ -211,7 +229,10 @@ mod tests {
     fn windows_drive_letter_path_is_preserved() {
         // `C:\path\file.rs` must NOT be misparsed as `(C, \path\file.rs)`.
         match parse_strs(&[r"C:\foo\bar.rs"]) {
-            Action::Launch { path: Some(p), jump: None } => {
+            Action::Launch {
+                path: Some(p),
+                jump: None,
+            } => {
                 assert_eq!(p, PathBuf::from(r"C:\foo\bar.rs"));
             }
             other => panic!("expected Launch, got {other:?}"),
@@ -221,7 +242,10 @@ mod tests {
     #[test]
     fn windows_drive_letter_with_line_jump() {
         match parse_strs(&[r"C:\foo\bar.rs:42"]) {
-            Action::Launch { path: Some(p), jump: Some((42, None)) } => {
+            Action::Launch {
+                path: Some(p),
+                jump: Some((42, None)),
+            } => {
                 assert_eq!(p, PathBuf::from(r"C:\foo\bar.rs"));
             }
             other => panic!("expected Launch+jump, got {other:?}"),
@@ -231,7 +255,10 @@ mod tests {
     #[test]
     fn windows_drive_letter_with_line_and_column() {
         match parse_strs(&[r"C:\foo\bar.rs:42:10"]) {
-            Action::Launch { path: Some(p), jump: Some((42, Some(10))) } => {
+            Action::Launch {
+                path: Some(p),
+                jump: Some((42, Some(10))),
+            } => {
                 assert_eq!(p, PathBuf::from(r"C:\foo\bar.rs"));
             }
             other => panic!("expected Launch+jump, got {other:?}"),
