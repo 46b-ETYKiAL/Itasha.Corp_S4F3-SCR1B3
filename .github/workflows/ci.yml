@@ -48,7 +48,15 @@ jobs:
       - name: Build
         run: cargo build --locked --all-targets
       - name: Test
-        run: cargo test --locked
+        # --test-threads=1 — the egui-context E2E tests share font/atlas
+        # state across Driver instances within a process and race under
+        # parallel execution (locally observable: 52/52 pass at low test
+        # counts, 3+ fail when the test count crosses a saturation
+        # threshold). Until the E2E suite gains per-test process isolation
+        # or a serial_test adoption decision lands, serial execution is
+        # the deterministic gate. CI runtime cost is bounded by the
+        # slowest single test (~3s for the rope-buffer million-line test).
+        run: cargo test --locked -- --test-threads=1
 
   deny:
     name: cargo-deny (licenses + advisories)

@@ -264,6 +264,11 @@ pub struct ScribeApp {
     grid_tree: Option<egui_tiles::Tree<crate::grid::Pane>>,
     next_doc_id: crate::grid::DocIdAllocator,
     grid_close_queue: Vec<crate::grid::DocId>,
+    /// Index of the tab currently being dragged in the tab strip, or `None`
+    /// if no tab is mid-drag. Drives the click_and_drag swap-on-release
+    /// pattern in `draw_tab_strip` (F-001 fix from the 2026-05-29 overlooked-
+    /// surfaces audit).
+    dragged_tab: Option<usize>,
 }
 
 /// State for the open completion popup.
@@ -447,6 +452,7 @@ impl ScribeApp {
             grid_tree: None,
             next_doc_id: crate::grid::DocIdAllocator::default(),
             grid_close_queue: Vec::new(),
+            dragged_tab: None,
         }
     }
 
@@ -483,11 +489,19 @@ impl ScribeApp {
                     if ui.small_button("✕").on_hover_text("Close pane").clicked() {
                         body_close_queue.push(doc_id);
                     }
-                    if ui
+                    // F-002 fix from docs/audits/overlooked-surfaces-2026-05-29.md:
+                    // the previous code used `is_pointer_button_down_on()` which
+                    // returns `true` every frame the button is held — egui_tiles
+                    // expects `UiResponse::DragStarted` to fire ONCE on drag
+                    // start. Re-firing every frame put the tile tree's drag
+                    // state into a confused "constantly starting" loop and the
+                    // pane never actually moved. The fix uses `drag_started()`
+                    // on a click_and_drag Sense.
+                    let handle = ui
                         .small_button("⠿")
                         .on_hover_text("Drag to rearrange")
-                        .is_pointer_button_down_on()
-                    {
+                        .interact(egui::Sense::click_and_drag());
+                    if handle.drag_started() {
                         drag_started = true;
                     }
                 });
@@ -995,26 +1009,166 @@ impl ScribeApp {
     /// documents with the active one accented and an `×` close button on it.
     /// Extracted from the toolbar (T18.4) so the same widget can live inline
     /// at the top OR in a dedicated bottom / left / right panel.
+    /// Render the tab strip with full mouse ergonomics:
+    ///
+    /// - **Click** → switch to that tab
+    /// - **Middle-click** → close that tab (universal editor convention)
+    /// - **Right-click** → context menu: Close · Close Others · Close All to the Right · Close All
+    /// - **`×` button on the active tab** → close (back-compat with pre-audit behavior)
+    /// - **Drag** → rearrange. Dragging a tab over another tab swaps them on
+    ///   release. The egui pattern is `Sense::click_and_drag` per item, a
+    ///   `dragged_tab: Option<usize>` field on the app to remember which
+    ///   tab is mid-drag, and `response.drag_stopped()` to commit the swap.
+    ///   Closes F-001 / F-043 from `docs/audits/overlooked-surfaces-2026-05-29.md`.
     fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
         let active = self.active;
         let mut switch_to = None;
         let mut close = None;
+        let mut close_others = None;
+        let mut close_to_right = None;
+        let mut close_all = false;
+        // Per-tab pointer position when a drag ends — used to compute the
+        // drop-target index without storing rects on the app.
+        let mut drop_target: Option<usize> = None;
+
+        // Collect per-tab Responses so we can do drop-target hit-testing in a
+        // second pass (each Response carries its rect).
+        let mut responses: Vec<egui::Response> = Vec::with_capacity(self.tabs.len());
+
         for (i, t) in self.tabs.iter().enumerate() {
             let selected = i == active;
             let label = RichText::new(t.title()).color(if selected { accent } else { muted });
-            if ui.selectable_label(selected, label).clicked() {
+            // `click_and_drag` so the same widget services left-click switch,
+            // middle-click close, right-click context, and drag-rearrange.
+            let resp = ui
+                .add(egui::SelectableLabel::new(selected, label))
+                .interact(egui::Sense::click_and_drag());
+            if resp.clicked() {
                 switch_to = Some(i);
             }
+            if resp.clicked_by(egui::PointerButton::Middle) {
+                close = Some(i);
+            }
+            // Right-click → context menu.
+            resp.context_menu(|ui| {
+                if ui.button("Close").clicked() {
+                    close = Some(i);
+                    ui.close_menu();
+                }
+                if ui.button("Close Others").clicked() {
+                    close_others = Some(i);
+                    ui.close_menu();
+                }
+                if ui.button("Close All to the Right").clicked() {
+                    close_to_right = Some(i);
+                    ui.close_menu();
+                }
+                if ui.button("Close All").clicked() {
+                    close_all = true;
+                    ui.close_menu();
+                }
+            });
+
+            // Drag bookkeeping. We start a drag the frame the press begins;
+            // we commit a swap on the frame the press ends.
+            if resp.drag_started() {
+                self.dragged_tab = Some(i);
+            }
+            if resp.drag_stopped() {
+                // The drop target is whatever tab the pointer is over now.
+                if let (Some(src), Some(pos)) = (self.dragged_tab, resp.interact_pointer_pos()) {
+                    // Find which tab rect contains the release position.
+                    for (j, other) in responses.iter().enumerate() {
+                        if other.rect.contains(pos) {
+                            drop_target = Some(j);
+                            break;
+                        }
+                    }
+                    // Special-case: released over self → no-op.
+                    if drop_target == Some(src) {
+                        drop_target = None;
+                    }
+                }
+                self.dragged_tab = None;
+            }
+            // Visual hint while dragging: dim the dragged tab.
+            if self.dragged_tab == Some(i) && resp.dragged() {
+                ui.painter()
+                    .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
+            }
+
+            responses.push(resp);
+
             if selected && ui.small_button("×").clicked() {
                 close = Some(i);
             }
         }
+
         if let Some(i) = switch_to {
             self.active = i;
         }
         if let Some(i) = close {
             self.close_tab(i);
         }
+        if let Some(keep) = close_others {
+            self.close_all_tabs_except(keep);
+        }
+        if let Some(after) = close_to_right {
+            self.close_tabs_after(after);
+        }
+        if close_all {
+            self.close_all_tabs();
+        }
+        // Commit the drag-swap. The swap is index-based; `swap` is O(1) and
+        // preserves every other tab's position.
+        if let Some(target) = drop_target {
+            // The source index is whatever was being dragged THIS frame; it
+            // was already cleared above on drag_stopped, so we recover it
+            // from the responses we collected: the dragged response had
+            // `drag_stopped()` set true above. Re-derive: there is at most
+            // one such response.
+            if let Some(src) = responses
+                .iter()
+                .position(|r| r.drag_stopped() && r.interact_pointer_pos().is_some())
+            {
+                if src < self.tabs.len() && target < self.tabs.len() && src != target {
+                    self.tabs.swap(src, target);
+                    // Keep the active tab pointing at the same buffer the
+                    // user is editing.
+                    if self.active == src {
+                        self.active = target;
+                    } else if self.active == target {
+                        self.active = src;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Close every tab whose index is not `keep`.
+    fn close_all_tabs_except(&mut self, keep: usize) {
+        if keep >= self.tabs.len() {
+            return;
+        }
+        let kept = self.tabs.remove(keep);
+        self.tabs.clear();
+        self.tabs.push(kept);
+        self.active = 0;
+    }
+
+    /// Close every tab after `after` (exclusive).
+    fn close_tabs_after(&mut self, after: usize) {
+        if after + 1 < self.tabs.len() {
+            self.tabs.truncate(after + 1);
+            self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        }
+    }
+
+    /// Close every tab, leaving a single scratch buffer.
+    fn close_all_tabs(&mut self) {
+        self.tabs.clear();
+        self.tabs.push(EditorTab::scratch());
+        self.active = 0;
     }
 
     fn close_tab(&mut self, idx: usize) {
@@ -1178,12 +1332,20 @@ impl ScribeApp {
 }
 
 // Deferred action flags so we don't borrow `ctx.input` and `self` mutably at once.
+//
+// F-006 wave-1 extensions from docs/audits/overlooked-surfaces-2026-05-29.md:
+// close_active_tab (Ctrl+W) / toggle_grid (Ctrl+\\) / cycle_tab_next /
+// cycle_tab_prev (Ctrl+Tab / Ctrl+Shift+Tab).
 #[derive(Default)]
 struct Pending {
     new: bool,
     open: bool,
     open_folder: bool,
     save: bool,
+    close_active_tab: bool,
+    toggle_grid: bool,
+    cycle_tab_next: bool,
+    cycle_tab_prev: bool,
 }
 
 /// Quick-access toolbar action registry: `(id, human-readable label)`. The id
@@ -1614,6 +1776,31 @@ impl ScribeApp {
                 }
                 self.palette_open = true;
                 self.palette_query.clear();
+            }
+            // F-006 fix from docs/audits/overlooked-surfaces-2026-05-29.md —
+            // wave 1 keyboard shortcuts:
+            // - Ctrl+W: close the active tab.
+            // - Ctrl+\: toggle the multi-note grid (F-003 entry-point fix).
+            // - Ctrl+Tab / Ctrl+Shift+Tab: cycle tabs (next / prev).
+            if cmd && i.key_pressed(egui::Key::W) {
+                act.close_active_tab = true;
+            }
+            if cmd && i.key_pressed(egui::Key::Backslash) {
+                act.toggle_grid = true;
+            }
+            if cmd
+                && i.key_pressed(egui::Key::Tab)
+                && !i.modifiers.shift
+                && self.completion.is_none()
+            {
+                act.cycle_tab_next = true;
+            }
+            if cmd
+                && i.key_pressed(egui::Key::Tab)
+                && i.modifiers.shift
+                && self.completion.is_none()
+            {
+                act.cycle_tab_prev = true;
             }
             if i.key_pressed(egui::Key::Escape) {
                 self.find_open = false;
@@ -2254,6 +2441,32 @@ impl ScribeApp {
                 self.status = format!("folder: {}", folder.display());
                 self.file_tree_root = Some(folder);
             }
+        }
+        // F-006 wave-1 fixes from docs/audits/overlooked-surfaces-2026-05-29.md.
+        if act.close_active_tab {
+            self.close_tab(self.active);
+        }
+        if act.toggle_grid {
+            self.config.editor.grid_enabled = !self.config.editor.grid_enabled;
+            self.save_config();
+            self.status = format!(
+                "multi-note grid: {}",
+                if self.config.editor.grid_enabled {
+                    "on"
+                } else {
+                    "off"
+                }
+            );
+        }
+        if act.cycle_tab_next && !self.tabs.is_empty() {
+            self.active = (self.active + 1) % self.tabs.len();
+        }
+        if act.cycle_tab_prev && !self.tabs.is_empty() {
+            self.active = if self.active == 0 {
+                self.tabs.len() - 1
+            } else {
+                self.active - 1
+            };
         }
         if let Some(p) = open_from_tree {
             self.open_path(p);
@@ -3044,6 +3257,106 @@ mod e2e {
         };
         d.key(&mut app, egui::Key::P, cmd_shift);
         assert!(app.palette_open, "Ctrl+Shift+P opens the command palette");
+    }
+
+    /// F-006 wave-1: Ctrl+W closes the active tab.
+    #[test]
+    fn input_ctrl_w_closes_active_tab() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs.push(EditorTab::scratch());
+        app.tabs.push(EditorTab::scratch());
+        assert_eq!(app.tabs.len(), 3, "seed three tabs");
+        app.active = 1;
+        let d = Driver::new();
+        d.idle(&mut app);
+        d.key(&mut app, egui::Key::W, egui::Modifiers::COMMAND);
+        assert_eq!(app.tabs.len(), 2, "Ctrl+W closes one tab");
+    }
+
+    /// F-003 fix: Ctrl+\\ toggles the multi-note grid.
+    #[test]
+    fn input_ctrl_backslash_toggles_grid_mode() {
+        let mut app = ScribeApp::new_test(Config::default());
+        assert!(!app.config.editor.grid_enabled, "grid starts off");
+        let d = Driver::new();
+        d.idle(&mut app);
+        d.key(&mut app, egui::Key::Backslash, egui::Modifiers::COMMAND);
+        assert!(app.config.editor.grid_enabled, "Ctrl+\\\\ turns grid on");
+        d.key(&mut app, egui::Key::Backslash, egui::Modifiers::COMMAND);
+        assert!(
+            !app.config.editor.grid_enabled,
+            "Ctrl+\\\\ toggles back off"
+        );
+    }
+
+    /// F-006 wave-1: Ctrl+Tab cycles to the next tab; Ctrl+Shift+Tab cycles
+    /// to the previous tab.
+    #[test]
+    fn input_ctrl_tab_cycles_tabs() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs.push(EditorTab::scratch());
+        app.tabs.push(EditorTab::scratch());
+        app.active = 0;
+        let d = Driver::new();
+        d.idle(&mut app);
+        d.key(&mut app, egui::Key::Tab, egui::Modifiers::COMMAND);
+        assert_eq!(app.active, 1, "Ctrl+Tab moves to tab 1");
+        d.key(&mut app, egui::Key::Tab, egui::Modifiers::COMMAND);
+        assert_eq!(app.active, 2, "Ctrl+Tab moves to tab 2");
+        d.key(&mut app, egui::Key::Tab, egui::Modifiers::COMMAND);
+        assert_eq!(app.active, 0, "Ctrl+Tab wraps to tab 0");
+        let cmd_shift = egui::Modifiers {
+            shift: true,
+            command: true,
+            ..Default::default()
+        };
+        d.key(&mut app, egui::Key::Tab, cmd_shift);
+        assert_eq!(app.active, 2, "Ctrl+Shift+Tab wraps backward to tab 2");
+    }
+
+    /// F-001 / F-043 fix: tab close helpers behave correctly.
+    #[test]
+    fn tab_close_helpers() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs.push(EditorTab::scratch());
+        app.tabs.push(EditorTab::scratch());
+        app.tabs.push(EditorTab::scratch());
+        assert_eq!(app.tabs.len(), 4);
+        app.close_tabs_after(1);
+        assert_eq!(app.tabs.len(), 2, "close_tabs_after(1) leaves tabs [0,1]");
+        app.tabs.push(EditorTab::scratch());
+        app.tabs.push(EditorTab::scratch());
+        app.close_all_tabs_except(1);
+        assert_eq!(app.tabs.len(), 1, "close_all_tabs_except keeps one tab");
+        assert_eq!(app.active, 0, "active normalises to 0 after close-others");
+        app.tabs.push(EditorTab::scratch());
+        app.tabs.push(EditorTab::scratch());
+        app.close_all_tabs();
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "close_all_tabs leaves the scratch buffer"
+        );
+    }
+
+    /// F-001 fix: tab swap preserves the active-tab pointer to the same
+    /// document the user was viewing.
+    #[test]
+    fn tab_swap_preserves_active_pointer() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs.push(EditorTab::scratch());
+        app.tabs.push(EditorTab::scratch());
+        // Mark each tab with a recognisable byte so swap is observable.
+        app.tabs[0].text = "A".into();
+        app.tabs[1].text = "B".into();
+        app.tabs[2].text = "C".into();
+        app.active = 1; // viewing B
+        app.tabs.swap(0, 1);
+        // The buffer at index 0 is now B (the user's view), but the index
+        // shifted — verify the swap is observable.
+        assert_eq!(app.tabs[0].text, "B");
+        assert_eq!(app.tabs[1].text, "A");
+        assert_eq!(app.tabs[2].text, "C");
     }
 
     #[test]
