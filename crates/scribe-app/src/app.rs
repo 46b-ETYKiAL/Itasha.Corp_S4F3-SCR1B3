@@ -205,6 +205,37 @@ impl EditorTab {
         })
     }
 
+    /// Reconstruct a tab from a restored session backup: `content` is the
+    /// unsaved text. When `path` is set and still readable, the doc binds the
+    /// path + holds the on-disk content (so the dirty comparison is correct);
+    /// if the file vanished or there is no path, the tab restores as an
+    /// untitled scratch holding the backup content.
+    fn from_backup(path: Option<PathBuf>, content: String) -> Self {
+        if let Some(p) = path {
+            if let Ok(doc) = Document::open(&p) {
+                let disk_text = doc.text();
+                let disk_mtime = doc
+                    .path()
+                    .and_then(|p| std::fs::metadata(p).ok())
+                    .and_then(|m| m.modified().ok());
+                return Self {
+                    doc,
+                    text: content,
+                    doc_id: crate::grid::DocId(0),
+                    pinned: false,
+                    disk_mtime,
+                    disk_text,
+                    rope_state: None,
+                };
+            }
+        }
+        // Untitled, or the original file is gone: restore as a scratch buffer
+        // carrying the unsaved content (dirty vs an empty saved doc).
+        let mut tab = Self::scratch();
+        tab.text = content;
+        tab
+    }
+
     fn title(&self) -> String {
         let name = self.doc.file_name();
         let pin = if self.pinned { "📌 " } else { "" };
@@ -314,6 +345,9 @@ pub struct ScribeApp {
     diagnostics: Vec<Diagnostic>,
     /// Signature of the currently-open file set (to persist session on change).
     session_sig: String,
+    /// Last time unsaved-buffer backups were flushed (throttles the periodic
+    /// snapshot so we don't rewrite content every keystroke).
+    last_backup_at: Option<std::time::Instant>,
     /// Cached syntax-highlight layout (keyed by text+lang+size) so syntect only
     /// re-runs when the buffer changes, not every frame (perf hotspot fix).
     hl_cache: std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
@@ -483,7 +517,17 @@ impl ScribeApp {
                 Err(e) => toast = Some(format!("could not open {p}: {e}")),
             }
         }
-        // Restore the previous session (open files) when launched bare.
+        // Restore the previous session when launched bare. With session
+        // backups on (default), restore unsaved CONTENT too (hot exit) — incl.
+        // untitled scratch notes — from the manifest + backup store. Otherwise
+        // fall back to the legacy paths-only restore.
+        let mut restored_active = 0usize;
+        if tabs.is_empty() && config.editor.session_backup {
+            if let Some((restored, active_idx)) = Self::restore_tabs_from_manifest() {
+                tabs = restored;
+                restored_active = active_idx;
+            }
+        }
         if tabs.is_empty() && config.editor.restore_session {
             for path in load_session() {
                 if let Ok(t) = EditorTab::from_path(path) {
@@ -527,8 +571,8 @@ impl ScribeApp {
             config,
             theme,
             hl: Highlighter::new(),
+            active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
-            active: 0,
             visuals_applied: false,
             wgpu_post_available: false,
             want_close: false,
@@ -568,6 +612,7 @@ impl ScribeApp {
             lsp_lang: None,
             diagnostics: Vec::new(),
             session_sig,
+            last_backup_at: None,
             hl_cache: std::cell::RefCell::new(None),
             _cfg_watcher: cfg_watcher,
             cfg_rx: Some(cfg_rx),
@@ -1307,6 +1352,76 @@ impl ScribeApp {
             }
             Err(e) => self.toast = Some(format!("save failed: {e}")),
         }
+    }
+
+    /// Hot-exit snapshot: flush every unsaved buffer's content to the backup
+    /// store + write the session manifest, so unsaved work (incl. untitled
+    /// scratch notes) survives a restart or crash. Each dirty file tab and each
+    /// non-empty untitled tab gets an atomic content backup; clean tabs are
+    /// recorded by path only; orphan backups are pruned. Best-effort.
+    fn snapshot_session_backups(&mut self) {
+        use scribe_core::session;
+        let Some(dir) = Config::config_dir() else {
+            return;
+        };
+        let bdir = session::backup_dir(&dir);
+        let active = self.active.min(self.tabs.len().saturating_sub(1));
+        let mut snapshots = Vec::with_capacity(self.tabs.len());
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let path = tab.doc.path().map(|p| p.display().to_string());
+            let dirty = tab.is_dirty();
+            let untitled_with_content = path.is_none() && !tab.text.is_empty();
+            let cursor = tab.rope_state.as_ref().map(|s| s.edit.cursor).unwrap_or(0);
+            let backup = if dirty || untitled_with_content {
+                let name = session::backup_name(path.as_deref(), i);
+                session::write_backup(&bdir, &name, &tab.text)
+                    .ok()
+                    .map(|()| name)
+            } else {
+                None
+            };
+            snapshots.push(session::TabSnapshot {
+                path,
+                dirty,
+                backup,
+                cursor,
+            });
+        }
+        let manifest = session::SessionManifest::new(snapshots, active);
+        let _ = session::save_manifest(&dir, &manifest);
+        session::prune_orphan_backups(&bdir, &manifest);
+        self.last_backup_at = Some(std::time::Instant::now());
+    }
+
+    /// Restore tabs from the session manifest + content backups (hot exit).
+    /// Returns `(tabs, active_index)` or `None` when there is no usable
+    /// manifest. A tab with a backup restores its unsaved content (marked
+    /// dirty); a clean tab opens from disk.
+    fn restore_tabs_from_manifest() -> Option<(Vec<EditorTab>, usize)> {
+        use scribe_core::session;
+        let dir = Config::config_dir()?;
+        let manifest = session::load_manifest(&dir)?;
+        let bdir = session::backup_dir(&dir);
+        let mut tabs = Vec::new();
+        for snap in &manifest.tabs {
+            let path = snap.path.as_ref().map(PathBuf::from);
+            if let Some(name) = &snap.backup {
+                if let Ok(content) = session::read_backup(&bdir, name) {
+                    tabs.push(EditorTab::from_backup(path, content));
+                    continue;
+                }
+            }
+            if let Some(p) = path {
+                if let Ok(tab) = EditorTab::from_path(p) {
+                    tabs.push(tab);
+                }
+            }
+        }
+        if tabs.is_empty() {
+            return None;
+        }
+        let active = manifest.active.min(tabs.len() - 1);
+        Some((tabs, active))
     }
 
     /// F-022 — Poll every file-backed tab's mtime. If a tab's disk mtime
@@ -2797,6 +2912,11 @@ impl eframe::App for ScribeApp {
         // SCR1B3 owns its config). Persist via save_config, which writes the
         // single canonical TOML.
         self.save_config();
+        // Hot-exit: eframe calls save() periodically AND on shutdown, so this
+        // guarantees the latest unsaved content is backed up before exit.
+        if self.config.editor.session_backup {
+            self.snapshot_session_backups();
+        }
     }
 
     // eframe 0.34: `App::ui(&mut self, &mut Ui, &mut Frame)` is the new required
@@ -4507,6 +4627,25 @@ impl ScribeApp {
                     .collect();
                 save_session(&paths);
                 self.session_sig = sig;
+            }
+        }
+
+        // Hot-exit: periodically flush unsaved buffer CONTENT to the backup
+        // store so an unsaved note survives a crash/restart. Throttled so we
+        // don't rewrite content every keystroke, and only when something is
+        // actually unsaved.
+        if self.config.editor.session_backup {
+            const BACKUP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
+            let due = self
+                .last_backup_at
+                .map(|t| t.elapsed() >= BACKUP_INTERVAL)
+                .unwrap_or(true);
+            let has_unsaved = self
+                .tabs
+                .iter()
+                .any(|t| t.is_dirty() || (t.doc.path().is_none() && !t.text.is_empty()));
+            if due && has_unsaved {
+                self.snapshot_session_backups();
             }
         }
     }
