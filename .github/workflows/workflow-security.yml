@@ -24,7 +24,10 @@ permissions:
 
 concurrency:
   group: workflow-security-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel only stale PR runs; never cancel master/scheduled runs, so they
+  # complete and never leave a cancelled (failed-looking) check-run on the
+  # commit (a cancelled SARIF/security scan is also an incomplete analysis).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   zizmor:
