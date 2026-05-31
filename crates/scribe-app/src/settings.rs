@@ -408,6 +408,21 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 );
             });
         }
+        if row_visible(q, "render whitespace markers") {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.editor.render_whitespace,
+                        "Render whitespace (· spaces, → tabs — experimental editor)",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.render_whitespace,
+                    &def.editor.render_whitespace,
+                );
+            });
+        }
         if row_visible(q, "tab bar position top bottom left right") {
             // T18.4: position the open-tab strip relative to the editor.
             use scribe_core::config::TabBarPosition;
