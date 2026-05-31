@@ -34,16 +34,19 @@
 //! support, tree-sitter integration, and minimap each land in their own
 //! follow-up so review surface stays bounded.
 
-use egui::{Color32, FontId, Ui};
+use egui::text::LayoutJob;
+use egui::{Color32, FontId, TextFormat, Ui};
 use scribe_core::buffer::Buffer;
+use scribe_core::syntax::{Highlighter, HlSpan};
 
 /// Inherent-method widget over a `&mut Buffer` (NOT a `Widget` impl —
 /// the renderer needs `&mut self` plumbing through `show_rows`).
 ///
 /// The widget renders the buffer with viewport culling and a monospace
-/// font of the caller's choosing. The current pass paints **plain text**
-/// (no syntax color, no cursor, no selection). The per-line cache +
-/// tree-sitter + caret each land in follow-ups.
+/// font of the caller's choosing. It paints **read-only** text — optionally
+/// with viewport-scoped syntax highlighting (F-030) and a line-number gutter.
+/// Cursor / selection / editing each land in the editing-layer follow-up; the
+/// current surface is the huge-file *browse* path.
 pub struct RopeEditor<'a> {
     pub(crate) buffer: &'a mut Buffer,
     pub(crate) font_id: FontId,
@@ -54,6 +57,16 @@ pub struct RopeEditor<'a> {
     /// `[r, g, b, a]` for the body text. Caller threads the theme's
     /// `[ui] foreground` here.
     pub(crate) text_color: Color32,
+    /// Optional syntax highlighter + file extension. When set, each visible
+    /// window is highlighted on its own (cost is `O(viewport)`, not
+    /// `O(total_lines)`) — the viewport-scoped highlight the KEYSTONE huge-
+    /// file browse wants (F-030).
+    pub(crate) highlighter: Option<&'a Highlighter>,
+    pub(crate) ext: Option<String>,
+    /// When true, a right-aligned line-number gutter is drawn before each row.
+    pub(crate) line_numbers: bool,
+    /// Gutter (line-number) text color.
+    pub(crate) gutter_color: Color32,
 }
 
 impl<'a> RopeEditor<'a> {
@@ -64,12 +77,36 @@ impl<'a> RopeEditor<'a> {
             font_id,
             line_height,
             text_color: Color32::from_rgb(0xc8, 0xd6, 0xdc),
+            highlighter: None,
+            ext: None,
+            line_numbers: false,
+            gutter_color: Color32::from_rgb(0x5a, 0x58, 0x69),
         }
     }
 
     /// Override the body text color (default is wired-noir `text`).
     pub fn with_text_color(mut self, c: Color32) -> Self {
         self.text_color = c;
+        self
+    }
+
+    /// Enable viewport-scoped syntax highlighting (F-030). Only the visible
+    /// window is highlighted each frame, so cost scales with the viewport.
+    pub fn with_syntax(mut self, hl: &'a Highlighter, ext: Option<String>) -> Self {
+        self.highlighter = Some(hl);
+        self.ext = ext;
+        self
+    }
+
+    /// Draw a right-aligned line-number gutter before each row.
+    pub fn with_line_numbers(mut self, on: bool) -> Self {
+        self.line_numbers = on;
+        self
+    }
+
+    /// Override the gutter (line-number) color.
+    pub fn with_gutter_color(mut self, c: Color32) -> Self {
+        self.gutter_color = c;
         self
     }
 
@@ -100,33 +137,60 @@ impl<'a> RopeEditor<'a> {
         };
         let total_lines = rope.len_lines();
         let line_h = self.line_height.max(1.0);
+        // Width (in characters) of the widest line number, for the gutter.
+        let gutter_digits = if self.line_numbers {
+            digit_count(total_lines)
+        } else {
+            0
+        };
         // The keystone primitive — egui computes the visible range; we
         // only render what it hands back. Cost is O(viewport_rows).
         let scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, line_h, total_lines, |ui, range| {
-                let mut first = range.start;
                 let last = range.end.min(total_lines);
-                while first < last {
-                    let line = rope.line(first);
-                    // Walk chunks instead of allocating a String per line
-                    // so a 100k-char unwrapped line doesn't allocate.
+                // Materialise just the visible lines (O(viewport)).
+                let mut line_strings: Vec<String> = Vec::with_capacity(last - range.start);
+                for li in range.start..last {
+                    let line = rope.line(li);
                     let mut buf = String::new();
                     for chunk in line.chunks() {
                         buf.push_str(chunk);
                     }
-                    // Drop any trailing '\n' we sampled from the rope —
-                    // ScrollArea rows align by the line height, not by
-                    // the rendered text height.
+                    // Drop any trailing '\n' — ScrollArea rows align by the
+                    // line height, not by the rendered text height.
                     if buf.ends_with('\n') {
                         buf.pop();
                     }
-                    ui.label(
-                        egui::RichText::new(buf)
-                            .font(self.font_id.clone())
-                            .color(self.text_color),
-                    );
-                    first += 1;
+                    line_strings.push(buf);
+                }
+                // F-030: highlight ONLY the visible window. We re-highlight the
+                // window as a standalone chunk, so cost is O(viewport). A
+                // construct opened above the window (an unterminated block
+                // comment) is not carried in — an acceptable, bounded
+                // approximation for a read-only browse view.
+                let window_spans: Option<Vec<Vec<HlSpan>>> = self.highlighter.map(|hl| {
+                    let window = line_strings.join("\n");
+                    hl.highlight_document(&window, self.ext.as_deref())
+                });
+                for (i, s) in line_strings.iter().enumerate() {
+                    let line_idx = range.start + i;
+                    ui.horizontal(|ui| {
+                        if self.line_numbers {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{:>width$}",
+                                    line_idx + 1,
+                                    width = gutter_digits
+                                ))
+                                .font(self.font_id.clone())
+                                .color(self.gutter_color),
+                            );
+                        }
+                        let spans = window_spans.as_ref().and_then(|w| w.get(i));
+                        let job = build_line_job(s, spans, &self.font_id, self.text_color);
+                        ui.label(job);
+                    });
                 }
                 range
             });
@@ -145,6 +209,73 @@ pub struct RopeEditorResponse {
     pub visible_line_range: std::ops::Range<usize>,
     /// Which buffer variant we actually walked this frame.
     pub buffer_mode: BufferModeSeen,
+}
+
+/// Decimal digits needed to print the largest line number (>= 1).
+fn digit_count(total_lines: usize) -> usize {
+    let mut n = total_lines.max(1);
+    let mut d = 0;
+    while n > 0 {
+        n /= 10;
+        d += 1;
+    }
+    d
+}
+
+/// Build a (possibly multi-colored) layout job for one line. With `spans`,
+/// each span's byte range is sliced from `line` and appended in its color;
+/// without spans (or for any byte range that doesn't fall on a char boundary)
+/// the line is appended in `default` color. Always renders the full line text.
+fn build_line_job(
+    line: &str,
+    spans: Option<&Vec<HlSpan>>,
+    font: &FontId,
+    default: Color32,
+) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    let fmt = |color: Color32| TextFormat {
+        font_id: font.clone(),
+        color,
+        ..Default::default()
+    };
+    match spans {
+        Some(spans) if !spans.is_empty() => {
+            let mut covered = 0usize;
+            for sp in spans {
+                // Guard against spans that drift past the line end or land off
+                // a char boundary (defensive — the tiler emits contiguous,
+                // boundary-aligned spans, but a mismatched window can desync).
+                let start = sp.range.start.min(line.len());
+                let end = sp.range.end.min(line.len());
+                if end <= start {
+                    continue;
+                }
+                let Some(seg) = line.get(start..end) else {
+                    continue;
+                };
+                job.append(seg, 0.0, fmt(scribe_core_color(sp.color)));
+                covered = covered.max(end);
+            }
+            // If the spans didn't reach the end of the line (off-boundary or
+            // partial), append the remainder in the default color so no text
+            // is silently dropped.
+            if covered < line.len() {
+                if let Some(rest) = line.get(covered..) {
+                    job.append(rest, 0.0, fmt(default));
+                }
+            }
+        }
+        _ => {
+            job.append(line, 0.0, fmt(default));
+        }
+    }
+    job
+}
+
+/// Map a syntax RGB triple to an egui color (mirrors `scribe_render::
+/// syntax_color32`, inlined here to avoid a self-referential crate path).
+fn scribe_core_color(rgb: [u8; 3]) -> Color32 {
+    Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -221,6 +352,90 @@ mod tests {
                 let mut b = Buffer::default();
                 let resp = RopeEditor::new(&mut b, FontId::monospace(14.0), 18.0).show(ui);
                 // Default Buffer is Rope, so we exercise the rope branch.
+                assert_eq!(resp.buffer_mode, BufferModeSeen::Rope);
+            });
+        });
+    }
+
+    #[test]
+    fn digit_count_matches_decimal_width() {
+        assert_eq!(digit_count(0), 1);
+        assert_eq!(digit_count(1), 1);
+        assert_eq!(digit_count(9), 1);
+        assert_eq!(digit_count(10), 2);
+        assert_eq!(digit_count(999), 3);
+        assert_eq!(digit_count(1_000), 4);
+        assert_eq!(digit_count(1_000_000), 7);
+    }
+
+    /// With no spans, the whole line is one default-colored section.
+    #[test]
+    fn build_line_job_plain_is_single_section() {
+        let job = build_line_job("hello", None, &FontId::monospace(14.0), Color32::WHITE);
+        assert_eq!(job.sections.len(), 1);
+        assert_eq!(job.text, "hello");
+    }
+
+    /// Two contiguous spans produce two sections covering the whole line.
+    #[test]
+    fn build_line_job_colored_covers_line() {
+        let spans = vec![
+            HlSpan {
+                range: 0..2,
+                color: [255, 0, 0],
+                bold: false,
+                italic: false,
+            },
+            HlSpan {
+                range: 2..5,
+                color: [0, 255, 0],
+                bold: false,
+                italic: false,
+            },
+        ];
+        let job = build_line_job(
+            "hello",
+            Some(&spans),
+            &FontId::monospace(14.0),
+            Color32::WHITE,
+        );
+        assert_eq!(job.text, "hello");
+        assert_eq!(job.sections.len(), 2);
+    }
+
+    /// A span that stops short of the line end still renders the full text:
+    /// the uncovered tail is appended in the default color (no dropped bytes).
+    #[test]
+    fn build_line_job_partial_spans_append_remainder() {
+        let spans = vec![HlSpan {
+            range: 0..2,
+            color: [255, 0, 0],
+            bold: false,
+            italic: false,
+        }];
+        let job = build_line_job(
+            "hello",
+            Some(&spans),
+            &FontId::monospace(14.0),
+            Color32::WHITE,
+        );
+        assert_eq!(job.text, "hello", "no text may be dropped");
+        assert_eq!(job.sections.len(), 2, "colored head + default tail");
+    }
+
+    /// The viewport-highlight path renders a small Rust rope without panic and
+    /// reports the rope branch (exercises `with_syntax` + `with_line_numbers`).
+    #[test]
+    fn highlighted_rope_with_line_numbers_does_not_panic() {
+        let hl = scribe_core::syntax::Highlighter::new();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut b = Buffer::Rope(Rope::from_str("fn main() {\n    let x = 1;\n}\n"));
+                let resp = RopeEditor::new(&mut b, FontId::monospace(14.0), 18.0)
+                    .with_syntax(&hl, Some("rs".to_string()))
+                    .with_line_numbers(true)
+                    .show(ui);
                 assert_eq!(resp.buffer_mode, BufferModeSeen::Rope);
             });
         });
