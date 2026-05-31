@@ -179,8 +179,8 @@ mod tests {
 
     #[test]
     fn backup_name_is_stable_and_separator_free() {
-        let a = backup_name(Some("/home/x/notes.txt"), 0);
-        let b = backup_name(Some("/home/x/notes.txt"), 9);
+        let a = backup_name(Some("/proj/notes.txt"), 0);
+        let b = backup_name(Some("/proj/notes.txt"), 9);
         assert_eq!(a, b, "same path → same backup name regardless of index");
         assert!(!a.contains('/') && !a.contains('\\'));
         let u0 = backup_name(None, 0);
