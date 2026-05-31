@@ -32,6 +32,7 @@ pub mod search;
 pub mod session;
 pub mod spell;
 pub mod syntax;
+pub mod text_ops;
 pub mod theme;
 pub mod update;
 

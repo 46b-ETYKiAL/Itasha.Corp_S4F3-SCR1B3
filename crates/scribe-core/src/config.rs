@@ -281,6 +281,20 @@ pub struct EditorConfig {
     /// `<config>/backup/`; deleted once the buffer is saved. Default ON.
     #[serde(default = "default_true")]
     pub session_backup: bool,
+    /// Strip trailing spaces/tabs from every line on save. Default OFF.
+    #[serde(default)]
+    pub trim_trailing_whitespace_on_save: bool,
+    /// Ensure the file ends with a single newline on save. Default OFF.
+    #[serde(default)]
+    pub final_newline_on_save: bool,
+    /// Remember + restore the caret char index per file path (extends the
+    /// scroll-position memory). Default ON.
+    #[serde(default = "default_true")]
+    pub restore_cursor_position: bool,
+    /// Per-file caret char index, restored on reopen (companion to
+    /// `scroll_positions`). Capped at [`SCROLL_POS_CAP`].
+    #[serde(default)]
+    pub cursor_positions: std::collections::HashMap<String, usize>,
 }
 
 /// serde default for opt-OUT booleans (fields that should be ON unless the
@@ -357,6 +371,10 @@ impl Default for EditorConfig {
             scroll_positions: std::collections::HashMap::new(),
             experimental_rope_editor: false,
             session_backup: true,
+            trim_trailing_whitespace_on_save: false,
+            final_newline_on_save: false,
+            restore_cursor_position: true,
+            cursor_positions: std::collections::HashMap::new(),
         }
     }
 }
