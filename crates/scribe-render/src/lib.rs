@@ -12,7 +12,9 @@ pub mod post;
 pub mod rope_editor;
 
 pub use post::{CrtPostCallback, PostResources, PostState, PostUniforms};
-pub use rope_editor::{BufferModeSeen, RopeEditor, RopeEditorResponse};
+pub use rope_editor::{
+    apply_event, BufferModeSeen, EventOutcome, RopeEditor, RopeEditorResponse, RopeEditorState,
+};
 
 use egui::{Color32, Stroke, Visuals};
 use scribe_core::theme::{Appearance, Rgba, Theme};

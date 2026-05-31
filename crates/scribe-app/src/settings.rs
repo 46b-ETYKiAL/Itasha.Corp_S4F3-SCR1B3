@@ -481,6 +481,27 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 );
             });
         }
+        if row_visible(q, "experimental rope editor owned cursor undo keystone") {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.editor.experimental_rope_editor,
+                        "Experimental rope editor (own caret / undo)",
+                    )
+                    .on_hover_text(
+                        "Use the in-house rope editor for normal files instead of the default \
+                         egui text widget. Own caret, selection, and persistent-capable undo. \
+                         Experimental: no IME / mouse-selection parity yet. Click the editor to \
+                         focus it. Read-only huge files always use the rope browse path.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.experimental_rope_editor,
+                    &def.editor.experimental_rope_editor,
+                );
+            });
+        }
         space(ui);
     }
 

@@ -268,6 +268,13 @@ pub struct EditorConfig {
     /// at [`SCROLL_POS_CAP`].
     #[serde(default)]
     pub scroll_positions: std::collections::HashMap<String, f32>,
+    /// KEYSTONE — opt into the in-house rope editor (own cursor / selection /
+    /// undo) instead of egui's `TextEdit` for normal-size files. Default OFF:
+    /// the egui path stays the default while the owned editor matures (it does
+    /// not yet have IME / mouse-selection parity). Read-only huge files always
+    /// use the rope browse path regardless of this flag.
+    #[serde(default)]
+    pub experimental_rope_editor: bool,
 }
 
 /// Cap on the scroll-position memory map (F-021). Older entries are evicted
@@ -336,6 +343,7 @@ impl Default for EditorConfig {
             recent_files: Vec::new(),
             first_run_completed: false,
             scroll_positions: std::collections::HashMap::new(),
+            experimental_rope_editor: false,
         }
     }
 }

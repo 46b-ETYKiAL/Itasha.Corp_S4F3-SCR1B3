@@ -116,6 +116,12 @@ impl Buffer {
     }
 
     /// Total byte length of the buffer.
+    /// Build an in-memory (editable) rope buffer from a string. Convenience so
+    /// callers don't need a direct `ropey` dependency.
+    pub fn from_text(text: &str) -> Self {
+        Buffer::Rope(Rope::from_str(text))
+    }
+
     pub fn len_bytes(&self) -> usize {
         match self {
             Buffer::Mmap { mmap, .. } => mmap.len(),
