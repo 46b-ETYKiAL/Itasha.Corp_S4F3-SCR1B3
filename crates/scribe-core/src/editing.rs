@@ -626,7 +626,10 @@ mod tests {
         // the first insert (offset management).
         assert_eq!(r.to_string(), "!ab\n!cd\n");
         // Carets sit just after each inserted '!'.
-        assert_eq!(carets.iter().map(|c| c.cursor).collect::<Vec<_>>(), vec![1, 5]);
+        assert_eq!(
+            carets.iter().map(|c| c.cursor).collect::<Vec<_>>(),
+            vec![1, 5]
+        );
     }
 
     #[test]
@@ -639,14 +642,20 @@ mod tests {
         });
         // Each backspace removes the preceding 'X'.
         assert_eq!(r.to_string(), "ab");
-        assert_eq!(carets.iter().map(|c| c.cursor).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(
+            carets.iter().map(|c| c.cursor).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 
     #[test]
     fn dedupe_carets_merges_coincident() {
         let mut carets = vec![EditState::at(3), EditState::at(1), EditState::at(3)];
         dedupe_carets(&mut carets);
-        assert_eq!(carets.iter().map(|c| c.cursor).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(
+            carets.iter().map(|c| c.cursor).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
     }
 
     #[test]
@@ -663,7 +672,7 @@ mod tests {
     fn add_caret_vertical_clamps_at_buffer_edge() {
         let r = rope("only\n");
         let mut carets = vec![EditState::at(0)]; // line 0
-        // No line above → no caret added.
+                                                 // No line above → no caret added.
         assert!(!add_caret_vertical(&r, &mut carets, -1));
         assert_eq!(carets.len(), 1);
     }
