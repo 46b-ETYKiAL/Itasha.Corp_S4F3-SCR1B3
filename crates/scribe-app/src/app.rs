@@ -4353,6 +4353,7 @@ impl ScribeApp {
                             .with_text_color(fg)
                             .with_gutter_color(muted)
                             .with_line_numbers(show_line_numbers)
+                            .with_render_whitespace(self.config.editor.render_whitespace)
                             .with_syntax(&self.hl, ext.clone())
                             .show_editable(ui, state);
                     // Write edits back so save / status / find see them.

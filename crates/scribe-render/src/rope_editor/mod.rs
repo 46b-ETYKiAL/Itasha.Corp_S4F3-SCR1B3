@@ -68,6 +68,10 @@ pub struct RopeEditor<'a> {
     pub(crate) line_numbers: bool,
     /// Gutter (line-number) text color.
     pub(crate) gutter_color: Color32,
+    /// When true, paint faint visible-whitespace markers (`·` per space,
+    /// `→` per tab) OVER each visible row. Pure overlay — the real text and
+    /// the highlight spans are untouched.
+    pub(crate) render_whitespace: bool,
 }
 
 impl<'a> RopeEditor<'a> {
@@ -82,6 +86,7 @@ impl<'a> RopeEditor<'a> {
             ext: None,
             line_numbers: false,
             gutter_color: Color32::from_rgb(0x5a, 0x58, 0x69),
+            render_whitespace: false,
         }
     }
 
@@ -108,6 +113,13 @@ impl<'a> RopeEditor<'a> {
     /// Override the gutter (line-number) color.
     pub fn with_gutter_color(mut self, c: Color32) -> Self {
         self.gutter_color = c;
+        self
+    }
+
+    /// Paint faint visible-whitespace markers (`·` per space, `→` per tab)
+    /// as an overlay. The real text and highlight spans are unaffected.
+    pub fn with_render_whitespace(mut self, on: bool) -> Self {
+        self.render_whitespace = on;
         self
     }
 
@@ -236,6 +248,7 @@ impl<'a> RopeEditor<'a> {
         let text_color = self.text_color;
         let gutter_color = self.gutter_color;
         let line_numbers = self.line_numbers;
+        let render_whitespace = self.render_whitespace;
         let highlighter = self.highlighter;
         let ext = self.ext.clone();
         let sel_color = Color32::from_rgba_unmultiplied(0x3a, 0x6e, 0xa5, 96);
@@ -329,6 +342,31 @@ impl<'a> RopeEditor<'a> {
                     });
                     let text_rect = row.inner;
                     let line_chars = s.chars().count();
+
+                    // Render-whitespace overlay: paint a faint `·` centered in
+                    // each space cell and a `→` for each tab. Pure overlay —
+                    // the real text + highlight spans are untouched. Positions
+                    // use the monospace advance (`char_w`) the caret math also
+                    // uses, so the markers sit dead-centre over their cells.
+                    if render_whitespace {
+                        let ws_color = gutter_color.gamma_multiply(0.7);
+                        for (col, ch) in s.chars().enumerate() {
+                            let marker = match ch {
+                                ' ' => "·",
+                                '\t' => "→",
+                                _ => continue,
+                            };
+                            let cx = text_rect.left() + (col as f32 + 0.5) * char_w;
+                            let cy = (text_rect.top() + text_rect.bottom()) * 0.5;
+                            ui.painter().text(
+                                egui::pos2(cx, cy),
+                                egui::Align2::CENTER_CENTER,
+                                marker,
+                                font.clone(),
+                                ws_color,
+                            );
+                        }
+                    }
 
                     // Current-line highlight: a faint full-width band on the
                     // caret's line (only when there's no active selection, to
@@ -1135,6 +1173,24 @@ mod tests {
                     .show_editable(ui, &mut state);
                 assert_eq!(resp.buffer_mode, BufferModeSeen::Rope);
                 assert!(clip.is_none(), "no copy/cut event was sent");
+            });
+        });
+    }
+
+    /// The whitespace-overlay path renders a buffer containing spaces + tabs
+    /// without panicking and reports the rope branch (exercises
+    /// `with_render_whitespace`).
+    #[test]
+    fn render_whitespace_overlay_does_not_panic() {
+        let mut state = RopeEditorState::new();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut b = Buffer::Rope(Rope::from_str("a b\tc\n  trailing  \n"));
+                let (resp, _) = RopeEditor::new(&mut b, FontId::monospace(14.0), 18.0)
+                    .with_render_whitespace(true)
+                    .show_editable(ui, &mut state);
+                assert_eq!(resp.buffer_mode, BufferModeSeen::Rope);
             });
         });
     }

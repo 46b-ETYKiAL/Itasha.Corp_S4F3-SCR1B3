@@ -295,6 +295,12 @@ pub struct EditorConfig {
     /// `scroll_positions`). Capped at [`SCROLL_POS_CAP`].
     #[serde(default)]
     pub cursor_positions: std::collections::HashMap<String, usize>,
+    /// Render visible whitespace markers (a faint `·` per space, `→` per
+    /// tab) in the OWNED rope editor. Default OFF — the markers are an
+    /// opt-in overlay; the egui TextEdit path and the real buffer text are
+    /// untouched whether on or off.
+    #[serde(default)]
+    pub render_whitespace: bool,
 }
 
 /// serde default for opt-OUT booleans (fields that should be ON unless the
@@ -375,6 +381,7 @@ impl Default for EditorConfig {
             final_newline_on_save: false,
             restore_cursor_position: true,
             cursor_positions: std::collections::HashMap::new(),
+            render_whitespace: false,
         }
     }
 }
@@ -875,6 +882,18 @@ mod tests {
         let s = c2.to_toml_string();
         let back: Config = toml::from_str(&s).expect("config TOML round-trip");
         assert!(back.editor.first_run_completed);
+    }
+
+    /// render_whitespace defaults OFF and round-trips through TOML.
+    #[test]
+    fn render_whitespace_default_off_and_round_trips() {
+        let c = Config::default();
+        assert!(!c.editor.render_whitespace);
+        let mut c2 = c.clone();
+        c2.editor.render_whitespace = true;
+        let s = c2.to_toml_string();
+        let back: Config = toml::from_str(&s).expect("config TOML round-trip");
+        assert!(back.editor.render_whitespace);
     }
 
     /// F-021 helper: record_scroll_pos inserts + caps at SCROLL_POS_CAP.
