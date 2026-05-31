@@ -147,3 +147,8 @@ jobs:
               --generate-notes \
               "${assets[@]}"
           fi
+          # Always finish PUBLISHED + marked latest. GitHub auto-demotes a
+          # release to a draft when its tag is deleted, so a delete+re-push tag
+          # (re-cut) would otherwise leave an invisible draft after the upload
+          # path. This makes the release reliably public + installable.
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
