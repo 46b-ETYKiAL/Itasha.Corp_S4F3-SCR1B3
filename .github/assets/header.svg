@@ -171,7 +171,7 @@
     </g>
 
     <!-- content-band lift: boot block + right instrument shift up uniformly so -->
-    <!-- the lowest content clears the bottom corner brackets (plan-611). -->
+    <!-- the lowest content clears the bottom corner brackets. -->
     <g transform="translate(0,-14)">
     <g filter="url(#phos)">
       <text x="80" y="266" font-size="14" fill="#5a6b73">SCRIBE-CORE --boot</text>
@@ -220,7 +220,7 @@
       </g>
       <text x="596" y="160" fill="#ff6f91" font-size="8.5" opacity="0.5" transform="rotate(90 596 160)" text-anchor="middle" letter-spacing="2">AMPLITUDE</text>
 
-      <!-- BESPOKE per-repo right instrument (plan-611). The MOTIF-BLOCK       -->
+      <!-- BESPOKE per-repo right instrument. The MOTIF-BLOCK       -->
       <!-- placeholder is filled by repo_motif_library.get_motif(MOTIF_KEY).   -->
       <!-- Authored once at header scale; the social card reuses the same      -->
       <!-- fragment via the social MOTIF-BLOCK (scale 0.82). v4: the cluster is -->
