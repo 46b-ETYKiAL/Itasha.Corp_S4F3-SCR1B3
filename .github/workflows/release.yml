@@ -100,8 +100,10 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: scr1b3-${{ matrix.target }}
-          path: apps/scribe/dist/*
-          if-no-files-found: ignore
+          # Artifacts are built into `dist/` at the repo root (this is the
+          # standalone public repo — NOT the monorepo `apps/scribe/` subtree).
+          path: dist/*
+          if-no-files-found: error
 
   release:
     needs: build

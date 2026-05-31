@@ -39,41 +39,26 @@ The name is a nod to *Serial Experiments Lain*. Good tools don't call attention 
 
 ## Installation
 
+Download the build for your platform from the
+[**Releases**](https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/releases)
+page — that is the single maintained install channel. Every release ships a
+`.sha256` checksum next to each artifact; verify it before running.
+
 ### Windows
 
-Download `scr1b3-x86_64-pc-windows-msvc.msi` from the [Releases](https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/releases) page and double-click it — the installer adds a Start Menu shortcut and an optional PATH entry. Or via a package manager:
+Download `scr1b3-x86_64-pc-windows-msvc.msi` and double-click it — the installer
+adds a Start-Menu shortcut and an optional PATH entry.
 
-```powershell
-# winget (when published)
-winget install ItashaCorp.SCR1B3
+### macOS / Linux
 
-# or grab the portable .exe from the Releases page (self-updating)
-```
-
-### macOS
+Download the `scr1b3-<target>.tar.gz` for your platform, extract it, and run the
+`scr1b3` binary:
 
 ```bash
-# Homebrew cask (when published)
-brew install --cask scr1b3
-
-# or download the .dmg from the Releases page
-```
-
-### Linux
-
-```bash
-# AppImage — download, mark executable, run
-chmod +x SCR1B3-x86_64.AppImage
-./SCR1B3-x86_64.AppImage
-
-# Debian / Ubuntu
-sudo dpkg -i scr1b3_<version>_amd64.deb
-```
-
-### One-line installer
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/master/scripts/install.sh | sh
+# Linux x86_64
+tar -xzf scr1b3-x86_64-unknown-linux-gnu.tar.gz && ./scr1b3
+# macOS (Apple Silicon)
+tar -xzf scr1b3-aarch64-apple-darwin.tar.gz && ./scr1b3
 ```
 
 ### Build from source
