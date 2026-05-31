@@ -361,6 +361,9 @@ pub struct ScribeApp {
     closed_tabs: Vec<ClosedTab>,
     /// Last time an auto-save fired (throttles the periodic save).
     last_autosave_at: Option<std::time::Instant>,
+    /// Content hash of unsaved buffers at the last backup flush; skips
+    /// rewriting identical content (audit fix F1).
+    last_backup_sig: u64,
     /// Cached syntax-highlight layout (keyed by text+lang+size) so syntect only
     /// re-runs when the buffer changes, not every frame (perf hotspot fix).
     hl_cache: std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
@@ -628,6 +631,7 @@ impl ScribeApp {
             last_backup_at: None,
             closed_tabs: Vec::new(),
             last_autosave_at: None,
+            last_backup_sig: 0,
             hl_cache: std::cell::RefCell::new(None),
             _cfg_watcher: cfg_watcher,
             cfg_rx: Some(cfg_rx),
@@ -2386,6 +2390,18 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
     ShortcutEntry {
         chord: "Ctrl+Shift+R",
         action: "Reopen the most recently closed tab",
+    },
+    ShortcutEntry {
+        chord: "Tab / Shift+Tab",
+        action: "Indent / outdent selected lines (experimental editor)",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+K",
+        action: "Delete the current line (experimental editor)",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+U / Ctrl+Shift+U",
+        action: "Lowercase / uppercase the selection (experimental editor)",
     },
 ];
 
@@ -4793,8 +4809,23 @@ impl ScribeApp {
                 .tabs
                 .iter()
                 .any(|t| t.is_dirty() || (t.doc.path().is_none() && !t.text.is_empty()));
-            if due && has_unsaved {
+            // Audit fix F1: only rewrite backups when the unsaved CONTENT
+            // actually changed since the last flush — avoids re-writing the
+            // same bytes every interval while a buffer sits dirty but idle.
+            let content_sig = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                for t in &self.tabs {
+                    if t.is_dirty() || (t.doc.path().is_none() && !t.text.is_empty()) {
+                        t.text.hash(&mut h);
+                        t.doc.path().map(|p| p.to_path_buf()).hash(&mut h);
+                    }
+                }
+                h.finish()
+            };
+            if due && has_unsaved && content_sig != self.last_backup_sig {
                 self.snapshot_session_backups();
+                self.last_backup_sig = content_sig;
             }
         }
 
