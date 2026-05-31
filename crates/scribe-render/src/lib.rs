@@ -11,7 +11,7 @@
 pub mod post;
 pub mod rope_editor;
 
-pub use post::{CrtPostCallback, PostResources, PostState, PostUniforms};
+pub use post::{crt_overlay_shape, CrtPostCallback, PostResources, PostState, PostUniforms};
 pub use rope_editor::{
     apply_event, BufferModeSeen, EventOutcome, RopeEditor, RopeEditorResponse, RopeEditorState,
 };
