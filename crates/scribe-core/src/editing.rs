@@ -205,6 +205,72 @@ pub fn selected_text(rope: &Rope, st: &EditState) -> String {
     rope.slice(st.selection()).to_string()
 }
 
+// ---- Multi-cursor (F-009) ------------------------------------------------
+
+/// Apply a per-caret edit to every caret in `carets`, managing the running
+/// text-length offset so each caret edits at its position SHIFTED by the edits
+/// the earlier carets performed. `carets` is sorted ascending and de-duplicated
+/// (carets that collapse onto the same position after editing are merged).
+///
+/// `f` performs the op on ONE `(rope, caret)` and the function derives each
+/// edit's char-length delta from the rope length, so callers reuse the existing
+/// single-caret primitives ([`insert`], [`backspace`], …) unchanged. This is
+/// the load-bearing correctness primitive for multi-cursor edits.
+pub fn for_each_caret<F>(rope: &mut Rope, carets: &mut Vec<EditState>, mut f: F)
+where
+    F: FnMut(&mut Rope, &mut EditState),
+{
+    if carets.is_empty() {
+        return;
+    }
+    carets.sort_by_key(|c| c.selection().start.min(c.cursor));
+    let mut offset: isize = 0;
+    for caret in carets.iter_mut() {
+        // Shift this caret by the net length change earlier carets caused.
+        caret.cursor = (caret.cursor as isize + offset).max(0) as usize;
+        caret.anchor = (caret.anchor as isize + offset).max(0) as usize;
+        let before = rope.len_chars() as isize;
+        f(rope, caret);
+        offset += rope.len_chars() as isize - before;
+    }
+    dedupe_carets(carets);
+}
+
+/// Merge carets that occupy the same collapsed position (keep one), preserving
+/// ascending order. Selections are compared by `(start, end)`.
+pub fn dedupe_carets(carets: &mut Vec<EditState>) {
+    carets.sort_by_key(|c| (c.selection().start, c.cursor));
+    carets.dedup_by_key(|c| (c.cursor, c.anchor));
+}
+
+/// Add a collapsed caret one line below the lowest caret (`dir = 1`) or above
+/// the highest (`dir = -1`), at that reference caret's column. No-op when the
+/// new line would fall outside the buffer. Returns `true` when a caret was
+/// added.
+pub fn add_caret_vertical(rope: &Rope, carets: &mut Vec<EditState>, dir: isize) -> bool {
+    let reference = if dir >= 0 {
+        carets.iter().map(|c| c.cursor).max()
+    } else {
+        carets.iter().map(|c| c.cursor).min()
+    };
+    let Some(reference) = reference else {
+        return false;
+    };
+    let (line, col) = line_col(rope, reference);
+    let last_line = rope.len_lines().saturating_sub(1);
+    let target = line as isize + dir;
+    if target < 0 || target as usize > last_line {
+        return false;
+    }
+    let at = char_at(rope, target as usize, col);
+    if carets.iter().any(|c| c.cursor == at && !c.has_selection()) {
+        return false;
+    }
+    carets.push(EditState::at(at));
+    dedupe_carets(carets);
+    true
+}
+
 /// One undo checkpoint: the full buffer text + caret char index. Snapshot-
 /// based (simple and always-correct vs. operation logs); the [`History`]
 /// coalesces runs of same-kind edits so a burst of typing is one undo step.
@@ -543,5 +609,62 @@ mod tests {
         let json = serde_json::to_string(&h).unwrap();
         let back: History = serde_json::from_str(&json).unwrap();
         assert!(back.can_undo());
+    }
+
+    // ---- Multi-cursor (F-009) ----
+
+    #[test]
+    fn for_each_caret_inserts_at_every_caret_with_offset() {
+        // Two carets in "abXcdX" style: insert "!" at col 0 of each line.
+        let mut r = rope("ab\ncd\n");
+        // caret at line0 col0 (idx 0) and line1 col0 (idx 3).
+        let mut carets = vec![EditState::at(0), EditState::at(3)];
+        for_each_caret(&mut r, &mut carets, |rope, st| {
+            insert(rope, st, "!");
+        });
+        // Both lines gain a leading '!'. The second caret's index shifted by
+        // the first insert (offset management).
+        assert_eq!(r.to_string(), "!ab\n!cd\n");
+        // Carets sit just after each inserted '!'.
+        assert_eq!(carets.iter().map(|c| c.cursor).collect::<Vec<_>>(), vec![1, 5]);
+    }
+
+    #[test]
+    fn for_each_caret_backspace_offsets_correctly() {
+        let mut r = rope("aXbX");
+        // Carets after each 'X' (idx 2 and idx 4).
+        let mut carets = vec![EditState::at(2), EditState::at(4)];
+        for_each_caret(&mut r, &mut carets, |rope, st| {
+            backspace(rope, st);
+        });
+        // Each backspace removes the preceding 'X'.
+        assert_eq!(r.to_string(), "ab");
+        assert_eq!(carets.iter().map(|c| c.cursor).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn dedupe_carets_merges_coincident() {
+        let mut carets = vec![EditState::at(3), EditState::at(1), EditState::at(3)];
+        dedupe_carets(&mut carets);
+        assert_eq!(carets.iter().map(|c| c.cursor).collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    #[test]
+    fn add_caret_vertical_below_keeps_column() {
+        let r = rope("abcd\nefgh\nijkl\n");
+        let mut carets = vec![EditState::at(2)]; // line 0, col 2
+        assert!(add_caret_vertical(&r, &mut carets, 1));
+        // New caret on line 1 col 2 → idx 7.
+        assert!(carets.iter().any(|c| line_col(&r, c.cursor) == (1, 2)));
+        assert_eq!(carets.len(), 2);
+    }
+
+    #[test]
+    fn add_caret_vertical_clamps_at_buffer_edge() {
+        let r = rope("only\n");
+        let mut carets = vec![EditState::at(0)]; // line 0
+        // No line above → no caret added.
+        assert!(!add_caret_vertical(&r, &mut carets, -1));
+        assert_eq!(carets.len(), 1);
     }
 }
