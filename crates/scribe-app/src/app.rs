@@ -1297,6 +1297,17 @@ impl ScribeApp {
                     .ensure_defaults(Config::config_dir().as_deref());
                 self.plugin_manager.open = true;
             }
+            BuiltinCommand::SortLines => {
+                let active = self.active.min(self.tabs.len().saturating_sub(1));
+                if active < self.tabs.len() && !self.tabs[active].doc.is_read_only_large() {
+                    let sorted = scribe_core::text_ops::sort_lines(&self.tabs[active].text);
+                    if sorted != self.tabs[active].text {
+                        self.tabs[active].text = sorted;
+                        self.tabs[active].doc.mark_dirty();
+                        self.status = "sorted lines (A→Z)".to_string();
+                    }
+                }
+            }
             // Clipboard / history actions: record the request; `frame_tick`
             // drains it into the focused editor as a native egui event.
             BuiltinCommand::Copy => self.pending_editor_action = Some(EditorAction::Copy),
@@ -2437,6 +2448,7 @@ pub(crate) enum BuiltinCommand {
     FoldAll,
     ExpandAll,
     OpenPluginManager,
+    SortLines,
     Copy,
     Cut,
     Paste,
@@ -2561,6 +2573,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Show command palette",
         shortcut: "Ctrl+Shift+P",
         action: BuiltinCommand::OpenPalette,
+    },
+    BuiltinEntry {
+        label: "Sort lines (A→Z)",
+        shortcut: "",
+        action: BuiltinCommand::SortLines,
     },
     BuiltinEntry {
         label: "Start language server for current file",
