@@ -29,6 +29,7 @@ pub mod error;
 pub mod lsp;
 pub mod plugin;
 pub mod search;
+pub mod session;
 pub mod spell;
 pub mod syntax;
 pub mod theme;

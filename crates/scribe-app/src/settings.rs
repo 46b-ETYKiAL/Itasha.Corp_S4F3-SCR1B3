@@ -502,6 +502,27 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 );
             });
         }
+        if row_visible(q, "session backup hot exit unsaved restore crash recovery") {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.editor.session_backup,
+                        "Restore unsaved notes after restart (session backup)",
+                    )
+                    .on_hover_text(
+                        "Keeps a backup of unsaved buffers (including never-saved scratch \
+                         notes) so they come back after a restart or crash — no save needed. \
+                         Backups live in the config 'backup' folder and are deleted once you \
+                         save. On by default.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.session_backup,
+                    &def.editor.session_backup,
+                );
+            });
+        }
         space(ui);
     }
 

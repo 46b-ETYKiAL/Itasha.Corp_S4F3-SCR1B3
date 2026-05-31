@@ -275,6 +275,18 @@ pub struct EditorConfig {
     /// use the rope browse path regardless of this flag.
     #[serde(default)]
     pub experimental_rope_editor: bool,
+    /// Persist UNSAVED buffer content (incl. untitled scratch notes) so it
+    /// survives a restart or crash without an explicit save — the Notepad++
+    /// "session snapshot" / VS Code "Hot Exit" behaviour. Backups live in
+    /// `<config>/backup/`; deleted once the buffer is saved. Default ON.
+    #[serde(default = "default_true")]
+    pub session_backup: bool,
+}
+
+/// serde default for opt-OUT booleans (fields that should be ON unless the
+/// user turns them off, and ON for configs written before the field existed).
+fn default_true() -> bool {
+    true
 }
 
 /// Cap on the scroll-position memory map (F-021). Older entries are evicted
@@ -344,6 +356,7 @@ impl Default for EditorConfig {
             first_run_completed: false,
             scroll_positions: std::collections::HashMap::new(),
             experimental_rope_editor: false,
+            session_backup: true,
         }
     }
 }
