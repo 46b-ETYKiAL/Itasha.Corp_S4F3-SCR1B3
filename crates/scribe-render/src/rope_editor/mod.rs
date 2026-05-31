@@ -275,6 +275,20 @@ impl<'a> RopeEditor<'a> {
             .iter()
             .map(|c| editing::line_col(rope, c.cursor))
             .collect();
+        // Bracket-match highlight: the bracket under (or just before) the caret
+        // and its partner. Capped scan so a huge file can't stall.
+        let bracket_hl: Vec<(usize, usize)> = {
+            let mut v = Vec::new();
+            let cur = state.edit.cursor;
+            for probe in [cur, cur.saturating_sub(1)] {
+                if let Some(m) = editing::matching_bracket(rope, probe, 100_000) {
+                    v.push(editing::line_col(rope, probe));
+                    v.push(editing::line_col(rope, m));
+                    break;
+                }
+            }
+            v
+        };
 
         let scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -370,6 +384,22 @@ impl<'a> RopeEditor<'a> {
                                     cx,
                                     text_rect.top()..=text_rect.bottom(),
                                     egui::Stroke::new(1.5, text_color),
+                                );
+                            }
+                        }
+                        // Matching-bracket boxes on this line.
+                        for (bl, bc) in &bracket_hl {
+                            if *bl == li {
+                                let x = text_rect.left() + *bc as f32 * char_w;
+                                let box_rect = egui::Rect::from_min_max(
+                                    egui::pos2(x, text_rect.top()),
+                                    egui::pos2(x + char_w, text_rect.bottom()),
+                                );
+                                ui.painter().rect_stroke(
+                                    box_rect,
+                                    0.0,
+                                    egui::Stroke::new(1.0, gutter_color),
+                                    egui::StrokeKind::Inside,
                                 );
                             }
                         }
