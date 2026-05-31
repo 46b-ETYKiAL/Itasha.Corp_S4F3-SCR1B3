@@ -316,6 +316,21 @@ impl<'a> RopeEditor<'a> {
                     let text_rect = row.inner;
                     let line_chars = s.chars().count();
 
+                    // Current-line highlight: a faint full-width band on the
+                    // caret's line (only when there's no active selection, to
+                    // avoid fighting the selection band).
+                    if focused && li == caret_line && !has_sel {
+                        let band = egui::Rect::from_min_max(
+                            egui::pos2(ui.max_rect().left(), text_rect.top()),
+                            egui::pos2(ui.max_rect().right(), text_rect.bottom()),
+                        );
+                        ui.painter().rect_filled(
+                            band,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 8),
+                        );
+                    }
+
                     // Selection band (semi-transparent overlay).
                     if has_sel && li >= sel_s_line && li <= sel_e_line {
                         let from = if li == sel_s_line { sel_s_col } else { 0 };
@@ -597,7 +612,28 @@ pub fn apply_event(
     match event {
         Event::Text(text) if !text.is_empty() => {
             record_before!(EditKind::Insert);
-            edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, text));
+            // Auto-close brackets/quotes (single caret): typing an opener
+            // inserts the matching closer and keeps the caret between; with a
+            // selection, the selection is wrapped in the pair.
+            let opener = if text.chars().count() == 1 {
+                text.chars().next().and_then(editing::closing_for)
+            } else {
+                None
+            };
+            if let (true, Some(close)) = (state.extra.is_empty(), opener) {
+                if state.edit.has_selection() {
+                    let sel = editing::selected_text(rope, &state.edit);
+                    let wrapped = format!("{text}{sel}{close}");
+                    editing::replace_selection(rope, &mut state.edit, &wrapped);
+                } else {
+                    let pair = format!("{text}{close}");
+                    editing::insert(rope, &mut state.edit, &pair);
+                    state.edit.cursor = state.edit.cursor.saturating_sub(1);
+                    state.edit.anchor = state.edit.cursor;
+                }
+            } else {
+                edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, text));
+            }
             out.consumed = true;
         }
         Event::Paste(text) if !text.is_empty() => {
@@ -665,12 +701,55 @@ pub fn apply_event(
                 }
                 Key::Enter => {
                     record_before!(EditKind::Other);
-                    edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, "\n"));
+                    if state.extra.is_empty() {
+                        // Auto-indent: carry the current line's leading
+                        // whitespace onto the new line.
+                        let ws = editing::leading_whitespace(rope, state.edit.cursor);
+                        let nl = format!("\n{ws}");
+                        editing::insert(rope, &mut state.edit, &nl);
+                    } else {
+                        edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, "\n"));
+                    }
                     out.consumed = true;
                 }
                 Key::Tab => {
                     record_before!(EditKind::Other);
-                    edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, "    "));
+                    let multiline = {
+                        let s = state.edit.selection();
+                        rope.char_to_line(s.start) != rope.char_to_line(s.end.max(s.start))
+                    };
+                    if shift {
+                        // Shift+Tab outdents the selected (or current) line(s).
+                        editing::indent_lines(rope, &mut state.edit, "    ", true);
+                    } else if multiline && state.extra.is_empty() {
+                        // Tab indents every line of a multi-line selection.
+                        editing::indent_lines(rope, &mut state.edit, "    ", false);
+                    } else {
+                        edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(
+                            r, st, "    "
+                        ));
+                    }
+                    out.consumed = true;
+                }
+                // Ctrl+Shift+K deletes the current line.
+                Key::K if cmd && shift => {
+                    record_before!(EditKind::Other);
+                    state.clear_extra_carets();
+                    editing::delete_line(rope, &mut state.edit);
+                    out.consumed = true;
+                }
+                // Ctrl+U lowercases the selection; Ctrl+Shift+U uppercases.
+                Key::U if cmd => {
+                    if state.edit.has_selection() {
+                        record_before!(EditKind::Other);
+                        let sel = editing::selected_text(rope, &state.edit);
+                        let cased = if shift {
+                            sel.to_uppercase()
+                        } else {
+                            sel.to_lowercase()
+                        };
+                        editing::replace_selection(rope, &mut state.edit, &cased);
+                    }
                     out.consumed = true;
                 }
                 Key::ArrowLeft => {
@@ -939,6 +1018,70 @@ mod tests {
         assert!(st.is_multi());
         apply_event(&mut r, &mut st, &key_ev(egui::Key::Backspace, false, false));
         assert_eq!(r.to_string(), "ab\ncd\n", "each X removed");
+    }
+
+    #[test]
+    fn apply_event_auto_closes_brackets() {
+        let mut r = Rope::from_str("");
+        let mut st = RopeEditorState::new();
+        apply_event(&mut r, &mut st, &text_event("("));
+        assert_eq!(r.to_string(), "()", "closer auto-inserted");
+        assert_eq!(st.edit.cursor, 1, "caret sits between the pair");
+    }
+
+    #[test]
+    fn apply_event_wraps_selection_in_bracket() {
+        let mut r = Rope::from_str("abc");
+        let mut st = RopeEditorState::new();
+        st.edit = EditState {
+            anchor: 0,
+            cursor: 3,
+            goal_col: None,
+        };
+        apply_event(&mut r, &mut st, &text_event("["));
+        assert_eq!(r.to_string(), "[abc]", "selection wrapped");
+    }
+
+    #[test]
+    fn apply_event_auto_indents_on_enter() {
+        let mut r = Rope::from_str("    x");
+        let mut st = RopeEditorState::new();
+        st.edit = EditState::at(5); // end of "    x"
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::Enter, false, false));
+        assert_eq!(r.to_string(), "    x\n    ", "new line carries indent");
+    }
+
+    #[test]
+    fn apply_event_tab_indents_multiline_selection() {
+        let mut r = Rope::from_str("a\nb\n");
+        let mut st = RopeEditorState::new();
+        st.edit = EditState {
+            anchor: 0,
+            cursor: 3,
+            goal_col: None,
+        };
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::Tab, false, false));
+        assert_eq!(r.to_string(), "    a\n    b\n");
+        // Shift+Tab outdents back.
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::Tab, true, false));
+        assert_eq!(r.to_string(), "a\nb\n");
+    }
+
+    #[test]
+    fn apply_event_delete_line_and_case_toggle() {
+        let mut r = Rope::from_str("keep\ndrop\n");
+        let mut st = RopeEditorState::new();
+        st.edit = EditState::at(6); // on "drop"
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::K, true, true));
+        assert_eq!(r.to_string(), "keep\n");
+        // Select "keep" and uppercase it.
+        st.edit = EditState {
+            anchor: 0,
+            cursor: 4,
+            goal_col: None,
+        };
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::U, true, true));
+        assert_eq!(r.to_string(), "KEEP\n");
     }
 
     /// The editable widget renders a small buffer (caret + selection state)

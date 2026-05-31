@@ -271,6 +271,109 @@ pub fn add_caret_vertical(rope: &Rope, carets: &mut Vec<EditState>, dir: isize) 
     true
 }
 
+// ---- Editing power-features: auto-close, auto-indent, line ops -----------
+
+/// The auto-close partner for an opening bracket/quote, or `None`.
+pub fn closing_for(open: char) -> Option<char> {
+    match open {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '"' => Some('"'),
+        '\'' => Some('\''),
+        '`' => Some('`'),
+        _ => None,
+    }
+}
+
+/// The leading whitespace (spaces/tabs) of the line containing char index `c`.
+pub fn leading_whitespace(rope: &Rope, c: usize) -> String {
+    let (line, _) = line_col(rope, c);
+    let start = rope.line_to_char(line);
+    let slice = rope.line(line);
+    let mut ws = String::new();
+    for ch in slice.chars() {
+        if ch == ' ' || ch == '\t' {
+            ws.push(ch);
+        } else {
+            break;
+        }
+    }
+    let _ = start;
+    ws
+}
+
+/// Indent (or `outdent`) every line touched by the caret's selection (or the
+/// caret's own line when collapsed) by one `unit` of whitespace. The selection
+/// is extended to cover the affected lines. Returns the net char delta.
+pub fn indent_lines(rope: &mut Rope, st: &mut EditState, unit: &str, outdent: bool) {
+    let sel = st.selection();
+    let first_line = rope.char_to_line(sel.start);
+    let last_line = rope.char_to_line(sel.end.max(sel.start));
+    let unit_len = unit.chars().count();
+    // Walk lines bottom-up so earlier edits don't shift later line offsets.
+    for line in (first_line..=last_line).rev() {
+        let line_start = rope.line_to_char(line);
+        if outdent {
+            // Remove up to `unit_len` leading whitespace chars.
+            let slice = rope.line(line);
+            let mut removable = 0usize;
+            for ch in slice.chars().take(unit_len) {
+                if ch == ' ' || ch == '\t' {
+                    removable += 1;
+                } else {
+                    break;
+                }
+            }
+            if removable > 0 {
+                rope.remove(line_start..line_start + removable);
+            }
+        } else {
+            // Don't indent a completely empty last line of a selection.
+            if rope.line(line).len_chars() == 0 {
+                continue;
+            }
+            rope.insert(line_start, unit);
+        }
+    }
+    // Re-anchor the caret/selection to span the affected lines.
+    let new_first = rope.line_to_char(first_line);
+    let new_last_end = char_at(rope, last_line, usize::MAX);
+    st.anchor = new_first;
+    st.cursor = new_last_end;
+    st.goal_col = None;
+}
+
+/// Delete the entire line(s) the selection touches (including the trailing
+/// newline), collapsing the caret to the start of the following line.
+pub fn delete_line(rope: &mut Rope, st: &mut EditState) {
+    let sel = st.selection();
+    let first_line = rope.char_to_line(sel.start);
+    let last_line = rope.char_to_line(sel.end.max(sel.start));
+    let start = rope.line_to_char(first_line);
+    let end = if last_line + 1 < rope.len_lines() {
+        rope.line_to_char(last_line + 1)
+    } else {
+        rope.len_chars()
+    };
+    rope.remove(start..end);
+    st.collapse_to(start.min(rope.len_chars()));
+}
+
+/// Replace the selection with `replacement` (same char length expected for a
+/// case toggle), keeping it selected. No-op when collapsed.
+pub fn replace_selection(rope: &mut Rope, st: &mut EditState, replacement: &str) {
+    if !st.has_selection() {
+        return;
+    }
+    let range = st.selection();
+    rope.remove(range.clone());
+    rope.insert(range.start, replacement);
+    st.anchor = range.start;
+    st.cursor = range.start + replacement.chars().count();
+    st.goal_col = None;
+}
+
 /// One undo checkpoint: the full buffer text + caret char index. Snapshot-
 /// based (simple and always-correct vs. operation logs); the [`History`]
 /// coalesces runs of same-kind edits so a burst of typing is one undo step.
@@ -675,5 +778,69 @@ mod tests {
                                                  // No line above → no caret added.
         assert!(!add_caret_vertical(&r, &mut carets, -1));
         assert_eq!(carets.len(), 1);
+    }
+
+    // ---- editing power-features ----
+
+    #[test]
+    fn closing_for_pairs() {
+        assert_eq!(closing_for('('), Some(')'));
+        assert_eq!(closing_for('['), Some(']'));
+        assert_eq!(closing_for('{'), Some('}'));
+        assert_eq!(closing_for('"'), Some('"'));
+        assert_eq!(closing_for('x'), None);
+    }
+
+    #[test]
+    fn leading_whitespace_of_line() {
+        let r = rope("    indented\nflush\n");
+        assert_eq!(leading_whitespace(&r, 6), "    "); // inside line 0
+        assert_eq!(leading_whitespace(&r, 13), ""); // line 1 (flush)
+    }
+
+    #[test]
+    fn indent_lines_indents_selection() {
+        let mut r = rope("a\nb\nc\n");
+        // Select lines 0..2 (chars 0..4 spans line0+line1).
+        let mut st = EditState {
+            anchor: 0,
+            cursor: 3,
+            goal_col: None,
+        };
+        indent_lines(&mut r, &mut st, "  ", false);
+        assert_eq!(r.to_string(), "  a\n  b\nc\n");
+    }
+
+    #[test]
+    fn indent_lines_outdents() {
+        let mut r = rope("    a\n    b\n");
+        let mut st = EditState {
+            anchor: 0,
+            cursor: 6,
+            goal_col: None,
+        };
+        indent_lines(&mut r, &mut st, "  ", true);
+        assert_eq!(r.to_string(), "  a\n  b\n");
+    }
+
+    #[test]
+    fn delete_line_removes_whole_line() {
+        let mut r = rope("a\nb\nc\n");
+        let mut st = EditState::at(2); // on line 1 ("b")
+        delete_line(&mut r, &mut st);
+        assert_eq!(r.to_string(), "a\nc\n");
+    }
+
+    #[test]
+    fn replace_selection_swaps_and_reselects() {
+        let mut r = rope("abcd");
+        let mut st = EditState {
+            anchor: 1,
+            cursor: 3,
+            goal_col: None,
+        };
+        replace_selection(&mut r, &mut st, "XY");
+        assert_eq!(r.to_string(), "aXYd");
+        assert_eq!(st.selection(), 1..3);
     }
 }
