@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="windows-1252"?>
 <!--
-  WiX source for the SCR1B3 Windows installer (.msi), built with cargo-wix:
-
-      cargo install cargo-wix
-      cargo wix --package scribe-app --nocapture
+  WiX source for the SCR1B3 Windows installer (.msi), built with cargo-wix.
+  Build it with `cargo wix` (package scribe-app); see packaging/README.md for
+  the exact CLI flags. NOTE: XML comments may not contain a double hyphen, so
+  the literal flags are described in prose here rather than written out.
 
   Produces target/wix/scr1b3-<version>-x86_64.msi: a standard MSI that installs
   scr1b3.exe to Program Files, adds a Start-Menu shortcut, and (optionally) puts
-  it on PATH. Per-machine install; clean upgrade + uninstall.
+  it on PATH. Per-machine install; clean upgrade and uninstall.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product
