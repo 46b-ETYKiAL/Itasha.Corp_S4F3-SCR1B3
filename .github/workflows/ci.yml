@@ -42,7 +42,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev \
             libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
-      - uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Format check
         run: cargo fmt --all --check
       - name: Clippy (deny warnings)
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@8a45e1c7c9a95dfae3276e89a553705e40ae45a2 # v2.0.20
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
         with:
           command: check
 
