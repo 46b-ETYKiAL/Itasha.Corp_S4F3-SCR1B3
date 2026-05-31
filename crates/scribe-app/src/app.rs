@@ -2277,6 +2277,14 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
         chord: "Ctrl+Shift+Z",
         action: "Redo",
     },
+    ShortcutEntry {
+        chord: "Ctrl+Alt+↓ / ↑",
+        action: "Add caret below / above (multi-cursor — experimental editor)",
+    },
+    ShortcutEntry {
+        chord: "Esc",
+        action: "Collapse multi-cursor to one caret",
+    },
 ];
 
 // ---- Built-in command palette registry (F-004) ----

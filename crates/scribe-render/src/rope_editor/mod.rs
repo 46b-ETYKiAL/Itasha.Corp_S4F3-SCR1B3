@@ -269,6 +269,12 @@ impl<'a> RopeEditor<'a> {
         let has_sel = sel.start != sel.end;
         let (sel_s_line, sel_s_col) = editing::line_col(rope, sel.start);
         let (sel_e_line, sel_e_col) = editing::line_col(rope, sel.end);
+        // Multi-cursor (F-009): secondary caret (line, col) positions to paint.
+        let extra_carets: Vec<(usize, usize)> = state
+            .extra
+            .iter()
+            .map(|c| editing::line_col(rope, c.cursor))
+            .collect();
 
         let scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -327,7 +333,7 @@ impl<'a> RopeEditor<'a> {
                         ui.painter().rect_filled(band, 0.0, sel_color);
                     }
 
-                    // Caret.
+                    // Primary caret.
                     if focused && li == caret_line {
                         let cx = text_rect.left() + caret_col as f32 * char_w;
                         ui.painter().vline(
@@ -338,6 +344,19 @@ impl<'a> RopeEditor<'a> {
                         // Keep the caret in view after an edit/move.
                         if caret_moved {
                             ui.scroll_to_rect(text_rect, None);
+                        }
+                    }
+                    // Secondary carets (multi-cursor) on this line.
+                    if focused {
+                        for (cl, cc) in &extra_carets {
+                            if *cl == li {
+                                let cx = text_rect.left() + *cc as f32 * char_w;
+                                ui.painter().vline(
+                                    cx,
+                                    text_rect.top()..=text_rect.bottom(),
+                                    egui::Stroke::new(1.5, text_color),
+                                );
+                            }
                         }
                     }
                 }
@@ -461,6 +480,9 @@ use scribe_core::editing::{self, EditKind, EditState, History, Snapshot};
 #[derive(Debug, Clone)]
 pub struct RopeEditorState {
     pub edit: EditState,
+    /// Secondary carets for multi-cursor (F-009). Empty in single-caret mode.
+    /// Mutating + movement edits apply to `edit` AND every `extra` caret.
+    pub extra: Vec<EditState>,
     pub history: History,
 }
 
@@ -468,6 +490,7 @@ impl Default for RopeEditorState {
     fn default() -> Self {
         Self {
             edit: EditState::at(0),
+            extra: Vec::new(),
             history: History::default(),
         }
     }
@@ -484,6 +507,39 @@ impl RopeEditorState {
         let n = rope.len_chars();
         self.edit.cursor = self.edit.cursor.min(n);
         self.edit.anchor = self.edit.anchor.min(n);
+        for c in &mut self.extra {
+            c.cursor = c.cursor.min(n);
+            c.anchor = c.anchor.min(n);
+        }
+    }
+
+    /// All carets (primary + extras) as a flat vec, for a multi-caret op.
+    fn all_carets(&self) -> Vec<EditState> {
+        let mut v = Vec::with_capacity(1 + self.extra.len());
+        v.push(self.edit);
+        v.extend(self.extra.iter().copied());
+        v
+    }
+
+    /// Write back a multi-caret result: dedupe, then the lowest caret becomes
+    /// primary and the rest become extras.
+    fn set_carets(&mut self, mut carets: Vec<EditState>) {
+        editing::dedupe_carets(&mut carets);
+        if carets.is_empty() {
+            return;
+        }
+        self.edit = carets.remove(0);
+        self.extra = carets;
+    }
+
+    /// Collapse to a single caret (drop all secondary carets).
+    pub fn clear_extra_carets(&mut self) {
+        self.extra.clear();
+    }
+
+    /// Whether multi-cursor mode is active.
+    pub fn is_multi(&self) -> bool {
+        !self.extra.is_empty()
     }
 }
 
@@ -518,18 +574,39 @@ pub fn apply_event(
         }};
     }
 
+    // Run a mutating per-caret op across every caret (multi-cursor aware),
+    // managing the shared offset so each caret edits at its shifted position.
+    macro_rules! edit_all {
+        ($f:expr) => {{
+            let mut carets = state.all_carets();
+            editing::for_each_caret(rope, &mut carets, $f);
+            state.set_carets(carets);
+        }};
+    }
+    // Move every caret (no text change → no offset management needed).
+    macro_rules! move_all {
+        ($f:expr) => {{
+            let mut carets = state.all_carets();
+            for c in &mut carets {
+                $f(rope, c);
+            }
+            state.set_carets(carets);
+        }};
+    }
+
     match event {
         Event::Text(text) if !text.is_empty() => {
             record_before!(EditKind::Insert);
-            editing::insert(rope, &mut state.edit, text);
+            edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, text));
             out.consumed = true;
         }
         Event::Paste(text) if !text.is_empty() => {
             record_before!(EditKind::Other);
-            editing::insert(rope, &mut state.edit, text);
+            edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, text));
             out.consumed = true;
         }
         Event::Copy => {
+            state.clear_extra_carets();
             let sel = editing::selected_text(rope, &state.edit);
             if !sel.is_empty() {
                 out.set_clipboard = Some(sel);
@@ -537,6 +614,7 @@ pub fn apply_event(
             out.consumed = true;
         }
         Event::Cut => {
+            state.clear_extra_carets();
             let sel = editing::selected_text(rope, &state.edit);
             if !sel.is_empty() {
                 record_before!(EditKind::Other);
@@ -553,56 +631,91 @@ pub fn apply_event(
         } => {
             let shift = modifiers.shift;
             let cmd = modifiers.command;
+            let alt = modifiers.alt;
             match key {
+                // Multi-cursor add/remove: Ctrl+Alt+Down/Up add a caret below /
+                // above; Escape collapses back to a single caret.
+                Key::ArrowDown if alt && cmd => {
+                    let mut carets = state.all_carets();
+                    if editing::add_caret_vertical(rope, &mut carets, 1) {
+                        state.set_carets(carets);
+                    }
+                    out.consumed = true;
+                }
+                Key::ArrowUp if alt && cmd => {
+                    let mut carets = state.all_carets();
+                    if editing::add_caret_vertical(rope, &mut carets, -1) {
+                        state.set_carets(carets);
+                    }
+                    out.consumed = true;
+                }
+                Key::Escape if state.is_multi() => {
+                    state.clear_extra_carets();
+                    out.consumed = true;
+                }
                 Key::Backspace => {
                     record_before!(EditKind::Delete);
-                    editing::backspace(rope, &mut state.edit);
+                    edit_all!(editing::backspace);
                     out.consumed = true;
                 }
                 Key::Delete => {
                     record_before!(EditKind::Delete);
-                    editing::delete_forward(rope, &mut state.edit);
+                    edit_all!(editing::delete_forward);
                     out.consumed = true;
                 }
                 Key::Enter => {
                     record_before!(EditKind::Other);
-                    editing::insert(rope, &mut state.edit, "\n");
+                    edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, "\n"));
                     out.consumed = true;
                 }
                 Key::Tab => {
                     record_before!(EditKind::Other);
-                    editing::insert(rope, &mut state.edit, "    ");
+                    edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, "    "));
                     out.consumed = true;
                 }
                 Key::ArrowLeft => {
-                    editing::move_horizontal(rope, &mut state.edit, -1, shift);
+                    move_all!(|r: &mut Rope, c: &mut EditState| editing::move_horizontal(
+                        r, c, -1, shift
+                    ));
                     out.consumed = true;
                 }
                 Key::ArrowRight => {
-                    editing::move_horizontal(rope, &mut state.edit, 1, shift);
+                    move_all!(|r: &mut Rope, c: &mut EditState| editing::move_horizontal(
+                        r, c, 1, shift
+                    ));
                     out.consumed = true;
                 }
                 Key::ArrowUp => {
-                    editing::move_vertical(rope, &mut state.edit, -1, shift);
+                    move_all!(|r: &mut Rope, c: &mut EditState| editing::move_vertical(
+                        r, c, -1, shift
+                    ));
                     out.consumed = true;
                 }
                 Key::ArrowDown => {
-                    editing::move_vertical(rope, &mut state.edit, 1, shift);
+                    move_all!(|r: &mut Rope, c: &mut EditState| editing::move_vertical(
+                        r, c, 1, shift
+                    ));
                     out.consumed = true;
                 }
                 Key::Home => {
-                    editing::move_line_start(rope, &mut state.edit, shift);
+                    move_all!(|r: &mut Rope, c: &mut EditState| editing::move_line_start(
+                        r, c, shift
+                    ));
                     out.consumed = true;
                 }
                 Key::End => {
-                    editing::move_line_end(rope, &mut state.edit, shift);
+                    move_all!(|r: &mut Rope, c: &mut EditState| editing::move_line_end(
+                        r, c, shift
+                    ));
                     out.consumed = true;
                 }
                 Key::A if cmd => {
+                    state.clear_extra_carets();
                     editing::select_all(rope, &mut state.edit);
                     out.consumed = true;
                 }
                 Key::Z if cmd && !shift => {
+                    state.clear_extra_carets();
                     let current = Snapshot::new(rope.to_string(), state.edit.cursor);
                     if let Some(prev) = state.history.undo(current) {
                         *rope = Rope::from_str(&prev.text);
@@ -611,6 +724,7 @@ pub fn apply_event(
                     out.consumed = true;
                 }
                 Key::Z if cmd && shift => {
+                    state.clear_extra_carets();
                     let current = Snapshot::new(rope.to_string(), state.edit.cursor);
                     if let Some(next) = state.history.redo(current) {
                         *rope = Rope::from_str(&next.text);
@@ -776,6 +890,55 @@ mod tests {
         );
         apply_event(&mut r, &mut st, &key_ev(egui::Key::ArrowRight, true, false));
         assert_eq!(st.edit.selection(), 1..2);
+    }
+
+    fn alt_cmd_key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                alt: true,
+                command: true,
+                ctrl: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn multi_cursor_add_and_type_at_all_carets() {
+        let mut r = Rope::from_str("ab\ncd\n");
+        let mut st = RopeEditorState::new();
+        // Caret at line0 col0. Ctrl+Alt+Down adds a caret on line1 col0.
+        apply_event(&mut r, &mut st, &alt_cmd_key(egui::Key::ArrowDown));
+        assert!(st.is_multi(), "second caret added");
+        // Typing inserts at BOTH carets (offset-managed).
+        apply_event(&mut r, &mut st, &text_event("!"));
+        assert_eq!(r.to_string(), "!ab\n!cd\n");
+    }
+
+    #[test]
+    fn multi_cursor_escape_collapses() {
+        let mut r = Rope::from_str("ab\ncd\n");
+        let mut st = RopeEditorState::new();
+        apply_event(&mut r, &mut st, &alt_cmd_key(egui::Key::ArrowDown));
+        assert!(st.is_multi());
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::Escape, false, false));
+        assert!(!st.is_multi(), "Escape drops secondary carets");
+    }
+
+    #[test]
+    fn multi_cursor_backspace_at_all_carets() {
+        let mut r = Rope::from_str("aXb\ncXd\n");
+        let mut st = RopeEditorState::new();
+        // Place primary after the first X (idx 2), add a caret below.
+        st.edit = EditState::at(2);
+        apply_event(&mut r, &mut st, &alt_cmd_key(egui::Key::ArrowDown));
+        assert!(st.is_multi());
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::Backspace, false, false));
+        assert_eq!(r.to_string(), "ab\ncd\n", "each X removed");
     }
 
     /// The editable widget renders a small buffer (caret + selection state)
