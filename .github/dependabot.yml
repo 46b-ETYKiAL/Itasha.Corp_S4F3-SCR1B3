@@ -18,6 +18,14 @@ updates:
       timezone: "UTC"
     open-pull-requests-limit: 5
     rebase-strategy: auto
+    # Wait before adopting brand-new releases so a malicious or broken fresh
+    # publish (supply-chain attack) is caught upstream before Dependabot opens
+    # a bump PR; longer hold for majors. (zizmor dependabot-cooldown)
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     labels:
       - "dependencies"
       - "rust"
@@ -39,6 +47,11 @@ updates:
       time: "09:00"
       timezone: "UTC"
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     labels:
       - "dependencies"
       - "github-actions"
