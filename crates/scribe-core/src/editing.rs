@@ -374,6 +374,60 @@ pub fn replace_selection(rope: &mut Rope, st: &mut EditState, replacement: &str)
     st.goal_col = None;
 }
 
+/// Find the position of the bracket matching the `(`/`)`/`[`/`]`/`{`/`}` at
+/// char index `pos`, or `None` when `pos` isn't on a bracket or no match
+/// exists. Scans in the bracket's direction tracking nesting, capped at
+/// `max_scan` chars so a huge file with an unmatched bracket can't stall.
+pub fn matching_bracket(rope: &Rope, pos: usize, max_scan: usize) -> Option<usize> {
+    if pos >= rope.len_chars() {
+        return None;
+    }
+    let ch = rope.char(pos);
+    const PAIRS: &[(char, char)] = &[('(', ')'), ('[', ']'), ('{', '}')];
+    let (open, close, forward) = if let Some(p) = PAIRS.iter().find(|(o, _)| *o == ch) {
+        (p.0, p.1, true)
+    } else if let Some(p) = PAIRS.iter().find(|(_, c)| *c == ch) {
+        (p.0, p.1, false)
+    } else {
+        return None;
+    };
+    let mut depth = 0i32;
+    let mut steps = 0usize;
+    if forward {
+        let mut i = pos;
+        let n = rope.len_chars();
+        while i < n && steps < max_scan {
+            let c = rope.char(i);
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            i += 1;
+            steps += 1;
+        }
+    } else {
+        let mut i = pos as isize;
+        while i >= 0 && steps < max_scan {
+            let c = rope.char(i as usize);
+            if c == close {
+                depth += 1;
+            } else if c == open {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i as usize);
+                }
+            }
+            i -= 1;
+            steps += 1;
+        }
+    }
+    None
+}
+
 /// One undo checkpoint: the full buffer text + caret char index. Snapshot-
 /// based (simple and always-correct vs. operation logs); the [`History`]
 /// coalesces runs of same-kind edits so a burst of typing is one undo step.
@@ -829,6 +883,25 @@ mod tests {
         let mut st = EditState::at(2); // on line 1 ("b")
         delete_line(&mut r, &mut st);
         assert_eq!(r.to_string(), "a\nc\n");
+    }
+
+    #[test]
+    fn matching_bracket_forward_and_back() {
+        let r = rope("a(b[c]d)e");
+        // '(' at idx 1 matches ')' at idx 7.
+        assert_eq!(matching_bracket(&r, 1, 1000), Some(7));
+        // ')' at idx 7 matches '(' at idx 1.
+        assert_eq!(matching_bracket(&r, 7, 1000), Some(1));
+        // '[' at idx 3 matches ']' at idx 5.
+        assert_eq!(matching_bracket(&r, 3, 1000), Some(5));
+        // 'a' at idx 0 is not a bracket.
+        assert_eq!(matching_bracket(&r, 0, 1000), None);
+    }
+
+    #[test]
+    fn matching_bracket_unmatched_is_none() {
+        let r = rope("(((");
+        assert_eq!(matching_bracket(&r, 0, 1000), None);
     }
 
     #[test]
