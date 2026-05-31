@@ -146,6 +146,7 @@ impl<'a> RopeEditor<'a> {
             return RopeEditorResponse {
                 visible_line_range: 0..0,
                 buffer_mode: BufferModeSeen::Mmap,
+                content_changed: false, // read-only `show` path — never edits
             };
         };
         let total_lines = rope.len_lines();
@@ -210,6 +211,7 @@ impl<'a> RopeEditor<'a> {
         RopeEditorResponse {
             visible_line_range: scroll.inner,
             buffer_mode: BufferModeSeen::Rope,
+            content_changed: false, // read-only `show` path — never edits
         }
     }
 
@@ -227,6 +229,7 @@ impl<'a> RopeEditor<'a> {
         let focused = ui.memory(|m| m.has_focus(editor_id));
         let mut clipboard: Option<String> = None;
         let mut caret_moved = false;
+        let mut content_changed = false;
 
         // ---- input phase (mutates the rope) ----
         if focused {
@@ -235,6 +238,7 @@ impl<'a> RopeEditor<'a> {
                 for ev in &events {
                     let out = apply_event(rope, state, ev);
                     caret_moved |= out.consumed;
+                    content_changed |= out.mutated;
                     if let Some(c) = out.set_clipboard {
                         clipboard = Some(c);
                     }
@@ -266,6 +270,7 @@ impl<'a> RopeEditor<'a> {
                 RopeEditorResponse {
                     visible_line_range: 0..0,
                     buffer_mode: BufferModeSeen::Mmap,
+                    content_changed,
                 },
                 clipboard,
             );
@@ -460,6 +465,7 @@ impl<'a> RopeEditor<'a> {
             RopeEditorResponse {
                 visible_line_range: scroll.inner,
                 buffer_mode: BufferModeSeen::Rope,
+                content_changed,
             },
             clipboard,
         )
@@ -474,6 +480,10 @@ pub struct RopeEditorResponse {
     pub visible_line_range: std::ops::Range<usize>,
     /// Which buffer variant we actually walked this frame.
     pub buffer_mode: BufferModeSeen,
+    /// Any apply_event this frame changed buffer CONTENT (not just caret).
+    /// The app uses this to sync `tab.text` from the persistent rope ONLY
+    /// when a real edit occurred — avoiding a per-frame `rope.to_string()`.
+    pub content_changed: bool,
 }
 
 /// Decimal digits needed to print the largest line number (>= 1).
@@ -629,8 +639,13 @@ impl RopeEditorState {
 /// What an applied event asked the host to do.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct EventOutcome {
-    /// The event mutated the buffer or moved the caret (request a repaint).
+    /// The event was handled (mutated the buffer OR moved the caret) — request
+    /// a repaint.
     pub consumed: bool,
+    /// The event changed the buffer CONTENT (not just caret/selection). The
+    /// host syncs its String mirror only on real edits, avoiding an O(n)
+    /// `to_string()` every idle frame.
+    pub mutated: bool,
     /// Copy/Cut produced this text for the host to write to the clipboard.
     pub set_clipboard: Option<String>,
 }
@@ -649,6 +664,10 @@ pub fn apply_event(
 ) -> EventOutcome {
     use egui::{Event, Key};
     let mut out = EventOutcome::default();
+    // Length before any edit — most mutations change length, so this derives
+    // `mutated` for free. Same-length edits (case-toggle, undo/redo) set the
+    // flag explicitly in their arms.
+    let len_before = rope.len_chars();
 
     macro_rules! record_before {
         ($kind:expr) => {{
@@ -817,6 +836,7 @@ pub fn apply_event(
                             sel.to_lowercase()
                         };
                         editing::replace_selection(rope, &mut state.edit, &cased);
+                        out.mutated = true; // same-length edit — not length-derived
                     }
                     out.consumed = true;
                 }
@@ -867,6 +887,7 @@ pub fn apply_event(
                     if let Some(prev) = state.history.undo(current) {
                         *rope = Rope::from_str(&prev.text);
                         state.edit = EditState::at(prev.cursor);
+                        out.mutated = true;
                     }
                     out.consumed = true;
                 }
@@ -876,6 +897,7 @@ pub fn apply_event(
                     if let Some(next) = state.history.redo(current) {
                         *rope = Rope::from_str(&next.text);
                         state.edit = EditState::at(next.cursor);
+                        out.mutated = true;
                     }
                     out.consumed = true;
                 }
@@ -884,6 +906,9 @@ pub fn apply_event(
         }
         _ => {}
     }
+    // Most edits change length — derive `mutated` from that, OR'd with the
+    // explicit same-length flags set above.
+    out.mutated = out.mutated || rope.len_chars() != len_before;
     out
 }
 
@@ -1150,6 +1175,50 @@ mod tests {
         };
         apply_event(&mut r, &mut st, &key_ev(egui::Key::U, true, true));
         assert_eq!(r.to_string(), "KEEP\n");
+    }
+
+    /// `EventOutcome::mutated` is the bridge signal the app uses to sync
+    /// `tab.text` from the persistent rope ONLY on real content edits — the
+    /// per-frame `to_string()` perf fix. Caret-only events must report
+    /// `mutated == false`; content edits (insert, case-toggle, undo) must
+    /// report `mutated == true`.
+    #[test]
+    fn apply_event_mutated_flag_tracks_content_change() {
+        let mut r = Rope::from_str("hello\n");
+        let mut st = RopeEditorState::new();
+        st.edit = EditState::at(0);
+
+        // Caret move (ArrowRight) changes no content.
+        let out = apply_event(
+            &mut r,
+            &mut st,
+            &key_ev(egui::Key::ArrowRight, false, false),
+        );
+        assert!(!out.mutated, "caret move must not flag a content change");
+
+        // Insert text — length grows, mutated derived from length.
+        let out = apply_event(&mut r, &mut st, &text_event("X"));
+        assert!(out.mutated, "insert must flag a content change");
+
+        // Select "hello" and case-toggle (same length) — explicit flag path.
+        st.edit = EditState {
+            anchor: 0,
+            cursor: 5,
+            goal_col: None,
+        };
+        let out = apply_event(&mut r, &mut st, &key_ev(egui::Key::U, true, true));
+        assert!(
+            out.mutated,
+            "same-length case-toggle must flag a content change"
+        );
+
+        // Undo (Cmd+Z) restores prior content — also a content change.
+        let out = apply_event(&mut r, &mut st, &key_ev(egui::Key::Z, false, true));
+        assert!(out.mutated, "undo must flag a content change");
+
+        // Select-all (Cmd+A) is selection-only — no content change.
+        let out = apply_event(&mut r, &mut st, &key_ev(egui::Key::A, false, true));
+        assert!(!out.mutated, "select-all must not flag a content change");
     }
 
     /// The editable widget renders a small buffer (caret + selection state)
