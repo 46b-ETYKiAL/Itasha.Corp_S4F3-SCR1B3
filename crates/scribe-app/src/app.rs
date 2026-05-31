@@ -6186,4 +6186,84 @@ def";
         );
         assert!(app.completion.is_none(), "popup closes after accept");
     }
+
+    // ---- E2E for the new feature surfaces (integration smoke) ----
+
+    /// The experimental owned rope editor renders the full frame loop without
+    /// panicking (exercises show_editable + the bridge + caret render path).
+    #[test]
+    fn experimental_rope_editor_renders_without_panic() {
+        let mut cfg = Config::default();
+        cfg.editor.experimental_rope_editor = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "fn main() {\n    let x = 1;\n}\n".to_string();
+        run_frames(&mut app, 4);
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    /// Auto-save + session-backup + trim-on-save all enabled together render
+    /// the frame loop cleanly (no panic from the periodic save/snapshot paths).
+    #[test]
+    fn save_hygiene_configs_render_without_panic() {
+        let mut cfg = Config::default();
+        cfg.editor.auto_save = true;
+        cfg.editor.session_backup = true;
+        cfg.editor.trim_trailing_whitespace_on_save = true;
+        cfg.editor.final_newline_on_save = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "x   \ny".to_string();
+        run_frames(&mut app, 3);
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    /// Reopen-closed-tab restores an accidentally closed tab's content.
+    #[test]
+    fn reopen_closed_tab_restores_content() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "important note".to_string();
+        app.close_tab(0);
+        // close_tab replaces the empty tab set with a fresh scratch.
+        app.reopen_closed_tab();
+        assert!(
+            app.tabs.iter().any(|t| t.text == "important note"),
+            "closed tab content recovered"
+        );
+    }
+
+    /// Performance: the owned editing model handles a large buffer without
+    /// quadratic blowup — 5k sequential inserts + an undo on a 50k-line rope
+    /// complete well within a generous bound.
+    #[test]
+    fn perf_large_buffer_edit_is_bounded() {
+        use scribe_render::{apply_event, RopeEditorState};
+        let mut body = String::with_capacity(50_000 * 6);
+        for i in 0..50_000 {
+            body.push_str(&format!("{i:05}\n"));
+        }
+        let mut buf = scribe_core::buffer::Buffer::from_text(&body);
+        let rope = buf.as_rope_mut().expect("rope buffer");
+        let mut st = RopeEditorState::new();
+        let start = std::time::Instant::now();
+        for _ in 0..5_000 {
+            apply_event(rope, &mut st, &egui::Event::Text("a".to_string()));
+        }
+        apply_event(
+            rope,
+            &mut st,
+            &egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            },
+        );
+        let elapsed = start.elapsed();
+        // Snapshot-undo rebuilds the rope per keystroke (O(n) bridge) — still
+        // must stay well under a wall-clock ceiling on a 50k-line buffer.
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "5k edits on a 50k-line rope took {elapsed:?}"
+        );
+    }
 }
