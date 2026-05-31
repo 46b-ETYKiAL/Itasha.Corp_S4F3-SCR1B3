@@ -174,6 +174,15 @@ struct EditorTab {
     rope_state: Option<scribe_render::RopeEditorState>,
 }
 
+/// A recently-closed tab kept on the reopen stack (Ctrl+Shift+T), so an
+/// accidental close is one keystroke from recovery (content + caret restored).
+#[derive(Debug, Clone)]
+struct ClosedTab {
+    path: Option<PathBuf>,
+    text: String,
+    cursor: usize,
+}
+
 impl EditorTab {
     fn scratch() -> Self {
         Self {
@@ -348,6 +357,10 @@ pub struct ScribeApp {
     /// Last time unsaved-buffer backups were flushed (throttles the periodic
     /// snapshot so we don't rewrite content every keystroke).
     last_backup_at: Option<std::time::Instant>,
+    /// Stack of recently-closed tabs for Ctrl+Shift+T reopen (most-recent last).
+    closed_tabs: Vec<ClosedTab>,
+    /// Last time an auto-save fired (throttles the periodic save).
+    last_autosave_at: Option<std::time::Instant>,
     /// Cached syntax-highlight layout (keyed by text+lang+size) so syntect only
     /// re-runs when the buffer changes, not every frame (perf hotspot fix).
     hl_cache: std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
@@ -613,6 +626,8 @@ impl ScribeApp {
             diagnostics: Vec::new(),
             session_sig,
             last_backup_at: None,
+            closed_tabs: Vec::new(),
+            last_autosave_at: None,
             hl_cache: std::cell::RefCell::new(None),
             _cfg_watcher: cfg_watcher,
             cfg_rx: Some(cfg_rx),
@@ -827,6 +842,18 @@ impl ScribeApp {
                 let key = path.display().to_string();
                 if let Some(&y) = self.config.editor.scroll_positions.get(&key) {
                     self.pending_scroll = Some(y);
+                }
+                // Restore the prior caret position (best-effort). Applies to
+                // the owned rope editor; the egui TextEdit path approximates
+                // via the restored scroll offset.
+                if self.config.editor.restore_cursor_position {
+                    if let Some(&cur) = self.config.editor.cursor_positions.get(&key) {
+                        let idx = self.tabs.len() - 1;
+                        let clamped = cur.min(self.tabs[idx].text.chars().count());
+                        let mut st = scribe_render::RopeEditorState::new();
+                        st.edit = scribe_core::editing::EditState::at(clamped);
+                        self.tabs[idx].rope_state = Some(st);
+                    }
                 }
                 // F-012 — record on the MRU recent-files list + persist.
                 scribe_core::config::record_recent_file(&mut self.config.editor.recent_files, path);
@@ -1330,8 +1357,19 @@ impl ScribeApp {
         if active >= self.tabs.len() {
             return;
         }
+        // Save-time hygiene (opt-in): trim trailing whitespace + ensure a
+        // final newline. Cleaned text is reflected back into the live buffer.
+        let mut text = self.tabs[active].text.clone();
+        if self.config.editor.trim_trailing_whitespace_on_save {
+            text = scribe_core::text_ops::trim_trailing_whitespace(&text);
+        }
+        if self.config.editor.final_newline_on_save {
+            text = scribe_core::text_ops::ensure_final_newline(&text);
+        }
+        if text != self.tabs[active].text {
+            self.tabs[active].text = text.clone();
+        }
         // Sync editable text into the document model, then persist.
-        let text = self.tabs[active].text.clone();
         self.tabs[active].doc.set_text(&text);
         if self.tabs[active].doc.path().is_none() {
             self.save_as_active();
@@ -1716,7 +1754,40 @@ impl ScribeApp {
                     &key,
                     y,
                 );
+                // Remember the caret too (best-effort; restored on reopen).
+                if self.config.editor.restore_cursor_position {
+                    let cur = self.tabs[idx]
+                        .rope_state
+                        .as_ref()
+                        .map(|s| s.edit.cursor)
+                        .unwrap_or(0);
+                    if self.config.editor.cursor_positions.len()
+                        >= scribe_core::config::SCROLL_POS_CAP
+                    {
+                        if let Some(k) = self.config.editor.cursor_positions.keys().next().cloned()
+                        {
+                            self.config.editor.cursor_positions.remove(&k);
+                        }
+                    }
+                    self.config.editor.cursor_positions.insert(key.clone(), cur);
+                }
                 self.save_config();
+            }
+            // Push the closed tab onto the reopen stack (Ctrl+Shift+T-style),
+            // capturing its content + caret so an accidental close is one
+            // keystroke from recovery. Skip pristine empty scratch tabs.
+            let tab = &self.tabs[idx];
+            let cursor = tab.rope_state.as_ref().map(|s| s.edit.cursor).unwrap_or(0);
+            if tab.doc.path().is_some() || !tab.text.is_empty() {
+                self.closed_tabs.push(ClosedTab {
+                    path: tab.doc.path().map(|p| p.to_path_buf()),
+                    text: tab.text.clone(),
+                    cursor,
+                });
+                const MAX_CLOSED: usize = 20;
+                if self.closed_tabs.len() > MAX_CLOSED {
+                    self.closed_tabs.remove(0);
+                }
             }
             self.tabs.remove(idx);
             if self.tabs.is_empty() {
@@ -1724,6 +1795,24 @@ impl ScribeApp {
             }
             self.active = self.active.min(self.tabs.len() - 1);
         }
+    }
+
+    /// Reopen the most recently closed tab (restoring its unsaved content +
+    /// caret). No-op when the reopen stack is empty.
+    fn reopen_closed_tab(&mut self) {
+        let Some(closed) = self.closed_tabs.pop() else {
+            self.status = "no closed tab to reopen".to_string();
+            return;
+        };
+        let mut tab = EditorTab::from_backup(closed.path, closed.text);
+        if self.config.editor.experimental_rope_editor {
+            let mut st = scribe_render::RopeEditorState::new();
+            st.edit = scribe_core::editing::EditState::at(closed.cursor);
+            tab.rope_state = Some(st);
+        }
+        self.tabs.push(tab);
+        self.active = self.tabs.len() - 1;
+        self.status = "reopened closed tab".to_string();
     }
 
     /// F-008 — Replace `find_query` with `replace_query` in the active
@@ -2138,6 +2227,11 @@ struct Pending {
     /// expands every region.
     fold_all: bool,
     expand_all: bool,
+    /// Font zoom: `Some(1)` zoom in, `Some(-1)` zoom out, `Some(0)` reset to
+    /// the default size (Ctrl+= / Ctrl+- / Ctrl+0 and Ctrl+scroll).
+    font_zoom: Option<i8>,
+    /// Reopen the most recently closed tab (Ctrl+Shift+R).
+    reopen_tab: bool,
 }
 
 // ---- Keyboard shortcut cheatsheet table (F-014) ----
@@ -2284,6 +2378,14 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
     ShortcutEntry {
         chord: "Esc",
         action: "Collapse multi-cursor to one caret",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+= / Ctrl+- / Ctrl+0",
+        action: "Zoom font in / out / reset (also Ctrl+scroll)",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+R",
+        action: "Reopen the most recently closed tab",
     },
 ];
 
@@ -3077,6 +3179,30 @@ impl ScribeApp {
             }
             if cmd && i.modifiers.shift && i.key_pressed(egui::Key::CloseBracket) {
                 act.expand_all = true;
+            }
+            // Font zoom: Ctrl+= / Ctrl++ in, Ctrl+- out, Ctrl+0 reset, and
+            // Ctrl+scroll. Universal editor convenience.
+            if cmd && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
+                act.font_zoom = Some(1);
+            }
+            if cmd && i.key_pressed(egui::Key::Minus) {
+                act.font_zoom = Some(-1);
+            }
+            if cmd && i.key_pressed(egui::Key::Num0) {
+                act.font_zoom = Some(0);
+            }
+            if cmd {
+                let dy = i.smooth_scroll_delta.y;
+                if dy > 0.5 {
+                    act.font_zoom = Some(1);
+                } else if dy < -0.5 {
+                    act.font_zoom = Some(-1);
+                }
+            }
+            // Reopen the most recently closed tab (Ctrl+Shift+R — Ctrl+Shift+T
+            // is already the theme-cycle chord in this editor).
+            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::R) {
+                act.reopen_tab = true;
             }
             // F-017 — Alt+Up/Down move the cursor line; Ctrl+Shift+D
             // duplicates; Ctrl+J joins next.
@@ -4544,6 +4670,21 @@ impl ScribeApp {
                 self.status = format!("theme: {next}");
             }
         }
+        // Font zoom (Ctrl+= / Ctrl+- / Ctrl+0 / Ctrl+scroll).
+        if let Some(z) = act.font_zoom {
+            let def = scribe_core::config::Config::default().fonts.editor_size;
+            let size = &mut self.config.fonts.editor_size;
+            *size = match z {
+                0 => def,
+                d => (*size + d as f32).clamp(8.0, 32.0),
+            };
+            self.save_config();
+            self.status = format!("font size: {:.0}", self.config.fonts.editor_size);
+        }
+        // Reopen the most recently closed tab.
+        if act.reopen_tab {
+            self.reopen_closed_tab();
+        }
         if act.toggle_minimap {
             self.config.editor.show_minimap = !self.config.editor.show_minimap;
             self.save_config();
@@ -4654,6 +4795,31 @@ impl ScribeApp {
                 .any(|t| t.is_dirty() || (t.doc.path().is_none() && !t.text.is_empty()));
             if due && has_unsaved {
                 self.snapshot_session_backups();
+            }
+        }
+
+        // Auto-save (opt-in, default OFF): after a quiet interval, write any
+        // dirty file-backed buffer to disk. Untitled buffers are never
+        // auto-saved (no path → would pop a dialog). Throttled like backups.
+        if self.config.editor.auto_save {
+            const AUTOSAVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+            let due = self
+                .last_autosave_at
+                .map(|t| t.elapsed() >= AUTOSAVE_INTERVAL)
+                .unwrap_or(true);
+            if due {
+                let dirty: Vec<usize> = (0..self.tabs.len())
+                    .filter(|&i| self.tabs[i].doc.path().is_some() && self.tabs[i].is_dirty())
+                    .collect();
+                if !dirty.is_empty() {
+                    let prev_active = self.active;
+                    for i in dirty {
+                        self.active = i;
+                        self.save_active();
+                    }
+                    self.active = prev_active.min(self.tabs.len().saturating_sub(1));
+                }
+                self.last_autosave_at = Some(std::time::Instant::now());
             }
         }
     }

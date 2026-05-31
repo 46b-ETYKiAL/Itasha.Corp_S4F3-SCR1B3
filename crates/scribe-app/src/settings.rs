@@ -523,6 +523,67 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 );
             });
         }
+        if row_visible(q, "auto save autosave") {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.editor.auto_save,
+                        "Auto-save (after a short pause)",
+                    )
+                    .on_hover_text(
+                        "Automatically save dirty file-backed buffers a few seconds after you \
+                         stop typing. Untitled buffers are never auto-saved. Off by default.",
+                    )
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.editor.auto_save, &def.editor.auto_save);
+            });
+        }
+        if row_visible(q, "trim trailing whitespace on save") {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.editor.trim_trailing_whitespace_on_save,
+                        "Trim trailing whitespace on save",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.trim_trailing_whitespace_on_save,
+                    &def.editor.trim_trailing_whitespace_on_save,
+                );
+            });
+        }
+        if row_visible(q, "final newline ensure on save") {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.editor.final_newline_on_save,
+                        "Ensure final newline on save",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.final_newline_on_save,
+                    &def.editor.final_newline_on_save,
+                );
+            });
+        }
+        if row_visible(q, "restore cursor caret position per file") {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(
+                        &mut config.editor.restore_cursor_position,
+                        "Restore caret position per file",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.restore_cursor_position,
+                    &def.editor.restore_cursor_position,
+                );
+            });
+        }
         space(ui);
     }
 
