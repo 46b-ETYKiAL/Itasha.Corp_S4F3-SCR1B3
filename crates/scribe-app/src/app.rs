@@ -228,6 +228,12 @@ pub struct ScribeApp {
     tabs: Vec<EditorTab>,
     active: usize,
     visuals_applied: bool,
+    /// F-027 — true when the wgpu backend is live and `PostResources` was
+    /// stashed in the egui_wgpu callback type-map at init. When true the CRT
+    /// effect renders via the GPU overlay pass; when false (glow backend or
+    /// init failure) it falls back to the egui-painter overlay. Prevents the
+    /// two overlays from doubling up.
+    wgpu_post_available: bool,
     /// Set when the user asks to close (custom titlebar ✕). Funnels into the
     /// same two-phase close path as an OS-initiated close.
     want_close: bool,
@@ -431,14 +437,14 @@ impl ScribeApp {
         // pure-cost-zero: the resources sit in the type-map until a draw
         // callback retrieves them.
         if let Some(rs) = cc.wgpu_render_state.as_ref() {
-            let post_res =
-                scribe_render::PostResources::new(&rs.device, &rs.queue, rs.target_format);
+            let post_res = scribe_render::PostResources::new(&rs.device, rs.target_format);
             rs.renderer.write().callback_resources.insert(post_res);
-            tracing::debug!("scr1b3-post: PostResources initialised + stashed");
+            app.wgpu_post_available = true;
+            tracing::debug!("scr1b3-post: PostResources initialised + stashed (GPU CRT overlay live)");
         } else {
             tracing::debug!(
                 "scr1b3-post: no wgpu_render_state (probably glow backend); \
-                 post-pass disabled for this session"
+                 CRT effect falls back to the egui-painter overlay"
             );
         }
         app
@@ -522,6 +528,7 @@ impl ScribeApp {
             tabs,
             active: 0,
             visuals_applied: false,
+            wgpu_post_available: false,
             want_close: false,
             closing: false,
             find_open: false,
@@ -4286,8 +4293,15 @@ impl ScribeApp {
         }
 
         // CRT post-effect overlay (top-most; skipped entirely when disabled).
+        // F-027: prefer the GPU overlay pass when the wgpu backend is live;
+        // otherwise fall back to the egui-painter overlay. Exactly one path
+        // runs so the effect never doubles up.
         if self.config.effects.crt_enabled {
-            paint_crt_overlay(ctx, &self.config.effects, false);
+            if self.wgpu_post_available {
+                paint_crt_gpu_overlay(ctx, &self.config.effects);
+            } else {
+                paint_crt_overlay(ctx, &self.config.effects, false);
+            }
         }
         // Window color-tint overlay (subtle wash; portable across modes/OSes).
         if self.config.window.tint_strength > 0.0 {
@@ -4673,6 +4687,44 @@ fn draw_resize_overlays(ctx: &egui::Context) {
                 }
             });
     }
+}
+
+/// F-027 — register the GPU CRT overlay pass for this frame.
+///
+/// Builds a [`scribe_render::PostState`] from the effects config + live frame
+/// geometry, then adds the wgpu paint callback to a top-most foreground-layer
+/// painter spanning the whole window. The callback blends procedural CRT
+/// artifacts (scanlines, vignette, phosphor glow, grid) OVER the editor using
+/// premultiplied-alpha blending — it samples no source texture, so it can
+/// never black out the editor.
+///
+/// Registering the callback IS the "render the overlay" instruction; this is
+/// only called when `crt_enabled` is true, so the off-state is zero-cost.
+fn paint_crt_gpu_overlay(ctx: &egui::Context, fx: &scribe_core::config::EffectsConfig) {
+    let rect = ctx.content_rect();
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    let ppp = ctx.pixels_per_point();
+    let screen = [rect.width() * ppp, rect.height() * ppp];
+    let time_sec = ctx.input(|i| i.time) as f32;
+    let state = scribe_render::PostState {
+        params: scribe_render::CrtParams::from_effects(fx, false),
+        time_sec,
+        screen,
+        // No body-text mask in v1: the overlay's effects are readable over
+        // text by construction (capped darkening + faint tint). A real
+        // `max_rect()` mask is a follow-up documented in the design doc.
+        mask_uv: [0.0; 4],
+        glitch_frames_left: 0,
+        grid_intensity: 0.0,
+        persistence_decay: 0.0,
+    };
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("crt-gpu-overlay"),
+    ));
+    painter.add(scribe_render::crt_overlay_shape(rect, state));
 }
 
 fn paint_crt_overlay(

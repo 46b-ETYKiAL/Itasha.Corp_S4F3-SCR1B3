@@ -1,33 +1,43 @@
-// SCR1B3 Phase 17 T17.4 — single-pass CRT post-process shader.
+// SCR1B3 F-027 — procedural CRT overlay shader (offscreen-RT-free).
 //
 // One pipeline, one draw, full-screen triangle via @builtin(vertex_index)
-// (no vertex buffer). Effects are encoded as float weights in the `Params`
-// uniform; **zero weight = identity** — Naga 22 emits dead-code-elim on
-// Vulkan/Metal/DX12, so OFF-effects cost nothing beyond the fixed
-// 8.2 MP × ~11 fetch baseline (~1.4 ms @ 1080p, integrated GPU).
+// (no vertex buffer). This shader does NOT sample the framebuffer — it is a
+// pure *overlay* that egui_wgpu's `CallbackTrait::paint` blends OVER the
+// already-painted editor using premultiplied-alpha blending.
+//
+// WHY NO SOURCE SAMPLE: eframe 0.34 owns the surface render loop and exposes
+// no post-egui hook (`App::post_rendering` was removed in eframe 0.24), and
+// `CallbackTrait::paint` runs INSIDE the egui surface render pass — wgpu
+// forbids binding the active color attachment as a sampled texture. A
+// full-frame post-process that *resamples* the composited frame is therefore
+// architecturally impossible within eframe 0.34 (see
+// `docs/audits/crt-post-pass-design.md`). The overlay form below is the
+// subset of CRT artifacts that need NO source texel — they are all
+// modulation (darken) or faint additive tint, which compose correctly via
+// alpha blending and can never black out the editor.
+//
+// Output convention: PREMULTIPLIED alpha. `rgb` is already multiplied by `a`.
+// The pipeline blend state is premultiplied-alpha
+// (src=ONE, dst=ONE_MINUS_SRC_ALPHA), so `out = overlay.rgb + dst*(1-a)`.
+// A fully transparent texel (`a == 0`, `rgb == 0`) is a byte-exact no-op.
 //
 // Body-text bypass: the `mask` vec4 carries the editor `max_rect()` in UV.
-// Pixels inside `mask` return the source texel verbatim — pixel-identical
-// to no-pass state. This is the structural "never on body text" guarantee
-// (T17.4 plan line).
-//
-// Reference: the rustdoc on `crate::post` documents the design rationale.
+// Pixels inside `mask` emit a fully-transparent texel — byte-identical to
+// no-pass for the body-text region (the structural "never on body text"
+// guarantee). The mask defaults to zero-rect (no bypass) when unset.
 
 struct Params {
-    // a: scanline / phosphor_glow / bloom / vignette
+    // a: scanline / phosphor_glow / bloom(unused-overlay) / vignette
     a: vec4<f32>,
-    // b: curvature / chromatic_aberration / glitch / grid
+    // b: curvature(unused-overlay) / chromatic_aberration(unused-overlay) / glitch / grid
     b: vec4<f32>,
-    // c: persistence_decay / time_sec / screen_w / screen_h
+    // c: persistence_decay(unused-overlay) / time_sec / screen_w / screen_h
     c: vec4<f32>,
     // mask: body-text rect in UV (x, y, w, h)
     mask: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
-@group(0) @binding(1) var src_tex: texture_2d<f32>;
-@group(0) @binding(2) var src_smp: sampler;
-@group(0) @binding(3) var hist_tex: texture_2d<f32>;
 
 // Full-screen triangle — no vertex buffer.
 @vertex
@@ -38,91 +48,83 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(x, -y, 0.0, 1.0);
 }
 
-// (1) Scanlines — row-stripe modulation; never fully black.
-fn apply_scanlines(c: vec3<f32>, uv: vec2<f32>, w: f32) -> vec3<f32> {
-    if (w <= 0.0) { return c; }
+// Accumulated CRT overlay is built in *straight* (non-premultiplied) space as
+// a (tint_rgb, coverage_alpha) pair, then premultiplied once at the end.
+
+// (1) Scanlines — horizontal row-stripe darkening. Coverage scales with
+//     weight; the darker stripe rows get alpha that dims the editor toward
+//     black. Never fully opaque (cap 0.35) so text stays readable.
+fn scanline_alpha(uv: vec2<f32>, w: f32) -> f32 {
+    if (w <= 0.0) { return 0.0; }
     let stripe = step(0.5, fract(uv.y * p.c.w * 0.5));
-    return c * mix(1.0 - w * 0.35, 1.0, stripe);
+    // stripe==0 → dark row gets up to 0.35*w darkening; stripe==1 → none.
+    return (1.0 - stripe) * w * 0.35;
 }
 
-// (2) Gated bloom — 8-tap ring, luma-gated at 0.55; single-pass constraint.
-fn apply_bloom(uv: vec2<f32>, w: f32) -> vec3<f32> {
-    if (w <= 0.0) { return vec3<f32>(0.0); }
-    let texel = vec2<f32>(1.0) / vec2<f32>(p.c.z, p.c.w);
-    var sum = vec3<f32>(0.0);
-    for (var i = 0; i < 8; i = i + 1) {
-        let a = f32(i) * 0.7853981;  // pi/4
-        let o = vec2<f32>(cos(a), sin(a)) * texel * 2.5;
-        let s = textureSample(src_tex, src_smp, uv + o).rgb;
-        let l = dot(s, vec3<f32>(0.2126, 0.7152, 0.0722));
-        sum = sum + s * step(0.55, l);
-    }
-    return (sum / 8.0) * w;
-}
-
-// (3) Vignette — radial dim, applied last.
-fn apply_vignette(c: vec3<f32>, uv: vec2<f32>, w: f32) -> vec3<f32> {
-    if (w <= 0.0) { return c; }
+// (2) Vignette — radial darkening toward the corners.
+fn vignette_alpha(uv: vec2<f32>, w: f32) -> f32 {
+    if (w <= 0.0) { return 0.0; }
     let d = distance(uv, vec2<f32>(0.5)) * 1.4142;
-    return c * (1.0 - w * smoothstep(0.55, 1.0, d));
+    return w * smoothstep(0.55, 1.0, d) * 0.9;
 }
 
-// (4) Micro chroma — R/B shifted radially by <=2 texels (perf cap).
-fn apply_chroma(uv: vec2<f32>, w: f32) -> vec3<f32> {
-    if (w <= 0.0) { return textureSample(src_tex, src_smp, uv).rgb; }
-    let texel = vec2<f32>(1.0) / vec2<f32>(p.c.z, p.c.w);
-    let dir = normalize(uv - vec2<f32>(0.5) + vec2<f32>(1e-6));
-    let off = dir * texel * min(w * 2.0, 2.0);
-    let r = textureSample(src_tex, src_smp, uv + off).r;
-    let g = textureSample(src_tex, src_smp, uv).g;
-    let b = textureSample(src_tex, src_smp, uv - off).b;
-    return vec3<f32>(r, g, b);
-}
-
-// (5) Faint PCB/dot-grid — content-gated (only on near-black pixels).
-fn apply_grid(c: vec3<f32>, uv: vec2<f32>, w: f32) -> vec3<f32> {
-    if (w <= 0.0) { return c; }
-    let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let empty = 1.0 - smoothstep(0.05, 0.12, l);
+// (3) Faint dot-grid — additive phosphor-cell tint on a sparse lattice.
+//     Returns a premultiplied additive contribution (no darkening).
+fn grid_tint(uv: vec2<f32>, w: f32) -> vec3<f32> {
+    if (w <= 0.0) { return vec3<f32>(0.0); }
     let gx = step(0.985, fract(uv.x * p.c.z / 24.0));
     let gy = step(0.985, fract(uv.y * p.c.w / 24.0));
-    return c + vec3<f32>(0.06, 0.08, 0.10) * max(gx, gy) * w * empty;
+    return vec3<f32>(0.06, 0.08, 0.10) * max(gx, gy) * w;
 }
 
-// (6) Event-only glitch — UV tear; CPU sets weight=1 for one frame on event.
-fn apply_glitch(uv: vec2<f32>, w: f32) -> vec2<f32> {
-    if (w <= 0.0) { return uv; }
+// (4) Phosphor glow — a faint green-blue additive wash across the whole
+//     overlay (the iconic CRT cast). Additive (premultiplied) contribution.
+fn phosphor_tint(w: f32) -> vec3<f32> {
+    if (w <= 0.0) { return vec3<f32>(0.0); }
+    // Very faint so it tints rather than washes out.
+    return vec3<f32>(0.0, 0.045, 0.02) * w;
+}
+
+// (5) Event-only glitch — per-row horizontal darken bands, gated to one frame
+//     by the CPU (weight=1 only on the event frame). Additive darkening.
+fn glitch_alpha(uv: vec2<f32>, w: f32) -> f32 {
+    if (w <= 0.0) { return 0.0; }
     let row = floor(uv.y * p.c.w / 4.0);
     let h = fract(sin(row * 12.9898 + p.c.y * 60.0) * 43758.5453);
-    let tear = (h - 0.5) * w * 0.04;
-    return vec2<f32>(uv.x + tear, uv.y);
-}
-
-// (7) Optional phosphor-persistence — max-blend with previous frame.
-fn apply_persistence(c: vec3<f32>, uv: vec2<f32>, w: f32) -> vec3<f32> {
-    if (w <= 0.0) { return c; }
-    let prev = textureSample(hist_tex, src_smp, uv).rgb;
-    return max(c, prev * (1.0 - w * 0.25));
+    // Tear bands: roughly half the rows darken briefly.
+    return step(0.7, h) * w * 0.25;
 }
 
 @fragment
 fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
-    var uv = frag_pos.xy / vec2<f32>(p.c.z, p.c.w);
-    // Structural body-text bypass — DECISION T17.4: pixels inside the
-    // mask rect return the source verbatim. byte-identical to no-pass.
+    let uv = frag_pos.xy / vec2<f32>(p.c.z, p.c.w);
+
+    // Structural body-text bypass — pixels inside the mask rect emit a fully
+    // transparent texel (byte-identical to no-pass). Mask defaults to the
+    // zero rect, which this test never enters, so the bypass is inert unless
+    // the driver supplies a real mask.
     let in_text = step(p.mask.x, uv.x) * step(p.mask.y, uv.y)
                 * step(uv.x, p.mask.x + p.mask.z)
-                * step(uv.y, p.mask.y + p.mask.w);
-    if (in_text > 0.5) { return textureSample(src_tex, src_smp, uv); }
+                * step(uv.y, p.mask.y + p.mask.w)
+                * step(0.0000001, p.mask.z * p.mask.w);
+    if (in_text > 0.5) { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }
 
-    uv = apply_glitch(uv, p.b.z);
-    var rgb = apply_chroma(uv, p.b.y);
-    rgb = apply_scanlines(rgb, uv, p.a.x);
-    rgb = rgb + apply_bloom(uv, p.a.z);
-    // Phosphor tint — mixes a faint green-blue cast at half the glow weight.
-    rgb = mix(rgb, rgb * vec3<f32>(0.94, 1.05, 0.96), p.a.y * 0.5);
-    rgb = apply_grid(rgb, uv, p.b.w);
-    rgb = apply_vignette(rgb, uv, p.a.w);
-    rgb = apply_persistence(rgb, uv, p.c.x);
-    return vec4<f32>(rgb, 1.0);
+    // Darkening coverage (alpha over black) from the modulation effects.
+    var dark = scanline_alpha(uv, p.a.x);
+    dark = dark + vignette_alpha(uv, p.a.w);
+    dark = dark + glitch_alpha(uv, p.b.z);
+    dark = clamp(dark, 0.0, 0.85);
+
+    // Additive tints (premultiplied: contribute color without coverage of
+    // their own beyond what the alpha already carries).
+    var add = grid_tint(uv, p.b.w);
+    add = add + phosphor_tint(p.a.y);
+
+    // Compose: the darkening is alpha over black (rgb contribution = 0 for the
+    // dark part since color is black), plus the additive tints on top. We emit
+    // premultiplied alpha. Total coverage alpha is the darkening coverage; the
+    // additive tints raise rgb above the (black * alpha == 0) floor.
+    let a = clamp(dark + max(add.r, max(add.g, add.b)), 0.0, 1.0);
+    let rgb = add; // black darkening contributes 0 rgb; only tints add color
+    return vec4<f32>(rgb, a);
 }
