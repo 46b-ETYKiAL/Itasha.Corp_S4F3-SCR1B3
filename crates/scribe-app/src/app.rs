@@ -167,6 +167,11 @@ struct EditorTab {
     /// The exact text last read from / written to disk. When the buffer
     /// still matches this, an external change can be silently re-read.
     disk_text: String,
+    /// KEYSTONE — per-tab editing state (caret/selection + undo history) for
+    /// the experimental owned rope editor. Lazily created on first use when
+    /// `config.editor.experimental_rope_editor` is on; `None` while the egui
+    /// TextEdit path owns this tab.
+    rope_state: Option<scribe_render::RopeEditorState>,
 }
 
 impl EditorTab {
@@ -178,6 +183,7 @@ impl EditorTab {
             pinned: false,
             disk_mtime: None,
             disk_text: String::new(),
+            rope_state: None,
         }
     }
 
@@ -195,6 +201,7 @@ impl EditorTab {
             pinned: false,
             disk_mtime,
             disk_text: text,
+            rope_state: None,
         })
     }
 
@@ -4030,6 +4037,41 @@ impl ScribeApp {
                         .with_line_numbers(show_line_numbers)
                         .with_syntax(&self.hl, ext.clone())
                         .show(ui);
+                    return;
+                }
+
+                // KEYSTONE — experimental owned rope editor (opt-in). Renders
+                // normal files through the in-house editor (own caret /
+                // selection / undo) instead of egui's TextEdit. The rope is
+                // bridged from `text` each frame and written back after, so the
+                // rest of the app (save, status bar, find) keeps seeing a
+                // String. Default OFF — the egui path below stays canonical.
+                if self.config.editor.experimental_rope_editor {
+                    let fg = ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
+                    let mut buf = scribe_core::buffer::Buffer::from_text(&self.tabs[active].text);
+                    let state = self.tabs[active]
+                        .rope_state
+                        .get_or_insert_with(scribe_render::RopeEditorState::new);
+                    let (_, clipboard) =
+                        scribe_render::RopeEditor::new(&mut buf, font.clone(), gutter_row_h)
+                            .with_text_color(fg)
+                            .with_gutter_color(muted)
+                            .with_line_numbers(show_line_numbers)
+                            .with_syntax(&self.hl, ext.clone())
+                            .show_editable(ui, state);
+                    // Write edits back so save / status / find see them.
+                    if let Some(rope) = buf.as_rope() {
+                        let new_text = rope.to_string();
+                        if new_text != self.tabs[active].text {
+                            self.tabs[active].text = new_text;
+                            self.tabs[active].doc.mark_dirty();
+                        }
+                    }
+                    if let Some(text) = clipboard {
+                        if let Ok(mut cb) = arboard::Clipboard::new() {
+                            let _ = cb.set_text(text);
+                        }
+                    }
                     return;
                 }
 

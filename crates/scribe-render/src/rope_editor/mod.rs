@@ -200,6 +200,168 @@ impl<'a> RopeEditor<'a> {
             buffer_mode: BufferModeSeen::Rope,
         }
     }
+
+    /// Editable variant: consume keyboard/clipboard input via [`apply_event`]
+    /// (only while focused), then render text + caret + selection. Returns the
+    /// response plus any text the host should write to the OS clipboard (from
+    /// Copy/Cut). The editor takes keyboard focus on click. Caret geometry
+    /// assumes the monospace editor font (one advance per char).
+    pub fn show_editable(
+        self,
+        ui: &mut Ui,
+        state: &mut RopeEditorState,
+    ) -> (RopeEditorResponse, Option<String>) {
+        let editor_id = ui.id().with("scr1b3-rope-editable");
+        let focused = ui.memory(|m| m.has_focus(editor_id));
+        let mut clipboard: Option<String> = None;
+        let mut caret_moved = false;
+
+        // ---- input phase (mutates the rope) ----
+        if focused {
+            let events = ui.input(|i| i.events.clone());
+            if let Some(rope) = self.buffer.as_rope_mut() {
+                for ev in &events {
+                    let out = apply_event(rope, state, ev);
+                    caret_moved |= out.consumed;
+                    if let Some(c) = out.set_clipboard {
+                        clipboard = Some(c);
+                    }
+                }
+                state.clamp_to(rope);
+            }
+        }
+
+        // ---- render phase (reads the rope) ----
+        let font = self.font_id.clone();
+        let text_color = self.text_color;
+        let gutter_color = self.gutter_color;
+        let line_numbers = self.line_numbers;
+        let highlighter = self.highlighter;
+        let ext = self.ext.clone();
+        let sel_color = Color32::from_rgba_unmultiplied(0x3a, 0x6e, 0xa5, 96);
+        // Monospace advance: width of one glyph (the editor font is monospace,
+        // so every char is the same width — caret/selection x is col * advance).
+        let char_w = ui
+            .painter()
+            .layout_no_wrap("M".to_string(), font.clone(), text_color)
+            .size()
+            .x
+            .max(1.0);
+
+        let Some(rope) = self.buffer.as_rope() else {
+            return (
+                RopeEditorResponse {
+                    visible_line_range: 0..0,
+                    buffer_mode: BufferModeSeen::Mmap,
+                },
+                clipboard,
+            );
+        };
+        let total_lines = rope.len_lines();
+        let line_h = self.line_height.max(1.0);
+        let gutter_digits = if line_numbers {
+            digit_count(total_lines)
+        } else {
+            0
+        };
+        let (caret_line, caret_col) = editing::line_col(rope, state.edit.cursor);
+        let sel = state.edit.selection();
+        let has_sel = sel.start != sel.end;
+        let (sel_s_line, sel_s_col) = editing::line_col(rope, sel.start);
+        let (sel_e_line, sel_e_col) = editing::line_col(rope, sel.end);
+
+        let scroll = egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show_rows(ui, line_h, total_lines, |ui, range| {
+                let last = range.end.min(total_lines);
+                let mut line_strings: Vec<String> = Vec::with_capacity(last - range.start);
+                for li in range.start..last {
+                    let line = rope.line(li);
+                    let mut buf = String::new();
+                    for ch in line.chunks() {
+                        buf.push_str(ch);
+                    }
+                    if buf.ends_with('\n') {
+                        buf.pop();
+                    }
+                    line_strings.push(buf);
+                }
+                let window_spans: Option<Vec<Vec<HlSpan>>> = highlighter
+                    .map(|hl| hl.highlight_document(&line_strings.join("\n"), ext.as_deref()));
+
+                for (i, s) in line_strings.iter().enumerate() {
+                    let li = range.start + i;
+                    let row = ui.horizontal(|ui| {
+                        if line_numbers {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{:>width$}",
+                                    li + 1,
+                                    width = gutter_digits
+                                ))
+                                .font(font.clone())
+                                .color(gutter_color),
+                            );
+                        }
+                        let spans = window_spans.as_ref().and_then(|w| w.get(i));
+                        let job = build_line_job(s, spans, &font, text_color);
+                        ui.label(job).rect
+                    });
+                    let text_rect = row.inner;
+                    let line_chars = s.chars().count();
+
+                    // Selection band (semi-transparent overlay).
+                    if has_sel && li >= sel_s_line && li <= sel_e_line {
+                        let from = if li == sel_s_line { sel_s_col } else { 0 };
+                        let to = if li == sel_e_line {
+                            sel_e_col
+                        } else {
+                            line_chars
+                        };
+                        let x0 = text_rect.left() + from as f32 * char_w;
+                        let x1 = text_rect.left() + to as f32 * char_w;
+                        let band = egui::Rect::from_min_max(
+                            egui::pos2(x0, text_rect.top()),
+                            egui::pos2(x1.max(x0 + 2.0), text_rect.bottom()),
+                        );
+                        ui.painter().rect_filled(band, 0.0, sel_color);
+                    }
+
+                    // Caret.
+                    if focused && li == caret_line {
+                        let cx = text_rect.left() + caret_col as f32 * char_w;
+                        ui.painter().vline(
+                            cx,
+                            text_rect.top()..=text_rect.bottom(),
+                            egui::Stroke::new(1.5, text_color),
+                        );
+                        // Keep the caret in view after an edit/move.
+                        if caret_moved {
+                            ui.scroll_to_rect(text_rect, None);
+                        }
+                    }
+                }
+                range
+            });
+
+        // Click anywhere in the editor to focus it (enables keyboard input).
+        let area = ui.interact(scroll.inner_rect, editor_id, egui::Sense::click());
+        if area.clicked() {
+            ui.memory_mut(|m| m.request_focus(editor_id));
+        }
+        if focused {
+            // Repaint so the caret stays responsive to held keys / blink.
+            ui.ctx().request_repaint();
+        }
+
+        (
+            RopeEditorResponse {
+                visible_line_range: scroll.inner,
+                buffer_mode: BufferModeSeen::Rope,
+            },
+            clipboard,
+        )
+    }
 }
 
 /// What the widget paint reported back about the frame.
@@ -614,6 +776,31 @@ mod tests {
         );
         apply_event(&mut r, &mut st, &key_ev(egui::Key::ArrowRight, true, false));
         assert_eq!(st.edit.selection(), 1..2);
+    }
+
+    /// The editable widget renders a small buffer (caret + selection state)
+    /// without panicking and reports the rope branch.
+    #[test]
+    fn show_editable_renders_without_panic() {
+        let hl = scribe_core::syntax::Highlighter::new();
+        let mut state = RopeEditorState::new();
+        state.edit = EditState {
+            anchor: 0,
+            cursor: 3,
+            goal_col: None,
+        };
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut b = Buffer::Rope(Rope::from_str("fn main() {\n    let x = 1;\n}\n"));
+                let (resp, clip) = RopeEditor::new(&mut b, FontId::monospace(14.0), 18.0)
+                    .with_syntax(&hl, Some("rs".to_string()))
+                    .with_line_numbers(true)
+                    .show_editable(ui, &mut state);
+                assert_eq!(resp.buffer_mode, BufferModeSeen::Rope);
+                assert!(clip.is_none(), "no copy/cut event was sent");
+            });
+        });
     }
 
     #[test]
