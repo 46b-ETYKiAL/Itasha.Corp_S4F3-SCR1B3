@@ -46,8 +46,9 @@ page — that is the single maintained install channel. Every release ships a
 
 ### Windows
 
-Download `scr1b3-x86_64-pc-windows-msvc.msi` and double-click it — the installer
-adds a Start-Menu shortcut and an optional PATH entry.
+Download `scr1b3-<version>-x86_64-setup.exe` and run it — the Itasha.Corp
+installer installs SCR1B3 per-machine with a Start-Menu shortcut. (Prefer no
+installer? Grab the `scr1b3-x86_64-pc-windows-msvc.tar.gz` portable build.)
 
 ### macOS / Linux
 
