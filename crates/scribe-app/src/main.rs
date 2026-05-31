@@ -2,7 +2,8 @@
 //!
 //! A "better Notepad++": fast, telemetry-free, not bloated, modern. This binary
 //! is the egui/eframe shell over `scribe-core` (engine) + `scribe-render`
-//! (theme/CRT mapping). Frameless window with a custom brand titlebar.
+//! (theme mapping + rope-editor widget). Frameless window with a custom brand
+//! titlebar.
 //!
 //! Phase 21 T21.2 P1 — `#![forbid(unsafe_code)]`. The egui shell is pure-safe
 //! Rust over eframe; no `unsafe` is ever needed at this layer.

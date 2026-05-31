@@ -17,7 +17,6 @@ const CATEGORIES: &[&str] = &[
     "Appearance",
     "Fonts",
     "Editor",
-    "Effects",
     "Motion",
     "Window",
     "Spellcheck",
@@ -599,80 +598,6 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 );
             });
         }
-        space(ui);
-    }
-
-    // ---- Effects (CRT) ----
-    if section_visible(
-        sel,
-        q,
-        "Effects",
-        &[
-            "crt",
-            "scanline",
-            "glow",
-            "bloom",
-            "vignette",
-            "curvature",
-            "reduced motion",
-        ],
-    ) {
-        ui.heading("CRT effect");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .checkbox(&mut config.effects.crt_enabled, "Enable CRT post-process")
-                .changed();
-            changed |= reset_to_default(
-                ui,
-                &mut config.effects.crt_enabled,
-                &def.effects.crt_enabled,
-            );
-        });
-        ui.add_enabled_ui(config.effects.crt_enabled, |ui| {
-            for (label, cur, dflt) in [
-                (
-                    "scanline",
-                    &mut config.effects.scanline,
-                    def.effects.scanline,
-                ),
-                (
-                    "glow",
-                    &mut config.effects.phosphor_glow,
-                    def.effects.phosphor_glow,
-                ),
-                ("bloom", &mut config.effects.bloom, def.effects.bloom),
-                (
-                    "vignette",
-                    &mut config.effects.vignette,
-                    def.effects.vignette,
-                ),
-                (
-                    "curvature",
-                    &mut config.effects.curvature,
-                    def.effects.curvature,
-                ),
-            ] {
-                ui.horizontal(|ui| {
-                    changed |= ui
-                        .add(egui::Slider::new(cur, 0.0..=1.0).text(label))
-                        .changed();
-                    changed |= reset_to_default(ui, cur, &dflt);
-                });
-            }
-            ui.horizontal(|ui| {
-                changed |= ui
-                    .checkbox(
-                        &mut config.effects.respect_reduced_motion,
-                        "Respect reduced motion",
-                    )
-                    .changed();
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.effects.respect_reduced_motion,
-                    &def.effects.respect_reduced_motion,
-                );
-            });
-        });
         space(ui);
     }
 

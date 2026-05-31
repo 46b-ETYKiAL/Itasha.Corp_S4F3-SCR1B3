@@ -4,19 +4,11 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "SCR1B3 render layer: theme -> egui Visuals mapping, syntax color mapping, CRT post-process params."
+description = "SCR1B3 render layer: theme -> egui Visuals mapping, syntax color mapping, rope-editor widget."
 
 [dependencies]
 egui.workspace = true
 scribe-core.workspace = true
-# Phase 17 T17.4 — wgpu post-pass. Versions match eframe 0.34's transitive
-# `wgpu` 29.x + `egui-wgpu` 0.34.x. `bytemuck` derive feature for Pod
-# uniform structs. `static_assertions` keeps the uniform layout a
-# build-time invariant. Lockfile pins exact versions.
-wgpu = "29"
-egui-wgpu = "0.34"
-bytemuck = { version = "1", features = ["derive"] }
-static_assertions = "1"
 # Phase 15 KEYSTONE — rope-editor widget reads + walks `Rope`s from the
 # `scribe_core::buffer::Buffer::Rope` variant. ropey is pinned at the
 # workspace level next to memmap2.

@@ -15,7 +15,6 @@ pub struct Config {
     pub editor: EditorConfig,
     pub appearance: AppearanceConfig,
     pub fonts: FontConfig,
-    pub effects: EffectsConfig,
     pub window: WindowConfig,
     pub updates: UpdateConfig,
     pub spellcheck: SpellcheckConfig,
@@ -447,35 +446,6 @@ impl Default for FontConfig {
     }
 }
 
-/// CRT/retro post-process. Disabled by default (zero cost when off).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct EffectsConfig {
-    pub crt_enabled: bool,
-    pub scanline: f32,
-    pub phosphor_glow: f32,
-    pub bloom: f32,
-    pub vignette: f32,
-    pub curvature: f32,
-    pub chromatic_aberration: f32,
-    pub respect_reduced_motion: bool,
-}
-
-impl Default for EffectsConfig {
-    fn default() -> Self {
-        Self {
-            crt_enabled: false,
-            scanline: 0.30,
-            phosphor_glow: 0.20,
-            bloom: 0.15,
-            vignette: 0.25,
-            curvature: 0.0,
-            chromatic_aberration: 0.05,
-            respect_reduced_motion: true,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateMode {
@@ -607,7 +577,6 @@ impl Default for ToolbarConfig {
                 "wrap",
                 "sep",
                 "spellcheck",
-                "crt",
             ]
             .iter()
             .map(|s| s.to_string())
@@ -809,11 +778,6 @@ mod tests {
             ..Default::default()
         };
         assert!(!w.effective_translucent());
-    }
-
-    #[test]
-    fn crt_off_by_default() {
-        assert!(!Config::default().effects.crt_enabled);
     }
 
     /// F-020: default `last_geometry` is None (first-launch falls back to

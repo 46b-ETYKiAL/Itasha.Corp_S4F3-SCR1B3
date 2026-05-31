@@ -298,12 +298,6 @@ pub struct ScribeApp {
     tabs: Vec<EditorTab>,
     active: usize,
     visuals_applied: bool,
-    /// F-027 — true when the wgpu backend is live and `PostResources` was
-    /// stashed in the egui_wgpu callback type-map at init. When true the CRT
-    /// effect renders via the GPU overlay pass; when false (glow backend or
-    /// init failure) it falls back to the egui-painter overlay. Prevents the
-    /// two overlays from doubling up.
-    wgpu_post_available: bool,
     /// Set when the user asks to close (custom titlebar ✕). Funnels into the
     /// same two-phase close path as an OS-initiated close.
     want_close: bool,
@@ -515,28 +509,6 @@ impl ScribeApp {
         if app.config.window.effective_translucent() {
             apply_window_effect(cc, app.config.window.mode, &app.config.window.tint);
         }
-        // Phase 17 T17.4 wgpu CRT post-pass — INIT step. Construct
-        // `PostResources` (compiled shader + pipeline + uniform buffer +
-        // bind group + sampler) once at startup and stash them in the
-        // egui_wgpu renderer's `callback_resources` type-map so a later
-        // PR's `CrtPostCallback` can find them at paint time. We do NOT
-        // register the callback in this PR — the offscreen-RT copy step
-        // the dossier's §4 prescribes lands in a follow-up. This init is
-        // pure-cost-zero: the resources sit in the type-map until a draw
-        // callback retrieves them.
-        if let Some(rs) = cc.wgpu_render_state.as_ref() {
-            let post_res = scribe_render::PostResources::new(&rs.device, rs.target_format);
-            rs.renderer.write().callback_resources.insert(post_res);
-            app.wgpu_post_available = true;
-            tracing::debug!(
-                "scr1b3-post: PostResources initialised + stashed (GPU CRT overlay live)"
-            );
-        } else {
-            tracing::debug!(
-                "scr1b3-post: no wgpu_render_state (probably glow backend); \
-                 CRT effect falls back to the egui-painter overlay"
-            );
-        }
         app
     }
 
@@ -645,7 +617,6 @@ impl ScribeApp {
             active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
             visuals_applied: false,
-            wgpu_post_available: false,
             want_close: false,
             closing: false,
             find_open: false,
@@ -1128,19 +1099,6 @@ impl ScribeApp {
                     .clicked()
                 {
                     self.config.spellcheck.enabled = !self.config.spellcheck.enabled;
-                    *save_cfg = true;
-                }
-            }
-            "crt" => {
-                if ui
-                    .selectable_label(
-                        self.config.effects.crt_enabled,
-                        toolbar_widget("crt", icons, jp),
-                    )
-                    .on_hover_text("CRT effect")
-                    .clicked()
-                {
-                    self.config.effects.crt_enabled = !self.config.effects.crt_enabled;
                     *save_cfg = true;
                 }
             }
@@ -2782,7 +2740,6 @@ pub(crate) const TOOLBAR_ACTIONS: &[(&str, &str)] = &[
     ("fold", "Folded view"),
     ("linenumbers", "Line numbers"),
     ("spellcheck", "Spellcheck"),
-    ("crt", "CRT effect"),
     ("lsp", "Start LSP"),
     ("sep", "Separator"),
 ];
@@ -2811,8 +2768,8 @@ pub(crate) const TOOLBAR_ACTIONS: &[(&str, &str)] = &[
 /// - 綴 (tsuzuru) "spell/compose" — `綴り` (spelling)
 ///
 /// Omitted (uncertain or non-canonical): openfolder (Western metaphor),
-/// palette (`⌘` glyph fallback exists), crt (acronym/loanword), lsp
-/// (acronym/loanword), find (covered by 検).
+/// palette (`⌘` glyph fallback exists), lsp (acronym/loanword),
+/// find (covered by 検).
 pub(crate) fn jp_glyph(id: &str) -> Option<&'static str> {
     match id {
         "new" => Some("新"),
@@ -2879,7 +2836,6 @@ pub(crate) fn toolbar_label(id: &str, icons: bool) -> &'static str {
         (true, "fold") => ph::EYE,
         (true, "linenumbers") => ph::LIST_NUMBERS,
         (true, "spellcheck") => ph::CHECK_FAT,
-        (true, "crt") => ph::MONITOR,
         (true, "lsp") => ph::PLAY,
         (_, "new") => "new",
         (_, "open") => "open",
@@ -2894,7 +2850,6 @@ pub(crate) fn toolbar_label(id: &str, icons: bool) -> &'static str {
         (_, "fold") => "fold",
         (_, "linenumbers") => "nums",
         (_, "spellcheck") => "spell",
-        (_, "crt") => "crt",
         (_, "lsp") => "lsp",
         (_, _) => "·",
     }
@@ -4898,17 +4853,6 @@ impl ScribeApp {
             });
         }
 
-        // CRT post-effect overlay (top-most; skipped entirely when disabled).
-        // F-027: prefer the GPU overlay pass when the wgpu backend is live;
-        // otherwise fall back to the egui-painter overlay. Exactly one path
-        // runs so the effect never doubles up.
-        if self.config.effects.crt_enabled {
-            if self.wgpu_post_available {
-                paint_crt_gpu_overlay(ctx, &self.config.effects);
-            } else {
-                paint_crt_overlay(ctx, &self.config.effects, false);
-            }
-        }
         // Window color-tint overlay (subtle wash; portable across modes/OSes).
         if self.config.window.tint_strength > 0.0 {
             paint_tint_overlay(
@@ -5277,9 +5221,6 @@ fn caption_btn(
     resp
 }
 
-/// Paint the CRT post-effect as a top-most overlay: horizontal scanlines plus a
-/// soft vignette. Cheap (egui shapes, no GPU pass), reduced-motion-safe (static),
-/// and skipped entirely when disabled. `reduced_motion` zeroes any animated term.
 /// Width of the 4 edge resize zones, in logical px. Slim so they only intercept
 /// pointer events right at the window border.
 const RESIZE_EDGE_PX: f32 = 6.0;
@@ -5379,106 +5320,6 @@ fn draw_resize_overlays(ctx: &egui::Context) {
     }
 }
 
-/// F-027 — register the GPU CRT overlay pass for this frame.
-///
-/// Builds a [`scribe_render::PostState`] from the effects config + live frame
-/// geometry, then adds the wgpu paint callback to a top-most foreground-layer
-/// painter spanning the whole window. The callback blends procedural CRT
-/// artifacts (scanlines, vignette, phosphor glow, grid) OVER the editor using
-/// premultiplied-alpha blending — it samples no source texture, so it can
-/// never black out the editor.
-///
-/// Registering the callback IS the "render the overlay" instruction; this is
-/// only called when `crt_enabled` is true, so the off-state is zero-cost.
-fn paint_crt_gpu_overlay(ctx: &egui::Context, fx: &scribe_core::config::EffectsConfig) {
-    let rect = ctx.content_rect();
-    if rect.width() <= 0.0 || rect.height() <= 0.0 {
-        return;
-    }
-    let ppp = ctx.pixels_per_point();
-    let screen = [rect.width() * ppp, rect.height() * ppp];
-    let time_sec = ctx.input(|i| i.time) as f32;
-    let state = scribe_render::PostState {
-        params: scribe_render::CrtParams::from_effects(fx, false),
-        time_sec,
-        screen,
-        // No body-text mask in v1: the overlay's effects are readable over
-        // text by construction (capped darkening + faint tint). A real
-        // `max_rect()` mask is a follow-up documented in the design doc.
-        mask_uv: [0.0; 4],
-        glitch_frames_left: 0,
-        grid_intensity: 0.0,
-        persistence_decay: 0.0,
-    };
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("crt-gpu-overlay"),
-    ));
-    painter.add(scribe_render::crt_overlay_shape(rect, state));
-}
-
-fn paint_crt_overlay(
-    ctx: &egui::Context,
-    fx: &scribe_core::config::EffectsConfig,
-    reduced_motion: bool,
-) {
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
-        egui::Id::new("crt-overlay"),
-    ));
-    // egui 0.34: Context::screen_rect split into viewport_rect() + content_rect()
-    // — the CRT overlay paints across the entire window content, so content_rect()
-    // is the right successor.
-    let rect = ctx.content_rect();
-
-    // Scanlines — the iconic CRT element (static, accessibility-safe).
-    if fx.scanline > 0.0 {
-        let a = (fx.scanline * 46.0).round().clamp(0.0, 255.0) as u8;
-        let col = Color32::from_black_alpha(a);
-        let mut y = rect.top();
-        while y < rect.bottom() {
-            painter.hline(rect.x_range(), y, egui::Stroke::new(1.0, col));
-            y += 3.0;
-        }
-    }
-
-    // Phosphor glow tint — a faint accent wash (skipped under reduced motion to
-    // avoid any shimmer; here it is static so we keep it but scale by glow).
-    let _ = reduced_motion;
-
-    // Vignette — a 3x3 vertex mesh, transparent center darkening to the corners.
-    if fx.vignette > 0.0 {
-        let edge = (fx.vignette * 140.0).round().clamp(0.0, 255.0) as u8;
-        let corner = Color32::from_black_alpha(edge);
-        let mid = Color32::from_black_alpha(edge / 2);
-        let center = Color32::TRANSPARENT;
-        let xs = [rect.left(), rect.center().x, rect.right()];
-        let ys = [rect.top(), rect.center().y, rect.bottom()];
-        // color per (row, col): corners full, edge-midpoints mid, center clear.
-        let color_at = |r: usize, c: usize| -> Color32 {
-            match (r, c) {
-                (1, 1) => center,
-                (1, _) | (_, 1) => mid,
-                _ => corner,
-            }
-        };
-        let mut mesh = egui::Mesh::default();
-        for (r, &y) in ys.iter().enumerate() {
-            for (c, &x) in xs.iter().enumerate() {
-                mesh.colored_vertex(egui::pos2(x, y), color_at(r, c));
-            }
-        }
-        let idx = |r: usize, c: usize| (r * 3 + c) as u32;
-        for r in 0..2 {
-            for c in 0..2 {
-                mesh.add_triangle(idx(r, c), idx(r, c + 1), idx(r + 1, c));
-                mesh.add_triangle(idx(r, c + 1), idx(r + 1, c + 1), idx(r + 1, c));
-            }
-        }
-        painter.add(egui::Shape::mesh(mesh));
-    }
-}
-
 /// Paint a translucent color tint over the whole window (portable; works in
 /// every mode and on every OS). Strength scales the alpha.
 fn paint_tint_overlay(ctx: &egui::Context, tint_hex: &str, strength: f32) {
@@ -5529,7 +5370,6 @@ mod jp_glyph_tests {
         // None so a future "ship a guess" doesn't slip through.
         assert_eq!(jp_glyph("openfolder"), None);
         assert_eq!(jp_glyph("palette"), None);
-        assert_eq!(jp_glyph("crt"), None);
         assert_eq!(jp_glyph("lsp"), None);
         // Unknown ids also return None — the helper never invents.
         assert_eq!(jp_glyph("not-a-toolbar-action"), None);
@@ -5660,15 +5500,6 @@ mod e2e {
             "first frame latches into the hide-then-close phase"
         );
         assert!(!app.want_close, "want_close consumed");
-    }
-
-    #[test]
-    fn crt_overlay_renders_when_enabled() {
-        let mut cfg = Config::default();
-        cfg.effects.crt_enabled = true;
-        let mut app = ScribeApp::new_test(cfg);
-        run_frames(&mut app, 2);
-        assert!(app.config.effects.crt_enabled);
     }
 
     #[test]
@@ -5837,7 +5668,7 @@ mod e2e {
     #[test]
     fn toolbar_layout_survives_serde_roundtrip() {
         let mut cfg = Config::default();
-        cfg.toolbar.items = vec!["save".into(), "sep".into(), "crt".into()];
+        cfg.toolbar.items = vec!["save".into(), "sep".into(), "lsp".into()];
         let back = Config::from_toml_str(&cfg.to_toml_string()).unwrap();
         assert_eq!(back.toolbar.items, cfg.toolbar.items);
     }
