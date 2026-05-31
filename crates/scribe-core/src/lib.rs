@@ -22,6 +22,7 @@
 pub mod buffer;
 pub mod config;
 pub mod document;
+pub mod editing;
 pub mod encoding;
 pub mod eol;
 pub mod error;
