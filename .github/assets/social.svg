@@ -148,7 +148,7 @@
     </g>
 
     <!-- content-band lift: boot block + right instrument shift up uniformly so -->
-    <!-- the lowest content clears the bottom corner brackets (plan-611). -->
+    <!-- the lowest content clears the bottom corner brackets. -->
     <g transform="translate(0,-10)">
     <g filter="url(#phos)">
       <text x="64" y="226" font-size="13" fill="#5a6b73">SCRIBE-CORE --boot</text>
@@ -170,7 +170,7 @@
       </g>
     </g>
 
-    <!-- BESPOKE per-repo right instrument (plan-611) — same fragment as the    -->
+    <!-- BESPOKE per-repo right instrument — same fragment as the    -->
     <!-- header, wrapped in scale(0.92) + frame chrome to fill the social panel.-->
     <g transform="translate(770, 220)" style="animation: flicker 9s infinite;" opacity="0.94">
       <text x="14" y="16" fill="#34e0d0" font-size="9.5" letter-spacing="1.6" opacity="0.78">CARET // glyph stream</text>
