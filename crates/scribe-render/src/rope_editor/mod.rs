@@ -308,6 +308,14 @@ impl<'a> RopeEditor<'a> {
             v
         };
 
+        // Captured during render: the (x, y) of the first visible row's text
+        // origin (after the gutter). Mouse hit-testing maps a pointer position
+        // back to a (line, col) using this origin + the monospace advance.
+        let mut text_geom: Option<(f32, f32)> = None;
+        // Captured during render: the primary caret's screen rect, used to
+        // position the OS IME composition window.
+        let mut caret_screen: Option<egui::Rect> = None;
+
         let scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, line_h, total_lines, |ui, range| {
@@ -346,6 +354,12 @@ impl<'a> RopeEditor<'a> {
                         ui.label(job).rect
                     });
                     let text_rect = row.inner;
+                    // First visible row fixes the text origin for mouse mapping
+                    // (gutter width is constant, so left() is the same on every
+                    // row, including empty ones).
+                    if text_geom.is_none() {
+                        text_geom = Some((text_rect.left(), text_rect.top()));
+                    }
                     let line_chars = s.chars().count();
 
                     // Render-whitespace overlay: paint a faint `·` centered in
@@ -413,6 +427,10 @@ impl<'a> RopeEditor<'a> {
                             text_rect.top()..=text_rect.bottom(),
                             egui::Stroke::new(1.5, text_color),
                         );
+                        caret_screen = Some(egui::Rect::from_min_max(
+                            egui::pos2(cx, text_rect.top()),
+                            egui::pos2(cx + 1.0, text_rect.bottom()),
+                        ));
                         // Keep the caret in view after an edit/move.
                         if caret_moved {
                             ui.scroll_to_rect(text_rect, None);
@@ -451,12 +469,71 @@ impl<'a> RopeEditor<'a> {
                 range
             });
 
-        // Click anywhere in the editor to focus it (enables keyboard input).
-        let area = ui.interact(scroll.inner_rect, editor_id, egui::Sense::click());
-        if area.clicked() {
+        // Pointer input: click to place the caret, click-drag to select,
+        // shift-click to extend (TextEdit parity). Clicking also focuses the
+        // editor so keyboard input flows.
+        let area = ui.interact(scroll.inner_rect, editor_id, egui::Sense::click_and_drag());
+        if area.clicked() || area.drag_started() {
             ui.memory_mut(|m| m.request_focus(editor_id));
         }
+        // Map a screen position to a rope char offset via the captured text
+        // origin + monospace advance. `None` until the first row has rendered.
+        let range_start = scroll.inner.start;
+        let pos_to_offset = |pos: egui::Pos2| -> Option<usize> {
+            let (text_left, row0_top) = text_geom?;
+            let geom = TextGeom {
+                text_left,
+                row0_top,
+                line_h,
+                char_w,
+            };
+            Some(pos_to_char_offset(
+                rope,
+                pos,
+                geom,
+                range_start,
+                total_lines,
+            ))
+        };
+        if let Some(pos) = area.interact_pointer_pos() {
+            let shift = ui.input(|i| i.modifiers.shift);
+            if area.clicked() {
+                if let Some(off) = pos_to_offset(pos) {
+                    state.clear_extra_carets();
+                    if shift {
+                        state.edit.cursor = off; // extend from existing anchor
+                        state.edit.goal_col = None;
+                    } else {
+                        state.edit = EditState::at(off);
+                    }
+                }
+            } else if area.drag_started() {
+                if let Some(off) = pos_to_offset(pos) {
+                    state.clear_extra_carets();
+                    if !shift {
+                        state.edit.anchor = off;
+                    }
+                    state.edit.cursor = off;
+                    state.edit.goal_col = None;
+                }
+            } else if area.dragged() {
+                if let Some(off) = pos_to_offset(pos) {
+                    state.edit.cursor = off;
+                    state.edit.goal_col = None;
+                }
+            }
+        }
         if focused {
+            // Position the OS IME composition window at the caret so CJK /
+            // compose candidates appear in the right place.
+            if let Some(rect) = caret_screen {
+                ui.ctx().output_mut(|o| {
+                    o.ime = Some(egui::output::IMEOutput {
+                        rect,
+                        cursor_rect: rect,
+                    });
+                });
+            }
             // Repaint so the caret stays responsive to held keys / blink.
             ui.ctx().request_repaint();
         }
@@ -484,6 +561,50 @@ pub struct RopeEditorResponse {
     /// The app uses this to sync `tab.text` from the persistent rope ONLY
     /// when a real edit occurred — avoiding a per-frame `rope.to_string()`.
     pub content_changed: bool,
+}
+
+/// Monospace text layout geometry for pointer hit-testing: the top-left of the
+/// first visible row's text (after the gutter), the per-row height, and the
+/// glyph advance.
+#[derive(Clone, Copy)]
+struct TextGeom {
+    text_left: f32,
+    row0_top: f32,
+    line_h: f32,
+    char_w: f32,
+}
+
+/// Map a screen position to a rope char offset, given the monospace text
+/// geometry and the visible row range. Pure so the pointer→caret mapping is
+/// unit-testable without simulating egui events.
+///
+/// A click past a line's end clamps to its last glyph; a click below the last
+/// line clamps to that line. Columns round to the nearest glyph boundary so the
+/// caret lands where the eye expects between two characters.
+fn pos_to_char_offset(
+    rope: &Rope,
+    pos: egui::Pos2,
+    geom: TextGeom,
+    range_start: usize,
+    total_lines: usize,
+) -> usize {
+    let rel = ((pos.y - geom.row0_top) / geom.line_h).floor();
+    let line = (range_start as f32 + rel).clamp(0.0, total_lines.saturating_sub(1) as f32) as usize;
+    let line_start = rope.line_to_char(line);
+    let line_end = if line + 1 < total_lines {
+        rope.line_to_char(line + 1)
+    } else {
+        rope.len_chars()
+    };
+    let mut len = line_end - line_start;
+    if len > 0 && rope.char(line_start + len - 1) == '\n' {
+        len -= 1;
+    }
+    if len > 0 && rope.char(line_start + len - 1) == '\r' {
+        len -= 1;
+    }
+    let col = (((pos.x - geom.text_left) / geom.char_w).round().max(0.0) as usize).min(len);
+    line_start + col
 }
 
 /// Decimal digits needed to print the largest line number (>= 1).
@@ -726,6 +847,21 @@ pub fn apply_event(
         Event::Paste(text) if !text.is_empty() => {
             record_before!(EditKind::Other);
             edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, text));
+            out.consumed = true;
+        }
+        // IME composition (CJK, dead-keys, compose). The OS candidate window
+        // shows the in-progress preedit (positioned via the `output.ime` rect
+        // set in `show_editable`); on `Commit` we insert the finalised text the
+        // same way a paste does. Enable/Preedit/Disable are consumed so egui
+        // keeps routing the composition to this widget.
+        Event::Ime(ime) => {
+            match ime {
+                egui::ImeEvent::Commit(text) if !text.is_empty() => {
+                    record_before!(EditKind::Other);
+                    edit_all!(|r: &mut Rope, st: &mut EditState| editing::insert(r, st, text));
+                }
+                _ => {}
+            }
             out.consumed = true;
         }
         Event::Copy => {
@@ -1219,6 +1355,82 @@ mod tests {
         // Select-all (Cmd+A) is selection-only — no content change.
         let out = apply_event(&mut r, &mut st, &key_ev(egui::Key::A, false, true));
         assert!(!out.mutated, "select-all must not flag a content change");
+    }
+
+    /// IME composition: a `Commit` inserts the finalised text at the caret
+    /// (CJK parity); `Preedit`/`Enable` are consumed but don't mutate (the OS
+    /// candidate window shows the in-progress composition).
+    #[test]
+    fn apply_event_ime_commit_inserts() {
+        let mut r = Rope::from_str("a\n");
+        let mut st = RopeEditorState::new();
+        st.edit = EditState::at(1); // after 'a'
+
+        // Preedit shows composition but must not change the buffer.
+        let out = apply_event(
+            &mut r,
+            &mut st,
+            &egui::Event::Ime(egui::ImeEvent::Preedit("せ".to_string())),
+        );
+        assert!(out.consumed);
+        assert!(!out.mutated, "preedit must not mutate the buffer");
+        assert_eq!(r.to_string(), "a\n");
+
+        // Commit inserts the finalised text.
+        let out = apply_event(
+            &mut r,
+            &mut st,
+            &egui::Event::Ime(egui::ImeEvent::Commit("世界".to_string())),
+        );
+        assert!(out.consumed);
+        assert!(out.mutated, "commit changes content");
+        assert_eq!(r.to_string(), "a世界\n");
+    }
+
+    /// Mouse hit-testing maps a pointer position to the rope char offset the
+    /// caret should jump to. Geometry: text origin at (10, 0), 16px rows, 8px
+    /// glyphs. Buffer "hello\nworld\n" → lines start at char 0 and 6.
+    #[test]
+    fn pos_to_char_offset_maps_clicks() {
+        let r = Rope::from_str("hello\nworld\n");
+        let total = r.len_lines();
+        let geom = TextGeom {
+            text_left: 10.0,
+            row0_top: 0.0,
+            line_h: 16.0,
+            char_w: 8.0,
+        };
+        let at = |x: f32, y: f32| pos_to_char_offset(&r, egui::pos2(x, y), geom, 0, total);
+        // Row 0, before the 3rd glyph (x≈10+2*8=26) → offset 2 ("he|llo").
+        assert_eq!(at(26.0, 4.0), 2);
+        // Row 0, far left clamps to col 0.
+        assert_eq!(at(0.0, 4.0), 0);
+        // Row 0, far right clamps to end-of-line (5, before the newline).
+        assert_eq!(at(999.0, 4.0), 5);
+        // Row 1 (y in [16,32)) at col 0 → offset 6 (start of "world").
+        assert_eq!(at(10.0, 20.0), 6);
+        // Row 1, col 3 → offset 9 ("wor|ld").
+        assert_eq!(at(10.0 + 3.0 * 8.0, 20.0), 9);
+        // Click below the last line clamps to the last line.
+        assert_eq!(at(10.0, 9999.0), r.line_to_char(total - 1));
+    }
+
+    /// Rounding lands the caret on the nearer glyph boundary (parity with how a
+    /// user expects a click between two characters to resolve).
+    #[test]
+    fn pos_to_char_offset_rounds_to_nearest_boundary() {
+        let r = Rope::from_str("abcd");
+        let geom = TextGeom {
+            text_left: 0.0,
+            row0_top: 0.0,
+            line_h: 16.0,
+            char_w: 10.0,
+        };
+        let at = |x: f32| pos_to_char_offset(&r, egui::pos2(x, 1.0), geom, 0, 1);
+        assert_eq!(at(4.0), 0); // closer to boundary 0
+        assert_eq!(at(6.0), 1); // closer to boundary 1
+        assert_eq!(at(14.0), 1); // closer to boundary 1
+        assert_eq!(at(16.0), 2); // closer to boundary 2
     }
 
     /// The editable widget renders a small buffer (caret + selection state)
