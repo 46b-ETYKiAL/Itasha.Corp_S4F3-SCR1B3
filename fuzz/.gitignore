@@ -1,0 +1,5 @@
+# cargo-fuzz build + run artifacts (not source).
+target/
+corpus/
+artifacts/
+coverage/
