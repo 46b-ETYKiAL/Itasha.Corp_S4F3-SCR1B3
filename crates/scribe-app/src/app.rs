@@ -440,7 +440,9 @@ impl ScribeApp {
             let post_res = scribe_render::PostResources::new(&rs.device, rs.target_format);
             rs.renderer.write().callback_resources.insert(post_res);
             app.wgpu_post_available = true;
-            tracing::debug!("scr1b3-post: PostResources initialised + stashed (GPU CRT overlay live)");
+            tracing::debug!(
+                "scr1b3-post: PostResources initialised + stashed (GPU CRT overlay live)"
+            );
         } else {
             tracing::debug!(
                 "scr1b3-post: no wgpu_render_state (probably glow backend); \
