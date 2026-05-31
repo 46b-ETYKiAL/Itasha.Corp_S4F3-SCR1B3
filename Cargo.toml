@@ -3,6 +3,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/scribe-core", "crates/scribe-render", "crates/scribe-app"]
+# `fuzz/` is an independent cargo-fuzz workspace (needs nightly + libFuzzer);
+# exclude it so the main build/test/clippy/deny gates never compile it.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
