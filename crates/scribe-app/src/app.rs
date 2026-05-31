@@ -172,6 +172,15 @@ struct EditorTab {
     /// `config.editor.experimental_rope_editor` is on; `None` while the egui
     /// TextEdit path owns this tab.
     rope_state: Option<scribe_render::RopeEditorState>,
+    /// KEYSTONE perf — the persistent rope buffer for the experimental owned
+    /// editor. Built once from `text` (O(n)) on first use, then mutated in
+    /// place each frame; `text` is re-synced from it ONLY when an edit
+    /// actually changes content (see `RopeEditorResponse::content_changed`).
+    /// This removes the per-frame `Buffer::from_text` + `rope.to_string()`
+    /// round-trip that made the experimental path O(n)/frame. Set to `None`
+    /// to invalidate after any external mutation of `text` (reload, plugin,
+    /// find-replace, sort-lines) so the next frame rebuilds it.
+    rope_buf: Option<scribe_core::buffer::Buffer>,
     /// Per-tab line bookmarks (0-based line indices). Toggled with Ctrl+F2 on
     /// the cursor line; F2 / Shift+F2 jump to the next / previous bookmark.
     /// A dot marker is drawn in the line-number gutter for each bookmarked
@@ -198,6 +207,7 @@ impl EditorTab {
             disk_mtime: None,
             disk_text: String::new(),
             rope_state: None,
+            rope_buf: None,
             bookmarks: std::collections::BTreeSet::new(),
         }
     }
@@ -217,6 +227,7 @@ impl EditorTab {
             disk_mtime,
             disk_text: text,
             rope_state: None,
+            rope_buf: None,
             bookmarks: std::collections::BTreeSet::new(),
         })
     }
@@ -242,6 +253,7 @@ impl EditorTab {
                     disk_mtime,
                     disk_text,
                     rope_state: None,
+                    rope_buf: None,
                     bookmarks: std::collections::BTreeSet::new(),
                 };
             }
@@ -251,6 +263,16 @@ impl EditorTab {
         let mut tab = Self::scratch();
         tab.text = content;
         tab
+    }
+
+    /// Replace the editable text from an EXTERNAL source (reload, plugin,
+    /// find-replace, sort-lines) and invalidate the experimental rope cache so
+    /// the next frame rebuilds the persistent rope from the new content. The
+    /// rope editor itself writes `text` directly (it owns the rope) and must
+    /// NOT go through here, or it would discard its own live buffer.
+    fn set_text(&mut self, new: String) {
+        self.text = new;
+        self.rope_buf = None;
     }
 
     fn title(&self) -> String {
@@ -458,7 +480,7 @@ impl ScribeApp {
         config_err: Option<String>,
         cli_path: Option<String>,
     ) -> Self {
-        let mut app = Self::build(config, config_err, cli_path);
+        let mut app = Self::build(config, config_err, cli_path, true);
         // Phase 16 T16.3: register the egui-phosphor Thin icon font so toolbar
         // glyphs (Save / Find / Palette / etc.) render when appearance.toolbar_icons
         // is on. The icon font is inserted as the #2 entry in Proportional, so
@@ -525,10 +547,15 @@ impl ScribeApp {
     pub fn new_test(mut config: Config) -> Self {
         config.editor.restore_session = false;
         config.plugins.enabled = false;
-        Self::build(config, None, None)
+        Self::build(config, None, None, false)
     }
 
-    fn build(config: Config, config_err: Option<String>, cli_path: Option<String>) -> Self {
+    fn build(
+        config: Config,
+        config_err: Option<String>,
+        cli_path: Option<String>,
+        watch_config: bool,
+    ) -> Self {
         let theme = load_theme(&config.appearance.theme);
         // F-013 — open the welcome modal on first launch only. Suppressed
         // when the user passed a file on the command line OR the recent-
@@ -554,7 +581,10 @@ impl ScribeApp {
         // untitled scratch notes — from the manifest + backup store. Otherwise
         // fall back to the legacy paths-only restore.
         let mut restored_active = 0usize;
-        if tabs.is_empty() && config.editor.session_backup {
+        // Hot-exit restore reads the SHARED OS session manifest. Skipped under
+        // `new_test` (watch_config = false) so a parallel test never inherits
+        // another test's restored tabs (which would break tabs.len() asserts).
+        if watch_config && tabs.is_empty() && config.editor.session_backup {
             if let Some((restored, active_idx)) = Self::restore_tabs_from_manifest() {
                 tabs = restored;
                 restored_active = active_idx;
@@ -596,8 +626,17 @@ impl ScribeApp {
         let plugin_cmds = plugins.commands();
 
         // Live-reload: watch the config dir for external edits to scr1b3.toml.
+        // Skipped under `new_test` (watch_config = false): the watcher targets
+        // the shared OS config dir, so in a parallel test run one test's
+        // session/config write would fire every other test's watcher and
+        // `reload_config_from_disk` would clobber its in-memory feature flags
+        // with on-disk defaults (test-isolation race).
         let (cfg_tx, cfg_rx) = std::sync::mpsc::channel();
-        let cfg_watcher = spawn_config_watcher(cfg_tx);
+        let cfg_watcher = if watch_config {
+            spawn_config_watcher(cfg_tx)
+        } else {
+            None
+        };
 
         Self {
             config,
@@ -921,7 +960,7 @@ impl ScribeApp {
             hi,
             self.config.editor.tab_width,
         );
-        self.tabs[active].text = new_text;
+        self.tabs[active].set_text(new_text);
         state
             .cursor
             .set_char_range(Some(egui::text::CCursorRange::one(
@@ -1141,7 +1180,7 @@ impl ScribeApp {
         let mut pctx = PluginContext::new(self.tabs[active].text.clone());
         match self.plugins.run_command(command_id, &mut pctx) {
             Ok(()) => {
-                self.tabs[active].text = pctx.text;
+                self.tabs[active].set_text(pctx.text);
                 if let Some(n) = pctx.notifications.last() {
                     self.status = n.clone();
                 }
@@ -1321,7 +1360,7 @@ impl ScribeApp {
                 if active < self.tabs.len() && !self.tabs[active].doc.is_read_only_large() {
                     let sorted = scribe_core::text_ops::sort_lines(&self.tabs[active].text);
                     if sorted != self.tabs[active].text {
-                        self.tabs[active].text = sorted;
+                        self.tabs[active].set_text(sorted);
                         self.tabs[active].doc.mark_dirty();
                         self.status = "sorted lines (A→Z)".to_string();
                     }
@@ -1409,7 +1448,7 @@ impl ScribeApp {
             text = scribe_core::text_ops::ensure_final_newline(&text);
         }
         if text != self.tabs[active].text {
-            self.tabs[active].text = text.clone();
+            self.tabs[active].set_text(text.clone());
         }
         // Sync editable text into the document model, then persist.
         self.tabs[active].doc.set_text(&text);
@@ -1530,7 +1569,7 @@ impl ScribeApp {
                 continue;
             };
             if let Ok(fresh) = std::fs::read_to_string(&path) {
-                self.tabs[i].text = fresh.clone();
+                self.tabs[i].set_text(fresh.clone());
                 self.tabs[i].doc.set_text(&fresh);
                 self.tabs[i].disk_text = fresh;
                 if let Ok(m) = std::fs::metadata(&path).and_then(|m| m.modified()) {
@@ -1556,7 +1595,7 @@ impl ScribeApp {
         let mut pctx = PluginContext::new(self.tabs[active].text.clone());
         if self.plugins.fire_event(HookEvent::Save, &mut pctx).is_ok() {
             if pctx.text != self.tabs[active].text {
-                self.tabs[active].text = pctx.text;
+                self.tabs[active].set_text(pctx.text);
             }
             if let Some(n) = pctx.notifications.last() {
                 self.status = n.clone();
@@ -4608,24 +4647,37 @@ impl ScribeApp {
                 // String. Default OFF — the egui path below stays canonical.
                 if self.config.editor.experimental_rope_editor {
                     let fg = ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
-                    let mut buf = scribe_core::buffer::Buffer::from_text(&self.tabs[active].text);
-                    let state = self.tabs[active]
+                    // KEYSTONE perf: the rope persists across frames in the tab.
+                    // Build it once (O(n)) from `text`; thereafter the widget
+                    // mutates it in place and we sync back to `text` ONLY when
+                    // an edit actually changed content. `ropey` clones are O(1)
+                    // (Arc-shared), so persistence costs no extra memory churn.
+                    let tab = &mut self.tabs[active];
+                    // Lazily (re)build the persistent rope from `text`. Done as a
+                    // separate `is_none` check rather than `get_or_insert_with`
+                    // so the closure does not capture `tab` while `rope_buf` is
+                    // mutably borrowed (disjoint-field borrow).
+                    if tab.rope_buf.is_none() {
+                        tab.rope_buf = Some(scribe_core::buffer::Buffer::from_text(&tab.text));
+                    }
+                    let buf = tab.rope_buf.as_mut().expect("rope_buf set above");
+                    let state = tab
                         .rope_state
                         .get_or_insert_with(scribe_render::RopeEditorState::new);
-                    let (_, clipboard) =
-                        scribe_render::RopeEditor::new(&mut buf, font.clone(), gutter_row_h)
+                    let (resp, clipboard) =
+                        scribe_render::RopeEditor::new(buf, font.clone(), gutter_row_h)
                             .with_text_color(fg)
                             .with_gutter_color(muted)
                             .with_line_numbers(show_line_numbers)
                             .with_render_whitespace(self.config.editor.render_whitespace)
                             .with_syntax(&self.hl, ext.clone())
                             .show_editable(ui, state);
-                    // Write edits back so save / status / find see them.
-                    if let Some(rope) = buf.as_rope() {
-                        let new_text = rope.to_string();
-                        if new_text != self.tabs[active].text {
-                            self.tabs[active].text = new_text;
-                            self.tabs[active].doc.mark_dirty();
+                    // Sync `text` from the rope ONLY on a real content edit — the
+                    // O(n) `to_string()` now runs on keystrokes, not every frame.
+                    if resp.content_changed {
+                        if let Some(rope) = tab.rope_buf.as_ref().and_then(|b| b.as_rope()) {
+                            tab.text = rope.to_string();
+                            tab.doc.mark_dirty();
                         }
                     }
                     if let Some(text) = clipboard {
@@ -6567,6 +6619,40 @@ def";
         app.tabs[0].text = "fn main() {\n    let x = 1;\n}\n".to_string();
         run_frames(&mut app, 4);
         assert_eq!(app.tabs.len(), 1);
+    }
+
+    /// KEYSTONE perf bridge: the experimental editor builds the rope ONCE and
+    /// persists it across frames (no per-frame `Buffer::from_text`), and an
+    /// external `set_text` invalidates the cache so the next frame rebuilds
+    /// from the new content.
+    #[test]
+    fn experimental_editor_persists_rope_and_invalidates_on_external_edit() {
+        let mut cfg = Config::default();
+        cfg.editor.experimental_rope_editor = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "alpha\nbeta\n".to_string();
+        run_frames(&mut app, 3);
+        assert!(
+            app.tabs[0].rope_buf.is_some(),
+            "experimental editor builds + persists the rope across frames"
+        );
+        // External mutation (reload / plugin / sort) invalidates the cache.
+        app.tabs[0].set_text("gamma\n".to_string());
+        assert!(
+            app.tabs[0].rope_buf.is_none(),
+            "set_text invalidates the persistent rope cache"
+        );
+        run_frames(&mut app, 2);
+        let rebuilt = app.tabs[0]
+            .rope_buf
+            .as_ref()
+            .and_then(|b| b.as_rope())
+            .map(|r| r.to_string());
+        assert_eq!(
+            rebuilt,
+            Some("gamma\n".to_string()),
+            "rope rebuilt after invalidation reflects the externally-set content"
+        );
     }
 
     /// Auto-save + session-backup + trim-on-save all enabled together render
