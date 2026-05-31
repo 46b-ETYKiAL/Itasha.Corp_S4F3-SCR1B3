@@ -1,17 +1,15 @@
 //! SCR1B3 render layer: maps the engine-agnostic `Theme` onto egui `Visuals`,
-//! converts colors, and carries CRT post-process parameters. Keeps the
+//! converts colors, and hosts the rope-editor widget. Keeps the
 //! `egui`-specific mapping out of `scribe-core`.
 //!
 //! Phase 21 T21.2 P1 — `#![forbid(unsafe_code)]`. This crate is pure-safe
-//! Rust: theme → Visuals, color math, CRT parameter conversion. No mmap,
+//! Rust: theme → Visuals, color math, rope-editor paint. No mmap,
 //! no FFI, no transmute path is needed; the forbid is unconditional.
 
 #![forbid(unsafe_code)]
 
-pub mod post;
 pub mod rope_editor;
 
-pub use post::{crt_overlay_shape, CrtPostCallback, PostResources, PostState, PostUniforms};
 pub use rope_editor::{
     apply_event, BufferModeSeen, EventOutcome, RopeEditor, RopeEditorResponse, RopeEditorState,
 };
@@ -76,42 +74,6 @@ pub fn apply_window_opacity(v: &mut Visuals, opacity: f32) {
     v.faint_bg_color = with_a(v.faint_bg_color);
 }
 
-/// CRT post-process parameters (consumed by the optional wgpu post-pass).
-/// When `enabled` is false the post-pass is skipped entirely (zero cost).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CrtParams {
-    pub enabled: bool,
-    pub scanline: f32,
-    pub phosphor_glow: f32,
-    pub bloom: f32,
-    pub vignette: f32,
-    pub curvature: f32,
-    pub chromatic_aberration: f32,
-}
-
-impl CrtParams {
-    /// Build from config, zeroing animated terms when the OS requests reduced
-    /// motion (accessibility).
-    pub fn from_effects(e: &scribe_core::config::EffectsConfig, reduced_motion: bool) -> Self {
-        let gate = |v: f32| {
-            if reduced_motion && e.respect_reduced_motion {
-                0.0
-            } else {
-                v
-            }
-        };
-        CrtParams {
-            enabled: e.crt_enabled,
-            scanline: gate(e.scanline),
-            phosphor_glow: e.phosphor_glow,
-            bloom: e.bloom,
-            vignette: e.vignette,
-            curvature: e.curvature,
-            chromatic_aberration: e.chromatic_aberration,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,17 +90,5 @@ mod tests {
     fn visuals_from_brand_theme() {
         let v = theme_to_visuals(&Theme::wired_noir());
         assert_eq!(v.extreme_bg_color, Color32::from_rgb(0x07, 0x0a, 0x0c));
-    }
-
-    #[test]
-    fn reduced_motion_zeros_scanline() {
-        let e = scribe_core::config::EffectsConfig {
-            crt_enabled: true,
-            scanline: 0.5,
-            ..Default::default()
-        };
-        let p = CrtParams::from_effects(&e, true);
-        assert_eq!(p.scanline, 0.0);
-        assert!(p.enabled);
     }
 }

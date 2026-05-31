@@ -3395,13 +3395,9 @@ dependencies = [
 name = "scribe-render"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "egui",
- "egui-wgpu",
  "ropey",
  "scribe-core",
- "static_assertions",
- "wgpu",
 ]
 
 [[package]]
