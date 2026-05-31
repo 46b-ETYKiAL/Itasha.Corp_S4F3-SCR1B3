@@ -36,6 +36,7 @@
 
 use egui::text::LayoutJob;
 use egui::{Color32, FontId, TextFormat, Ui};
+use ropey::Rope;
 use scribe_core::buffer::Buffer;
 use scribe_core::syntax::{Highlighter, HlSpan};
 
@@ -287,6 +288,182 @@ pub enum BufferModeSeen {
     Mmap,
 }
 
+// ---- Editable session: input handling on top of the editing model --------
+
+use scribe_core::editing::{self, EditKind, EditState, History, Snapshot};
+
+/// Persistent editing state for an *editable* RopeEditor session, held by the
+/// caller across frames: the caret/selection plus the undo history. This is
+/// the owned editing layer that replaces the state egui's `TextEdit` keeps
+/// internally — the basis for multi-cursor + persistent undo.
+#[derive(Debug, Clone)]
+pub struct RopeEditorState {
+    pub edit: EditState,
+    pub history: History,
+}
+
+impl Default for RopeEditorState {
+    fn default() -> Self {
+        Self {
+            edit: EditState::at(0),
+            history: History::default(),
+        }
+    }
+}
+
+impl RopeEditorState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Clamp the caret/anchor into the current rope (after an external content
+    /// change). Cheap; call when the buffer is replaced out from under us.
+    pub fn clamp_to(&mut self, rope: &Rope) {
+        let n = rope.len_chars();
+        self.edit.cursor = self.edit.cursor.min(n);
+        self.edit.anchor = self.edit.anchor.min(n);
+    }
+}
+
+/// What an applied event asked the host to do.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct EventOutcome {
+    /// The event mutated the buffer or moved the caret (request a repaint).
+    pub consumed: bool,
+    /// Copy/Cut produced this text for the host to write to the clipboard.
+    pub set_clipboard: Option<String>,
+}
+
+/// Apply one egui input event to `(rope, state)`, integrating undo history.
+/// Pasted text arrives in `Event::Paste`; Copy/Cut hand their text back via
+/// `set_clipboard` (the host owns the OS clipboard).
+///
+/// Snapshot-based undo: the pre-edit `(text, cursor)` is recorded before each
+/// mutation; the [`History`] coalesces typing runs so undo reverts words, not
+/// single chars. Undo/redo replace the whole rope from a snapshot.
+pub fn apply_event(
+    rope: &mut Rope,
+    state: &mut RopeEditorState,
+    event: &egui::Event,
+) -> EventOutcome {
+    use egui::{Event, Key};
+    let mut out = EventOutcome::default();
+
+    macro_rules! record_before {
+        ($kind:expr) => {{
+            let before = Snapshot::new(rope.to_string(), state.edit.cursor);
+            state.history.record(before, $kind);
+        }};
+    }
+
+    match event {
+        Event::Text(text) if !text.is_empty() => {
+            record_before!(EditKind::Insert);
+            editing::insert(rope, &mut state.edit, text);
+            out.consumed = true;
+        }
+        Event::Paste(text) if !text.is_empty() => {
+            record_before!(EditKind::Other);
+            editing::insert(rope, &mut state.edit, text);
+            out.consumed = true;
+        }
+        Event::Copy => {
+            let sel = editing::selected_text(rope, &state.edit);
+            if !sel.is_empty() {
+                out.set_clipboard = Some(sel);
+            }
+            out.consumed = true;
+        }
+        Event::Cut => {
+            let sel = editing::selected_text(rope, &state.edit);
+            if !sel.is_empty() {
+                record_before!(EditKind::Other);
+                editing::delete_selection(rope, &mut state.edit);
+                out.set_clipboard = Some(sel);
+            }
+            out.consumed = true;
+        }
+        Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } => {
+            let shift = modifiers.shift;
+            let cmd = modifiers.command;
+            match key {
+                Key::Backspace => {
+                    record_before!(EditKind::Delete);
+                    editing::backspace(rope, &mut state.edit);
+                    out.consumed = true;
+                }
+                Key::Delete => {
+                    record_before!(EditKind::Delete);
+                    editing::delete_forward(rope, &mut state.edit);
+                    out.consumed = true;
+                }
+                Key::Enter => {
+                    record_before!(EditKind::Other);
+                    editing::insert(rope, &mut state.edit, "\n");
+                    out.consumed = true;
+                }
+                Key::Tab => {
+                    record_before!(EditKind::Other);
+                    editing::insert(rope, &mut state.edit, "    ");
+                    out.consumed = true;
+                }
+                Key::ArrowLeft => {
+                    editing::move_horizontal(rope, &mut state.edit, -1, shift);
+                    out.consumed = true;
+                }
+                Key::ArrowRight => {
+                    editing::move_horizontal(rope, &mut state.edit, 1, shift);
+                    out.consumed = true;
+                }
+                Key::ArrowUp => {
+                    editing::move_vertical(rope, &mut state.edit, -1, shift);
+                    out.consumed = true;
+                }
+                Key::ArrowDown => {
+                    editing::move_vertical(rope, &mut state.edit, 1, shift);
+                    out.consumed = true;
+                }
+                Key::Home => {
+                    editing::move_line_start(rope, &mut state.edit, shift);
+                    out.consumed = true;
+                }
+                Key::End => {
+                    editing::move_line_end(rope, &mut state.edit, shift);
+                    out.consumed = true;
+                }
+                Key::A if cmd => {
+                    editing::select_all(rope, &mut state.edit);
+                    out.consumed = true;
+                }
+                Key::Z if cmd && !shift => {
+                    let current = Snapshot::new(rope.to_string(), state.edit.cursor);
+                    if let Some(prev) = state.history.undo(current) {
+                        *rope = Rope::from_str(&prev.text);
+                        state.edit = EditState::at(prev.cursor);
+                    }
+                    out.consumed = true;
+                }
+                Key::Z if cmd && shift => {
+                    let current = Snapshot::new(rope.to_string(), state.edit.cursor);
+                    if let Some(next) = state.history.redo(current) {
+                        *rope = Rope::from_str(&next.text);
+                        state.edit = EditState::at(next.cursor);
+                    }
+                    out.consumed = true;
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(deprecated)] // egui 0.34 deprecated Context::run + CentralPanel::show
                      // for non-test paths; the run_ui replacement is for the live render loop,
@@ -294,8 +471,6 @@ pub enum BufferModeSeen {
                      // for its app.rs e2e harness.
 mod tests {
     use super::*;
-    use ropey::Rope;
-    use scribe_core::buffer::Buffer;
 
     /// Smoke-test: an empty rope renders without panicking + reports
     /// the empty visible range egui computes for it.
@@ -355,6 +530,90 @@ mod tests {
                 assert_eq!(resp.buffer_mode, BufferModeSeen::Rope);
             });
         });
+    }
+
+    // ---- editable session: apply_event ----
+
+    fn text_event(s: &str) -> egui::Event {
+        egui::Event::Text(s.to_string())
+    }
+    fn key_ev(key: egui::Key, shift: bool, cmd: bool) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                shift,
+                command: cmd,
+                ctrl: cmd,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn apply_event_types_and_backspaces() {
+        let mut r = Rope::from_str("");
+        let mut st = RopeEditorState::new();
+        for ch in ["h", "i"] {
+            assert!(apply_event(&mut r, &mut st, &text_event(ch)).consumed);
+        }
+        assert_eq!(r.to_string(), "hi");
+        assert_eq!(st.edit.cursor, 2);
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::Backspace, false, false));
+        assert_eq!(r.to_string(), "h");
+    }
+
+    #[test]
+    fn apply_event_undo_redo_typing_run() {
+        let mut r = Rope::from_str("");
+        let mut st = RopeEditorState::new();
+        for ch in ["a", "b", "c"] {
+            apply_event(&mut r, &mut st, &text_event(ch));
+        }
+        assert_eq!(r.to_string(), "abc");
+        // Ctrl+Z undoes the whole coalesced typing run.
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::Z, false, true));
+        assert_eq!(r.to_string(), "");
+        // Ctrl+Shift+Z redoes it.
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::Z, true, true));
+        assert_eq!(r.to_string(), "abc");
+    }
+
+    #[test]
+    fn apply_event_select_all_copy_cut() {
+        let mut r = Rope::from_str("hello");
+        let mut st = RopeEditorState::new();
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::A, false, true));
+        let copy = apply_event(&mut r, &mut st, &egui::Event::Copy);
+        assert_eq!(copy.set_clipboard.as_deref(), Some("hello"));
+        assert_eq!(r.to_string(), "hello", "copy must not mutate");
+        let cut = apply_event(&mut r, &mut st, &egui::Event::Cut);
+        assert_eq!(cut.set_clipboard.as_deref(), Some("hello"));
+        assert_eq!(r.to_string(), "", "cut removes the selection");
+    }
+
+    #[test]
+    fn apply_event_paste_inserts() {
+        let mut r = Rope::from_str("");
+        let mut st = RopeEditorState::new();
+        apply_event(&mut r, &mut st, &egui::Event::Paste("xy".to_string()));
+        assert_eq!(r.to_string(), "xy");
+        assert_eq!(st.edit.cursor, 2);
+    }
+
+    #[test]
+    fn apply_event_shift_arrow_selects() {
+        let mut r = Rope::from_str("abcd");
+        let mut st = RopeEditorState::new();
+        apply_event(
+            &mut r,
+            &mut st,
+            &key_ev(egui::Key::ArrowRight, false, false),
+        );
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::ArrowRight, true, false));
+        assert_eq!(st.edit.selection(), 1..2);
     }
 
     #[test]
