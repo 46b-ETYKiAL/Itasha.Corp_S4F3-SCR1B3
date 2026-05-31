@@ -37,12 +37,18 @@ jobs:
       # No dependency cache in this release-context workflow (zizmor
       # cache-poisoning): the SBOM must reflect a clean dependency resolution.
       - name: Install cargo-cyclonedx
-        run: cargo install cargo-cyclonedx --locked
+        # Pin to the 0.5.x line for reproducible, drift-free SBOMs. This line
+        # emits CycloneDX up to spec 1.5; 1.6 is not yet implemented by
+        # cargo-cyclonedx (roadmap only), so requesting it fails the run.
+        run: cargo install cargo-cyclonedx --version "^0.5.9" --locked
       - name: Generate SBOM
         run: |
+          # --spec-version 1.5: the highest CycloneDX version cargo-cyclonedx
+          # 0.5.x supports (1.6 is unimplemented upstream). Bump when the tool
+          # gains 1.6 support.
           cargo cyclonedx \
             --format json \
-            --spec-version 1.6 \
+            --spec-version 1.5 \
             --all \
             --output-pattern bom
           # cargo-cyclonedx emits per-crate bom.json files; the workspace
@@ -61,5 +67,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" scr1b3-sbom.cdx.json \
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # The Release workflow runs in parallel and creates the release only
+          # after its multi-platform builds finish, which can be AFTER this job.
+          # Wait (up to ~10 min) for the release to exist before attaching, so
+          # the SBOM upload never races ahead of release creation.
+          for i in $(seq 1 60); do
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              break
+            fi
+            echo "release $tag not yet created (attempt $i/60) — waiting 10s..."
+            sleep 10
+          done
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::release $tag was not created within the timeout — cannot attach SBOM."
+            exit 1
+          fi
+          gh release upload "$tag" scr1b3-sbom.cdx.json \
             --repo "$GITHUB_REPOSITORY" --clobber
