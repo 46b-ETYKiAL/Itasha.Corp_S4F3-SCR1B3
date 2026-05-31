@@ -346,6 +346,14 @@ pub struct ScribeApp {
     goto_open: bool,
     goto_query: String,
     focus_goto: bool,
+    /// Go-to-symbol modal (Ctrl+Shift+O). `goto_symbol_open` is the
+    /// modal-open flag, `goto_symbol_query` is the typed filter text,
+    /// `focus_goto_symbol` is the one-shot focus request on open. The list
+    /// is sourced from `editor_features::symbol_scopes` for the active
+    /// buffer; selecting an entry jumps to its start line.
+    goto_symbol_open: bool,
+    goto_symbol_query: String,
+    focus_goto_symbol: bool,
     /// Open folder for the file-tree sidebar (None = sidebar hidden).
     file_tree_root: Option<PathBuf>,
     /// F-041: keyboard nav state for the sidebar. The struct rebuilds its
@@ -628,6 +636,9 @@ impl ScribeApp {
             goto_open: false,
             goto_query: String::new(),
             focus_goto: false,
+            goto_symbol_open: false,
+            goto_symbol_query: String::new(),
+            focus_goto_symbol: false,
             file_tree_root: None,
             file_tree_state: crate::filetree::FileTreeState::default(),
             plugin_manager: crate::plugin_manager::PluginManagerState::default(),
@@ -1326,6 +1337,11 @@ impl ScribeApp {
             BuiltinCommand::ToggleBookmark => self.toggle_bookmark(),
             BuiltinCommand::NextBookmark => self.navigate_bookmark(1),
             BuiltinCommand::PrevBookmark => self.navigate_bookmark(-1),
+            BuiltinCommand::GoToSymbol => {
+                self.goto_symbol_open = true;
+                self.focus_goto_symbol = true;
+                self.goto_symbol_query.clear();
+            }
         }
     }
 
@@ -2381,6 +2397,10 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
         action: "Jump to the previous bookmark",
     },
     ShortcutEntry {
+        chord: "Ctrl+Shift+O",
+        action: "Go to a symbol (definition) in the active buffer",
+    },
+    ShortcutEntry {
         chord: "Alt+Up",
         action: "Move cursor line up",
     },
@@ -2523,6 +2543,7 @@ pub(crate) enum BuiltinCommand {
     ToggleBookmark,
     NextBookmark,
     PrevBookmark,
+    GoToSymbol,
 }
 
 /// A clipboard / history action the palette requests; drained in `frame_tick`
@@ -2587,6 +2608,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Fold all regions",
         shortcut: "Ctrl+Shift+[",
         action: BuiltinCommand::FoldAll,
+    },
+    BuiltinEntry {
+        label: "Go to symbol…",
+        shortcut: "Ctrl+Shift+O",
+        action: BuiltinCommand::GoToSymbol,
     },
     BuiltinEntry {
         label: "Manage plugins",
@@ -3398,6 +3424,15 @@ impl ScribeApp {
                 self.focus_goto = true;
                 self.goto_query.clear();
             }
+            // Ctrl+Shift+O opens the go-to-symbol modal (jump to a definition
+            // in the active buffer).
+            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::O) {
+                if !self.goto_symbol_open {
+                    self.focus_goto_symbol = true;
+                }
+                self.goto_symbol_open = true;
+                self.goto_symbol_query.clear();
+            }
             // F-012 — Ctrl+R opens the recent-files modal.
             if cmd && i.key_pressed(egui::Key::R) {
                 self.recent_open = true;
@@ -3425,6 +3460,7 @@ impl ScribeApp {
                 self.palette_open = false;
                 self.cheatsheet_open = false;
                 self.goto_open = false;
+                self.goto_symbol_open = false;
                 self.recent_open = false;
                 self.welcome_open = false;
                 self.fuzzy_open = false;
@@ -3929,6 +3965,96 @@ impl ScribeApp {
             }
         }
 
+        // ---- Go-to-symbol modal (Ctrl+Shift+O) ----
+        //
+        // Lists the active buffer's definition scopes (from
+        // `editor_features::symbol_scopes`), filterable by a substring query.
+        // Selecting an entry jumps to its start line via the existing
+        // `goto_line` scroll pipe. Modelled on the recent-files modal.
+        if self.goto_symbol_open {
+            let active = self.active.min(self.tabs.len().saturating_sub(1));
+            // Bound the scan like the breadcrumb/sticky path does.
+            let symbols = if !self.tabs.is_empty() && self.tabs[active].text.len() <= 500_000 {
+                crate::editor_features::symbol_scopes(&self.tabs[active].text)
+            } else {
+                Vec::new()
+            };
+            let q = self.goto_symbol_query.trim().to_lowercase();
+            let mut chosen: Option<usize> = None;
+            let mut want_close = false;
+            let mut first_match: Option<usize> = None;
+            egui::Window::new(RichText::new("◇ go to symbol").color(accent).monospace())
+                .collapsible(false)
+                .resizable(true)
+                .default_width(520.0)
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
+                .show(ctx, |ui| {
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.goto_symbol_query)
+                            .hint_text("filter symbols")
+                            .desired_width(f32::INFINITY),
+                    );
+                    if self.focus_goto_symbol {
+                        r.request_focus();
+                        self.focus_goto_symbol = false;
+                    }
+                    // Enter jumps to the first match; Esc closes (handled in input).
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.separator();
+                    if symbols.is_empty() {
+                        ui.label(
+                            RichText::new("no symbols in this buffer")
+                                .color(muted)
+                                .small(),
+                        );
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .max_height(360.0)
+                            .show(ui, |ui| {
+                                for s in &symbols {
+                                    if !q.is_empty() && !s.label.to_lowercase().contains(&q) {
+                                        continue;
+                                    }
+                                    if first_match.is_none() {
+                                        first_match = Some(s.start_line);
+                                    }
+                                    // Indent by nesting depth; show the 1-based line.
+                                    let indent = "  ".repeat(s.depth);
+                                    let label = RichText::new(format!(
+                                        "{indent}{}  ·  {}",
+                                        s.label,
+                                        s.start_line + 1
+                                    ))
+                                    .monospace();
+                                    if ui.selectable_label(false, label).clicked() {
+                                        chosen = Some(s.start_line);
+                                    }
+                                }
+                            });
+                    }
+                    if enter {
+                        if let Some(line0) = first_match {
+                            chosen = Some(line0);
+                        } else {
+                            want_close = true;
+                        }
+                    }
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("Enter jumps to the first match · Esc closes")
+                            .color(muted)
+                            .small()
+                            .monospace(),
+                    );
+                });
+            if let Some(line0) = chosen {
+                self.goto_line(line0 + 1);
+                self.goto_symbol_open = false;
+            } else if want_close {
+                self.goto_symbol_open = false;
+            }
+        }
+
         // ---- Recent files modal (Ctrl+R) ----
         //
         // F-012 from docs/audits/overlooked-surfaces-2026-05-29.md. Pops
@@ -4326,6 +4452,7 @@ impl ScribeApp {
                 || self.find_open
                 || self.fuzzy_open
                 || self.goto_open
+                || self.goto_symbol_open
                 || self.recent_open
                 || self.cheatsheet_open
                 || self.settings_open
@@ -5894,6 +6021,36 @@ def";
         assert!(
             app.pending_scroll.is_some(),
             "navigate to an existing bookmark requests a scroll"
+        );
+    }
+
+    /// GoToSymbol builtin opens the modal + requests focus.
+    #[test]
+    fn execute_builtin_go_to_symbol_opens_modal() {
+        let mut app = ScribeApp::new_test(Config::default());
+        assert!(!app.goto_symbol_open);
+        app.execute_builtin(BuiltinCommand::GoToSymbol);
+        assert!(app.goto_symbol_open, "modal opened");
+        assert!(app.focus_goto_symbol, "focus requested");
+    }
+
+    /// Jumping to a symbol's start line (the modal's action) requests a
+    /// scroll via the shared goto_line pipe. Exercises the symbol_scopes →
+    /// goto_line path the modal wires together.
+    #[test]
+    fn go_to_symbol_jump_requests_scroll() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "fn a() {\n}\nfn b() {\n}\n".into();
+        let scopes = crate::editor_features::symbol_scopes(&app.tabs[0].text);
+        assert!(!scopes.is_empty(), "two fn definitions detected");
+        // Jump to the second symbol's start line (the modal calls
+        // goto_line(start_line + 1)).
+        let target = scopes.last().unwrap().start_line;
+        app.pending_scroll = None;
+        app.goto_line(target + 1);
+        assert!(
+            app.pending_scroll.is_some(),
+            "symbol jump requests a scroll"
         );
     }
 
