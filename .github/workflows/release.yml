@@ -93,6 +93,11 @@ jobs:
           cp "target/${{ matrix.target }}/release/$bin" "dist/" 2>/dev/null || true
           cd dist
           tar -czf "scr1b3-${{ matrix.target }}.tar.gz" "$bin" 2>/dev/null || true
+          # Drop the raw binary now that it's archived: it is NOT a release asset
+          # and, being named just `scr1b3`/`scr1b3.exe`, the linux + macOS copies
+          # would collide as same-named assets and fail the upload. Only the
+          # target-prefixed `scr1b3-<target>.{tar.gz,msi,sha256}` ship.
+          rm -f "$bin"
           # SHA-256 over every artifact (.tar.gz + .msi). Signature step runs
           # only when the MINISIGN_SECRET_KEY secret is present.
           if command -v sha256sum >/dev/null; then sha256sum scr1b3-* > "scr1b3-${{ matrix.target }}.sha256" 2>/dev/null || true; fi
@@ -123,11 +128,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           # Collect every built artifact (flattened from the per-target dirs).
           mapfile -t assets < <(find dist -type f)
-          gh release create "$tag" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$tag" \
-            --generate-notes \
-            "${assets[@]}"
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::No artifacts found under dist/ — refusing to publish an empty release."
+            exit 1
+          fi
+          # Idempotent: create the release if absent, else upload/clobber into it
+          # (so a re-run after a partial failure recovers instead of erroring).
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${assets[@]}"
+          else
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$tag" \
+              --generate-notes \
+              "${assets[@]}"
+          fi
