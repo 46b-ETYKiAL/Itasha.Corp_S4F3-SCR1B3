@@ -172,6 +172,11 @@ struct EditorTab {
     /// `config.editor.experimental_rope_editor` is on; `None` while the egui
     /// TextEdit path owns this tab.
     rope_state: Option<scribe_render::RopeEditorState>,
+    /// Per-tab line bookmarks (0-based line indices). Toggled with Ctrl+F2 on
+    /// the cursor line; F2 / Shift+F2 jump to the next / previous bookmark.
+    /// A dot marker is drawn in the line-number gutter for each bookmarked
+    /// line. Session-scoped (not persisted to disk).
+    bookmarks: std::collections::BTreeSet<usize>,
 }
 
 /// A recently-closed tab kept on the reopen stack (Ctrl+Shift+T), so an
@@ -193,6 +198,7 @@ impl EditorTab {
             disk_mtime: None,
             disk_text: String::new(),
             rope_state: None,
+            bookmarks: std::collections::BTreeSet::new(),
         }
     }
 
@@ -211,6 +217,7 @@ impl EditorTab {
             disk_mtime,
             disk_text: text,
             rope_state: None,
+            bookmarks: std::collections::BTreeSet::new(),
         })
     }
 
@@ -235,6 +242,7 @@ impl EditorTab {
                     disk_mtime,
                     disk_text,
                     rope_state: None,
+                    bookmarks: std::collections::BTreeSet::new(),
                 };
             }
         }
@@ -1315,6 +1323,9 @@ impl ScribeApp {
             BuiltinCommand::Paste => self.pending_editor_action = Some(EditorAction::Paste),
             BuiltinCommand::Undo => self.pending_editor_action = Some(EditorAction::Undo),
             BuiltinCommand::Redo => self.pending_editor_action = Some(EditorAction::Redo),
+            BuiltinCommand::ToggleBookmark => self.toggle_bookmark(),
+            BuiltinCommand::NextBookmark => self.navigate_bookmark(1),
+            BuiltinCommand::PrevBookmark => self.navigate_bookmark(-1),
         }
     }
 
@@ -2048,6 +2059,44 @@ impl ScribeApp {
         self.status = format!("go to line {line_1based}");
     }
 
+    /// 0-based cursor line of the active tab (from `last_cursor_line_col`,
+    /// which is 1-based; defaults to line 0 when no caret has been seen yet).
+    fn cursor_line0(&self) -> usize {
+        self.last_cursor_line_col
+            .map(|(l, _)| l.saturating_sub(1))
+            .unwrap_or(0)
+    }
+
+    /// Toggle a bookmark on the active tab's cursor line.
+    fn toggle_bookmark(&mut self) {
+        if self.active >= self.tabs.len() {
+            return;
+        }
+        let line0 = self.cursor_line0();
+        let bm = &mut self.tabs[self.active].bookmarks;
+        if bm.remove(&line0) {
+            self.status = format!("bookmark removed: line {}", line0 + 1);
+        } else {
+            bm.insert(line0);
+            self.status = format!("bookmark added: line {}", line0 + 1);
+        }
+    }
+
+    /// Jump to the next (`dir = 1`) or previous (`dir = -1`) bookmark on the
+    /// active tab, wrapping around the buffer. No-op (with a status hint) when
+    /// the tab has no bookmarks.
+    fn navigate_bookmark(&mut self, dir: i32) {
+        if self.active >= self.tabs.len() {
+            return;
+        }
+        let from = self.cursor_line0();
+        let target = pick_bookmark(&self.tabs[self.active].bookmarks, from, dir);
+        match target {
+            Some(line0) => self.goto_line(line0 + 1),
+            None => self.status = "no bookmarks in this buffer".to_string(),
+        }
+    }
+
     /// Open the identifier-completion popup for the prefix ending at `char_idx`
     /// in the active buffer. Sources suggestions from the buffer's own words
     /// (zero network / LSP dependency).
@@ -2247,6 +2296,11 @@ struct Pending {
     font_zoom: Option<i8>,
     /// Reopen the most recently closed tab (Ctrl+Shift+R).
     reopen_tab: bool,
+    /// Line bookmarks: Ctrl+F2 toggles a bookmark on the cursor line; F2 jumps
+    /// to the next bookmark; Shift+F2 jumps to the previous one.
+    toggle_bookmark: bool,
+    next_bookmark: bool,
+    prev_bookmark: bool,
 }
 
 // ---- Keyboard shortcut cheatsheet table (F-014) ----
@@ -2313,6 +2367,18 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
     ShortcutEntry {
         chord: "Ctrl+P",
         action: "Fuzzy-find a file in the project",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+F2",
+        action: "Toggle a bookmark on the cursor line",
+    },
+    ShortcutEntry {
+        chord: "F2",
+        action: "Jump to the next bookmark",
+    },
+    ShortcutEntry {
+        chord: "Shift+F2",
+        action: "Jump to the previous bookmark",
     },
     ShortcutEntry {
         chord: "Alt+Up",
@@ -2454,6 +2520,9 @@ pub(crate) enum BuiltinCommand {
     Paste,
     Undo,
     Redo,
+    ToggleBookmark,
+    NextBookmark,
+    PrevBookmark,
 }
 
 /// A clipboard / history action the palette requests; drained in `frame_tick`
@@ -2525,6 +2594,16 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         action: BuiltinCommand::OpenPluginManager,
     },
     BuiltinEntry {
+        label: "Navigate to next bookmark",
+        shortcut: "F2",
+        action: BuiltinCommand::NextBookmark,
+    },
+    BuiltinEntry {
+        label: "Navigate to previous bookmark",
+        shortcut: "Shift+F2",
+        action: BuiltinCommand::PrevBookmark,
+    },
+    BuiltinEntry {
         label: "New file",
         shortcut: "Ctrl+N",
         action: BuiltinCommand::NewFile,
@@ -2583,6 +2662,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Start language server for current file",
         shortcut: "",
         action: BuiltinCommand::StartLsp,
+    },
+    BuiltinEntry {
+        label: "Toggle bookmark on cursor line",
+        shortcut: "Ctrl+F2",
+        action: BuiltinCommand::ToggleBookmark,
     },
     BuiltinEntry {
         label: "Toggle line numbers",
@@ -2928,6 +3012,36 @@ pub(crate) fn parse_goto_query(s: &str) -> Option<(usize, Option<usize>)> {
         .ok()
         .filter(|&n| n > 0)
         .map(|n| (n, None))
+}
+
+/// Find the bookmark to jump to from `from` line (0-based) in direction
+/// `dir` (`1` = next/down, `-1` = previous/up). Bookmarks are an ordered set
+/// of 0-based line indices. The search wraps around the buffer, so "next"
+/// past the last bookmark returns the first, and "previous" before the
+/// first returns the last. Returns `None` when there are no bookmarks.
+fn pick_bookmark(
+    bookmarks: &std::collections::BTreeSet<usize>,
+    from: usize,
+    dir: i32,
+) -> Option<usize> {
+    if bookmarks.is_empty() {
+        return None;
+    }
+    if dir >= 0 {
+        // First bookmark strictly after `from`; wrap to the lowest otherwise.
+        bookmarks
+            .range((from + 1)..)
+            .next()
+            .copied()
+            .or_else(|| bookmarks.iter().next().copied())
+    } else {
+        // Last bookmark strictly before `from`; wrap to the highest otherwise.
+        bookmarks
+            .range(..from)
+            .next_back()
+            .copied()
+            .or_else(|| bookmarks.iter().next_back().copied())
+    }
 }
 
 /// Translate an egui [`egui::epaint::text::cursor::CCursor`] char index into
@@ -3287,6 +3401,18 @@ impl ScribeApp {
             // F-012 — Ctrl+R opens the recent-files modal.
             if cmd && i.key_pressed(egui::Key::R) {
                 self.recent_open = true;
+            }
+            // Line bookmarks: Ctrl+F2 toggles on the cursor line; F2 jumps to
+            // the next bookmark; Shift+F2 jumps to the previous one. Ctrl takes
+            // priority so Ctrl+F2 never doubles as a plain-F2 navigate.
+            if i.key_pressed(egui::Key::F2) {
+                if cmd {
+                    act.toggle_bookmark = true;
+                } else if i.modifiers.shift {
+                    act.prev_bookmark = true;
+                } else {
+                    act.next_bookmark = true;
+                }
             }
             // F-010 — Ctrl+P opens the fuzzy file finder (rebuilds the
             // file index on first open so cold-start cost lands here,
@@ -4277,6 +4403,7 @@ impl ScribeApp {
             let digits = total.to_string().len().max(2);
             let gutter_w = digits as f32 * (font.size * 0.62) + 16.0;
             let rows = &self.line_gutter;
+            let bookmarks = &self.tabs[active].bookmarks;
             egui::SidePanel::left("line-gutter")
                 .exact_width(gutter_w)
                 .resizable(false)
@@ -4285,10 +4412,20 @@ impl ScribeApp {
                     let painter = ui.painter();
                     let clip = ui.clip_rect();
                     let rx = ui.max_rect().right() - 8.0;
+                    let lx = ui.max_rect().left() + 4.0;
                     let nfont = FontId::monospace((font.size * 0.92).max(8.0));
                     for (i, &y) in rows.iter().enumerate() {
                         if y < clip.top() - gutter_row_h || y > clip.bottom() {
                             continue;
+                        }
+                        // Bookmark marker: a small filled dot at the gutter's
+                        // left edge for each bookmarked (0-based) line.
+                        if bookmarks.contains(&i) {
+                            painter.circle_filled(
+                                egui::pos2(lx, y + gutter_row_h * 0.5),
+                                3.0,
+                                accent,
+                            );
                         }
                         painter.text(
                             egui::pos2(rx, y),
@@ -4717,6 +4854,16 @@ impl ScribeApp {
         // Reopen the most recently closed tab.
         if act.reopen_tab {
             self.reopen_closed_tab();
+        }
+        // Line bookmarks (Ctrl+F2 toggle, F2 next, Shift+F2 prev).
+        if act.toggle_bookmark {
+            self.toggle_bookmark();
+        }
+        if act.next_bookmark {
+            self.navigate_bookmark(1);
+        }
+        if act.prev_bookmark {
+            self.navigate_bookmark(-1);
         }
         if act.toggle_minimap {
             self.config.editor.show_minimap = !self.config.editor.show_minimap;
@@ -5701,6 +5848,52 @@ def";
         assert_eq!(parse_goto_query(""), None);
         // Column clamps to 1.
         assert_eq!(parse_goto_query("42:0"), Some((42, Some(1))));
+    }
+
+    /// pick_bookmark walks the ordered set forward / backward and wraps.
+    #[test]
+    fn pick_bookmark_navigates_and_wraps() {
+        use std::collections::BTreeSet;
+        let bm: BTreeSet<usize> = [2usize, 5, 9].into_iter().collect();
+        // Forward: strictly-after, wrapping past the last.
+        assert_eq!(pick_bookmark(&bm, 0, 1), Some(2));
+        assert_eq!(pick_bookmark(&bm, 2, 1), Some(5));
+        assert_eq!(pick_bookmark(&bm, 5, 1), Some(9));
+        assert_eq!(pick_bookmark(&bm, 9, 1), Some(2), "wraps to first");
+        assert_eq!(pick_bookmark(&bm, 20, 1), Some(2), "past end wraps");
+        // Backward: strictly-before, wrapping past the first.
+        assert_eq!(pick_bookmark(&bm, 9, -1), Some(5));
+        assert_eq!(pick_bookmark(&bm, 5, -1), Some(2));
+        assert_eq!(pick_bookmark(&bm, 2, -1), Some(9), "wraps to last");
+        assert_eq!(pick_bookmark(&bm, 0, -1), Some(9), "before start wraps");
+        // Empty set yields nothing.
+        let empty: BTreeSet<usize> = BTreeSet::new();
+        assert_eq!(pick_bookmark(&empty, 0, 1), None);
+        assert_eq!(pick_bookmark(&empty, 0, -1), None);
+    }
+
+    /// toggle_bookmark flips the cursor line in the active tab's set, and
+    /// navigate_bookmark requests a scroll when a target exists.
+    #[test]
+    fn toggle_and_navigate_bookmark() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "a\nb\nc\nd\ne\n".into();
+        // Cursor on line 3 (1-based) → 0-based line 2.
+        app.last_cursor_line_col = Some((3, 1));
+        app.toggle_bookmark();
+        assert!(app.tabs[0].bookmarks.contains(&2), "bookmark added");
+        // Toggling again removes it.
+        app.toggle_bookmark();
+        assert!(!app.tabs[0].bookmarks.contains(&2), "bookmark removed");
+        // Re-add and navigate.
+        app.tabs[0].bookmarks.insert(4);
+        app.pending_scroll = None;
+        app.last_cursor_line_col = Some((1, 1)); // 0-based line 0
+        app.navigate_bookmark(1);
+        assert!(
+            app.pending_scroll.is_some(),
+            "navigate to an existing bookmark requests a scroll"
+        );
     }
 
     /// F-015 method: goto_line sets pending_scroll non-None for a valid
