@@ -10,8 +10,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Least-privilege default. Only the `release` job (which creates the GitHub
+# Release) is granted `contents: write`; the build matrix is read-only.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +21,8 @@ env:
 jobs:
   build:
     name: build ${{ matrix.target }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +46,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libssl-dev
-      - uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
+      # No dependency cache in the release build: a poisoned cache could taint
+      # published, signed artifacts (zizmor cache-poisoning). Release builds are
+      # clean + reproducible by design.
       - name: Build release
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Generate third-party license inventory (cargo-about)
@@ -101,12 +107,25 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
+    # Only this job writes to the repo (creates the Release + uploads assets).
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
-        with:
-          files: dist/**/*
-          generate_release_notes: true
+        # `gh release` ships on every GitHub-hosted runner, so no third-party
+        # action is needed (zizmor superfluous-actions). The default GITHUB_TOKEN
+        # (job-scoped `contents: write`) authorises the release create + upload.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # Collect every built artifact (flattened from the per-target dirs).
+          mapfile -t assets < <(find dist -type f)
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$tag" \
+            --generate-notes \
+            "${assets[@]}"

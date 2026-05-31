@@ -17,21 +17,25 @@ on:
       - "v*.*.*"
   workflow_dispatch:
 
+# Least-privilege default; the SBOM job is granted write only to attach the
+# artifact to the release.
 permissions:
-  contents: write   # attach the SBOM to the release
+  contents: read
 
 jobs:
   cyclonedx:
     name: cargo-cyclonedx
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # attach the SBOM to the release
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@aa7c1c80a07a27a84c0aa76d0cef0aad3830e330 # v2.7.8
+      # No dependency cache in this release-context workflow (zizmor
+      # cache-poisoning): the SBOM must reflect a clean dependency resolution.
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked
       - name: Generate SBOM
@@ -52,7 +56,10 @@ jobs:
           if-no-files-found: error
       - name: Attach SBOM to the GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
-        with:
-          files: scr1b3-sbom.cdx.json
-          fail_on_unmatched_files: true
+        # `gh release upload` ships on the runner — no third-party action needed
+        # (zizmor superfluous-actions). `--clobber` keeps re-runs idempotent.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" scr1b3-sbom.cdx.json \
+            --repo "$GITHUB_REPOSITORY" --clobber

@@ -10,6 +10,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege default for every job: read-only repo access. None of the CI
+# jobs (build/test, cargo-deny, content-safety, manifest audit) write to the
+# repo, so the GITHUB_TOKEN never needs more than `contents: read`.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
