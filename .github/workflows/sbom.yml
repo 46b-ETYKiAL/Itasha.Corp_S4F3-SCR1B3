@@ -46,14 +46,18 @@ jobs:
           # --spec-version 1.5: the highest CycloneDX version cargo-cyclonedx
           # 0.5.x supports (1.6 is unimplemented upstream). Bump when the tool
           # gains 1.6 support.
+          # cargo-cyclonedx 0.5.x has no --output-pattern; it writes one BOM next
+          # to each member's Cargo.toml (named by --override-filename). The
+          # scribe-app crate's BOM is the binary's full SBOM — it pulls in
+          # scribe-core + scribe-render + every transitive dependency (283
+          # components), so that is the SBOM we publish.
           cargo cyclonedx \
             --format json \
             --spec-version 1.5 \
             --all \
-            --output-pattern bom
-          # cargo-cyclonedx emits per-crate bom.json files; the workspace
-          # root one is the unified BOM. Copy + name it for the release.
-          cp bom.json scr1b3-sbom.cdx.json
+            --override-filename scr1b3-sbom
+          test -f crates/scribe-app/scr1b3-sbom.json
+          cp crates/scribe-app/scr1b3-sbom.json scr1b3-sbom.cdx.json
       - name: Upload SBOM as workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
