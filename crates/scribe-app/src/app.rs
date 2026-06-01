@@ -36,6 +36,17 @@ fn tint_rgba(hex: &str, alpha: u8) -> Option<(u8, u8, u8, u8)> {
     Rgba::parse_hex(hex).map(|c| (c.r, c.g, c.b, alpha))
 }
 
+/// The label shown on a tab: pinned tabs get a leading pin glyph so the pinned
+/// state is visible at a glance (not just in the right-click menu). Pure +
+/// unit-tested so the affordance can't silently drop.
+fn tab_display_label(title: &str, pinned: bool) -> String {
+    if pinned {
+        format!("{} {title}", egui_phosphor::thin::PUSH_PIN)
+    } else {
+        title.to_string()
+    }
+}
+
 /// Pure index remap for a drag-reorder that moves the element at `src` so it
 /// takes original position `target`'s slot — the drop-on-tab, swap-style UX
 /// (drop tab A onto tab B and A lands where B was, the rest shift to fill).
@@ -1873,12 +1884,15 @@ impl ScribeApp {
         let mut drag_src: Option<usize> = None;
         let mut drop_pos: Option<egui::Pos2> = None;
         let mut rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(self.tabs.len());
+        let mut add_tab = false;
 
         for i in 0..self.tabs.len() {
             let selected = i == active;
-            let label =
-                RichText::new(self.tabs[i].title()).color(if selected { accent } else { muted });
             let pinned = self.tabs[i].pinned;
+            // Pinned tabs carry a visible pin glyph so the state is obvious
+            // without opening the right-click menu.
+            let shown = tab_display_label(&self.tabs[i].title(), pinned);
+            let label = RichText::new(shown).color(if selected { accent } else { muted });
 
             let resp = ui
                 .add(egui::SelectableLabel::new(selected, label))
@@ -1931,6 +1945,15 @@ impl ScribeApp {
             }
         }
 
+        // "+" — add a new tab at the end of the strip (same as Ctrl+N).
+        if ui
+            .small_button("+")
+            .on_hover_text("New tab (Ctrl+N)")
+            .clicked()
+        {
+            add_tab = true;
+        }
+
         // Drag-reorder: the dragged tab was released over another tab's rect.
         if let (Some(src), Some(pos)) = (drag_src, drop_pos) {
             for (j, rect) in &rects {
@@ -1963,6 +1986,9 @@ impl ScribeApp {
         }
         if let Some((src, target)) = reorder {
             self.move_tab(src, target);
+        }
+        if add_tab {
+            self.new_tab();
         }
     }
 
@@ -6118,6 +6144,31 @@ mod e2e {
             before,
             "clicking the Line numbers checkbox must flip the setting"
         );
+    }
+
+    #[test]
+    fn plus_button_adds_a_tab() {
+        let mut h = ui_harness(fresh_app());
+        h.run();
+        let before = h.state().tabs.len();
+        h.get_by_label("+").click();
+        h.run();
+        assert_eq!(
+            h.state().tabs.len(),
+            before + 1,
+            "the + button must add a new tab"
+        );
+    }
+
+    #[test]
+    fn pinned_tab_label_carries_pin_glyph() {
+        let pin = egui_phosphor::thin::PUSH_PIN;
+        let pinned = super::tab_display_label("notes.txt", true);
+        assert!(
+            pinned.starts_with(pin),
+            "pinned tab label must lead with the pin glyph, got {pinned:?}"
+        );
+        assert_eq!(super::tab_display_label("notes.txt", false), "notes.txt");
     }
 
     #[test]
