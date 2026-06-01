@@ -600,6 +600,12 @@ impl ScribeApp {
             monospace.insert(0, "JetBrainsMono".to_owned());
         }
         cc.egui_ctx.set_fonts(fonts);
+        // Follow the OS theme preference so `ctx.theme()` reflects the live OS
+        // light/dark setting (egui-winit updates it on OS theme-change events).
+        // The app's own brand visuals are applied on top via `set_visuals`; this
+        // only makes the OS theme *readable* for `appearance.follow_os_theme`.
+        cc.egui_ctx
+            .options_mut(|o| o.theme_preference = egui::ThemePreference::System);
         cc.egui_ctx.set_visuals(app.current_visuals());
         app.visuals_applied = true;
         // Apply the OS glass/acrylic/mica/vibrancy effect — only when the master
@@ -1029,11 +1035,11 @@ impl ScribeApp {
     /// theme (`ghost-paper`); a dark OS → the user's chosen theme if it is
     /// itself dark, otherwise the default dark theme (`wired-noir`). When the
     /// toggle is off, or the OS theme is unknown, the user's chosen theme wins.
-    fn effective_theme_name(&self, os_theme: Option<egui::Theme>) -> String {
+    fn effective_theme_name(&self, os_theme: egui::Theme) -> String {
         if self.config.appearance.follow_os_theme {
             match os_theme {
-                Some(egui::Theme::Light) => return "ghost-paper".to_string(),
-                Some(egui::Theme::Dark) => {
+                egui::Theme::Light => return "ghost-paper".to_string(),
+                egui::Theme::Dark => {
                     let chosen = load_theme(&self.config.appearance.theme);
                     return if matches!(chosen.appearance, scribe_core::theme::Appearance::Dark) {
                         self.config.appearance.theme.clone()
@@ -1041,18 +1047,18 @@ impl ScribeApp {
                         "wired-noir".to_string()
                     };
                 }
-                None => {}
             }
         }
         self.config.appearance.theme.clone()
     }
 
     /// Apply the current theme to the egui context (after a theme/config change).
-    /// Reads the OS theme from `ctx` so a manual theme change while
-    /// `follow_os_theme` is on still resolves through [`Self::effective_theme_name`].
+    /// Reads the OS theme via `ctx.theme()` — egui-winit tracks the OS theme when
+    /// the theme preference is `System` (set in `new`). `raw.system_theme` is
+    /// unreliable/None on Windows, which is why "Follow OS theme" did nothing.
     fn reapply_theme(&mut self, ctx: &egui::Context) {
-        let os_theme = ctx.input(|i| i.raw.system_theme);
-        self.last_os_theme = os_theme;
+        let os_theme = ctx.theme();
+        self.last_os_theme = Some(os_theme);
         self.theme = load_theme(&self.effective_theme_name(os_theme));
         ctx.set_visuals(self.current_visuals());
         // `set_visuals` resets the caret style, so re-apply motion after it.
@@ -3490,8 +3496,8 @@ impl ScribeApp {
         // re-resolve + apply the theme whenever the OS flips light/dark. Cheap
         // — one input read; only re-applies on an actual change.
         {
-            let os_theme = ctx.input(|i| i.raw.system_theme);
-            if self.config.appearance.follow_os_theme && os_theme != self.last_os_theme {
+            let os_theme = ctx.theme();
+            if self.config.appearance.follow_os_theme && Some(os_theme) != self.last_os_theme {
                 self.reapply_theme(ctx);
             }
         }
@@ -5109,17 +5115,16 @@ impl ScribeApp {
         // corners that send `ViewportCommand::BeginResize(dir)` on drag and
         // hint the right cursor on hover.
         //
-        // CRITICAL: these zones are `Order::Foreground`, i.e. ABOVE egui windows
-        // (Middle). When a modal/overlay window is open (settings, find,
-        // palette) its title bar — including the ✕ close button — can fall under
-        // an edge/corner zone, which then swallows the click. That was the
-        // "settings ✕ doesn't close (only in frameless mode)" bug. You can't
-        // edge-resize the OS window while a modal is up anyway, so skip the
-        // overlay whenever one is open.
-        if self.config.appearance.frameless && !overlay_open {
+        // No persistent Foreground Areas (those swallowed tab/settings clicks
+        // window-wide and could leave resize stuck after the first drag). This
+        // is a pure per-frame check: hint the resize cursor at an edge and start
+        // an OS resize on a press there — only when egui isn't already using the
+        // pointer for a widget. Works repeatedly by construction.
+        let _ = overlay_open;
+        if self.config.appearance.frameless {
             let maximized = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
             if !maximized {
-                draw_resize_overlays(ctx);
+                handle_frameless_resize(ctx);
             }
         }
 
@@ -5478,106 +5483,150 @@ const RESIZE_EDGE_PX: f32 = 6.0;
 /// the edges so diagonal grabs are forgiving.
 const RESIZE_CORNER_PX: f32 = 12.0;
 
-/// Phase 18 T18.1 — paint the 8 invisible resize-handle interact zones around
-/// the frameless window. Pure side-effect on the egui context: on hover the
-/// pointer cursor flips to the matching direction; on drag-start a
-/// `ViewportCommand::BeginResize(dir)` is queued and winit drives the actual
-/// resize from there. Called once per frame from `frame_tick`.
-fn draw_resize_overlays(ctx: &egui::Context) {
-    use egui::{
-        Area, CursorIcon, Id, Order, PointerButton, Rect, ResizeDirection, Sense, ViewportCommand,
+/// Which window-edge resize direction (if any) the pointer `p` is over, given
+/// the window `rect` and the edge/corner band widths. Corners (within `corner`
+/// of two sides) take priority over straight edges; the interior returns `None`.
+/// Pure + unit-tested so the frameless-resize hit-testing can't silently regress.
+fn resize_dir_at(
+    p: egui::Pos2,
+    rect: egui::Rect,
+    edge: f32,
+    corner: f32,
+) -> Option<egui::ResizeDirection> {
+    use egui::ResizeDirection as D;
+    let (l, r, t, b) = (
+        p.x - rect.left(),
+        rect.right() - p.x,
+        p.y - rect.top(),
+        rect.bottom() - p.y,
+    );
+    // Outside the window → not a resize zone.
+    if l < 0.0 || r < 0.0 || t < 0.0 || b < 0.0 {
+        return None;
+    }
+    let (w, e, n, s) = (l <= edge, r <= edge, t <= edge, b <= edge);
+    let (nw, ne, nn, ns) = (l <= corner, r <= corner, t <= corner, b <= corner);
+    if (n && nw) || (w && nn) {
+        Some(D::NorthWest)
+    } else if (n && ne) || (e && nn) {
+        Some(D::NorthEast)
+    } else if (s && nw) || (w && ns) {
+        Some(D::SouthWest)
+    } else if (s && ne) || (e && ns) {
+        Some(D::SouthEast)
+    } else if n {
+        Some(D::North)
+    } else if s {
+        Some(D::South)
+    } else if w {
+        Some(D::West)
+    } else if e {
+        Some(D::East)
+    } else {
+        None
+    }
+}
+
+/// Frameless window edge-resize, the no-Area way. Each frame: if the pointer is
+/// over an edge band, hint the matching resize cursor; on a primary press there
+/// — and only when egui isn't already using the pointer for a widget — start an
+/// OS resize via `ViewportCommand::BeginResize`. No persistent `Order::Foreground`
+/// Areas, so it never swallows clicks meant for tabs / the settings ✕ / panels,
+/// and it works on every resize, not just the first.
+fn handle_frameless_resize(ctx: &egui::Context) {
+    use egui::{CursorIcon as C, ResizeDirection as D, ViewportCommand};
+    let Some(p) = ctx.pointer_latest_pos() else {
+        return;
     };
-    let rect = ctx.content_rect();
-    let e = RESIZE_EDGE_PX;
-    let c = RESIZE_CORNER_PX;
-    // (id, rect, cursor, direction)
-    let zones: [(&'static str, Rect, CursorIcon, ResizeDirection); 8] = [
-        (
-            "rz-n",
-            Rect::from_min_max(
-                rect.left_top() + egui::vec2(c, 0.0),
-                rect.right_top() + egui::vec2(-c, e),
-            ),
-            CursorIcon::ResizeNorth,
-            ResizeDirection::North,
-        ),
-        (
-            "rz-s",
-            Rect::from_min_max(
-                rect.left_bottom() + egui::vec2(c, -e),
-                rect.right_bottom() + egui::vec2(-c, 0.0),
-            ),
-            CursorIcon::ResizeSouth,
-            ResizeDirection::South,
-        ),
-        (
-            "rz-w",
-            Rect::from_min_max(
-                rect.left_top() + egui::vec2(0.0, c),
-                rect.left_bottom() + egui::vec2(e, -c),
-            ),
-            CursorIcon::ResizeWest,
-            ResizeDirection::West,
-        ),
-        (
-            "rz-e",
-            Rect::from_min_max(
-                rect.right_top() + egui::vec2(-e, c),
-                rect.right_bottom() + egui::vec2(0.0, -c),
-            ),
-            CursorIcon::ResizeEast,
-            ResizeDirection::East,
-        ),
-        (
-            "rz-nw",
-            Rect::from_min_size(rect.left_top(), egui::vec2(c, c)),
-            CursorIcon::ResizeNorthWest,
-            ResizeDirection::NorthWest,
-        ),
-        (
-            "rz-ne",
-            Rect::from_min_size(rect.right_top() - egui::vec2(c, 0.0), egui::vec2(c, c)),
-            CursorIcon::ResizeNorthEast,
-            ResizeDirection::NorthEast,
-        ),
-        (
-            "rz-sw",
-            Rect::from_min_size(rect.left_bottom() - egui::vec2(0.0, c), egui::vec2(c, c)),
-            CursorIcon::ResizeSouthWest,
-            ResizeDirection::SouthWest,
-        ),
-        (
-            "rz-se",
-            Rect::from_min_size(rect.right_bottom() - egui::vec2(c, c), egui::vec2(c, c)),
-            CursorIcon::ResizeSouthEast,
-            ResizeDirection::SouthEast,
-        ),
-    ];
-    // Only materialize a resize handle when the pointer is actually within that
-    // edge band. These are `Order::Foreground` (above panels + windows), and an
-    // interactable foreground Area swallows the pointer for the whole frame even
-    // when its rect is a thin edge strip — which is why clicking a tab or the
-    // settings ✕ did nothing in frameless mode. Gating on pointer-in-zone means
-    // the handles exist ONLY at the edges the user is actually touching, never
-    // over interior content/chrome.
-    let pointer = ctx.pointer_latest_pos();
-    for (id, zone, cursor, dir) in zones {
-        if !pointer.is_some_and(|p| zone.contains(p)) {
-            continue;
-        }
-        Area::new(Id::new(id))
-            .order(Order::Foreground)
-            .fixed_pos(zone.min)
-            .interactable(true)
-            .show(ctx, |ui| {
-                let resp = ui.allocate_rect(zone, Sense::click_and_drag());
-                if resp.hovered() {
-                    ctx.set_cursor_icon(cursor);
-                }
-                if resp.drag_started_by(PointerButton::Primary) {
-                    ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
-                }
-            });
+    let Some(dir) = resize_dir_at(p, ctx.content_rect(), RESIZE_EDGE_PX, RESIZE_CORNER_PX) else {
+        return;
+    };
+    ctx.set_cursor_icon(match dir {
+        D::North => C::ResizeNorth,
+        D::South => C::ResizeSouth,
+        D::West => C::ResizeWest,
+        D::East => C::ResizeEast,
+        D::NorthWest => C::ResizeNorthWest,
+        D::NorthEast => C::ResizeNorthEast,
+        D::SouthWest => C::ResizeSouthWest,
+        D::SouthEast => C::ResizeSouthEast,
+    });
+    // Start the OS resize only if egui isn't consuming the press for a widget
+    // (so a button/tab sitting at the very edge still gets its click).
+    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.wants_pointer_input() {
+        ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    //! Regression guard for the frameless resize hit-testing. The interior MUST
+    //! NOT be a resize zone (that's what made the resize overlay eat tab /
+    //! settings-✕ clicks); edges/corners must map to the right direction. Pure,
+    //! so it runs every CI build and pins the geometry across window sizes.
+    use super::resize_dir_at;
+    use egui::{pos2, Rect, ResizeDirection as D};
+
+    fn win() -> Rect {
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 700.0))
+    }
+
+    #[test]
+    fn interior_is_never_a_resize_zone() {
+        assert_eq!(resize_dir_at(pos2(500.0, 350.0), win(), 6.0, 12.0), None);
+        // The exact tab position the old Foreground overlay was eating.
+        assert_eq!(resize_dir_at(pos2(574.0, 48.0), win(), 6.0, 12.0), None);
+    }
+
+    #[test]
+    fn edges_map_to_their_direction() {
+        assert_eq!(
+            resize_dir_at(pos2(500.0, 1.0), win(), 6.0, 12.0),
+            Some(D::North)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(500.0, 699.0), win(), 6.0, 12.0),
+            Some(D::South)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(1.0, 350.0), win(), 6.0, 12.0),
+            Some(D::West)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(999.0, 350.0), win(), 6.0, 12.0),
+            Some(D::East)
+        );
+    }
+
+    #[test]
+    fn corners_take_priority_over_edges() {
+        assert_eq!(
+            resize_dir_at(pos2(2.0, 2.0), win(), 6.0, 12.0),
+            Some(D::NorthWest)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(998.0, 2.0), win(), 6.0, 12.0),
+            Some(D::NorthEast)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(2.0, 698.0), win(), 6.0, 12.0),
+            Some(D::SouthWest)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(998.0, 698.0), win(), 6.0, 12.0),
+            Some(D::SouthEast)
+        );
+        // On the top edge but within the corner band of the left side → NW.
+        assert_eq!(
+            resize_dir_at(pos2(8.0, 1.0), win(), 6.0, 12.0),
+            Some(D::NorthWest)
+        );
+    }
+
+    #[test]
+    fn outside_the_window_is_none() {
+        assert_eq!(resize_dir_at(pos2(-5.0, 350.0), win(), 6.0, 12.0), None);
+        assert_eq!(resize_dir_at(pos2(500.0, 800.0), win(), 6.0, 12.0), None);
     }
 }
 
@@ -6068,6 +6117,34 @@ mod e2e {
             h.state().config.editor.show_line_numbers,
             before,
             "clicking the Line numbers checkbox must flip the setting"
+        );
+    }
+
+    #[test]
+    fn follow_os_theme_switches_with_os() {
+        use scribe_core::theme::Appearance;
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.appearance.follow_os_theme = true;
+        cfg.appearance.theme = "wired-noir".to_string(); // a dark brand theme
+        let mut h = ui_harness(ScribeApp::new_test(cfg));
+        // OS reports LIGHT → the app must switch to a light theme.
+        h.ctx.set_theme(egui::Theme::Light);
+        h.run();
+        h.run();
+        assert!(
+            matches!(h.state().theme.appearance, Appearance::Light),
+            "light OS theme must switch the app to a light theme, got {:?}",
+            h.state().theme.appearance
+        );
+        // OS flips to DARK → the app must switch back to a dark theme.
+        h.ctx.set_theme(egui::Theme::Dark);
+        h.run();
+        h.run();
+        assert!(
+            matches!(h.state().theme.appearance, Appearance::Dark),
+            "dark OS theme must switch the app to a dark theme, got {:?}",
+            h.state().theme.appearance
         );
     }
 
