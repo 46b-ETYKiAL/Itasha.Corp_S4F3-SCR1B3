@@ -1914,6 +1914,10 @@ impl ScribeApp {
         let mut drop_pos: Option<egui::Pos2> = None;
         let mut rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(self.tabs.len());
         let mut add_tab = false;
+        // #59 live drag feedback: the in-flight (index, label, current pointer)
+        // while a tab is being dragged, so we can paint a ghost following the
+        // cursor and an insertion indicator at the drop gap.
+        let mut dragging: Option<(usize, String, egui::Pos2)> = None;
 
         for i in 0..self.tabs.len() {
             let selected = i == active;
@@ -1921,7 +1925,7 @@ impl ScribeApp {
             // Pinned tabs carry a visible pin glyph so the state is obvious
             // without opening the right-click menu.
             let shown = tab_display_label(&self.tabs[i].title(), pinned);
-            let label = RichText::new(shown).color(if selected { accent } else { muted });
+            let label = RichText::new(shown.clone()).color(if selected { accent } else { muted });
 
             let resp = ui
                 .add(egui::SelectableLabel::new(selected, label))
@@ -1960,6 +1964,9 @@ impl ScribeApp {
             if resp.dragged() {
                 ui.painter()
                     .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
+                if let Some(p) = resp.interact_pointer_pos() {
+                    dragging = Some((i, shown.clone(), p));
+                }
             }
             if resp.drag_stopped() {
                 if let Some(pos) = resp.interact_pointer_pos() {
@@ -1981,6 +1988,70 @@ impl ScribeApp {
             .clicked()
         {
             add_tab = true;
+        }
+
+        // #59 live drag feedback — paint while a tab is in flight:
+        //  * an insertion indicator (accent line) at the gap the drop will land
+        //  * a ghost of the dragged label following the cursor
+        // Both are painted on the foreground (paint-only, never interactable —
+        // a `layer_painter`, not an `Area`, so it cannot swallow clicks).
+        if let Some((src, ref label, pointer)) = dragging {
+            // Infer strip orientation from the first two tab rects: when tabs
+            // advance mostly in X the strip is horizontal (top/bottom); mostly
+            // in Y means a vertical side strip.
+            let horizontal = rects.len() < 2
+                || (rects[1].1.center().x - rects[0].1.center().x).abs()
+                    >= (rects[1].1.center().y - rects[0].1.center().y).abs();
+
+            // Insertion gap: the boundary nearest the pointer along the main
+            // axis. We draw the line on the leading edge of the first tab whose
+            // center is past the pointer (or the trailing edge of the last).
+            let painter = ui.painter();
+            let accent_line = egui::Stroke::new(2.0, accent);
+            if let Some((_, last_rect)) = rects.last().copied().map(|r| (r.0, r.1)) {
+                let mut drawn = false;
+                for (_, rect) in &rects {
+                    let past = if horizontal {
+                        pointer.x < rect.center().x
+                    } else {
+                        pointer.y < rect.center().y
+                    };
+                    if past {
+                        if horizontal {
+                            painter.vline(rect.left(), rect.y_range(), accent_line);
+                        } else {
+                            painter.hline(rect.x_range(), rect.top(), accent_line);
+                        }
+                        drawn = true;
+                        break;
+                    }
+                }
+                if !drawn {
+                    // Pointer is beyond the last tab — indicate append-at-end.
+                    if horizontal {
+                        painter.vline(last_rect.right(), last_rect.y_range(), accent_line);
+                    } else {
+                        painter.hline(last_rect.x_range(), last_rect.bottom(), accent_line);
+                    }
+                }
+            }
+
+            // Ghost label trailing the cursor (slightly offset so it doesn't sit
+            // under the pointer). Drawn on the Tooltip layer so it floats above
+            // the strip without taking input.
+            let ghost = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::new("tab-drag-ghost"),
+            ));
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let ghost_pos = pointer + egui::vec2(12.0, 6.0);
+            let galley = ghost.layout_no_wrap(label.clone(), font, accent);
+            // Soft backing chip for legibility against any background.
+            let bg =
+                egui::Rect::from_min_size(ghost_pos, galley.size()).expand2(egui::vec2(6.0, 3.0));
+            ghost.rect_filled(bg, 4.0, muted.linear_multiply(0.25));
+            ghost.galley(ghost_pos, galley, accent);
+            let _ = src;
         }
 
         // Drag-reorder: the dragged tab was released over another tab's rect.
