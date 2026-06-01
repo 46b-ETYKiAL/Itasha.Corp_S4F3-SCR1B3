@@ -3383,7 +3383,7 @@ fn load_theme(name: &str) -> Theme {
             }
         }
     }
-    Theme::builtin(name).unwrap_or_else(Theme::wired_noir)
+    Theme::builtin(name).unwrap_or_else(Theme::itasha_corp)
 }
 
 /// Spawn a filesystem watcher on the config directory; sends `()` on `tx` when

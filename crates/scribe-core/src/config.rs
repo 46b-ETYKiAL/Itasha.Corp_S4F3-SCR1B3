@@ -324,7 +324,7 @@ pub struct AppearanceConfig {
 impl Default for AppearanceConfig {
     fn default() -> Self {
         Self {
-            theme: "wired-noir".to_string(),
+            theme: "itasha-corp".to_string(),
             follow_os_theme: true,
             frameless: true,
             toolbar_icons: false,
@@ -561,7 +561,7 @@ mod tests {
         assert_eq!(c.editor.tab_width, 2);
         // unspecified fields keep defaults
         assert!(c.editor.show_line_numbers);
-        assert_eq!(c.appearance.theme, "wired-noir");
+        assert_eq!(c.appearance.theme, "itasha-corp");
     }
 
     #[test]
