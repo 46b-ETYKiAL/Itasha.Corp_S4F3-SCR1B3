@@ -15,10 +15,11 @@
 //! `HighlightConfiguration` in `new()`, and route the extension in
 //! `highlight_document`. See ADR-0001.
 
+use crate::spell::{ClassifiedSpan, SpanClass};
 use std::ops::Range;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SynStyle, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use syntect::util::LinesWithEndings;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter as TsHighlighter};
 
@@ -92,6 +93,43 @@ fn color_for(name: &str) -> [u8; 3] {
         [0xf2, 0x77, 0x7a] // red
     } else {
         DEFAULT_FG
+    }
+}
+
+/// Map a highlighter scope/capture name to the spellcheck [`SpanClass`].
+///
+/// The rule is substring-based so it works for both the dotted tree-sitter
+/// capture names (`"comment"`, `"string"`, `"string.escape"`) and the
+/// space-separated syntect scope stacks (`"source.rust comment.line.double-slash.rust"`):
+///
+/// * contains `"comment"` → [`SpanClass::Comment`]
+/// * else contains `"string"` or `"char"` → [`SpanClass::String`]
+/// * else a name carrying identifier-ish semantics (`variable`, `function`,
+///   `type`, `constant`, `property`, `entity.name`, `support`) →
+///   [`SpanClass::Identifier`]
+/// * everything else (keywords, operators, punctuation, whitespace) →
+///   [`SpanClass::Other`]
+///
+/// Comment is checked first so a doc-comment scope that also mentions a
+/// keyword classifies as a comment.
+pub fn classify_scope_name(name: &str) -> SpanClass {
+    if name.contains("comment") {
+        SpanClass::Comment
+    } else if name.contains("string") || name.contains("char") {
+        SpanClass::String
+    } else if name.contains("variable")
+        || name.contains("function")
+        || name.contains("constructor")
+        || name.contains("type")
+        || name.contains("constant")
+        || name.contains("property")
+        || name.contains("entity.name")
+        || name.contains("support")
+        || name.contains("identifier")
+    {
+        SpanClass::Identifier
+    } else {
+        SpanClass::Other
     }
 }
 
@@ -208,6 +246,126 @@ impl Highlighter {
         }
         out
     }
+
+    /// Classify the whole document into absolute byte spans tagged with a
+    /// [`SpanClass`] (comment / string / identifier / other) for spellcheck
+    /// scoping ([`crate::spell::check_text_scoped`]).
+    ///
+    /// Routes to the same backend as [`highlight_document`](Self::highlight_document)
+    /// — tree-sitter for native-grammar languages (Rust today), else syntect —
+    /// so the classification matches what the user sees highlighted. Returns an
+    /// empty `Vec` when no syntax info can be derived; the scoped checker treats
+    /// that as "no scoping" and falls back to whole-text checking, so an empty
+    /// result never silently disables spellcheck.
+    pub fn classify_document(&self, text: &str, ext: Option<&str>) -> Vec<ClassifiedSpan> {
+        if matches!(ext, Some("rs")) {
+            if let Some(spans) = self.classify_tree_sitter(text) {
+                return spans;
+            }
+        }
+        self.classify_syntect(text, ext)
+    }
+
+    /// tree-sitter classification pass → absolute classified spans. `None` if
+    /// the grammar is unavailable or the pass errors (caller falls back to
+    /// syntect). Mirrors [`highlight_tree_sitter`](Self::highlight_tree_sitter)
+    /// but maps each capture's `HL_NAMES` entry to a [`SpanClass`].
+    fn classify_tree_sitter(&self, text: &str) -> Option<Vec<ClassifiedSpan>> {
+        let cfg = self.ts_rust.as_ref()?;
+        let mut ts = TsHighlighter::new();
+        let src = text.as_bytes();
+        let events = ts.highlight(cfg, src, None, |_| None).ok()?;
+
+        let mut out: Vec<ClassifiedSpan> = Vec::new();
+        let mut stack: Vec<usize> = Vec::new();
+        for ev in events {
+            match ev.ok()? {
+                HighlightEvent::HighlightStart(h) => stack.push(h.0),
+                HighlightEvent::HighlightEnd => {
+                    stack.pop();
+                }
+                HighlightEvent::Source { start, end } => {
+                    if end > start {
+                        let class = stack
+                            .last()
+                            .and_then(|&i| HL_NAMES.get(i))
+                            .map(|name| classify_scope_name(name))
+                            .unwrap_or(SpanClass::Other);
+                        push_classified(&mut out, start, end, class);
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// syntect classification pass → absolute classified spans. Uses the
+    /// `ParseState`/`ScopeStack` parsing API (NOT the color-only
+    /// `HighlightLines`) so real scope names are available to
+    /// [`classify_scope_name`]. The top-of-stack scope wins, matching the
+    /// "most specific highlight" rule the tree-sitter path uses.
+    fn classify_syntect(&self, text: &str, ext: Option<&str>) -> Vec<ClassifiedSpan> {
+        let syntax = self.syntax_for(ext);
+        let mut state = ParseState::new(syntax);
+        let mut stack = ScopeStack::new();
+        let mut out: Vec<ClassifiedSpan> = Vec::new();
+        let mut line_start = 0usize; // absolute byte offset of the current line
+
+        for line in LinesWithEndings::from(text) {
+            let Ok(ops) = state.parse_line(line, &self.syntaxes) else {
+                line_start += line.len();
+                continue;
+            };
+            // Walk the (offset, op) ops, emitting a classified span for each
+            // run between consecutive offsets using the scope stack in force.
+            let mut prev = 0usize; // offset within `line`
+            for (offset, op) in ops {
+                if offset > prev {
+                    let class = scope_stack_class(&stack);
+                    push_classified(&mut out, line_start + prev, line_start + offset, class);
+                }
+                let _ = stack.apply(&op);
+                prev = offset;
+            }
+            // Tail of the line after the last op.
+            if prev < line.len() {
+                let class = scope_stack_class(&stack);
+                push_classified(&mut out, line_start + prev, line_start + line.len(), class);
+            }
+            line_start += line.len();
+        }
+        out
+    }
+}
+
+/// Classify a syntect scope stack by its most-specific (top) scope. Walks from
+/// the top down so the innermost scope (e.g. `comment.line` over `source.rust`)
+/// decides the class; falls back to `Other` for a bare/source-only stack.
+fn scope_stack_class(stack: &ScopeStack) -> SpanClass {
+    for scope in stack.as_slice().iter().rev() {
+        let name = scope.build_string();
+        let class = classify_scope_name(&name);
+        if class != SpanClass::Other {
+            return class;
+        }
+    }
+    SpanClass::Other
+}
+
+/// Append a classified span, coalescing with the previous one when it is
+/// byte-contiguous and the same class — keeps the span list compact so the
+/// linear lookup in `check_text_scoped` stays cheap.
+fn push_classified(out: &mut Vec<ClassifiedSpan>, start: usize, end: usize, class: SpanClass) {
+    if end <= start {
+        return;
+    }
+    if let Some(last) = out.last_mut() {
+        if last.end == start && last.class == class {
+            last.end = end;
+            return;
+        }
+    }
+    out.push(ClassifiedSpan { start, end, class });
 }
 
 /// Build the Rust tree-sitter highlight configuration. Returns `None` on any
@@ -365,5 +523,124 @@ mod tests {
         let lines = h.highlight_document("def f():\n    pass\n", Some("py"));
         assert_eq!(lines.len(), 2);
         assert!(!lines[0].is_empty());
+    }
+
+    // ---- scope classification (classify_scope_name / classify_document) ----
+
+    #[test]
+    fn classify_scope_name_buckets() {
+        // tree-sitter dotted names
+        assert_eq!(classify_scope_name("comment"), SpanClass::Comment);
+        assert_eq!(classify_scope_name("string"), SpanClass::String);
+        assert_eq!(classify_scope_name("string.escape"), SpanClass::String);
+        assert_eq!(classify_scope_name("variable"), SpanClass::Identifier);
+        assert_eq!(
+            classify_scope_name("function.method"),
+            SpanClass::Identifier
+        );
+        assert_eq!(classify_scope_name("type.builtin"), SpanClass::Identifier);
+        assert_eq!(classify_scope_name("keyword"), SpanClass::Other);
+        assert_eq!(classify_scope_name("operator"), SpanClass::Other);
+        assert_eq!(classify_scope_name("punctuation.bracket"), SpanClass::Other);
+        // syntect space-separated stacks
+        assert_eq!(
+            classify_scope_name("source.rust comment.line.double-slash.rust"),
+            SpanClass::Comment
+        );
+        assert_eq!(
+            classify_scope_name("source.rust string.quoted.double.rust"),
+            SpanClass::String
+        );
+        // comment wins over a co-occurring keyword token
+        assert_eq!(
+            classify_scope_name("comment.block keyword"),
+            SpanClass::Comment
+        );
+    }
+
+    /// Spans returned by classify_document tile the document contiguously and
+    /// in order (no gaps, no overlaps) — the invariant check_text_scoped relies
+    /// on for its start-byte lookup.
+    fn assert_tiles(spans: &[ClassifiedSpan], len: usize) {
+        let mut at = 0usize;
+        for s in spans {
+            assert_eq!(s.start, at, "span gap/overlap at {at}: {spans:?}");
+            assert!(s.end > s.start);
+            at = s.end;
+        }
+        assert_eq!(at, len, "spans must cover the whole document");
+    }
+
+    #[test]
+    fn classify_rust_marks_comment_string_identifier() {
+        let h = Highlighter::new();
+        let src = "fn brokin() {\n    // mispel here\n    let s = \"wronng\";\n}\n";
+        let spans = h.classify_document(src, Some("rs"));
+        assert!(!spans.is_empty(), "rust should classify via tree-sitter");
+        assert_tiles(&spans, src.len());
+
+        // The class covering each deliberately-placed word matches.
+        let class_at = |needle: &str| -> SpanClass {
+            let off = src.find(needle).unwrap();
+            spans
+                .iter()
+                .find(|s| off >= s.start && off < s.end)
+                .map(|s| s.class)
+                .unwrap()
+        };
+        assert_eq!(class_at("mispel"), SpanClass::Comment);
+        assert_eq!(class_at("wronng"), SpanClass::String);
+        assert_eq!(class_at("brokin"), SpanClass::Identifier);
+    }
+
+    #[test]
+    fn classify_python_via_syntect_marks_comment_and_string() {
+        let h = Highlighter::new();
+        let src = "x = \"wronng\"  # mispel\n";
+        let spans = h.classify_document(src, Some("py"));
+        assert!(!spans.is_empty(), "python should classify via syntect");
+        assert_tiles(&spans, src.len());
+
+        let class_at = |needle: &str| -> SpanClass {
+            let off = src.find(needle).unwrap();
+            spans
+                .iter()
+                .find(|s| off >= s.start && off < s.end)
+                .map(|s| s.class)
+                .unwrap()
+        };
+        assert_eq!(class_at("wronng"), SpanClass::String);
+        assert_eq!(class_at("mispel"), SpanClass::Comment);
+    }
+
+    #[test]
+    fn classify_end_to_end_scopes_spellcheck() {
+        // Wire the real highlighter classification into the real scoped checker
+        // and confirm comments-only isolates the comment misspelling.
+        use crate::spell::{check_text_scoped, HashSetEngine, SpellScope};
+        let h = Highlighter::new();
+        let engine = HashSetEngine::from_word_list("let\nfn\nhere\n");
+        let src = "fn run() {\n    // mispel here\n    let v = \"wronng\";\n}\n";
+        let spans = h.classify_document(src, Some("rs"));
+
+        // Comments only -> "mispel" flagged (a misspelling), "here" is known,
+        // "wronng" (string) is NOT checked.
+        let out = check_text_scoped(&engine, src, &spans, SpellScope::new(true, false, false));
+        let words: Vec<&str> = out.iter().map(|m| m.word.as_str()).collect();
+        assert!(
+            words.contains(&"mispel"),
+            "comment misspelling found: {words:?}"
+        );
+        assert!(
+            !words.contains(&"wronng"),
+            "string word must be excluded: {words:?}"
+        );
+    }
+
+    #[test]
+    fn classify_empty_text_is_empty() {
+        let h = Highlighter::new();
+        assert!(h.classify_document("", Some("rs")).is_empty());
+        assert!(h.classify_document("", Some("py")).is_empty());
     }
 }
