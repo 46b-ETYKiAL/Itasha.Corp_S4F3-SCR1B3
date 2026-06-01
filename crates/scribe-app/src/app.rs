@@ -4734,12 +4734,36 @@ impl ScribeApp {
         if self.split_view {
             let hl = &self.hl;
             let ext_ref = ext.as_deref();
+            // The split pane carries its own tab-like header: the active note's
+            // name on the left and a ✕ on the right that closes the split (the
+            // pane's own "tab" + close affordance, sitting at the split rather
+            // than only in the top strip). Applied after the panel so we don't
+            // double-borrow `self`.
+            let split_title = self.tabs[active].title();
+            let mut close_split = false;
             egui::SidePanel::right("split-pane")
                 .resizable(true)
                 .default_width(360.0)
                 .frame(egui::Frame::default().fill(panel))
                 .show(ctx, |ui| {
-                    ui.label(RichText::new("SPLIT").color(accent).small().monospace());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(&split_title)
+                                .color(accent)
+                                .strong()
+                                .monospace(),
+                        )
+                        .on_hover_text("This split shows the active note.");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Close split view")
+                                .clicked()
+                            {
+                                close_split = true;
+                            }
+                        });
+                    });
                     ui.separator();
                     let mut layouter =
                         make_layouter(hl, &self.hl_cache, ext_ref, font.clone(), line_height);
@@ -4764,6 +4788,9 @@ impl ScribeApp {
                         ui.add_sized(ui.available_size(), editor);
                     });
                 });
+            if close_split {
+                self.split_view = false;
+            }
         }
 
         // ---- Line-number gutter (sticky left strip; numbers are synced to the
