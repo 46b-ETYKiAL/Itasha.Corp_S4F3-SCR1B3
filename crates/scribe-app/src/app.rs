@@ -4798,7 +4798,10 @@ impl ScribeApp {
                 self.status = format!("line-ending: {}", next.label());
             }
         }
-        if let Some(_section) = open_settings_for {
+        if let Some(section) = open_settings_for {
+            // Honour the deep-link: open Settings ON the advertised category
+            // (the tooltips promise "Settings → Editor"), not the last-used one.
+            crate::settings::request_category(ctx, section);
             self.settings_open = true;
         }
 

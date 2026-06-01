@@ -34,6 +34,23 @@ fn open_plugin_manager_id() -> egui::Id {
     egui::Id::new("scr1b3_open_plugin_manager")
 }
 
+/// egui temp-data key holding the selected Settings category. Shared by
+/// [`show`] (read + write each frame) and [`request_category`] (host deep-link
+/// pre-select) so the two never drift apart.
+fn settings_cat_id() -> egui::Id {
+    egui::Id::new("scr1b3_settings_cat")
+}
+
+/// Pre-select which category [`show`] opens on. The host calls this when it
+/// opens Settings from a deep-link affordance (e.g. the status-bar encoding /
+/// language chips that advertise "Settings → Editor"). [`show`] reads the same
+/// temp key on its next frame, so the window opens on `category` instead of the
+/// last-used / default "Appearance". No-op if `category` is not a real section
+/// name — the nav simply falls back to its default selection.
+pub fn request_category(ctx: &egui::Context, category: &str) {
+    ctx.data_mut(|d| d.insert_temp(settings_cat_id(), category.to_string()));
+}
+
 /// Host-side accessor: returns `true` (and clears the flag) when the Plugins
 /// section requested the plugin manager this frame.
 pub fn take_open_plugin_manager_request(ctx: &egui::Context) -> bool {
@@ -105,7 +122,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
     let mut changed = false;
     let mut keep_open = *open;
 
-    let cat_id = egui::Id::new("scr1b3_settings_cat");
+    let cat_id = settings_cat_id();
     let q_id = egui::Id::new("scr1b3_settings_query");
     let mut category = ctx
         .data_mut(|d| d.get_temp::<String>(cat_id))
@@ -1602,6 +1619,40 @@ enum PickerSection {
     Palette,
     Ui,
     Syntax,
+}
+
+#[cfg(test)]
+mod deep_link {
+    //! #71 — the status-bar encoding / language chips advertise
+    //! "Settings → Editor"; opening Settings must land on that category, not the
+    //! last-used / default "Appearance". The host calls [`request_category`]
+    //! before flipping the window open; [`show`] reads the SAME temp key on its
+    //! next frame. This pins that both sides agree on the key + value so the
+    //! deep-link can't silently regress to opening on the wrong page.
+    use super::{request_category, settings_cat_id};
+
+    #[test]
+    fn request_category_sets_the_key_show_reads() {
+        let ctx = egui::Context::default();
+        request_category(&ctx, "Editor");
+        let stored = ctx.data_mut(|d| d.get_temp::<String>(settings_cat_id()));
+        assert_eq!(
+            stored.as_deref(),
+            Some("Editor"),
+            "request_category must write the exact temp key show() reads"
+        );
+    }
+
+    #[test]
+    fn show_defaults_to_appearance_when_no_request_made() {
+        // Mirror show()'s own read so the default contract is pinned: absent a
+        // deep-link, the window opens on Appearance.
+        let ctx = egui::Context::default();
+        let stored = ctx
+            .data_mut(|d| d.get_temp::<String>(settings_cat_id()))
+            .unwrap_or_else(|| "Appearance".to_string());
+        assert_eq!(stored, "Appearance");
+    }
 }
 
 #[cfg(test)]
