@@ -36,6 +36,36 @@ fn tint_rgba(hex: &str, alpha: u8) -> Option<(u8, u8, u8, u8)> {
     Rgba::parse_hex(hex).map(|c| (c.r, c.g, c.b, alpha))
 }
 
+/// The label shown on a tab: pinned tabs get a leading pin glyph so the pinned
+/// state is visible at a glance (not just in the right-click menu). Pure +
+/// unit-tested so the affordance can't silently drop.
+fn tab_display_label(title: &str, pinned: bool) -> String {
+    if pinned {
+        format!("{} {title}", egui_phosphor::thin::PUSH_PIN)
+    } else {
+        title.to_string()
+    }
+}
+
+/// Pure highlight-movement for the fuzzy finder's keyboard nav (#73). Returns
+/// the new selected index after applying an Up and/or Down key, clamped to
+/// `[0, len-1]`. Down saturates at the last row; Up saturates at the first.
+/// Factored out + unit-tested so the clamp/saturation edge cases (empty-ranked
+/// guarded by the caller) cannot regress into an out-of-bounds index.
+fn fuzzy_move_selection(current: usize, len: usize, up: bool, down: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let mut sel = current.min(len - 1);
+    if down {
+        sel = (sel + 1).min(len - 1);
+    }
+    if up {
+        sel = sel.saturating_sub(1);
+    }
+    sel
+}
+
 /// Pure index remap for a drag-reorder that moves the element at `src` so it
 /// takes original position `target`'s slot — the drop-on-tab, swap-style UX
 /// (drop tab A onto tab B and A lands where B was, the rest shift to fill).
@@ -461,6 +491,10 @@ pub struct ScribeApp {
     fuzzy_index: Vec<PathBuf>,
     /// One-shot focus request for the fuzzy-finder input when it opens.
     focus_fuzzy: bool,
+    /// Index of the keyboard-highlighted row in the fuzzy finder's ranked
+    /// results (#73). Up/Down move it; Enter opens it. Reset to 0 on open and
+    /// whenever the query changes; clamped to the result count each frame.
+    fuzzy_selected: usize,
     /// F-015 from docs/audits/overlooked-surfaces-2026-05-29.md: Ctrl+G
     /// "go to line" modal. `goto_open` is the modal-open flag, `goto_query`
     /// is the typed text (accepts `N` or `N:C`), `focus_goto` is the
@@ -599,7 +633,33 @@ impl ScribeApp {
         if let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
             monospace.insert(0, "JetBrainsMono".to_owned());
         }
+        // CJK fallback so the toolbar's "instrument plate" kanji render real
+        // glyphs instead of tofu boxes — neither JetBrains Mono nor egui's Hack
+        // covers CJK. This is a hand-subset of Noto Sans JP (OFL-1.1, see
+        // assets/fonts/NotoSansJP/OFL.txt) pinned to Regular and containing ONLY
+        // the 11 kanji `jp_glyph()` uses (~4.5 KB; regenerate via
+        // scripts/generate-jp-kanji-subset.py). Appended at the END of both
+        // families so it ONLY fills glyphs the primary fonts lack.
+        const NOTO_SANS_JP_SUBSET: &[u8] =
+            include_bytes!("../../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf");
+        fonts.font_data.insert(
+            "NotoSansJP-Subset".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(NOTO_SANS_JP_SUBSET)),
+        );
+        for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("NotoSansJP-Subset".to_owned());
+        }
         cc.egui_ctx.set_fonts(fonts);
+        // Follow the OS theme preference so `ctx.theme()` reflects the live OS
+        // light/dark setting (egui-winit updates it on OS theme-change events).
+        // The app's own brand visuals are applied on top via `set_visuals`; this
+        // only makes the OS theme *readable* for `appearance.follow_os_theme`.
+        cc.egui_ctx
+            .options_mut(|o| o.theme_preference = egui::ThemePreference::System);
         cc.egui_ctx.set_visuals(app.current_visuals());
         app.visuals_applied = true;
         // Apply the OS glass/acrylic/mica/vibrancy effect — only when the master
@@ -747,6 +807,7 @@ impl ScribeApp {
             fuzzy_query: String::new(),
             fuzzy_index: Vec::new(),
             focus_fuzzy: false,
+            fuzzy_selected: 0,
             goto_open: false,
             goto_query: String::new(),
             focus_goto: false,
@@ -1029,11 +1090,11 @@ impl ScribeApp {
     /// theme (`ghost-paper`); a dark OS → the user's chosen theme if it is
     /// itself dark, otherwise the default dark theme (`wired-noir`). When the
     /// toggle is off, or the OS theme is unknown, the user's chosen theme wins.
-    fn effective_theme_name(&self, os_theme: Option<egui::Theme>) -> String {
+    fn effective_theme_name(&self, os_theme: egui::Theme) -> String {
         if self.config.appearance.follow_os_theme {
             match os_theme {
-                Some(egui::Theme::Light) => return "ghost-paper".to_string(),
-                Some(egui::Theme::Dark) => {
+                egui::Theme::Light => return "ghost-paper".to_string(),
+                egui::Theme::Dark => {
                     let chosen = load_theme(&self.config.appearance.theme);
                     return if matches!(chosen.appearance, scribe_core::theme::Appearance::Dark) {
                         self.config.appearance.theme.clone()
@@ -1041,18 +1102,18 @@ impl ScribeApp {
                         "wired-noir".to_string()
                     };
                 }
-                None => {}
             }
         }
         self.config.appearance.theme.clone()
     }
 
     /// Apply the current theme to the egui context (after a theme/config change).
-    /// Reads the OS theme from `ctx` so a manual theme change while
-    /// `follow_os_theme` is on still resolves through [`Self::effective_theme_name`].
+    /// Reads the OS theme via `ctx.theme()` — egui-winit tracks the OS theme when
+    /// the theme preference is `System` (set in `new`). `raw.system_theme` is
+    /// unreliable/None on Windows, which is why "Follow OS theme" did nothing.
     fn reapply_theme(&mut self, ctx: &egui::Context) {
-        let os_theme = ctx.input(|i| i.raw.system_theme);
-        self.last_os_theme = os_theme;
+        let os_theme = ctx.theme();
+        self.last_os_theme = Some(os_theme);
         self.theme = load_theme(&self.effective_theme_name(os_theme));
         ctx.set_visuals(self.current_visuals());
         // `set_visuals` resets the caret style, so re-apply motion after it.
@@ -1421,7 +1482,11 @@ impl ScribeApp {
         }
         match std::fs::write(&path, self.config.to_toml_string()) {
             Ok(()) => self.status = "settings saved".to_string(),
-            Err(e) => self.toast = Some(format!("could not save settings: {e}")),
+            Err(e) => {
+                let msg = format!("could not save settings: {e}");
+                crate::action_log::record("error", &msg);
+                self.toast = Some(msg);
+            }
         }
     }
 
@@ -1464,6 +1529,7 @@ impl ScribeApp {
     fn new_tab(&mut self) {
         self.tabs.push(EditorTab::scratch());
         self.active = self.tabs.len() - 1;
+        crate::action_log::record("tab", "new");
     }
 
     /// Dispatch a [`BuiltinCommand`] selected from the command palette.
@@ -1473,6 +1539,9 @@ impl ScribeApp {
     /// changes (no drift between the two surfaces). Touches `self.config`
     /// then persists via `save_config` so toggles survive a restart.
     fn execute_builtin(&mut self, cmd: BuiltinCommand) {
+        // Action-log every command dispatch so a session is diagnosable: a
+        // command the user invoked that "did nothing" still leaves a trace here.
+        crate::action_log::record("cmd", &format!("{cmd:?}"));
         match cmd {
             BuiltinCommand::NewFile => self.new_tab(),
             BuiltinCommand::OpenFile => self.open_dialog(),
@@ -1830,23 +1899,44 @@ impl ScribeApp {
         }
     }
 
+    /// Render the tab strip inside a Left/Right side panel, honouring the
+    /// `side_tabs_vertical` orientation option (#70). Vertical is the side-bar
+    /// default (one full-width tab per row, scrolling vertically); horizontal
+    /// lays tabs left-to-right and wraps to new rows. Either way the strip
+    /// scrolls so no tab becomes unreachable in a small window.
+    fn draw_side_tab_strip(
+        &mut self,
+        ui: &mut egui::Ui,
+        accent: Color32,
+        muted: Color32,
+        vertical: bool,
+    ) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if vertical {
+                    ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                } else {
+                    ui.horizontal_wrapped(|ui| self.draw_tab_strip(ui, accent, muted));
+                }
+            });
+    }
+
     /// Render the tab strip — the row (or column, for side positions) of open
     /// documents with the active one accented and an `×` close button on it.
-    /// Extracted from the toolbar (T18.4) so the same widget can live inline
-    /// at the top OR in a dedicated bottom / left / right panel.
-    /// Render the tab strip with full mouse ergonomics:
+    /// Extracted from the toolbar (T18.4) so the same widget can live inline at
+    /// the top OR in a dedicated bottom / left / right panel. Mouse ergonomics:
     ///
     /// - **Click** → switch to that tab
     /// - **Middle-click** → close that tab (universal editor convention)
-    /// - **Right-click** → context menu: Close · Close Others · Close All to the Right · Close All
+    /// - **Right-click** → context menu: Close · Close Others · Close All to the Right · Close All · Pin
     /// - **`×` button on the active tab** → close (back-compat with pre-audit behavior)
-    /// - **Drag** → rearrange. Each tab is a `dnd_drag_source` wrapped in a
-    ///   `dnd_drop_zone`; dropping tab A onto tab B re-homes A into B's slot.
-    ///   This is the egui 0.34 drag-and-drop idiom (the same one the toolbar
-    ///   editor uses). It replaces an earlier hand-rolled `click_and_drag` +
-    ///   rect hit-test that scanned a *partially-built* response vector, so a
-    ///   drop onto any tab to the RIGHT of the dragged one was silently missed.
-    ///   The index arithmetic lives in [`tab_index_after_move`] (unit-tested).
+    /// - **Drag** → rearrange. Each tab is ONE `click_and_drag` widget (click
+    ///   switches, drag reorders); the drop target is resolved AFTER the loop by
+    ///   hit-testing the release position against every tab's full rect, so a
+    ///   drop onto a tab to the RIGHT of the dragged one is no longer missed and
+    ///   the extra `dnd_drop_zone` interaction that used to swallow the click is
+    ///   gone. The index arithmetic lives in [`tab_index_after_move`] (unit-tested).
     ///   Closes F-001 / F-043 from `docs/audits/overlooked-surfaces-2026-05-29.md`.
     fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
         let active = self.active;
@@ -1867,12 +1957,19 @@ impl ScribeApp {
         let mut drag_src: Option<usize> = None;
         let mut drop_pos: Option<egui::Pos2> = None;
         let mut rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(self.tabs.len());
+        let mut add_tab = false;
+        // #59 live drag feedback: the in-flight (index, label, current pointer)
+        // while a tab is being dragged, so we can paint a ghost following the
+        // cursor and an insertion indicator at the drop gap.
+        let mut dragging: Option<(usize, String, egui::Pos2)> = None;
 
         for i in 0..self.tabs.len() {
             let selected = i == active;
-            let label =
-                RichText::new(self.tabs[i].title()).color(if selected { accent } else { muted });
             let pinned = self.tabs[i].pinned;
+            // Pinned tabs carry a visible pin glyph so the state is obvious
+            // without opening the right-click menu.
+            let shown = tab_display_label(&self.tabs[i].title(), pinned);
+            let label = RichText::new(shown.clone()).color(if selected { accent } else { muted });
 
             let resp = ui
                 .add(egui::SelectableLabel::new(selected, label))
@@ -1911,6 +2008,9 @@ impl ScribeApp {
             if resp.dragged() {
                 ui.painter()
                     .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
+                if let Some(p) = resp.interact_pointer_pos() {
+                    dragging = Some((i, shown.clone(), p));
+                }
             }
             if resp.drag_stopped() {
                 if let Some(pos) = resp.interact_pointer_pos() {
@@ -1923,6 +2023,79 @@ impl ScribeApp {
             if selected && ui.small_button("×").clicked() {
                 close = Some(i);
             }
+        }
+
+        // "+" — add a new tab at the end of the strip (same as Ctrl+N).
+        if ui
+            .small_button("+")
+            .on_hover_text("New tab (Ctrl+N)")
+            .clicked()
+        {
+            add_tab = true;
+        }
+
+        // #59 live drag feedback — paint while a tab is in flight:
+        //  * an insertion indicator (accent line) at the gap the drop will land
+        //  * a ghost of the dragged label following the cursor
+        // Both are painted on the foreground (paint-only, never interactable —
+        // a `layer_painter`, not an `Area`, so it cannot swallow clicks).
+        if let Some((src, ref label, pointer)) = dragging {
+            // Infer strip orientation from the first two tab rects: when tabs
+            // advance mostly in X the strip is horizontal (top/bottom); mostly
+            // in Y means a vertical side strip.
+            let horizontal = rects.len() < 2
+                || (rects[1].1.center().x - rects[0].1.center().x).abs()
+                    >= (rects[1].1.center().y - rects[0].1.center().y).abs();
+
+            // Insertion gap: the boundary nearest the pointer along the main
+            // axis. We draw the line on the leading edge of the first tab whose
+            // center is past the pointer (or the trailing edge of the last).
+            let painter = ui.painter();
+            let accent_line = egui::Stroke::new(2.0, accent);
+            if let Some((_, last_rect)) = rects.last().copied().map(|r| (r.0, r.1)) {
+                let mut drawn = false;
+                for (_, rect) in &rects {
+                    let past = if horizontal {
+                        pointer.x < rect.center().x
+                    } else {
+                        pointer.y < rect.center().y
+                    };
+                    if past {
+                        if horizontal {
+                            painter.vline(rect.left(), rect.y_range(), accent_line);
+                        } else {
+                            painter.hline(rect.x_range(), rect.top(), accent_line);
+                        }
+                        drawn = true;
+                        break;
+                    }
+                }
+                if !drawn {
+                    // Pointer is beyond the last tab — indicate append-at-end.
+                    if horizontal {
+                        painter.vline(last_rect.right(), last_rect.y_range(), accent_line);
+                    } else {
+                        painter.hline(last_rect.x_range(), last_rect.bottom(), accent_line);
+                    }
+                }
+            }
+
+            // Ghost label trailing the cursor (slightly offset so it doesn't sit
+            // under the pointer). Drawn on the Tooltip layer so it floats above
+            // the strip without taking input.
+            let ghost = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                egui::Id::new("tab-drag-ghost"),
+            ));
+            let font = egui::TextStyle::Button.resolve(ui.style());
+            let ghost_pos = pointer + egui::vec2(12.0, 6.0);
+            let galley = ghost.layout_no_wrap(label.clone(), font, accent);
+            // Soft backing chip for legibility against any background.
+            let bg =
+                egui::Rect::from_min_size(ghost_pos, galley.size()).expand2(egui::vec2(6.0, 3.0));
+            ghost.rect_filled(bg, 4.0, muted.linear_multiply(0.25));
+            ghost.galley(ghost_pos, galley, accent);
+            let _ = src;
         }
 
         // Drag-reorder: the dragged tab was released over another tab's rect.
@@ -1957,6 +2130,9 @@ impl ScribeApp {
         }
         if let Some((src, target)) = reorder {
             self.move_tab(src, target);
+        }
+        if add_tab {
+            self.new_tab();
         }
     }
 
@@ -2024,6 +2200,7 @@ impl ScribeApp {
     }
 
     fn close_tab(&mut self, idx: usize) {
+        crate::action_log::record("tab", "close");
         if idx < self.tabs.len() {
             // F-021 — capture the current scroll position so the next open
             // of the same path restores it. Uses the last-frame
@@ -2351,6 +2528,23 @@ impl ScribeApp {
             Some(line0) => self.goto_line(line0 + 1),
             None => self.status = "no bookmarks in this buffer".to_string(),
         }
+    }
+
+    /// True when a modal with a focused text field or arrow-key navigation
+    /// currently owns the keyboard (#72). The editor-surface completion popup
+    /// must defer to these so its ↑↓/Enter interception cannot steal the modal
+    /// field's keys. Kept as one method so the set is defined in exactly one
+    /// place. NOTE: the passive display modals (welcome, cheatsheet, recent —
+    /// no text entry, no arrow navigation) are deliberately EXCLUDED; they have
+    /// no keys for completion to conflict with, and the first-run welcome flag
+    /// must not suppress completion in the editor behind it.
+    fn modal_owns_keyboard(&self) -> bool {
+        self.find_open
+            || self.palette_open
+            || self.settings_open
+            || self.fuzzy_open
+            || self.goto_open
+            || self.goto_symbol_open
     }
 
     /// Open the identifier-completion popup for the prefix ending at `char_idx`
@@ -3490,8 +3684,8 @@ impl ScribeApp {
         // re-resolve + apply the theme whenever the OS flips light/dark. Cheap
         // — one input read; only re-applies on an actual change.
         {
-            let os_theme = ctx.input(|i| i.raw.system_theme);
-            if self.config.appearance.follow_os_theme && os_theme != self.last_os_theme {
+            let os_theme = ctx.theme();
+            if self.config.appearance.follow_os_theme && Some(os_theme) != self.last_os_theme {
                 self.reapply_theme(ctx);
             }
         }
@@ -3728,9 +3922,22 @@ impl ScribeApp {
                 self.fuzzy_open = false;
             }
         });
-        // Ctrl/Cmd+Space requests identifier completion at the cursor.
-        let want_completion =
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Space));
+        // #72 — identifier completion is an EDITOR-surface popup. While any
+        // text-input / navigation modal owns the keyboard (find bar, command
+        // palette, fuzzy finder, go-to-symbol / go-to-line, recent files,
+        // settings, cheatsheet, welcome), completion must NOT open and must NOT
+        // intercept ↑↓/Enter — otherwise a Ctrl+Space typed into (say) the find
+        // field would spawn a popup that then steals the find bar's navigation
+        // keys. Force any open popup closed and leave Ctrl+Space for the modal.
+        let modal_owns_keys = self.modal_owns_keyboard();
+        if modal_owns_keys {
+            self.completion = None;
+        }
+        // Ctrl/Cmd+Space requests identifier completion at the cursor (only when
+        // the editor — not a modal — owns the keyboard; short-circuits so the
+        // key is left unconsumed for a focused modal field).
+        let want_completion = !modal_owns_keys
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Space));
         // While the completion popup is open, intercept navigation keys BEFORE
         // the TextEdit sees them so arrows/enter drive the list, not the caret.
         let mut accept_completion = false;
@@ -3896,21 +4103,23 @@ impl ScribeApp {
                     });
             }
             scribe_core::config::TabBarPosition::Left => {
+                let vertical = self.config.editor.side_tabs_vertical;
                 egui::SidePanel::left("tabs-left")
                     .resizable(true)
                     .default_width(180.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                     .show(ctx, |ui| {
-                        ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                        self.draw_side_tab_strip(ui, accent, muted, vertical);
                     });
             }
             scribe_core::config::TabBarPosition::Right => {
+                let vertical = self.config.editor.side_tabs_vertical;
                 egui::SidePanel::right("tabs-right")
                     .resizable(true)
                     .default_width(180.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                     .show(ctx, |ui| {
-                        ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                        self.draw_side_tab_strip(ui, accent, muted, vertical);
                     });
             }
         }
@@ -4478,6 +4687,29 @@ impl ScribeApp {
         if self.fuzzy_open {
             let mut chosen: Option<PathBuf> = None;
             let mut still_open = true;
+            // Rank once up front so keyboard nav + the row list agree on the set.
+            let ranked = crate::fuzzy::rank(&self.fuzzy_index, &self.fuzzy_query, 200);
+            // #73 keyboard nav: Up/Down move the highlight, Enter opens it. A
+            // singleline TextEdit ignores Up/Down/Enter-as-newline, so reading
+            // these keys here does not fight the query field's caret.
+            let (up, down, enter) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::Enter),
+                )
+            });
+            if !ranked.is_empty() {
+                self.fuzzy_selected =
+                    fuzzy_move_selection(self.fuzzy_selected, ranked.len(), up, down);
+                if enter {
+                    chosen = Some(ranked[self.fuzzy_selected].clone());
+                }
+            } else {
+                self.fuzzy_selected = 0;
+            }
+            let selected = self.fuzzy_selected;
+            let mut query_changed = false;
             egui::Window::new(RichText::new("⌕  open file").color(accent).monospace())
                 .open(&mut still_open)
                 .collapsible(false)
@@ -4490,9 +4722,10 @@ impl ScribeApp {
                         r.request_focus();
                         self.focus_fuzzy = false;
                     }
+                    query_changed = r.changed();
                     ui.label(
                         RichText::new(format!(
-                            "indexed {} files (Ctrl+P, Esc to close)",
+                            "indexed {} files · ↑↓ select · Enter open · Esc close",
                             self.fuzzy_index.len()
                         ))
                         .color(muted)
@@ -4502,21 +4735,28 @@ impl ScribeApp {
                     egui::ScrollArea::vertical()
                         .max_height(360.0)
                         .show(ui, |ui| {
-                            let ranked =
-                                crate::fuzzy::rank(&self.fuzzy_index, &self.fuzzy_query, 200);
                             if ranked.is_empty() {
                                 ui.label(
                                     RichText::new("no match").color(muted).small().monospace(),
                                 );
                             }
-                            for p in ranked {
+                            for (idx, p) in ranked.iter().enumerate() {
                                 let label = RichText::new(p.display().to_string()).monospace();
-                                if ui.selectable_label(false, label).clicked() {
-                                    chosen = Some(p);
+                                let row = ui.selectable_label(idx == selected, label);
+                                if row.clicked() {
+                                    chosen = Some(p.clone());
+                                }
+                                // Keep the keyboard-highlighted row in view.
+                                if idx == selected && (up || down) {
+                                    row.scroll_to_me(Some(egui::Align::Center));
                                 }
                             }
                         });
                 });
+            // A new query invalidates the old highlight position.
+            if query_changed {
+                self.fuzzy_selected = 0;
+            }
             if let Some(p) = chosen {
                 self.open_path(p);
                 self.fuzzy_open = false;
@@ -4663,7 +4903,10 @@ impl ScribeApp {
                 self.status = format!("line-ending: {}", next.label());
             }
         }
-        if let Some(_section) = open_settings_for {
+        if let Some(section) = open_settings_for {
+            // Honour the deep-link: open Settings ON the advertised category
+            // (the tooltips promise "Settings → Editor"), not the last-used one.
+            crate::settings::request_category(ctx, section);
             self.settings_open = true;
         }
 
@@ -4695,7 +4938,22 @@ impl ScribeApp {
                 .frame(egui::Frame::default().fill(panel).inner_margin(6.0))
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("EXPLORER").color(accent).small().monospace());
+                        // #74 — the tree supports ↑↓ Home End ⏎ navigation, but
+                        // that was undiscoverable. Surface it: a hover tip on the
+                        // header plus a always-visible muted key hint.
+                        ui.label(RichText::new("EXPLORER").color(accent).small().monospace())
+                            .on_hover_text(
+                                "File explorer. Keyboard: ↑/↓ move · Home/End jump to first/last \
+                                 · Enter open · (works when no dialog is open and the editor isn't \
+                                 focused).",
+                            );
+                        ui.label(
+                            RichText::new("↑↓ Home End ⏎")
+                                .color(muted)
+                                .small()
+                                .monospace(),
+                        )
+                        .on_hover_text("Navigate the file tree from the keyboard.");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("×").clicked() {
                                 close_tree = true;
@@ -5109,17 +5367,16 @@ impl ScribeApp {
         // corners that send `ViewportCommand::BeginResize(dir)` on drag and
         // hint the right cursor on hover.
         //
-        // CRITICAL: these zones are `Order::Foreground`, i.e. ABOVE egui windows
-        // (Middle). When a modal/overlay window is open (settings, find,
-        // palette) its title bar — including the ✕ close button — can fall under
-        // an edge/corner zone, which then swallows the click. That was the
-        // "settings ✕ doesn't close (only in frameless mode)" bug. You can't
-        // edge-resize the OS window while a modal is up anyway, so skip the
-        // overlay whenever one is open.
-        if self.config.appearance.frameless && !overlay_open {
+        // No persistent Foreground Areas (those swallowed tab/settings clicks
+        // window-wide and could leave resize stuck after the first drag). This
+        // is a pure per-frame check: hint the resize cursor at an edge and start
+        // an OS resize on a press there — only when egui isn't already using the
+        // pointer for a widget. Works repeatedly by construction.
+        let _ = overlay_open;
+        if self.config.appearance.frameless {
             let maximized = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
             if !maximized {
-                draw_resize_overlays(ctx);
+                handle_frameless_resize(ctx);
             }
         }
 
@@ -5281,6 +5538,7 @@ impl ScribeApp {
             self.fuzzy_open = true;
             self.focus_fuzzy = true;
             self.fuzzy_query.clear();
+            self.fuzzy_selected = 0;
         }
         for p in act.files_to_open.drain(..) {
             self.open_path(p);
@@ -5478,106 +5736,245 @@ const RESIZE_EDGE_PX: f32 = 6.0;
 /// the edges so diagonal grabs are forgiving.
 const RESIZE_CORNER_PX: f32 = 12.0;
 
-/// Phase 18 T18.1 — paint the 8 invisible resize-handle interact zones around
-/// the frameless window. Pure side-effect on the egui context: on hover the
-/// pointer cursor flips to the matching direction; on drag-start a
-/// `ViewportCommand::BeginResize(dir)` is queued and winit drives the actual
-/// resize from there. Called once per frame from `frame_tick`.
-fn draw_resize_overlays(ctx: &egui::Context) {
-    use egui::{
-        Area, CursorIcon, Id, Order, PointerButton, Rect, ResizeDirection, Sense, ViewportCommand,
+/// Which window-edge resize direction (if any) the pointer `p` is over, given
+/// the window `rect` and the edge/corner band widths. Corners (within `corner`
+/// of two sides) take priority over straight edges; the interior returns `None`.
+/// Pure + unit-tested so the frameless-resize hit-testing can't silently regress.
+fn resize_dir_at(
+    p: egui::Pos2,
+    rect: egui::Rect,
+    edge: f32,
+    corner: f32,
+) -> Option<egui::ResizeDirection> {
+    use egui::ResizeDirection as D;
+    let (l, r, t, b) = (
+        p.x - rect.left(),
+        rect.right() - p.x,
+        p.y - rect.top(),
+        rect.bottom() - p.y,
+    );
+    // Outside the window → not a resize zone.
+    if l < 0.0 || r < 0.0 || t < 0.0 || b < 0.0 {
+        return None;
+    }
+    let (w, e, n, s) = (l <= edge, r <= edge, t <= edge, b <= edge);
+    let (nw, ne, nn, ns) = (l <= corner, r <= corner, t <= corner, b <= corner);
+    if (n && nw) || (w && nn) {
+        Some(D::NorthWest)
+    } else if (n && ne) || (e && nn) {
+        Some(D::NorthEast)
+    } else if (s && nw) || (w && ns) {
+        Some(D::SouthWest)
+    } else if (s && ne) || (e && ns) {
+        Some(D::SouthEast)
+    } else if n {
+        Some(D::North)
+    } else if s {
+        Some(D::South)
+    } else if w {
+        Some(D::West)
+    } else if e {
+        Some(D::East)
+    } else {
+        None
+    }
+}
+
+/// Frameless window edge-resize, the no-Area way. Each frame: if the pointer is
+/// over an edge band, hint the matching resize cursor; on a primary press there
+/// — and only when egui isn't already using the pointer for a widget — start an
+/// OS resize via `ViewportCommand::BeginResize`. No persistent `Order::Foreground`
+/// Areas, so it never swallows clicks meant for tabs / the settings ✕ / panels,
+/// and it works on every resize, not just the first.
+fn handle_frameless_resize(ctx: &egui::Context) {
+    use egui::{CursorIcon as C, ResizeDirection as D, ViewportCommand};
+    let Some(p) = ctx.pointer_latest_pos() else {
+        return;
     };
-    let rect = ctx.content_rect();
-    let e = RESIZE_EDGE_PX;
-    let c = RESIZE_CORNER_PX;
-    // (id, rect, cursor, direction)
-    let zones: [(&'static str, Rect, CursorIcon, ResizeDirection); 8] = [
-        (
-            "rz-n",
-            Rect::from_min_max(
-                rect.left_top() + egui::vec2(c, 0.0),
-                rect.right_top() + egui::vec2(-c, e),
-            ),
-            CursorIcon::ResizeNorth,
-            ResizeDirection::North,
-        ),
-        (
-            "rz-s",
-            Rect::from_min_max(
-                rect.left_bottom() + egui::vec2(c, -e),
-                rect.right_bottom() + egui::vec2(-c, 0.0),
-            ),
-            CursorIcon::ResizeSouth,
-            ResizeDirection::South,
-        ),
-        (
-            "rz-w",
-            Rect::from_min_max(
-                rect.left_top() + egui::vec2(0.0, c),
-                rect.left_bottom() + egui::vec2(e, -c),
-            ),
-            CursorIcon::ResizeWest,
-            ResizeDirection::West,
-        ),
-        (
-            "rz-e",
-            Rect::from_min_max(
-                rect.right_top() + egui::vec2(-e, c),
-                rect.right_bottom() + egui::vec2(0.0, -c),
-            ),
-            CursorIcon::ResizeEast,
-            ResizeDirection::East,
-        ),
-        (
-            "rz-nw",
-            Rect::from_min_size(rect.left_top(), egui::vec2(c, c)),
-            CursorIcon::ResizeNorthWest,
-            ResizeDirection::NorthWest,
-        ),
-        (
-            "rz-ne",
-            Rect::from_min_size(rect.right_top() - egui::vec2(c, 0.0), egui::vec2(c, c)),
-            CursorIcon::ResizeNorthEast,
-            ResizeDirection::NorthEast,
-        ),
-        (
-            "rz-sw",
-            Rect::from_min_size(rect.left_bottom() - egui::vec2(0.0, c), egui::vec2(c, c)),
-            CursorIcon::ResizeSouthWest,
-            ResizeDirection::SouthWest,
-        ),
-        (
-            "rz-se",
-            Rect::from_min_size(rect.right_bottom() - egui::vec2(c, c), egui::vec2(c, c)),
-            CursorIcon::ResizeSouthEast,
-            ResizeDirection::SouthEast,
-        ),
+    let Some(dir) = resize_dir_at(p, ctx.content_rect(), RESIZE_EDGE_PX, RESIZE_CORNER_PX) else {
+        return;
+    };
+    ctx.set_cursor_icon(match dir {
+        D::North => C::ResizeNorth,
+        D::South => C::ResizeSouth,
+        D::West => C::ResizeWest,
+        D::East => C::ResizeEast,
+        D::NorthWest => C::ResizeNorthWest,
+        D::NorthEast => C::ResizeNorthEast,
+        D::SouthWest => C::ResizeSouthWest,
+        D::SouthEast => C::ResizeSouthEast,
+    });
+    // Start the OS resize only if egui isn't consuming the press for a widget
+    // (so a button/tab sitting at the very edge still gets its click).
+    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.wants_pointer_input() {
+        ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+    }
+}
+
+#[cfg(test)]
+mod resize_tests {
+    //! Regression guard for the frameless resize hit-testing. The interior MUST
+    //! NOT be a resize zone (that's what made the resize overlay eat tab /
+    //! settings-✕ clicks); edges/corners must map to the right direction. Pure,
+    //! so it runs every CI build and pins the geometry across window sizes.
+    use super::resize_dir_at;
+    use egui::{pos2, Rect, ResizeDirection as D};
+
+    fn win() -> Rect {
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 700.0))
+    }
+
+    #[test]
+    fn interior_is_never_a_resize_zone() {
+        assert_eq!(resize_dir_at(pos2(500.0, 350.0), win(), 6.0, 12.0), None);
+        // The exact tab position the old Foreground overlay was eating.
+        assert_eq!(resize_dir_at(pos2(574.0, 48.0), win(), 6.0, 12.0), None);
+    }
+
+    #[test]
+    fn edges_map_to_their_direction() {
+        assert_eq!(
+            resize_dir_at(pos2(500.0, 1.0), win(), 6.0, 12.0),
+            Some(D::North)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(500.0, 699.0), win(), 6.0, 12.0),
+            Some(D::South)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(1.0, 350.0), win(), 6.0, 12.0),
+            Some(D::West)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(999.0, 350.0), win(), 6.0, 12.0),
+            Some(D::East)
+        );
+    }
+
+    #[test]
+    fn corners_take_priority_over_edges() {
+        assert_eq!(
+            resize_dir_at(pos2(2.0, 2.0), win(), 6.0, 12.0),
+            Some(D::NorthWest)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(998.0, 2.0), win(), 6.0, 12.0),
+            Some(D::NorthEast)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(2.0, 698.0), win(), 6.0, 12.0),
+            Some(D::SouthWest)
+        );
+        assert_eq!(
+            resize_dir_at(pos2(998.0, 698.0), win(), 6.0, 12.0),
+            Some(D::SouthEast)
+        );
+        // On the top edge but within the corner band of the left side → NW.
+        assert_eq!(
+            resize_dir_at(pos2(8.0, 1.0), win(), 6.0, 12.0),
+            Some(D::NorthWest)
+        );
+    }
+
+    #[test]
+    fn outside_the_window_is_none() {
+        assert_eq!(resize_dir_at(pos2(-5.0, 350.0), win(), 6.0, 12.0), None);
+        assert_eq!(resize_dir_at(pos2(500.0, 800.0), win(), 6.0, 12.0), None);
+    }
+}
+
+#[cfg(test)]
+mod foreground_area_guard {
+    //! Anti-regression source-scan guard (#67).
+    //!
+    //! The whole class of "I clicked X and nothing happened" bugs in this app
+    //! traced to a frameless-resize overlay built from `egui::Area`s at
+    //! `Order::Foreground`: a Foreground `Area` is **interactable by default**,
+    //! so one that covers (part of) the window silently swallows every click in
+    //! its rect — tab switches, the settings ✕, panel-resize handles, all of it.
+    //! The fix removed that overlay (resize is now a pointer-gated per-frame edge
+    //! check with NO Area — see `handle_frameless_resize`).
+    //!
+    //! This guard scans the source so the dangerous pattern cannot creep back:
+    //! every `egui::Area` placed at `Order::Foreground` MUST either declare
+    //! `.interactable(false)` (paint-only / hint overlay — cannot eat clicks) or
+    //! be an allowlisted bounded popup that is positioned at a point (so it
+    //! covers a small region, not the window) and only shown on demand. A new
+    //! Foreground `Area` that is neither fails this test loudly, with a pointer
+    //! to this comment, before it can ship.
+
+    /// Foreground `Area`s that are intentionally interactable. Each is a small,
+    /// on-demand, point-anchored popup — NOT a window-spanning cover. Adding an
+    /// entry here is the explicit, reviewed way to introduce a new one.
+    const ALLOWED_INTERACTIVE_FOREGROUND_AREAS: &[&str] = &[
+        // Code-completion list, anchored just below the cursor via `.fixed_pos`,
+        // shown only while a completion is active. Rows must be clickable.
+        "scr1b3-completion",
     ];
-    // Only materialize a resize handle when the pointer is actually within that
-    // edge band. These are `Order::Foreground` (above panels + windows), and an
-    // interactable foreground Area swallows the pointer for the whole frame even
-    // when its rect is a thin edge strip — which is why clicking a tab or the
-    // settings ✕ did nothing in frameless mode. Gating on pointer-in-zone means
-    // the handles exist ONLY at the edges the user is actually touching, never
-    // over interior content/chrome.
-    let pointer = ctx.pointer_latest_pos();
-    for (id, zone, cursor, dir) in zones {
-        if !pointer.is_some_and(|p| zone.contains(p)) {
-            continue;
+
+    #[test]
+    fn no_ungated_interactable_foreground_area() {
+        let src = include_str!("app.rs");
+        let lines: Vec<&str> = src.lines().collect();
+
+        for (i, line) in lines.iter().enumerate() {
+            // Find the start of an Area construction that names its Id.
+            let Some(rest) = line.split("egui::Area::new(egui::Id::new(\"").nth(1) else {
+                continue;
+            };
+            let Some(id) = rest.split('"').next() else {
+                continue;
+            };
+
+            // Collect the builder chain: this line plus the following lines up to
+            // the `.show(` that ends the builder. That window is what we inspect
+            // for `.order(...Foreground)` and the gating call.
+            let mut chain = String::new();
+            for l in lines.iter().skip(i).take(20) {
+                chain.push_str(l);
+                chain.push('\n');
+                if l.contains(".show(") {
+                    break;
+                }
+            }
+
+            let is_foreground = chain.contains("Order::Foreground");
+            if !is_foreground {
+                continue;
+            }
+
+            // Paint-only / hint overlays opt out of input explicitly — safe.
+            let non_interactable = chain.contains(".interactable(false)");
+            if non_interactable {
+                continue;
+            }
+
+            let allowlisted = ALLOWED_INTERACTIVE_FOREGROUND_AREAS.contains(&id);
+            assert!(
+                allowlisted,
+                "app.rs:{}: `egui::Area` id={id:?} is at Order::Foreground and \
+                 interactable-by-default, which swallows clicks in its rect \
+                 (the resize-overlay click-eating regression class — see the \
+                 `foreground_area_guard` module doc). Either add \
+                 `.interactable(false)` if it must not take input, or — if it is \
+                 genuinely a small on-demand popup — add {id:?} to \
+                 ALLOWED_INTERACTIVE_FOREGROUND_AREAS with a justifying comment.",
+                i + 1
+            );
         }
-        Area::new(Id::new(id))
-            .order(Order::Foreground)
-            .fixed_pos(zone.min)
-            .interactable(true)
-            .show(ctx, |ui| {
-                let resp = ui.allocate_rect(zone, Sense::click_and_drag());
-                if resp.hovered() {
-                    ctx.set_cursor_icon(cursor);
-                }
-                if resp.drag_started_by(PointerButton::Primary) {
-                    ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
-                }
-            });
+    }
+
+    #[test]
+    fn the_completion_popup_is_still_present_so_the_scan_is_not_vacuous() {
+        // If the only allowlisted Area ever disappears, this guard would pass
+        // trivially on an empty match set. Pin that the scan actually sees it.
+        let src = include_str!("app.rs");
+        assert!(
+            src.contains("egui::Id::new(\"scr1b3-completion\")"),
+            "completion popup Area id not found — the foreground-area scan would \
+             be vacuous; update ALLOWED_INTERACTIVE_FOREGROUND_AREAS to match \
+             reality"
+        );
     }
 }
 
@@ -5625,6 +6022,43 @@ mod jp_glyph_tests {
     }
 
     #[test]
+    fn bundled_jp_subset_covers_every_toolbar_kanji() {
+        // #56 — the toolbar kanji rendered as tofu because no font in the stack
+        // covered CJK. We bundle a Noto Sans JP subset; this asserts that subset
+        // actually contains a glyph for every kanji `jp_glyph` can emit, read
+        // through skrifa (the same font crate epaint/egui 0.34 rasterizes with).
+        // A botched regeneration that drops a glyph fails here, loudly.
+        use skrifa::{raw::FontRef, MetadataProvider as _};
+        const SUBSET: &[u8] =
+            include_bytes!("../../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf");
+        let face = FontRef::new(SUBSET).expect("bundled JP subset must parse");
+        let charmap = face.charmap();
+        let ids = [
+            "new",
+            "open",
+            "save",
+            "saveas",
+            "find",
+            "split",
+            "minimap",
+            "wrap",
+            "fold",
+            "linenumbers",
+            "spellcheck",
+        ];
+        for id in ids {
+            let kanji = jp_glyph(id).expect("id has a verified kanji");
+            let ch = kanji.chars().next().unwrap();
+            let gid = charmap.map(ch);
+            assert!(
+                gid.is_some_and(|g| g.to_u32() != 0),
+                "bundled JP subset is missing a glyph for {id} = {kanji:?} \
+                 (regenerate via scripts/generate-jp-kanji-subset.py)"
+            );
+        }
+    }
+
+    #[test]
     fn uncertain_ids_omit_kanji() {
         // Western-metaphor or acronym/loanword actions stay English-only —
         // the canonical kanji is uncertain or contested. They MUST return
@@ -5665,8 +6099,27 @@ mod tab_reorder_tests {
     //! hit-test missed drop targets to the right of the dragged tab), so it is
     //! pinned exhaustively here; [`ScribeApp::move_tab`] is the thin wrapper
     //! that also keeps `active` pointed at the same buffer.
-    use super::{tab_index_after_move, EditorTab, ScribeApp};
+    use super::{fuzzy_move_selection, tab_index_after_move, EditorTab, ScribeApp};
     use scribe_core::Config;
+
+    #[test]
+    fn fuzzy_nav_down_advances_and_saturates_at_last() {
+        assert_eq!(fuzzy_move_selection(0, 3, false, true), 1);
+        assert_eq!(fuzzy_move_selection(2, 3, false, true), 2, "down saturates");
+    }
+
+    #[test]
+    fn fuzzy_nav_up_saturates_at_first() {
+        assert_eq!(fuzzy_move_selection(1, 3, true, false), 0);
+        assert_eq!(fuzzy_move_selection(0, 3, true, false), 0, "up saturates");
+    }
+
+    #[test]
+    fn fuzzy_nav_reclamps_when_results_shrank() {
+        // The query just narrowed the list under a stale selection index.
+        assert_eq!(fuzzy_move_selection(9, 3, false, false), 2);
+        assert_eq!(fuzzy_move_selection(9, 0, false, true), 0, "empty -> 0");
+    }
 
     #[test]
     fn move_is_identity_when_src_equals_target() {
@@ -5973,6 +6426,38 @@ mod e2e {
     }
 
     #[test]
+    fn open_find_bar_suppresses_and_clears_completion_popup() {
+        // #72 regression: a completion popup must not survive (and so cannot
+        // steal ↑↓/Enter) while the find bar owns the keyboard.
+        let mut app = fresh_app();
+        app.find_open = true;
+        app.completion = Some(super::Completion {
+            prefix_start: 0,
+            items: vec!["alpha".into(), "alpine".into()],
+            selected: 0,
+        });
+        assert!(
+            app.modal_owns_keyboard(),
+            "an open find bar must own the keyboard"
+        );
+        let mut h = ui_harness(app);
+        h.run();
+        assert!(
+            h.state().completion.is_none(),
+            "the completion popup must be force-closed while the find bar is open"
+        );
+    }
+
+    #[test]
+    fn editor_owns_keyboard_when_no_modal_open() {
+        let app = fresh_app();
+        assert!(
+            !app.modal_owns_keyboard(),
+            "with no modal open the editor (not a modal) owns the keyboard"
+        );
+    }
+
+    #[test]
     fn toolbar_palette_button_opens_palette() {
         let mut h = ui_harness(fresh_app());
         h.run();
@@ -6068,6 +6553,59 @@ mod e2e {
             h.state().config.editor.show_line_numbers,
             before,
             "clicking the Line numbers checkbox must flip the setting"
+        );
+    }
+
+    #[test]
+    fn plus_button_adds_a_tab() {
+        let mut h = ui_harness(fresh_app());
+        h.run();
+        let before = h.state().tabs.len();
+        h.get_by_label("+").click();
+        h.run();
+        assert_eq!(
+            h.state().tabs.len(),
+            before + 1,
+            "the + button must add a new tab"
+        );
+    }
+
+    #[test]
+    fn pinned_tab_label_carries_pin_glyph() {
+        let pin = egui_phosphor::thin::PUSH_PIN;
+        let pinned = super::tab_display_label("notes.txt", true);
+        assert!(
+            pinned.starts_with(pin),
+            "pinned tab label must lead with the pin glyph, got {pinned:?}"
+        );
+        assert_eq!(super::tab_display_label("notes.txt", false), "notes.txt");
+    }
+
+    #[test]
+    fn follow_os_theme_switches_with_os() {
+        use scribe_core::theme::Appearance;
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.appearance.follow_os_theme = true;
+        cfg.appearance.theme = "wired-noir".to_string(); // a dark brand theme
+        let mut h = ui_harness(ScribeApp::new_test(cfg));
+        // OS reports LIGHT → the app must switch to a light theme.
+        h.ctx.set_theme(egui::Theme::Light);
+        h.run();
+        h.run();
+        assert!(
+            matches!(h.state().theme.appearance, Appearance::Light),
+            "light OS theme must switch the app to a light theme, got {:?}",
+            h.state().theme.appearance
+        );
+        // OS flips to DARK → the app must switch back to a dark theme.
+        h.ctx.set_theme(egui::Theme::Dark);
+        h.run();
+        h.run();
+        assert!(
+            matches!(h.state().theme.appearance, Appearance::Dark),
+            "dark OS theme must switch the app to a dark theme, got {:?}",
+            h.state().theme.appearance
         );
     }
 

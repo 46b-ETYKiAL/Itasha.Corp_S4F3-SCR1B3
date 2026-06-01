@@ -34,6 +34,23 @@ fn open_plugin_manager_id() -> egui::Id {
     egui::Id::new("scr1b3_open_plugin_manager")
 }
 
+/// egui temp-data key holding the selected Settings category. Shared by
+/// [`show`] (read + write each frame) and [`request_category`] (host deep-link
+/// pre-select) so the two never drift apart.
+fn settings_cat_id() -> egui::Id {
+    egui::Id::new("scr1b3_settings_cat")
+}
+
+/// Pre-select which category [`show`] opens on. The host calls this when it
+/// opens Settings from a deep-link affordance (e.g. the status-bar encoding /
+/// language chips that advertise "Settings → Editor"). [`show`] reads the same
+/// temp key on its next frame, so the window opens on `category` instead of the
+/// last-used / default "Appearance". No-op if `category` is not a real section
+/// name — the nav simply falls back to its default selection.
+pub fn request_category(ctx: &egui::Context, category: &str) {
+    ctx.data_mut(|d| d.insert_temp(settings_cat_id(), category.to_string()));
+}
+
 /// Host-side accessor: returns `true` (and clears the flag) when the Plugins
 /// section requested the plugin manager this frame.
 pub fn take_open_plugin_manager_request(ctx: &egui::Context) -> bool {
@@ -105,7 +122,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
     let mut changed = false;
     let mut keep_open = *open;
 
-    let cat_id = egui::Id::new("scr1b3_settings_cat");
+    let cat_id = settings_cat_id();
     let q_id = egui::Id::new("scr1b3_settings_query");
     let mut category = ctx
         .data_mut(|d| d.get_temp::<String>(cat_id))
@@ -188,7 +205,24 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
 /// squished even at the default window size.
 fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -> bool {
     let mut changed = false;
-    let space = |ui: &mut egui::Ui| ui.add_space(10.0);
+    // Roomier vertical rhythm so rows don't feel cramped — egui's default item
+    // spacing (~3px) is what made settings hard to read. Applies to every row.
+    ui.spacing_mut().item_spacing.y = 8.0;
+    let space = |ui: &mut egui::Ui| ui.add_space(12.0);
+    // Sub-group header inside a category page: a little breathing room, a strong
+    // accented label, and a thin rule, so related settings read as a group.
+    let group = |ui: &mut egui::Ui, label: &str| {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(label).strong());
+        ui.separator();
+    };
+    // Category page header: the heading plus a muted one-line description of what
+    // the page covers, so each section is self-explanatory at a glance (#69).
+    let head = |ui: &mut egui::Ui, title: &str, desc: &str| {
+        ui.heading(title);
+        ui.label(egui::RichText::new(desc).weak().small());
+        ui.add_space(2.0);
+    };
     // F-037 — the default config, used by `reset_to_default` for every
     // per-setting ↺ revert button. Cheap to construct once per render.
     let def = Config::default();
@@ -200,7 +234,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         "Appearance",
         &["theme", "follow os", "frameless", "toolbar icons"],
     ) {
-        ui.heading("Appearance");
+        head(
+            ui,
+            "Appearance",
+            "Theme, window chrome, and toolbar look. Changes apply live.",
+        );
         if row_visible(q, "theme") {
             // Phase 17 T17.2: theme picker over the 4 built-ins (wired-noir,
             // phosphor-amber, lain-mauve, ghost-paper) + a free text field for
@@ -342,28 +380,47 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
     // ---- Fonts ----  (no ligatures: egui has no OpenType shaping, so the
     // toggle is intentionally absent rather than shown as a dead control.)
     if section_visible(sel, q, "Fonts", &["size", "line height"]) {
-        ui.heading("Fonts");
+        head(
+            ui,
+            "Fonts",
+            "Editor text size and line spacing. (Ligatures are off — the renderer \
+             does no OpenType shaping.)",
+        );
         if row_visible(q, "editor size") {
             ui.horizontal(|ui| {
+                ui.label("Size")
+                    .on_hover_text("Font size of the editor text, in points.");
+                if ui.small_button("-").on_hover_text("Smaller").clicked() {
+                    config.fonts.editor_size = (config.fonts.editor_size - 1.0).clamp(8.0, 32.0);
+                    changed = true;
+                }
                 changed |= ui
-                    .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0).text("size"))
-                    .on_hover_text("Font size of the editor text, in points.")
+                    .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0))
                     .changed();
+                if ui.small_button("+").on_hover_text("Larger").clicked() {
+                    config.fonts.editor_size = (config.fonts.editor_size + 1.0).clamp(8.0, 32.0);
+                    changed = true;
+                }
                 changed |=
                     reset_to_default(ui, &mut config.fonts.editor_size, &def.fonts.editor_size);
             });
         }
         if row_visible(q, "line height") {
             ui.horizontal(|ui| {
+                ui.label("Line height").on_hover_text(
+                    "Vertical spacing between lines, as a multiple of the font size.",
+                );
+                if ui.small_button("-").on_hover_text("Tighter").clicked() {
+                    config.fonts.line_height = (config.fonts.line_height - 0.1).clamp(1.0, 2.5);
+                    changed = true;
+                }
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5)
-                            .text("line height"),
-                    )
-                    .on_hover_text(
-                        "Vertical spacing between lines, as a multiple of the font size.",
-                    )
+                    .add(egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5))
                     .changed();
+                if ui.small_button("+").on_hover_text("Looser").clicked() {
+                    config.fonts.line_height = (config.fonts.line_height + 0.1).clamp(1.0, 2.5);
+                    changed = true;
+                }
                 changed |=
                     reset_to_default(ui, &mut config.fonts.line_height, &def.fonts.line_height);
             });
@@ -385,10 +442,15 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             "restore session",
         ],
     ) {
-        ui.heading("Editor");
+        head(
+            ui,
+            "Editor",
+            "Indentation, what's shown around the text, the tab bar, and save / \
+             session behaviour.",
+        );
 
         // -- Indentation --
-        ui.label(egui::RichText::new("Indentation").strong());
+        group(ui, "Indentation");
         ui.add_space(4.0);
         if row_visible(q, "tab width") {
             ui.horizontal(|ui| {
@@ -416,7 +478,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Display --
-        ui.label(egui::RichText::new("Display").strong());
+        group(ui, "Display");
         ui.add_space(4.0);
         if row_visible(q, "line numbers") {
             ui.horizontal(|ui| {
@@ -481,7 +543,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Layout --
-        ui.label(egui::RichText::new("Layout").strong());
+        group(ui, "Layout");
         ui.add_space(4.0);
         if row_visible(q, "tab bar position top bottom left right") {
             // T18.4: position the open-tab strip relative to the editor.
@@ -519,6 +581,33 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     ui,
                     &mut config.editor.tab_bar_position,
                     &def.editor.tab_bar_position,
+                );
+            });
+        }
+        if row_visible(q, "side tab orientation vertical horizontal left right") {
+            // #70 — only meaningful when the tab bar is on the Left/Right; the
+            // Top/Bottom positions are always horizontal. Disable (greyed) the
+            // control otherwise so the dependency is obvious rather than silent.
+            let is_side = config.editor.tab_bar_position.is_vertical();
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(is_side, |ui| {
+                    changed |= ui
+                        .checkbox(
+                            &mut config.editor.side_tabs_vertical,
+                            "Side tabs stack vertically",
+                        )
+                        .on_hover_text(
+                            "When the tab bar is on the Left or Right: ON stacks tabs vertically \
+                             (one tab per row — the side-bar default); OFF lays them out \
+                             horizontally, wrapping to new rows. No effect for Top/Bottom \
+                             (always horizontal).",
+                        )
+                        .changed();
+                });
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.side_tabs_vertical,
+                    &def.editor.side_tabs_vertical,
                 );
             });
         }
@@ -571,7 +660,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Save & Session --
-        ui.label(egui::RichText::new("Save & Session").strong());
+        group(ui, "Save & Session");
         ui.add_space(4.0);
         if row_visible(q, "restore session") {
             ui.horizontal(|ui| {
@@ -691,7 +780,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         "Motion",
         &["motion", "animation", "blink", "fade", "cursor"],
     ) {
-        ui.heading("Motion");
+        head(
+            ui,
+            "Motion",
+            "Subtle interface animation. Turn off for a fully static UI.",
+        );
         // Master OFF by default — calm-surface principle (DECISION-2026-005);
         // animation is opt-in so idle frames cost the same as plain egui.
         ui.horizontal(|ui| {
@@ -745,10 +838,14 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         "Window",
         &["mode", "opacity", "tint", "glass", "mica"],
     ) {
-        ui.heading("Window");
+        head(
+            ui,
+            "Window",
+            "Always-on-top, and translucency / glass for the window background.",
+        );
 
         // -- Always on top --
-        ui.label(egui::RichText::new("Always on top").strong());
+        group(ui, "Always on top");
         ui.add_space(4.0);
         // F-035 — always-on-top toggle. Takes effect immediately via the
         // ViewportCommand the app issues when this checkbox flips.
@@ -766,7 +863,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Transparency / glass --
-        ui.label(egui::RichText::new("Transparency / glass").strong());
+        group(ui, "Transparency / glass");
         ui.add_space(4.0);
         // Master on/off switch for the whole transparency system. Off by default:
         // a normal opaque window is fast and never leaves a DWM ghost on close.
@@ -883,7 +980,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             "identifiers",
         ],
     ) {
-        ui.heading("Spellcheck (offline)");
+        head(
+            ui,
+            "Spellcheck (offline)",
+            "Dictionary spellchecking that runs entirely on-device — no network.",
+        );
         ui.horizontal(|ui| {
             changed |= ui
                 .checkbox(&mut config.spellcheck.enabled, "Enable")
@@ -988,7 +1089,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
 
     // ---- Updates ----
     if section_visible(sel, q, "Updates", &["update", "mode", "notify", "auto"]) {
-        ui.heading("Updates (telemetry-free)");
+        head(
+            ui,
+            "Updates (telemetry-free)",
+            "How update checks behave. No usage data ever leaves your machine.",
+        );
         let modes = [
             (UpdateMode::Off, "off"),
             (UpdateMode::Notify, "notify"),
@@ -1065,7 +1170,12 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
 
     // ---- Plugins ----
     if section_visible(sel, q, "Plugins", &["plugin", "mod"]) {
-        ui.heading("Plugins");
+        head(
+            ui,
+            "Plugins",
+            "Enable plugins and open the manager. Plugins are local and \
+             signature-verified.",
+        );
         ui.horizontal(|ui| {
             changed |= ui
                 .checkbox(&mut config.plugins.enabled, "Enable plugin/mod system")
@@ -1129,6 +1239,14 @@ enum ToolbarDrag {
 fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     let mut changed = false;
     ui.heading("Quick-access toolbar");
+    ui.label(
+        egui::RichText::new(
+            "Drag to reorder the toolbar buttons, or add actions from the palette below.",
+        )
+        .weak()
+        .small(),
+    );
+    ui.add_space(2.0);
     ui.label(
         egui::RichText::new(
             "Choose what shows in the top bar. Drag rows to reorder; drag from the \
@@ -1554,6 +1672,40 @@ enum PickerSection {
 }
 
 #[cfg(test)]
+mod deep_link {
+    //! #71 — the status-bar encoding / language chips advertise
+    //! "Settings → Editor"; opening Settings must land on that category, not the
+    //! last-used / default "Appearance". The host calls [`request_category`]
+    //! before flipping the window open; [`show`] reads the SAME temp key on its
+    //! next frame. This pins that both sides agree on the key + value so the
+    //! deep-link can't silently regress to opening on the wrong page.
+    use super::{request_category, settings_cat_id};
+
+    #[test]
+    fn request_category_sets_the_key_show_reads() {
+        let ctx = egui::Context::default();
+        request_category(&ctx, "Editor");
+        let stored = ctx.data_mut(|d| d.get_temp::<String>(settings_cat_id()));
+        assert_eq!(
+            stored.as_deref(),
+            Some("Editor"),
+            "request_category must write the exact temp key show() reads"
+        );
+    }
+
+    #[test]
+    fn show_defaults_to_appearance_when_no_request_made() {
+        // Mirror show()'s own read so the default contract is pinned: absent a
+        // deep-link, the window opens on Appearance.
+        let ctx = egui::Context::default();
+        let stored = ctx
+            .data_mut(|d| d.get_temp::<String>(settings_cat_id()))
+            .unwrap_or_else(|| "Appearance".to_string());
+        assert_eq!(stored, "Appearance");
+    }
+}
+
+#[cfg(test)]
 mod wiring_guard {
     //! Proof that every control exposed in the Settings window is actually
     //! WIRED to runtime behavior — i.e. its config field is read by code outside
@@ -1629,6 +1781,7 @@ mod wiring_guard {
         "editor.show_minimap",
         "editor.render_whitespace",
         "editor.tab_bar_position",
+        "editor.side_tabs_vertical",
         "editor.restore_session",
         "editor.grid_enabled",
         "editor.experimental_rope_editor",

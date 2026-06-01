@@ -29,6 +29,10 @@ window-vibrancy = "0.7"                        # OS glass/acrylic/mica/vibrancy
 
 [dev-dependencies]
 tempfile = "3"
+# Glyph-coverage assertion for the bundled Noto Sans JP kanji subset. Same
+# font crate egui 0.34 (epaint/skrifa) rasterizes with, so the test verifies
+# coverage against the exact reader the app uses. Pinned to the in-tree version.
+skrifa = "=0.40.0"
 toml = { workspace = true }                    # Tree<Pane> round-trip test (Phase 18 T18.2)
 minisign = "0.7"                               # sign in plugin-manager verify tests (round-trip only)
 # Official egui UI-interaction test harness: drives the real render loop and

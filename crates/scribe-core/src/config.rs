@@ -156,6 +156,12 @@ pub struct EditorConfig {
     /// Where the open-tab strip lives: top (default, inline with the toolbar),
     /// bottom (status-side), left, or right. Phase 18 T18.4.
     pub tab_bar_position: TabBarPosition,
+    /// When the tab bar is on the Left or Right, lay the tabs out as a vertical
+    /// stack (one full-width tab per row — the side-bar default). Set false to
+    /// lay them out horizontally (wrapping) inside the side panel instead. Has
+    /// no effect for the Top/Bottom positions (those are always horizontal).
+    #[serde(default = "default_true")]
+    pub side_tabs_vertical: bool,
     /// Phase 18 T18.2 — enable the multi-note grid. When ON, the central
     /// editor surface renders every open tab as a movable, resizable pane
     /// inside an egui_tiles tree (up to 6 panes). Default OFF — the
@@ -283,6 +289,7 @@ impl Default for EditorConfig {
             auto_save: false,
             restore_session: true,
             tab_bar_position: TabBarPosition::Top,
+            side_tabs_vertical: true,
             grid_enabled: false,
             recent_files: Vec::new(),
             first_run_completed: false,
@@ -626,6 +633,21 @@ mod tests {
         assert!(!TabBarPosition::Bottom.is_vertical());
         assert!(TabBarPosition::Left.is_vertical());
         assert!(TabBarPosition::Right.is_vertical());
+        // The side-tab orientation override defaults to the vertical stack so
+        // existing side-bar users see no layout change.
+        assert!(EditorConfig::default().side_tabs_vertical);
+    }
+
+    #[test]
+    fn side_tabs_vertical_round_trips_and_back_fills_true_when_absent() {
+        // A config written before the field existed must deserialize with the
+        // field defaulting to true (the prior behaviour), not false.
+        let older = "tab_width = 2\n";
+        let cfg: EditorConfig = toml::from_str(older).unwrap();
+        assert!(cfg.side_tabs_vertical, "absent field back-fills to true");
+        let explicit = "tab_width = 2\nside_tabs_vertical = false\n";
+        let cfg2: EditorConfig = toml::from_str(explicit).unwrap();
+        assert!(!cfg2.side_tabs_vertical);
     }
 
     #[test]
