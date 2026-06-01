@@ -1006,12 +1006,16 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         });
         ui.add_enabled_ui(config.spellcheck.enabled, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Language")
-                    .on_hover_text("Dictionary language code to spell-check against (e.g. en_US).");
+                ui.label("Language").on_hover_text(
+                    "Dictionary language code (e.g. en_US). en_US is built in; for any other \
+                     code, drop a matching <code>.txt word list in the config `dict/` folder.",
+                );
                 changed |= ui
                     .text_edit_singleline(&mut config.spellcheck.language)
                     .on_hover_text(
-                        "Dictionary language code, such as en_US or de_DE, used for spell checking.",
+                        "Dictionary language code. en_US ships built in. For another language, \
+                         place `<code>.txt` (one word per line) in the `dict/` folder of your \
+                         config directory; it is loaded automatically.",
                     )
                     .changed();
                 changed |= reset_to_default(
@@ -1056,6 +1060,38 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     ui,
                     &mut config.spellcheck.check_identifiers,
                     &def.spellcheck.check_identifiers,
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Custom dictionary").on_hover_text(
+                    "Optional path to your own word list; every word in it is always treated \
+                     as correct (layered on top of the base dictionary).",
+                );
+                let mut s = config
+                    .spellcheck
+                    .custom_dict_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                if ui
+                    .text_edit_singleline(&mut s)
+                    .on_hover_text(
+                        "Absolute path to a newline-separated .txt word list (one word per \
+                         line). Leave empty for none.",
+                    )
+                    .changed()
+                {
+                    config.spellcheck.custom_dict_path = if s.trim().is_empty() {
+                        None
+                    } else {
+                        Some(std::path::PathBuf::from(s.trim()))
+                    };
+                    changed = true;
+                }
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.spellcheck.custom_dict_path,
+                    &def.spellcheck.custom_dict_path,
                 );
             });
         });
@@ -1719,6 +1755,11 @@ mod wiring_guard {
         "window.tint",
         "window.tint_strength",
         "spellcheck.enabled",
+        "spellcheck.language",
+        "spellcheck.check_comments",
+        "spellcheck.check_strings",
+        "spellcheck.check_identifiers",
+        "spellcheck.custom_dict_path",
         "plugins.enabled",
         "toolbar.button_size_px",
         "toolbar.button_spacing_px",
@@ -1731,10 +1772,6 @@ mod wiring_guard {
     /// Controls audited as DEAD (no runtime consumer yet). Shrinks as phases wire
     /// them; an entry here that gains a consumer fails the guard (move it to WIRED).
     const KNOWN_DEAD: &[&str] = &[
-        "spellcheck.language",
-        "spellcheck.check_comments",
-        "spellcheck.check_strings",
-        "spellcheck.check_identifiers",
         "motion.enabled",
         "motion.intensity",
         "motion.respect_reduced_motion",

@@ -84,6 +84,29 @@ pub(crate) fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Build the spell engine for the current `spellcheck` config — fully offline.
+/// The base dictionary is a user-supplied `<config_dir>/dict/<language>.txt`
+/// word list when present (so `spellcheck.language` is meaningful — drop a word
+/// list to check another language), otherwise the compiled-in en_US list so the
+/// default needs zero setup. Any `spellcheck.custom_dict_path` file is layered
+/// on top as extra accepted words.
+fn build_spell_engine(config: &Config) -> HashSetEngine {
+    let mut engine = Config::config_dir()
+        .map(|d| {
+            d.join("dict")
+                .join(format!("{}.txt", config.spellcheck.language))
+        })
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|list| HashSetEngine::from_word_list(&list))
+        .unwrap_or_else(HashSetEngine::bundled_en_us);
+    if let Some(path) = &config.spellcheck.custom_dict_path {
+        if let Ok(list) = std::fs::read_to_string(path) {
+            engine.load_user_words(&list);
+        }
+    }
+    engine
+}
+
 /// What the once-per-launch update reminder should do, given the user's mode +
 /// scheduling state. Pure (no I/O), so it is unit-tested directly.
 #[derive(Debug, PartialEq, Eq)]
@@ -694,6 +717,9 @@ impl ScribeApp {
             None
         };
 
+        // Built from `config` before the struct literal moves `config` in.
+        let spell = build_spell_engine(&config);
+
         Self {
             config,
             theme,
@@ -718,7 +744,7 @@ impl ScribeApp {
             toast,
             plugins,
             plugin_cmds,
-            spell: HashSetEngine::bundled_en_us(),
+            spell,
             palette_open: false,
             palette_query: String::new(),
             settings_open: false,
@@ -1281,7 +1307,30 @@ impl ScribeApp {
         let Some(tab) = self.tabs.get(active) else {
             return 0;
         };
-        spell::check_text(&self.spell, &tab.text, true).len()
+        // Scope the check to the requested token classes (comments / strings /
+        // identifiers) using the highlighter's classified spans, so the three
+        // Settings toggles actually constrain what gets flagged. With all three
+        // off, or no derivable syntax, `check_text_scoped` falls back to the
+        // whole-text behavior (no regression).
+        let scope = spell::SpellScope::new(
+            self.config.spellcheck.check_comments,
+            self.config.spellcheck.check_strings,
+            self.config.spellcheck.check_identifiers,
+        );
+        let ext = tab.doc.language_hint();
+        let spans = self.hl.classify_document(&tab.text, ext.as_deref());
+        // Scoping (comments / strings / identifiers) is a CODE concept. When the
+        // buffer has no code structure — an untitled note, plain text, markdown —
+        // those classes don't apply, so check the whole document as prose. Only
+        // when there are real comment/string/identifier spans do the toggles
+        // constrain the check.
+        let has_code_structure = spans
+            .iter()
+            .any(|s| !matches!(s.class, spell::SpanClass::Other));
+        if !has_code_structure {
+            return spell::check_text(&self.spell, &tab.text, true).len();
+        }
+        spell::check_text_scoped(&self.spell, &tab.text, &spans, scope).len()
     }
 
     /// Persist the current config to the user TOML file (creating the config
@@ -1323,6 +1372,13 @@ impl ScribeApp {
             }
             UpdateReminder::Skip => {}
         }
+    }
+
+    /// Rebuild the spell engine from the current config — called after the user
+    /// changes the spellcheck language or custom dictionary in Settings so the
+    /// new dictionary takes effect without a restart.
+    fn reload_spell_engine(&mut self) {
+        self.spell = build_spell_engine(&self.config);
     }
 
     fn save_config(&mut self) {
@@ -3990,6 +4046,8 @@ impl ScribeApp {
             }
             if changed {
                 self.reapply_theme(ctx);
+                // Spellcheck language / custom-dict edits take effect live.
+                self.reload_spell_engine();
                 // F-035 — push the always-on-top flag to the viewport
                 // immediately so the toggle is live (no restart required).
                 let level = if self.config.window.always_on_top {
