@@ -633,6 +633,26 @@ impl ScribeApp {
         if let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
             monospace.insert(0, "JetBrainsMono".to_owned());
         }
+        // CJK fallback so the toolbar's "instrument plate" kanji render real
+        // glyphs instead of tofu boxes — neither JetBrains Mono nor egui's Hack
+        // covers CJK. This is a hand-subset of Noto Sans JP (OFL-1.1, see
+        // assets/fonts/NotoSansJP/OFL.txt) pinned to Regular and containing ONLY
+        // the 11 kanji `jp_glyph()` uses (~4.5 KB; regenerate via
+        // scripts/generate-jp-kanji-subset.py). Appended at the END of both
+        // families so it ONLY fills glyphs the primary fonts lack.
+        const NOTO_SANS_JP_SUBSET: &[u8] =
+            include_bytes!("../../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf");
+        fonts.font_data.insert(
+            "NotoSansJP-Subset".to_owned(),
+            std::sync::Arc::new(egui::FontData::from_static(NOTO_SANS_JP_SUBSET)),
+        );
+        for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("NotoSansJP-Subset".to_owned());
+        }
         cc.egui_ctx.set_fonts(fonts);
         // Follow the OS theme preference so `ctx.theme()` reflects the live OS
         // light/dark setting (egui-winit updates it on OS theme-change events).
@@ -5999,6 +6019,43 @@ mod jp_glyph_tests {
         assert_eq!(jp_glyph("fold"), Some("畳"));
         assert_eq!(jp_glyph("linenumbers"), Some("番"));
         assert_eq!(jp_glyph("spellcheck"), Some("綴"));
+    }
+
+    #[test]
+    fn bundled_jp_subset_covers_every_toolbar_kanji() {
+        // #56 — the toolbar kanji rendered as tofu because no font in the stack
+        // covered CJK. We bundle a Noto Sans JP subset; this asserts that subset
+        // actually contains a glyph for every kanji `jp_glyph` can emit, read
+        // through skrifa (the same font crate epaint/egui 0.34 rasterizes with).
+        // A botched regeneration that drops a glyph fails here, loudly.
+        use skrifa::{raw::FontRef, MetadataProvider as _};
+        const SUBSET: &[u8] =
+            include_bytes!("../../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf");
+        let face = FontRef::new(SUBSET).expect("bundled JP subset must parse");
+        let charmap = face.charmap();
+        let ids = [
+            "new",
+            "open",
+            "save",
+            "saveas",
+            "find",
+            "split",
+            "minimap",
+            "wrap",
+            "fold",
+            "linenumbers",
+            "spellcheck",
+        ];
+        for id in ids {
+            let kanji = jp_glyph(id).expect("id has a verified kanji");
+            let ch = kanji.chars().next().unwrap();
+            let gid = charmap.map(ch);
+            assert!(
+                gid.is_some_and(|g| g.to_u32() != 0),
+                "bundled JP subset is missing a glyph for {id} = {kanji:?} \
+                 (regenerate via scripts/generate-jp-kanji-subset.py)"
+            );
+        }
     }
 
     #[test]
