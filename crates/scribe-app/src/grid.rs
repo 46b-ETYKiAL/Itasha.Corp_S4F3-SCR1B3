@@ -91,10 +91,15 @@ pub fn count_panes(tree: &egui_tiles::Tree<Pane>) -> usize {
         .count()
 }
 
-/// Build a default grid layout from a list of doc ids. Every doc becomes
-/// a leaf pane inside a single tab container — visually identical to the
-/// existing single-pane mode until the user splits. The id-stack key
-/// `"scribe-grid"` is fixed so persistence is stable across versions.
+/// Build a default grid layout from a list of doc ids. Every doc becomes a
+/// leaf pane inside a single **grid** container, so the open documents render
+/// side-by-side (egui_tiles auto-arranges rows×columns and lets the user drag
+/// to rearrange). Crucially this is NOT a *tab* container: a tab container
+/// paints its own tab strip inside the editor area, which is the "second row
+/// of tabs" the user reported. A grid container has no tab strip — the top-bar
+/// tab list stays the single source of truth for which documents are open, and
+/// the grid just shows them all at once. The id-stack key `"scribe-grid"` is
+/// fixed so persistence is stable across versions.
 pub fn build_default_grid(docs: &[DocId]) -> egui_tiles::Tree<Pane> {
     let mut tiles = egui_tiles::Tiles::default();
     let pane_ids: Vec<egui_tiles::TileId> = docs
@@ -104,8 +109,21 @@ pub fn build_default_grid(docs: &[DocId]) -> egui_tiles::Tree<Pane> {
     if pane_ids.is_empty() {
         return egui_tiles::Tree::empty("scribe-grid");
     }
-    let root = tiles.insert_tab_tile(pane_ids);
+    let root = tiles.insert_grid_tile(pane_ids);
     egui_tiles::Tree::new("scribe-grid", root, tiles)
+}
+
+/// The set of doc ids currently represented by a pane in the tree. Used to
+/// reconcile the grid against the open-tab set: a tab with no pane needs one
+/// added; a pane whose tab was closed is pruned via `retain_pane`.
+pub fn pane_doc_ids(tree: &egui_tiles::Tree<Pane>) -> std::collections::BTreeSet<DocId> {
+    tree.tiles
+        .iter()
+        .filter_map(|(_, tile)| match tile {
+            egui_tiles::Tile::Pane(p) => Some(p.doc_id),
+            _ => None,
+        })
+        .collect()
 }
 
 // ---- Behavior<Pane> implementation ----
@@ -132,9 +150,14 @@ pub struct AppGridBehavior<'a> {
     /// supplied `Ui`. Returns true if the pane reported it wants to be
     /// dragged this frame (which the host can use to start a drag).
     pub render_body: &'a mut dyn FnMut(&mut egui::Ui, DocId) -> bool,
-    /// Drained by the host after `tree.ui(...)` returns: doc ids the
-    /// pane chrome (close button etc.) requested be closed this frame.
-    pub close_requests: &'a mut Vec<DocId>,
+    /// Shared close-request buffer. The pane chrome (the `✕` button drawn by
+    /// `render_body`) pushes a doc id here, and `retain_pane` reads it back in
+    /// the SAME frame so egui_tiles prunes exactly that pane while leaving the
+    /// rest of the user's arrangement intact — no full-tree rebuild. A
+    /// `RefCell` (not `&mut Vec`) because `render_body` and `retain_pane` both
+    /// need to touch it during one `tree.ui()` call. Drained by the host
+    /// afterwards to drop the matching tabs.
+    pub close_requests: &'a std::cell::RefCell<Vec<DocId>>,
 }
 
 impl<'a> egui_tiles::Behavior<Pane> for AppGridBehavior<'a> {
@@ -173,7 +196,7 @@ impl<'a> egui_tiles::Behavior<Pane> for AppGridBehavior<'a> {
     }
 
     fn retain_pane(&mut self, pane: &Pane) -> bool {
-        !self.close_requests.contains(&pane.doc_id)
+        !self.close_requests.borrow().contains(&pane.doc_id)
     }
 }
 

@@ -36,6 +36,111 @@ fn tint_rgba(hex: &str, alpha: u8) -> Option<(u8, u8, u8, u8)> {
     Rgba::parse_hex(hex).map(|c| (c.r, c.g, c.b, alpha))
 }
 
+/// Drag-and-drop payload for tab reordering: the source tab's index. Stored in
+/// egui's `DragAndDrop` context while a tab is being dragged and read back by
+/// the drop zone of whichever tab the pointer releases over.
+#[derive(Clone, Copy)]
+struct TabDrag(usize);
+
+/// Pure index remap for a drag-reorder that moves the element at `src` so it
+/// takes original position `target`'s slot — the drop-on-tab, swap-style UX
+/// (drop tab A onto tab B and A lands where B was, the rest shift to fill).
+/// Models `Vec::remove(src)` followed by `Vec::insert(target, _)` and returns
+/// the new index of whatever element currently sits at `idx`. Factored out and
+/// unit-tested (see `tab_reorder_tests`) because the index arithmetic is the
+/// part that historically went wrong — the old hand-rolled hit-test scanned a
+/// partially-built response vector and silently missed drop targets to the
+/// right of the dragged tab.
+fn tab_index_after_move(src: usize, target: usize, idx: usize) -> usize {
+    if src == target {
+        return idx;
+    }
+    if idx == src {
+        return target;
+    }
+    // Where `idx` sits after `remove(src)`, then after `insert(target, _)`.
+    let a1 = if idx < src { idx } else { idx - 1 };
+    if a1 >= target {
+        a1 + 1
+    } else {
+        a1
+    }
+}
+
+/// Public Releases page for the manual "Check for updates" action. Opening this
+/// in the user's browser is the entire network surface of the update feature —
+/// there is no background HTTP, no version beacon, no telemetry (the bundled
+/// build ships no HTTP client by design). Same host as the installer's
+/// `ARPHELPLINK` so it is auditable against the wix manifest.
+pub(crate) const RELEASES_URL: &str =
+    "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/releases";
+
+/// Current wall-clock time in unix seconds, saturating to 0 before the epoch
+/// (a backwards-set clock yields 0 rather than panicking).
+pub(crate) fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Build the spell engine for the current `spellcheck` config — fully offline.
+/// The base dictionary is a user-supplied `<config_dir>/dict/<language>.txt`
+/// word list when present (so `spellcheck.language` is meaningful — drop a word
+/// list to check another language), otherwise the compiled-in en_US list so the
+/// default needs zero setup. Any `spellcheck.custom_dict_path` file is layered
+/// on top as extra accepted words.
+fn build_spell_engine(config: &Config) -> HashSetEngine {
+    let mut engine = Config::config_dir()
+        .map(|d| {
+            d.join("dict")
+                .join(format!("{}.txt", config.spellcheck.language))
+        })
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|list| HashSetEngine::from_word_list(&list))
+        .unwrap_or_else(HashSetEngine::bundled_en_us);
+    if let Some(path) = &config.spellcheck.custom_dict_path {
+        if let Ok(list) = std::fs::read_to_string(path) {
+            engine.load_user_words(&list);
+        }
+    }
+    engine
+}
+
+/// What the once-per-launch update reminder should do, given the user's mode +
+/// scheduling state. Pure (no I/O), so it is unit-tested directly.
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateReminder {
+    /// Do nothing — reminders are off, or the interval has not elapsed.
+    Skip,
+    /// Surface a passive hint toast pointing at the manual check.
+    Notify,
+    /// Open the releases page immediately (the proactive `auto` mode).
+    OpenReleases,
+}
+
+/// Decide the reminder action without performing any side effects. `Off` never
+/// reminds; otherwise [`scribe_core::update::is_check_due`] gates on the
+/// interval, and `auto` escalates from a toast to opening the releases page.
+fn update_reminder_action(
+    mode: scribe_core::config::UpdateMode,
+    last_check_unix: Option<u64>,
+    interval_hours: u64,
+    now: u64,
+) -> UpdateReminder {
+    use scribe_core::config::UpdateMode;
+    if mode == UpdateMode::Off {
+        return UpdateReminder::Skip;
+    }
+    if !scribe_core::update::is_check_due(last_check_unix, interval_hours, now) {
+        return UpdateReminder::Skip;
+    }
+    match mode {
+        UpdateMode::Auto => UpdateReminder::OpenReleases,
+        _ => UpdateReminder::Notify,
+    }
+}
+
 /// Apply the OS window effect for the chosen mode (best-effort, graceful on
 /// unsupported platforms). Windows: acrylic/mica; macOS: vibrancy; elsewhere the
 /// portable transparent surface + tint overlay carry the look.
@@ -294,6 +399,13 @@ impl EditorTab {
 pub struct ScribeApp {
     config: Config,
     theme: Theme,
+    /// Last OS-reported system theme (dark/light) we acted on, so the
+    /// `appearance.follow_os_theme` watcher only re-applies on an actual change
+    /// rather than every frame. `None` until the first frame reports one.
+    last_os_theme: Option<egui::Theme>,
+    /// Set once we have run the per-launch update-due check (so it fires at most
+    /// once per session, on the first frame).
+    did_update_check: bool,
     hl: Highlighter,
     tabs: Vec<EditorTab>,
     active: usize,
@@ -441,11 +553,6 @@ pub struct ScribeApp {
     grid_tree: Option<egui_tiles::Tree<crate::grid::Pane>>,
     next_doc_id: crate::grid::DocIdAllocator,
     grid_close_queue: Vec<crate::grid::DocId>,
-    /// Index of the tab currently being dragged in the tab strip, or `None`
-    /// if no tab is mid-drag. Drives the click_and_drag swap-on-release
-    /// pattern in `draw_tab_strip` (F-001 fix from the 2026-05-29 overlooked-
-    /// surfaces audit).
-    dragged_tab: Option<usize>,
     /// Last-frame cursor position in the active buffer, expressed as
     /// `(1-based line, 1-based column)`. Sampled from the central panel's
     /// `TextEditOutput::cursor_range.primary` on every paint and rendered
@@ -610,9 +717,14 @@ impl ScribeApp {
             None
         };
 
+        // Built from `config` before the struct literal moves `config` in.
+        let spell = build_spell_engine(&config);
+
         Self {
             config,
             theme,
+            last_os_theme: None,
+            did_update_check: false,
             hl: Highlighter::new(),
             active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
@@ -632,7 +744,7 @@ impl ScribeApp {
             toast,
             plugins,
             plugin_cmds,
-            spell: HashSetEngine::bundled_en_us(),
+            spell,
             palette_open: false,
             palette_query: String::new(),
             settings_open: false,
@@ -678,7 +790,6 @@ impl ScribeApp {
             grid_tree: None,
             next_doc_id: crate::grid::DocIdAllocator::default(),
             grid_close_queue: Vec::new(),
-            dragged_tab: None,
             last_cursor_line_col: None,
             last_selection_chars: 0,
         }
@@ -698,15 +809,23 @@ impl ScribeApp {
         let Some(mut tree) = self.grid_tree.take() else {
             return;
         };
-        // Reset the per-frame close queue; the behavior may push into it.
-        self.grid_close_queue.clear();
-        // Use a local close-queue inside the closure so the borrow
-        // checker doesn't see `&mut self.grid_close_queue` twice (once
-        // via the body closure capture, once via the behavior field).
-        let mut close_queue: Vec<crate::grid::DocId> = Vec::new();
+        let line_height = self.config.fonts.line_height;
+        // Disjoint-field borrows captured as locals BEFORE the central-panel
+        // closure (which mutably borrows `self.tabs`). The highlighter + its
+        // cache are different fields than `tabs`, so the immutable borrows here
+        // and the closure's `&mut self.tabs` coexist under disjoint closure
+        // capture.
+        let hl = &self.hl;
+        let hl_cache = &self.hl_cache;
+        // Per-frame shared close buffer. The pane `✕` button writes here and
+        // `AppGridBehavior::retain_pane` reads it back during the SAME
+        // `tree.ui()` call, so egui_tiles prunes exactly the closed pane and
+        // preserves the rest of the user's arrangement (no full rebuild).
+        let closes: std::cell::RefCell<Vec<crate::grid::DocId>> =
+            std::cell::RefCell::new(Vec::new());
         egui::CentralPanel::default().show(ctx, |ui| {
             let tabs = &mut self.tabs;
-            let body_close_queue = &mut close_queue;
+            let render_closes = &closes;
             let mut render_body = |ui: &mut egui::Ui, doc_id: crate::grid::DocId| -> bool {
                 let Some(idx) = tabs.iter().position(|t| t.doc_id == doc_id) else {
                     ui.weak("(document closed)");
@@ -715,16 +834,12 @@ impl ScribeApp {
                 let mut drag_started = false;
                 ui.horizontal(|ui| {
                     if ui.small_button("✕").on_hover_text("Close pane").clicked() {
-                        body_close_queue.push(doc_id);
+                        render_closes.borrow_mut().push(doc_id);
                     }
-                    // F-002 fix from docs/audits/overlooked-surfaces-2026-05-29.md:
-                    // the previous code used `is_pointer_button_down_on()` which
-                    // returns `true` every frame the button is held — egui_tiles
-                    // expects `UiResponse::DragStarted` to fire ONCE on drag
-                    // start. Re-firing every frame put the tile tree's drag
-                    // state into a confused "constantly starting" loop and the
-                    // pane never actually moved. The fix uses `drag_started()`
-                    // on a click_and_drag Sense.
+                    // `drag_started()` on a click_and_drag Sense fires ONCE on
+                    // drag start (egui_tiles expects a single `DragStarted`);
+                    // an "is button held" check would re-fire every frame and
+                    // wedge the tile tree's drag state.
                     let handle = ui
                         .small_button("⠿")
                         .on_hover_text("Drag to rearrange")
@@ -733,55 +848,61 @@ impl ScribeApp {
                         drag_started = true;
                     }
                 });
+                // Per-pane syntax highlighting via the same memoizing layouter
+                // the single-pane + split paths use, keyed on THIS pane's own
+                // language hint — so each pane highlights for its own file type
+                // instead of the old plain-text downgrade. The shared single-
+                // slot `hl_cache` recomputes as focus moves between panes, which
+                // is fine at the 6-pane ceiling.
+                let ext = tabs[idx].doc.language_hint();
+                let mut layouter =
+                    make_layouter(hl, hl_cache, ext.as_deref(), font.clone(), line_height);
                 egui::ScrollArea::both()
                     .id_salt(("scr1b3-grid-pane", doc_id.raw()))
                     .show(ui, |ui| {
                         let editor = egui::TextEdit::multiline(&mut tabs[idx].text)
                             .code_editor()
-                            .font(font.clone())
                             .desired_width(f32::INFINITY)
-                            .desired_rows(20);
+                            .desired_rows(20)
+                            .layouter(&mut layouter);
                         editor.show(ui);
                     });
                 drag_started
             };
-            // egui_tiles' `retain_pane` is consulted on every paint; we
-            // wire a small empty vec so the behavior owns its own slot
-            // and the body's close_queue is the authoritative buffer
-            // we drain after the frame.
-            let mut behavior_close_requests: Vec<crate::grid::DocId> = Vec::new();
             let mut behavior = crate::grid::AppGridBehavior {
                 titles: &titles,
                 render_body: &mut render_body,
-                close_requests: &mut behavior_close_requests,
+                close_requests: &closes,
             };
             tree.ui(&mut behavior, ui);
         });
-        self.grid_close_queue.append(&mut close_queue);
         // Phase 18 T18.2 — 6-pane cap. Reads the grid storage (NOT the
-        // currently-visible tabs) and toasts when the user splits past
-        // the ceiling. The full undo-snapshot pattern from the dossier
-        // lands in a follow-up; the MVP here just warns + caps the
-        // count by capping the tab vec so the next layout-build picks
-        // up the right shape.
+        // currently-visible tabs) and toasts when the user splits past the
+        // ceiling.
         if crate::grid::count_panes(&tree) > crate::grid::MAX_PANES {
             self.toast = Some(format!(
                 "Pane limit reached ({}). Close a pane before opening more.",
                 crate::grid::MAX_PANES
             ));
         }
-        // After the frame: if the user closed any panes via the chrome,
-        // we drop those tabs as well. The simplest cleanup is to remove
-        // the tabs matching each close request; the tree itself prunes
-        // empty parents via simplification on its next paint.
-        if !self.grid_close_queue.is_empty() {
-            for doc_id in self.grid_close_queue.drain(..).collect::<Vec<_>>() {
+        // Drop the tabs the user closed via the pane chrome. `retain_pane`
+        // already pruned the matching pane(s) during the frame, so here we only
+        // remove the backing tabs — the surviving panes keep their positions.
+        let to_close = closes.into_inner();
+        if !to_close.is_empty() {
+            for doc_id in to_close {
                 self.tabs.retain(|t| t.doc_id != doc_id);
             }
             if self.tabs.is_empty() {
                 self.tabs.push(EditorTab::scratch());
             }
-            // Re-sync the tree to the surviving doc set.
+        }
+        // Reconcile additions: a tab opened while the grid is live has no pane
+        // yet. Rebuild ONLY when the doc set actually differs from the pane set,
+        // so steady-state editing and drag-rearranging never reset the layout.
+        let want: std::collections::BTreeSet<crate::grid::DocId> =
+            self.tabs.iter().map(|t| t.doc_id).collect();
+        if want != crate::grid::pane_doc_ids(&tree) {
             let docs: Vec<crate::grid::DocId> = self.tabs.iter().map(|t| t.doc_id).collect();
             tree = crate::grid::build_default_grid(&docs);
         }
@@ -906,10 +1027,62 @@ impl ScribeApp {
         v
     }
 
+    /// Resolve which theme name to actually load, honoring
+    /// `appearance.follow_os_theme`. When that is on and the OS reports its
+    /// theme, the OS decides light vs dark: a light OS → the bundled light
+    /// theme (`ghost-paper`); a dark OS → the user's chosen theme if it is
+    /// itself dark, otherwise the default dark theme (`wired-noir`). When the
+    /// toggle is off, or the OS theme is unknown, the user's chosen theme wins.
+    fn effective_theme_name(&self, os_theme: Option<egui::Theme>) -> String {
+        if self.config.appearance.follow_os_theme {
+            match os_theme {
+                Some(egui::Theme::Light) => return "ghost-paper".to_string(),
+                Some(egui::Theme::Dark) => {
+                    let chosen = load_theme(&self.config.appearance.theme);
+                    return if matches!(chosen.appearance, scribe_core::theme::Appearance::Dark) {
+                        self.config.appearance.theme.clone()
+                    } else {
+                        "wired-noir".to_string()
+                    };
+                }
+                None => {}
+            }
+        }
+        self.config.appearance.theme.clone()
+    }
+
     /// Apply the current theme to the egui context (after a theme/config change).
+    /// Reads the OS theme from `ctx` so a manual theme change while
+    /// `follow_os_theme` is on still resolves through [`Self::effective_theme_name`].
     fn reapply_theme(&mut self, ctx: &egui::Context) {
-        self.theme = load_theme(&self.config.appearance.theme);
+        let os_theme = ctx.input(|i| i.raw.system_theme);
+        self.last_os_theme = os_theme;
+        self.theme = load_theme(&self.effective_theme_name(os_theme));
         ctx.set_visuals(self.current_visuals());
+        // `set_visuals` resets the caret style, so re-apply motion after it.
+        self.apply_motion_style(ctx);
+    }
+
+    /// Push the `motion` preferences into egui's global style. Motion off zeroes
+    /// the animation time (instant transitions, no hover fades — idle frames
+    /// cost the same as plain egui) and stops the caret blinking; otherwise the
+    /// intensity scales egui's default animation time. This is the whole Motion
+    /// feature: only effects egui drives natively are exposed, so there are no
+    /// dead per-effect toggles.
+    fn apply_motion_style(&self, ctx: &egui::Context) {
+        // egui's stock animation time is 1/12 s; scale it by intensity, or zero
+        // it when motion is disabled.
+        const EGUI_DEFAULT_ANIMATION_TIME: f32 = 1.0 / 12.0;
+        let anim = if self.config.motion.enabled {
+            EGUI_DEFAULT_ANIMATION_TIME * self.config.motion.clamped_intensity()
+        } else {
+            0.0
+        };
+        let blink = self.config.motion.enabled && self.config.motion.cursor_blink;
+        ctx.style_mut(|s| {
+            s.animation_time = anim;
+            s.visuals.text_cursor.blink = blink;
+        });
     }
 
     /// Replace the active editor's selection (or insert at the caret) with
@@ -955,20 +1128,22 @@ impl ScribeApp {
         save_cfg: &mut bool,
         start_lsp: &mut bool,
     ) {
-        // Phase 16 T16.3: every toolbar label routes through `toolbar_widget(id, icons, jp)`
+        // Phase 16 T16.3: every toolbar label routes through `toolbar_widget(id, icons, jp, size)`
         // so flipping `appearance.toolbar_icons` swaps every entry between its text
         // form and its Phosphor (Thin) glyph in one place. Phase 17 T17.5: the
         // same helper also appends a verified-canonical kanji "instrument plate"
         // when `appearance.jp_glyph_labels` is on (English-redundant, dimmed, smaller).
         let icons = self.config.appearance.toolbar_icons;
         let jp = self.config.appearance.jp_glyph_labels;
+        // Phase 18 T18.5: the icon-size slider drives every toolbar glyph/label.
+        let size = self.config.toolbar.clamped_icon_size();
         match id {
             "sep" => {
                 ui.separator();
             }
             "new" => {
                 if ui
-                    .button(toolbar_widget("new", icons, jp))
+                    .button(toolbar_widget("new", icons, jp, size))
                     .on_hover_text("New file (Ctrl+N)")
                     .clicked()
                 {
@@ -977,7 +1152,7 @@ impl ScribeApp {
             }
             "open" => {
                 if ui
-                    .button(toolbar_widget("open", icons, jp))
+                    .button(toolbar_widget("open", icons, jp, size))
                     .on_hover_text("Open file (Ctrl+O)")
                     .clicked()
                 {
@@ -986,7 +1161,7 @@ impl ScribeApp {
             }
             "openfolder" => {
                 if ui
-                    .button(toolbar_widget("openfolder", icons, jp))
+                    .button(toolbar_widget("openfolder", icons, jp, size))
                     .on_hover_text("Open folder")
                     .clicked()
                 {
@@ -995,7 +1170,7 @@ impl ScribeApp {
             }
             "save" => {
                 if ui
-                    .button(toolbar_widget("save", icons, jp))
+                    .button(toolbar_widget("save", icons, jp, size))
                     .on_hover_text("Save (Ctrl+S)")
                     .clicked()
                 {
@@ -1004,7 +1179,7 @@ impl ScribeApp {
             }
             "saveas" => {
                 if ui
-                    .button(toolbar_widget("saveas", icons, jp))
+                    .button(toolbar_widget("saveas", icons, jp, size))
                     .on_hover_text("Save As…")
                     .clicked()
                 {
@@ -1013,7 +1188,7 @@ impl ScribeApp {
             }
             "find" => {
                 if ui
-                    .button(toolbar_widget("find", icons, jp))
+                    .button(toolbar_widget("find", icons, jp, size))
                     .on_hover_text("Find (Ctrl+F)")
                     .clicked()
                 {
@@ -1023,7 +1198,7 @@ impl ScribeApp {
             }
             "palette" => {
                 if ui
-                    .button(toolbar_widget("palette", icons, jp))
+                    .button(toolbar_widget("palette", icons, jp, size))
                     .on_hover_text("Command palette")
                     .clicked()
                 {
@@ -1034,7 +1209,7 @@ impl ScribeApp {
             }
             "split" => {
                 if ui
-                    .selectable_label(self.split_view, toolbar_widget("split", icons, jp))
+                    .selectable_label(self.split_view, toolbar_widget("split", icons, jp, size))
                     .on_hover_text("Split view")
                     .clicked()
                 {
@@ -1045,7 +1220,7 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.editor.show_minimap,
-                        toolbar_widget("minimap", icons, jp),
+                        toolbar_widget("minimap", icons, jp, size),
                     )
                     .on_hover_text("Minimap")
                     .clicked()
@@ -1058,7 +1233,7 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.editor.word_wrap,
-                        toolbar_widget("wrap", icons, jp),
+                        toolbar_widget("wrap", icons, jp, size),
                     )
                     .on_hover_text("Word wrap")
                     .clicked()
@@ -1069,7 +1244,7 @@ impl ScribeApp {
             }
             "fold" => {
                 if ui
-                    .selectable_label(self.fold_view, toolbar_widget("fold", icons, jp))
+                    .selectable_label(self.fold_view, toolbar_widget("fold", icons, jp, size))
                     .on_hover_text("Folded view")
                     .clicked()
                 {
@@ -1080,7 +1255,7 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.editor.show_line_numbers,
-                        toolbar_widget("linenumbers", icons, jp),
+                        toolbar_widget("linenumbers", icons, jp, size),
                     )
                     .on_hover_text("Line numbers")
                     .clicked()
@@ -1093,7 +1268,7 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.spellcheck.enabled,
-                        toolbar_widget("spellcheck", icons, jp),
+                        toolbar_widget("spellcheck", icons, jp, size),
                     )
                     .on_hover_text("Spellcheck (offline)")
                     .clicked()
@@ -1104,7 +1279,7 @@ impl ScribeApp {
             }
             "lsp" => {
                 if ui
-                    .button(toolbar_widget("lsp", icons, jp))
+                    .button(toolbar_widget("lsp", icons, jp, size))
                     .on_hover_text("Start language server")
                     .clicked()
                 {
@@ -1156,11 +1331,80 @@ impl ScribeApp {
         let Some(tab) = self.tabs.get(active) else {
             return 0;
         };
-        spell::check_text(&self.spell, &tab.text, true).len()
+        // Scope the check to the requested token classes (comments / strings /
+        // identifiers) using the highlighter's classified spans, so the three
+        // Settings toggles actually constrain what gets flagged. With all three
+        // off, or no derivable syntax, `check_text_scoped` falls back to the
+        // whole-text behavior (no regression).
+        let scope = spell::SpellScope::new(
+            self.config.spellcheck.check_comments,
+            self.config.spellcheck.check_strings,
+            self.config.spellcheck.check_identifiers,
+        );
+        let ext = tab.doc.language_hint();
+        let spans = self.hl.classify_document(&tab.text, ext.as_deref());
+        // Scoping (comments / strings / identifiers) is a CODE concept. When the
+        // buffer has no code structure — an untitled note, plain text, markdown —
+        // those classes don't apply, so check the whole document as prose. Only
+        // when there are real comment/string/identifier spans do the toggles
+        // constrain the check.
+        let has_code_structure = spans
+            .iter()
+            .any(|s| !matches!(s.class, spell::SpanClass::Other));
+        if !has_code_structure {
+            return spell::check_text(&self.spell, &tab.text, true).len();
+        }
+        spell::check_text_scoped(&self.spell, &tab.text, &spans, scope).len()
     }
 
     /// Persist the current config to the user TOML file (creating the config
     /// dir if needed). Best-effort: surfaces a toast on failure, never panics.
+    /// Once per launch: if update reminders are enabled (`updates.mode != off`)
+    /// and the configured interval has elapsed since the last reminder, nudge
+    /// the user to check for a new release. This is the entire automatic side of
+    /// the update feature — telemetry-free by construction: it performs NO
+    /// network I/O (the bundled build ships no HTTP client). The actual check is
+    /// the user opening the Releases page (the "Check now" button in Settings,
+    /// or `ctx.open_url` here for `auto`). `is_check_due` + the persisted
+    /// `last_check_unix` make the interval honored across sessions.
+    fn maybe_remind_update(&mut self, ctx: &egui::Context) {
+        if self.did_update_check {
+            return;
+        }
+        self.did_update_check = true;
+        let action = update_reminder_action(
+            self.config.updates.mode,
+            self.config.updates.last_check_unix,
+            self.config.updates.check_interval_hours as u64,
+            now_unix(),
+        );
+        if action == UpdateReminder::Skip {
+            return;
+        }
+        // Due: record the reminder time so the interval is honored next launch.
+        self.config.updates.last_check_unix = Some(now_unix());
+        self.save_config();
+        match action {
+            UpdateReminder::OpenReleases => {
+                ctx.open_url(egui::OpenUrl::new_tab(RELEASES_URL));
+                self.toast = Some("Opened the SCR1B3 releases page to check for updates.".into());
+            }
+            UpdateReminder::Notify => {
+                self.toast = Some(
+                    "Time to check for SCR1B3 updates — Settings ▸ Updates ▸ Check now.".into(),
+                );
+            }
+            UpdateReminder::Skip => {}
+        }
+    }
+
+    /// Rebuild the spell engine from the current config — called after the user
+    /// changes the spellcheck language or custom dictionary in Settings so the
+    /// new dictionary takes effect without a restart.
+    fn reload_spell_engine(&mut self) {
+        self.spell = build_spell_engine(&self.config);
+    }
+
     fn save_config(&mut self) {
         let Some(path) = Config::config_file_path() else {
             return;
@@ -1586,10 +1830,13 @@ impl ScribeApp {
     /// - **Middle-click** → close that tab (universal editor convention)
     /// - **Right-click** → context menu: Close · Close Others · Close All to the Right · Close All
     /// - **`×` button on the active tab** → close (back-compat with pre-audit behavior)
-    /// - **Drag** → rearrange. Dragging a tab over another tab swaps them on
-    ///   release. The egui pattern is `Sense::click_and_drag` per item, a
-    ///   `dragged_tab: Option<usize>` field on the app to remember which
-    ///   tab is mid-drag, and `response.drag_stopped()` to commit the swap.
+    /// - **Drag** → rearrange. Each tab is a `dnd_drag_source` wrapped in a
+    ///   `dnd_drop_zone`; dropping tab A onto tab B re-homes A into B's slot.
+    ///   This is the egui 0.34 drag-and-drop idiom (the same one the toolbar
+    ///   editor uses). It replaces an earlier hand-rolled `click_and_drag` +
+    ///   rect hit-test that scanned a *partially-built* response vector, so a
+    ///   drop onto any tab to the RIGHT of the dragged one was silently missed.
+    ///   The index arithmetic lives in [`tab_index_after_move`] (unit-tested).
     ///   Closes F-001 / F-043 from `docs/audits/overlooked-surfaces-2026-05-29.md`.
     fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
         let active = self.active;
@@ -1599,87 +1846,72 @@ impl ScribeApp {
         let mut close_to_right = None;
         let mut close_all = false;
         let mut toggle_pin: Option<usize> = None;
-        // Per-tab pointer position when a drag ends — used to compute the
-        // drop-target index without storing rects on the app.
-        let mut drop_target: Option<usize> = None;
+        // Reorder request captured on drop: (source tab index, target tab index).
+        let mut reorder: Option<(usize, usize)> = None;
 
-        // Collect per-tab Responses so we can do drop-target hit-testing in a
-        // second pass (each Response carries its rect).
-        let mut responses: Vec<egui::Response> = Vec::with_capacity(self.tabs.len());
+        // Peek (without consuming) the in-flight drag payload so the tab being
+        // dragged can be dimmed. egui keeps the payload in context until release.
+        let dragging: Option<usize> = egui::DragAndDrop::payload::<TabDrag>(ui.ctx()).map(|p| p.0);
 
-        for (i, t) in self.tabs.iter().enumerate() {
+        for i in 0..self.tabs.len() {
             let selected = i == active;
-            let label = RichText::new(t.title()).color(if selected { accent } else { muted });
-            // `click_and_drag` so the same widget services left-click switch,
-            // middle-click close, right-click context, and drag-rearrange.
-            let resp = ui
-                .add(egui::SelectableLabel::new(selected, label))
-                .interact(egui::Sense::click_and_drag());
-            if resp.clicked() {
-                switch_to = Some(i);
-            }
-            if resp.clicked_by(egui::PointerButton::Middle) {
-                close = Some(i);
-            }
-            // Right-click → context menu.
-            let pin_label = if self.tabs[i].pinned {
-                "Unpin tab"
-            } else {
-                "Pin tab"
-            };
-            resp.context_menu(|ui| {
-                if ui.button("Close").clicked() {
+            let label =
+                RichText::new(self.tabs[i].title()).color(if selected { accent } else { muted });
+            let pinned = self.tabs[i].pinned;
+
+            // Drop zone wrapping a drag source: tab `i` accepts a tab dropped
+            // onto it AND can itself be picked up. The drop zone records the
+            // dropped payload (the source index) which we resolve after the row.
+            let frame = egui::Frame::default().inner_margin(egui::Margin::symmetric(1, 0));
+            let (_dz, dropped) = ui.dnd_drop_zone::<TabDrag, _>(frame, |ui| {
+                let drag_id = egui::Id::new(("scr1b3-tab-drag", i));
+                let resp = ui
+                    .dnd_drag_source(drag_id, TabDrag(i), |ui| {
+                        ui.add(egui::SelectableLabel::new(selected, label))
+                    })
+                    .inner;
+                if resp.clicked() {
+                    switch_to = Some(i);
+                }
+                if resp.clicked_by(egui::PointerButton::Middle) {
                     close = Some(i);
-                    ui.close_menu();
                 }
-                if ui.button("Close Others").clicked() {
-                    close_others = Some(i);
-                    ui.close_menu();
-                }
-                if ui.button("Close All to the Right").clicked() {
-                    close_to_right = Some(i);
-                    ui.close_menu();
-                }
-                if ui.button("Close All").clicked() {
-                    close_all = true;
-                    ui.close_menu();
-                }
-                ui.separator();
-                if ui.button(pin_label).clicked() {
-                    toggle_pin = Some(i);
-                    ui.close_menu();
+                let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
+                resp.context_menu(|ui| {
+                    if ui.button("Close").clicked() {
+                        close = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close Others").clicked() {
+                        close_others = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All to the Right").clicked() {
+                        close_to_right = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All").clicked() {
+                        close_all = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button(pin_label).clicked() {
+                        toggle_pin = Some(i);
+                        ui.close_menu();
+                    }
+                });
+                // Dim the tab that is currently being dragged.
+                if dragging == Some(i) {
+                    ui.painter()
+                        .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
                 }
             });
 
-            // Drag bookkeeping. We start a drag the frame the press begins;
-            // we commit a swap on the frame the press ends.
-            if resp.drag_started() {
-                self.dragged_tab = Some(i);
-            }
-            if resp.drag_stopped() {
-                // The drop target is whatever tab the pointer is over now.
-                if let (Some(src), Some(pos)) = (self.dragged_tab, resp.interact_pointer_pos()) {
-                    // Find which tab rect contains the release position.
-                    for (j, other) in responses.iter().enumerate() {
-                        if other.rect.contains(pos) {
-                            drop_target = Some(j);
-                            break;
-                        }
-                    }
-                    // Special-case: released over self → no-op.
-                    if drop_target == Some(src) {
-                        drop_target = None;
-                    }
+            if let Some(payload) = dropped {
+                if payload.0 != i {
+                    reorder = Some((payload.0, i));
                 }
-                self.dragged_tab = None;
             }
-            // Visual hint while dragging: dim the dragged tab.
-            if self.dragged_tab == Some(i) && resp.dragged() {
-                ui.painter()
-                    .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
-            }
-
-            responses.push(resp);
 
             if selected && ui.small_button("×").clicked() {
                 close = Some(i);
@@ -1706,30 +1938,24 @@ impl ScribeApp {
                 self.tabs[i].pinned = !self.tabs[i].pinned;
             }
         }
-        // Commit the drag-swap. The swap is index-based; `swap` is O(1) and
-        // preserves every other tab's position.
-        if let Some(target) = drop_target {
-            // The source index is whatever was being dragged THIS frame; it
-            // was already cleared above on drag_stopped, so we recover it
-            // from the responses we collected: the dragged response had
-            // `drag_stopped()` set true above. Re-derive: there is at most
-            // one such response.
-            if let Some(src) = responses
-                .iter()
-                .position(|r| r.drag_stopped() && r.interact_pointer_pos().is_some())
-            {
-                if src < self.tabs.len() && target < self.tabs.len() && src != target {
-                    self.tabs.swap(src, target);
-                    // Keep the active tab pointing at the same buffer the
-                    // user is editing.
-                    if self.active == src {
-                        self.active = target;
-                    } else if self.active == target {
-                        self.active = src;
-                    }
-                }
-            }
+        if let Some((src, target)) = reorder {
+            self.move_tab(src, target);
         }
+    }
+
+    /// Move the tab at `src` so it takes original position `target`'s slot
+    /// (drag-and-drop reorder), keeping [`Self::active`] pointed at the same
+    /// buffer the user is editing. No-op if either index is out of range or
+    /// they are equal. Index math is in [`tab_index_after_move`].
+    fn move_tab(&mut self, src: usize, target: usize) {
+        if src >= self.tabs.len() || target >= self.tabs.len() || src == target {
+            return;
+        }
+        let new_active = tab_index_after_move(src, target, self.active);
+        let tab = self.tabs.remove(src);
+        // `target < original len` ⇒ `target <= new len`, so this never panics.
+        self.tabs.insert(target, tab);
+        self.active = new_active.min(self.tabs.len().saturating_sub(1));
     }
 
     /// Close every tab whose index is not `keep` AND is not pinned (F-044).
@@ -2792,19 +3018,29 @@ pub(crate) fn jp_glyph(id: &str) -> Option<&'static str> {
 /// the kanji is appended after the primary label at smaller size and
 /// reduced opacity — the "instrument plate" effect (T17.5). When OFF or
 /// when no verified kanji exists, returns the primary label unchanged.
-pub(crate) fn toolbar_widget(id: &str, icons: bool, jp_glyphs: bool) -> egui::WidgetText {
+pub(crate) fn toolbar_widget(
+    id: &str,
+    icons: bool,
+    jp_glyphs: bool,
+    size: f32,
+) -> egui::WidgetText {
     let primary = toolbar_label(id, icons);
     let kanji = if jp_glyphs { jp_glyph(id) } else { None };
     let Some(kanji) = kanji else {
-        return egui::WidgetText::from(primary);
+        // Size the primary glyph/label by `toolbar.icon_size_px` so the slider
+        // is live for the common (no-kanji) case too.
+        return egui::RichText::new(primary).size(size).into();
     };
     use egui::text::LayoutJob;
+    // The kanji "instrument plate" keeps the original 10:14 size ratio relative
+    // to the primary, so it scales with the icon-size slider.
+    let kanji_size = size * (10.0 / 14.0);
     let mut job = LayoutJob::default();
     job.append(
         primary,
         0.0,
         egui::TextFormat {
-            font_id: egui::FontId::proportional(14.0),
+            font_id: egui::FontId::proportional(size),
             ..Default::default()
         },
     );
@@ -2812,7 +3048,7 @@ pub(crate) fn toolbar_widget(id: &str, icons: bool, jp_glyphs: bool) -> egui::Wi
         &format!("  {kanji}"),
         0.0,
         egui::TextFormat {
-            font_id: egui::FontId::proportional(10.0),
+            font_id: egui::FontId::proportional(kanji_size),
             color: egui::Color32::from_rgba_unmultiplied(180, 180, 180, 160),
             ..Default::default()
         },
@@ -3233,6 +3469,21 @@ impl ScribeApp {
         // assigned) and lets the grid show up the same frame the user flips
         // the checkbox.
         self.sync_grid_state();
+        // Follow-OS-theme watcher: when `appearance.follow_os_theme` is on,
+        // re-resolve + apply the theme whenever the OS flips light/dark. Cheap
+        // — one input read; only re-applies on an actual change.
+        {
+            let os_theme = ctx.input(|i| i.raw.system_theme);
+            if self.config.appearance.follow_os_theme && os_theme != self.last_os_theme {
+                self.reapply_theme(ctx);
+            }
+        }
+        // Once per launch: nudge to check for updates if the interval elapsed.
+        self.maybe_remind_update(ctx);
+        // Keep egui's animation time + caret style in sync with the motion
+        // preferences every frame (cheap; also covers startup before any
+        // theme reapply).
+        self.apply_motion_style(ctx);
         // ---- Two-phase close (T19.1 ghost-window fix) ----
         // A transparent / layered window (frameless or translucent) must be
         // HIDDEN one frame before it is destroyed, or the Windows DWM keeps its
@@ -3823,6 +4074,8 @@ impl ScribeApp {
             }
             if changed {
                 self.reapply_theme(ctx);
+                // Spellcheck language / custom-dict edits take effect live.
+                self.reload_spell_engine();
                 // F-035 — push the always-on-top flag to the viewport
                 // immediately so the toggle is live (no restart required).
                 let level = if self.config.window.always_on_top {
@@ -5378,11 +5631,11 @@ mod jp_glyph_tests {
     #[test]
     fn widget_falls_back_to_label_when_disabled_or_unknown() {
         // jp_glyph_labels=false → primary label only, regardless of action.
-        let off = toolbar_widget("new", false, false);
+        let off = toolbar_widget("new", false, false, 14.0);
         assert_eq!(off.text(), "new");
         // Even with the flag on, an action without verified kanji returns
         // only the primary label — no kanji is invented.
-        let on_unknown = toolbar_widget("openfolder", false, true);
+        let on_unknown = toolbar_widget("openfolder", false, true, 14.0);
         assert_eq!(on_unknown.text(), "folder");
     }
 
@@ -5390,10 +5643,168 @@ mod jp_glyph_tests {
     fn widget_appends_kanji_when_enabled_for_verified_action() {
         // jp_glyph_labels=true + verified action → primary then kanji.
         // The LayoutJob's flattened text contains both pieces.
-        let on = toolbar_widget("save", false, true);
+        let on = toolbar_widget("save", false, true, 14.0);
         let text = on.text();
         assert!(text.starts_with("save"), "got {text:?}");
         assert!(text.contains("保"), "got {text:?}");
+    }
+}
+
+#[cfg(test)]
+mod tab_reorder_tests {
+    //! Phase 2 — tab drag-reorder. The index arithmetic in
+    //! [`tab_index_after_move`] is the part that historically broke (the old
+    //! hit-test missed drop targets to the right of the dragged tab), so it is
+    //! pinned exhaustively here; [`ScribeApp::move_tab`] is the thin wrapper
+    //! that also keeps `active` pointed at the same buffer.
+    use super::{tab_index_after_move, EditorTab, ScribeApp};
+    use scribe_core::Config;
+
+    #[test]
+    fn move_is_identity_when_src_equals_target() {
+        for idx in 0..5 {
+            assert_eq!(tab_index_after_move(2, 2, idx), idx);
+        }
+    }
+
+    #[test]
+    fn rightward_move_places_dragged_at_target_slot() {
+        // [0,1,2,3], drag 0 → onto 2  =>  [1,2,0,3]  (0 takes slot 2)
+        assert_eq!(tab_index_after_move(0, 2, 0), 2); // dragged element → target
+        assert_eq!(tab_index_after_move(0, 2, 1), 0); // 1 shifts left
+        assert_eq!(tab_index_after_move(0, 2, 2), 1); // 2 shifts left
+        assert_eq!(tab_index_after_move(0, 2, 3), 3); // untouched
+    }
+
+    #[test]
+    fn leftward_move_places_dragged_at_target_slot() {
+        // [0,1,2,3], drag 3 → onto 1  =>  [0,3,1,2]  (3 takes slot 1)
+        assert_eq!(tab_index_after_move(3, 1, 3), 1); // dragged element → target
+        assert_eq!(tab_index_after_move(3, 1, 0), 0); // before target, untouched
+        assert_eq!(tab_index_after_move(3, 1, 1), 2); // 1 shifts right
+        assert_eq!(tab_index_after_move(3, 1, 2), 3); // 2 shifts right
+    }
+
+    #[test]
+    fn adjacent_swap_both_directions() {
+        // drag 1 → onto 2 (rightward by one): [0,1,2] -> [0,2,1]
+        assert_eq!(tab_index_after_move(1, 2, 1), 2);
+        assert_eq!(tab_index_after_move(1, 2, 2), 1);
+        // drag 2 → onto 1 (leftward by one): [0,1,2] -> [0,2,1]
+        assert_eq!(tab_index_after_move(2, 1, 2), 1);
+        assert_eq!(tab_index_after_move(2, 1, 1), 2);
+    }
+
+    /// `move_tab` must physically reorder the tabs AND keep `active` glued to
+    /// the buffer the user was editing, whichever tab moved.
+    #[test]
+    fn move_tab_reorders_and_tracks_active() {
+        let mut app = ScribeApp::new_test(Config::default());
+        // Replace whatever the constructor produced with 4 identifiable tabs.
+        app.tabs.clear();
+        for n in 0..4u64 {
+            let mut t = EditorTab::scratch();
+            t.doc_id = crate::grid::DocId(n);
+            app.tabs.push(t);
+        }
+
+        // User is editing buffer 1 (tab index 1); drag tab 0 onto tab 2 so 0
+        // takes slot 2 => order [1,2,0,3].
+        app.active = 1;
+        app.move_tab(0, 2);
+        let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
+        assert_eq!(ids, vec![1, 2, 0, 3], "physical order after rightward move");
+        assert_eq!(app.tabs[app.active].doc_id.0, 1, "active still on buffer 1");
+
+        // Now drag the last tab (index 3, buffer 3) onto index 0 so 3 takes
+        // slot 0 => [3,1,2,0]. The user is editing buffer 1 (now at index 0);
+        // it should follow to index 1.
+        app.active = 0;
+        let active_buf = app.tabs[app.active].doc_id.0;
+        app.move_tab(3, 0);
+        let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
+        assert_eq!(ids, vec![3, 1, 2, 0], "physical order after leftward move");
+        assert_eq!(
+            app.tabs[app.active].doc_id.0, active_buf,
+            "active follows its buffer across a leftward move"
+        );
+    }
+
+    #[test]
+    fn move_tab_is_noop_on_bad_indices() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs.clear();
+        for n in 0..3u64 {
+            let mut t = EditorTab::scratch();
+            t.doc_id = crate::grid::DocId(n);
+            app.tabs.push(t);
+        }
+        app.active = 2;
+        app.move_tab(0, 0); // equal
+        app.move_tab(5, 1); // src OOB
+        app.move_tab(1, 9); // target OOB
+        let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
+        assert_eq!(ids, vec![0, 1, 2], "order unchanged");
+        assert_eq!(app.active, 2, "active unchanged");
+    }
+}
+
+#[cfg(test)]
+mod update_reminder_tests {
+    //! Phase 5 — the once-per-launch update reminder mode→action mapping.
+    use super::{update_reminder_action, UpdateReminder};
+    use scribe_core::config::UpdateMode;
+
+    const HOUR: u64 = 3_600;
+
+    #[test]
+    fn off_never_reminds_even_when_overdue() {
+        assert_eq!(
+            update_reminder_action(UpdateMode::Off, None, 24, 1_000_000),
+            UpdateReminder::Skip,
+        );
+    }
+
+    #[test]
+    fn notify_skips_until_interval_elapses_then_reminds() {
+        let last = 1_000;
+        // 1h after a 24h-interval check → not due.
+        assert_eq!(
+            update_reminder_action(UpdateMode::Notify, Some(last), 24, last + HOUR),
+            UpdateReminder::Skip,
+        );
+        // 24h later → due.
+        assert_eq!(
+            update_reminder_action(UpdateMode::Notify, Some(last), 24, last + 24 * HOUR),
+            UpdateReminder::Notify,
+        );
+        // Never checked → always due.
+        assert_eq!(
+            update_reminder_action(UpdateMode::Notify, None, 24, 0),
+            UpdateReminder::Notify,
+        );
+    }
+
+    #[test]
+    fn manual_due_still_only_notifies() {
+        assert_eq!(
+            update_reminder_action(UpdateMode::Manual, None, 24, 0),
+            UpdateReminder::Notify,
+        );
+    }
+
+    #[test]
+    fn auto_due_opens_the_releases_page() {
+        assert_eq!(
+            update_reminder_action(UpdateMode::Auto, None, 24, 0),
+            UpdateReminder::OpenReleases,
+        );
+        // Auto still respects the interval (not-due → Skip).
+        let last = 1_000;
+        assert_eq!(
+            update_reminder_action(UpdateMode::Auto, Some(last), 24, last + HOUR),
+            UpdateReminder::Skip,
+        );
     }
 }
 

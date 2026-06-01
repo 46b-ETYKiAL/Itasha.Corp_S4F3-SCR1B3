@@ -192,7 +192,7 @@
     </g>
 
     <!-- content-band lift: boot block + right instrument shift up uniformly so -->
-    <!-- the lowest content clears the bottom corner brackets (plan-611). -->
+    <!-- the lowest content clears the bottom corner brackets (per-repo brand spec). -->
     <g transform="translate(0,-10)">
     <g filter="url(#phos)">
       <text x="64" y="226" font-size="13" fill="#5a6b73">SCRIBE-CORE --boot</text>
@@ -249,7 +249,7 @@
       </g>
     </g>
 
-    <!-- BESPOKE per-repo right instrument (plan-611). v5: generic frame chrome    -->
+    <!-- BESPOKE per-repo right instrument (per-repo brand spec). v5: generic frame chrome    -->
     <!-- (MOTIF label, CH-01 caption, corner brackets) REMOVED — they interfered    -->
     <!-- with the title + covered parts of some motifs. The motif is clipped to     -->
     <!-- #motifslot so it can never spill past the bezel.                           -->
