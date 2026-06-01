@@ -216,6 +216,13 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.label(egui::RichText::new(label).strong());
         ui.separator();
     };
+    // Category page header: the heading plus a muted one-line description of what
+    // the page covers, so each section is self-explanatory at a glance (#69).
+    let head = |ui: &mut egui::Ui, title: &str, desc: &str| {
+        ui.heading(title);
+        ui.label(egui::RichText::new(desc).weak().small());
+        ui.add_space(2.0);
+    };
     // F-037 — the default config, used by `reset_to_default` for every
     // per-setting ↺ revert button. Cheap to construct once per render.
     let def = Config::default();
@@ -227,7 +234,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         "Appearance",
         &["theme", "follow os", "frameless", "toolbar icons"],
     ) {
-        ui.heading("Appearance");
+        head(
+            ui,
+            "Appearance",
+            "Theme, window chrome, and toolbar look. Changes apply live.",
+        );
         if row_visible(q, "theme") {
             // Phase 17 T17.2: theme picker over the 4 built-ins (wired-noir,
             // phosphor-amber, lain-mauve, ghost-paper) + a free text field for
@@ -369,7 +380,12 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
     // ---- Fonts ----  (no ligatures: egui has no OpenType shaping, so the
     // toggle is intentionally absent rather than shown as a dead control.)
     if section_visible(sel, q, "Fonts", &["size", "line height"]) {
-        ui.heading("Fonts");
+        head(
+            ui,
+            "Fonts",
+            "Editor text size and line spacing. (Ligatures are off — the renderer \
+             does no OpenType shaping.)",
+        );
         if row_visible(q, "editor size") {
             ui.horizontal(|ui| {
                 ui.label("Size")
@@ -426,7 +442,12 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             "restore session",
         ],
     ) {
-        ui.heading("Editor");
+        head(
+            ui,
+            "Editor",
+            "Indentation, what's shown around the text, the tab bar, and save / \
+             session behaviour.",
+        );
 
         // -- Indentation --
         group(ui, "Indentation");
@@ -759,7 +780,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         "Motion",
         &["motion", "animation", "blink", "fade", "cursor"],
     ) {
-        ui.heading("Motion");
+        head(
+            ui,
+            "Motion",
+            "Subtle interface animation. Turn off for a fully static UI.",
+        );
         // Master OFF by default — calm-surface principle (DECISION-2026-005);
         // animation is opt-in so idle frames cost the same as plain egui.
         ui.horizontal(|ui| {
@@ -813,7 +838,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         "Window",
         &["mode", "opacity", "tint", "glass", "mica"],
     ) {
-        ui.heading("Window");
+        head(
+            ui,
+            "Window",
+            "Always-on-top, and translucency / glass for the window background.",
+        );
 
         // -- Always on top --
         group(ui, "Always on top");
@@ -951,7 +980,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             "identifiers",
         ],
     ) {
-        ui.heading("Spellcheck (offline)");
+        head(
+            ui,
+            "Spellcheck (offline)",
+            "Dictionary spellchecking that runs entirely on-device — no network.",
+        );
         ui.horizontal(|ui| {
             changed |= ui
                 .checkbox(&mut config.spellcheck.enabled, "Enable")
@@ -1056,7 +1089,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
 
     // ---- Updates ----
     if section_visible(sel, q, "Updates", &["update", "mode", "notify", "auto"]) {
-        ui.heading("Updates (telemetry-free)");
+        head(
+            ui,
+            "Updates (telemetry-free)",
+            "How update checks behave. No usage data ever leaves your machine.",
+        );
         let modes = [
             (UpdateMode::Off, "off"),
             (UpdateMode::Notify, "notify"),
@@ -1133,7 +1170,12 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
 
     // ---- Plugins ----
     if section_visible(sel, q, "Plugins", &["plugin", "mod"]) {
-        ui.heading("Plugins");
+        head(
+            ui,
+            "Plugins",
+            "Enable plugins and open the manager. Plugins are local and \
+             signature-verified.",
+        );
         ui.horizontal(|ui| {
             changed |= ui
                 .checkbox(&mut config.plugins.enabled, "Enable plugin/mod system")
@@ -1197,6 +1239,14 @@ enum ToolbarDrag {
 fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     let mut changed = false;
     ui.heading("Quick-access toolbar");
+    ui.label(
+        egui::RichText::new(
+            "Drag to reorder the toolbar buttons, or add actions from the palette below.",
+        )
+        .weak()
+        .small(),
+    );
+    ui.add_space(2.0);
     ui.label(
         egui::RichText::new(
             "Choose what shows in the top bar. Drag rows to reorder; drag from the \
