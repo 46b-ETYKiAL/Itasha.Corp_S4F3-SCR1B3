@@ -514,8 +514,6 @@ pub struct ScribeApp {
     /// Config-file watcher for live-reload (kept alive; events arrive on `cfg_rx`).
     _cfg_watcher: Option<notify::RecommendedWatcher>,
     cfg_rx: Option<std::sync::mpsc::Receiver<()>>,
-    /// Split view: a second editor pane over the same active buffer.
-    split_view: bool,
     /// Folded-preview mode: render a read-only buffer with brace regions
     /// collapsed; the gutter toggles individual folds (`folds` holds the
     /// `start_line` of each collapsed region for the active tab).
@@ -776,7 +774,6 @@ impl ScribeApp {
             hl_cache: std::cell::RefCell::new(None),
             _cfg_watcher: cfg_watcher,
             cfg_rx: Some(cfg_rx),
-            split_view: false,
             fold_view: false,
             folds: std::collections::BTreeSet::new(),
             completion: None,
@@ -832,6 +829,9 @@ impl ScribeApp {
                     return false;
                 };
                 let mut drag_started = false;
+                // Per-pane header: name of the note + the close affordance, so
+                // each pane in the split/grid reads as its own tab.
+                let pane_title = tabs[idx].title();
                 ui.horizontal(|ui| {
                     if ui.small_button("✕").on_hover_text("Close pane").clicked() {
                         render_closes.borrow_mut().push(doc_id);
@@ -847,6 +847,8 @@ impl ScribeApp {
                     if handle.drag_started() {
                         drag_started = true;
                     }
+                    ui.label(RichText::new(&pane_title).strong().monospace())
+                        .on_hover_text(&pane_title);
                 });
                 // Per-pane syntax highlighting via the same memoizing layouter
                 // the single-pane + split paths use, keyed on THIS pane's own
@@ -1208,12 +1210,23 @@ impl ScribeApp {
                 }
             }
             "split" => {
+                // Split and grid are one feature: this toggles the multi-pane
+                // view, which lays the OPEN TABS out as panes — two tabs read as
+                // a side-by-side split, and it grows into a grid as more tabs
+                // open. (Same `editor.grid_enabled` the grid command toggles.)
                 if ui
-                    .selectable_label(self.split_view, toolbar_widget("split", icons, jp, size))
-                    .on_hover_text("Split view")
+                    .selectable_label(
+                        self.config.editor.grid_enabled,
+                        toolbar_widget("split", icons, jp, size),
+                    )
+                    .on_hover_text(
+                        "Split / grid view — show the open notes side by side. \
+                         Opening more notes grows the split into a grid.",
+                    )
                     .clicked()
                 {
-                    self.split_view = !self.split_view;
+                    self.config.editor.grid_enabled = !self.config.editor.grid_enabled;
+                    *save_cfg = true;
                 }
             }
             "minimap" => {
@@ -1497,7 +1510,10 @@ impl ScribeApp {
                 }
             }
             BuiltinCommand::ToggleSplitView => {
-                self.split_view = !self.split_view;
+                // Unified with the grid: "split" is the multi-pane view of the
+                // open tabs (side-by-side for two, a grid for more).
+                self.config.editor.grid_enabled = !self.config.editor.grid_enabled;
+                self.save_config();
             }
             BuiltinCommand::ToggleMinimap => {
                 self.config.editor.show_minimap = !self.config.editor.show_minimap;
@@ -2933,7 +2949,7 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         action: BuiltinCommand::ToggleSpellcheck,
     },
     BuiltinEntry {
-        label: "Toggle split view",
+        label: "Toggle split / grid view",
         shortcut: "",
         action: BuiltinCommand::ToggleSplitView,
     },
@@ -4730,68 +4746,11 @@ impl ScribeApp {
             self.show_minimap(ctx, panel, accent);
         }
 
-        // ---- Split view: second pane over the same buffer (right of center) ----
-        if self.split_view {
-            let hl = &self.hl;
-            let ext_ref = ext.as_deref();
-            // The split pane carries its own tab-like header: the active note's
-            // name on the left and a ✕ on the right that closes the split (the
-            // pane's own "tab" + close affordance, sitting at the split rather
-            // than only in the top strip). Applied after the panel so we don't
-            // double-borrow `self`.
-            let split_title = self.tabs[active].title();
-            let mut close_split = false;
-            egui::SidePanel::right("split-pane")
-                .resizable(true)
-                .default_width(360.0)
-                .frame(egui::Frame::default().fill(panel))
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(&split_title)
-                                .color(accent)
-                                .strong()
-                                .monospace(),
-                        )
-                        .on_hover_text("This split shows the active note.");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("Close split view")
-                                .clicked()
-                            {
-                                close_split = true;
-                            }
-                        });
-                    });
-                    ui.separator();
-                    let mut layouter =
-                        make_layouter(hl, &self.hl_cache, ext_ref, font.clone(), line_height);
-                    let sa = if word_wrap {
-                        egui::ScrollArea::vertical()
-                    } else {
-                        egui::ScrollArea::both()
-                    };
-                    sa.id_salt("split-scroll").show(ui, |ui| {
-                        let dw = if word_wrap {
-                            ui.available_width()
-                        } else {
-                            f32::INFINITY
-                        };
-                        let editor = egui::TextEdit::multiline(&mut self.tabs[active].text)
-                            .code_editor()
-                            .desired_width(dw)
-                            .desired_rows(30)
-                            .lock_focus(true)
-                            .interactive(!read_only)
-                            .layouter(&mut layouter);
-                        ui.add_sized(ui.available_size(), editor);
-                    });
-                });
-            if close_split {
-                self.split_view = false;
-            }
-        }
+        // Split is no longer a separate same-buffer side panel — it is unified
+        // with the multi-note grid (`editor.grid_enabled`): the open tabs render
+        // as panes (two = side-by-side split, more = grid) via
+        // `render_grid_central_panel`. See the "split" toolbar button + the
+        // grid central-panel branch above.
 
         // ---- Line-number gutter (sticky left strip; numbers are synced to the
         // editor galley rows captured last frame — one-frame lag, like minimap).
@@ -6013,12 +5972,26 @@ mod e2e {
     }
 
     #[test]
-    fn split_view_renders() {
-        let mut app = ScribeApp::new_test(Config::default());
-        app.tabs[0].text = "fn main() {\n    let x = 1;\n}\n".into();
-        app.split_view = true;
+    fn split_is_unified_with_grid() {
+        // Split and grid are one feature: enabling the multi-pane view lays the
+        // OPEN TABS out as panes (two = side-by-side split, more = grid). With
+        // two tabs open the grid has two panes.
+        let mut cfg = Config::default();
+        cfg.editor.grid_enabled = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "fn main() {}\n".into();
+        app.tabs.push(EditorTab::scratch());
+        app.tabs[1].text = "second note\n".into();
         run_frames(&mut app, 2);
-        assert!(app.split_view);
+        let tree = app
+            .grid_tree
+            .as_ref()
+            .expect("grid tree present when enabled");
+        assert_eq!(
+            crate::grid::count_panes(tree),
+            2,
+            "two open tabs render as two panes (a side-by-side split)"
+        );
     }
 
     #[test]
