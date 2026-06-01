@@ -222,7 +222,7 @@
     </g>
 
     <!-- content-band lift: boot block + right instrument shift up uniformly so -->
-    <!-- the lowest content clears the bottom corner brackets (plan-611). -->
+    <!-- the lowest content clears the bottom corner brackets (per-repo brand spec). -->
     <g transform="translate(0,-14)">
     <g filter="url(#phos)">
       <text x="80" y="266" font-size="14" fill="#5a6b73">SCRIBE-CORE --boot</text>
@@ -317,7 +317,7 @@
       <!-- AMPLITUDE caption) REMOVED — the right side is 100% bespoke; each    -->
       <!-- repo's MOTIF owns the whole region, self-framed.                     -->
 
-      <!-- BESPOKE per-repo right instrument (plan-611). The MOTIF-BLOCK       -->
+      <!-- BESPOKE per-repo right instrument (per-repo brand spec). The MOTIF-BLOCK       -->
       <!-- placeholder is filled by repo_motif_library.get_motif(MOTIF_KEY).   -->
       <!-- Authored once at header scale; the social card reuses the same      -->
       <!-- fragment via the social MOTIF-BLOCK (scale 0.82). v4: the cluster is -->
