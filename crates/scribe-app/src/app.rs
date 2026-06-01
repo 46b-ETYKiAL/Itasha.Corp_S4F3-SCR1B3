@@ -2510,6 +2510,22 @@ impl ScribeApp {
         }
     }
 
+    /// True when a text-input / navigation modal currently owns the keyboard
+    /// (#72). The editor-surface completion popup must defer to these so its
+    /// ↑↓/Enter interception cannot steal a modal field's keys. Kept as one
+    /// method so the modal set is defined in exactly one place.
+    fn modal_owns_keyboard(&self) -> bool {
+        self.find_open
+            || self.palette_open
+            || self.settings_open
+            || self.cheatsheet_open
+            || self.recent_open
+            || self.welcome_open
+            || self.fuzzy_open
+            || self.goto_open
+            || self.goto_symbol_open
+    }
+
     /// Open the identifier-completion popup for the prefix ending at `char_idx`
     /// in the active buffer. Sources suggestions from the buffer's own words
     /// (zero network / LSP dependency).
@@ -3885,9 +3901,22 @@ impl ScribeApp {
                 self.fuzzy_open = false;
             }
         });
-        // Ctrl/Cmd+Space requests identifier completion at the cursor.
-        let want_completion =
-            ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Space));
+        // #72 — identifier completion is an EDITOR-surface popup. While any
+        // text-input / navigation modal owns the keyboard (find bar, command
+        // palette, fuzzy finder, go-to-symbol / go-to-line, recent files,
+        // settings, cheatsheet, welcome), completion must NOT open and must NOT
+        // intercept ↑↓/Enter — otherwise a Ctrl+Space typed into (say) the find
+        // field would spawn a popup that then steals the find bar's navigation
+        // keys. Force any open popup closed and leave Ctrl+Space for the modal.
+        let modal_owns_keys = self.modal_owns_keyboard();
+        if modal_owns_keys {
+            self.completion = None;
+        }
+        // Ctrl/Cmd+Space requests identifier completion at the cursor (only when
+        // the editor — not a modal — owns the keyboard; short-circuits so the
+        // key is left unconsumed for a focused modal field).
+        let want_completion = !modal_owns_keys
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Space));
         // While the completion popup is open, intercept navigation keys BEFORE
         // the TextEdit sees them so arrows/enter drive the list, not the caret.
         let mut accept_completion = false;
@@ -6321,6 +6350,38 @@ mod e2e {
         h.get_by_label("⚙").click();
         h.run();
         assert!(h.state().settings_open, "clicking ⚙ must open Settings");
+    }
+
+    #[test]
+    fn open_find_bar_suppresses_and_clears_completion_popup() {
+        // #72 regression: a completion popup must not survive (and so cannot
+        // steal ↑↓/Enter) while the find bar owns the keyboard.
+        let mut app = fresh_app();
+        app.find_open = true;
+        app.completion = Some(super::Completion {
+            prefix_start: 0,
+            items: vec!["alpha".into(), "alpine".into()],
+            selected: 0,
+        });
+        assert!(
+            app.modal_owns_keyboard(),
+            "an open find bar must own the keyboard"
+        );
+        let mut h = ui_harness(app);
+        h.run();
+        assert!(
+            h.state().completion.is_none(),
+            "the completion popup must be force-closed while the find bar is open"
+        );
+    }
+
+    #[test]
+    fn editor_owns_keyboard_when_no_modal_open() {
+        let app = fresh_app();
+        assert!(
+            !app.modal_owns_keyboard(),
+            "with no modal open the editor (not a modal) owns the keyboard"
+        );
     }
 
     #[test]
