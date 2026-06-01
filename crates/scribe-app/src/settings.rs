@@ -3,10 +3,12 @@
 //! persist + re-apply the theme. Kept as a free function so it never fights the
 //! `ScribeApp` borrow.
 //!
-//! Layout: a fixed-size window with a left category nav + a searchable,
+//! Layout: a resizable window with a left category nav + a searchable,
 //! internally-scrolling content pane — so every setting is reachable at the
-//! default size without ever resizing the window (`ScrollArea` with
-//! `auto_shrink([false, false])` is the load-bearing idiom here).
+//! default size without resizing, while the window can still be dragged,
+//! resized, and closed normally (`ScrollArea` with `auto_shrink([false,
+//! false])` is the load-bearing idiom here). Every control carries an
+//! `.on_hover_text` tooltip.
 
 use eframe::egui;
 use scribe_core::config::{ToolbarConfig, UpdateMode, WindowMode};
@@ -115,8 +117,16 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
     egui::Window::new("settings")
         .open(&mut keep_open)
         .collapsible(false)
-        .resizable(false)
-        .fixed_size([760.0, 560.0])
+        // Resizable + a default (not fixed) size restores egui's standard
+        // window layout: a full-width title bar that is draggable across its
+        // whole span, a correctly-placed close (✕) button, and resize handles.
+        // The previous `.resizable(false).fixed_size(...)` was the single root
+        // cause of "only the left half drags", the dead close button, and the
+        // un-resizable window.
+        .resizable(true)
+        .default_size([760.0, 560.0])
+        .min_width(420.0)
+        .min_height(320.0)
         .show(ctx, |ui| {
             ui.horizontal_top(|ui| {
                 // ---- Left category nav ----
@@ -124,7 +134,8 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
                     ui.set_width(170.0);
                     ui.add_space(2.0);
                     for cat in CATEGORIES {
-                        ui.selectable_value(&mut category, (*cat).to_string(), *cat);
+                        ui.selectable_value(&mut category, (*cat).to_string(), *cat)
+                            .on_hover_text(format!("Show the {cat} settings."));
                     }
                 });
                 ui.separator();
@@ -137,8 +148,17 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
                             egui::TextEdit::singleline(&mut query)
                                 .hint_text("search settings")
                                 .desired_width(f32::INFINITY),
+                        )
+                        .on_hover_text(
+                            "Filter settings by name across every category. Clear to return to \
+                             the selected category.",
                         );
-                        if !query.is_empty() && ui.button("✕").clicked() {
+                        if !query.is_empty()
+                            && ui
+                                .button("✕")
+                                .on_hover_text("Clear the search filter.")
+                                .clicked()
+                        {
                             query.clear();
                         }
                     });
@@ -186,7 +206,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             // phosphor-amber, lain-mauve, ghost-paper) + a free text field for
             // user themes stored under <config_dir>/themes/<name>.toml.
             ui.horizontal(|ui| {
-                ui.label("Theme");
+                ui.label("Theme").on_hover_text(
+                    "Pick the active colour theme from the built-ins, or type a user theme \
+                     name below. Changes apply live.",
+                );
                 let current = config.appearance.theme.clone();
                 egui::ComboBox::from_id_salt("theme-picker")
                     .selected_text(&current)
@@ -203,7 +226,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                                 changed = true;
                             }
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_text("Choose one of the built-in colour themes.");
                 changed |=
                     reset_to_default(ui, &mut config.appearance.theme, &def.appearance.theme);
             });
@@ -242,6 +267,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     .checkbox(
                         &mut config.appearance.follow_os_theme,
                         "Follow OS dark/light",
+                    )
+                    .on_hover_text(
+                        "Automatically switch between a light and dark theme to match the \
+                         operating system's appearance setting.",
                     )
                     .changed();
                 changed |= reset_to_default(
@@ -318,6 +347,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             ui.horizontal(|ui| {
                 changed |= ui
                     .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0).text("size"))
+                    .on_hover_text("Font size of the editor text, in points.")
                     .changed();
                 changed |=
                     reset_to_default(ui, &mut config.fonts.editor_size, &def.fonts.editor_size);
@@ -329,6 +359,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     .add(
                         egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5)
                             .text("line height"),
+                    )
+                    .on_hover_text(
+                        "Vertical spacing between lines, as a multiple of the font size.",
                     )
                     .changed();
                 changed |=
@@ -353,10 +386,15 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ],
     ) {
         ui.heading("Editor");
+
+        // -- Indentation --
+        ui.label(egui::RichText::new("Indentation").strong());
+        ui.add_space(4.0);
         if row_visible(q, "tab width") {
             ui.horizontal(|ui| {
                 changed |= ui
                     .add(egui::Slider::new(&mut config.editor.tab_width, 1..=8).text("tab width"))
+                    .on_hover_text("How many columns a tab character occupies.")
                     .changed();
                 changed |=
                     reset_to_default(ui, &mut config.editor.tab_width, &def.editor.tab_width);
@@ -366,6 +404,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             ui.horizontal(|ui| {
                 changed |= ui
                     .checkbox(&mut config.editor.insert_spaces, "Insert spaces (Tab key)")
+                    .on_hover_text("Insert spaces instead of a tab character when you press Tab.")
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -374,10 +413,16 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 );
             });
         }
+        ui.add_space(6.0);
+
+        // -- Display --
+        ui.label(egui::RichText::new("Display").strong());
+        ui.add_space(4.0);
         if row_visible(q, "line numbers") {
             ui.horizontal(|ui| {
                 changed |= ui
                     .checkbox(&mut config.editor.show_line_numbers, "Line numbers")
+                    .on_hover_text("Show a line-number gutter to the left of the editor.")
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -390,6 +435,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             ui.horizontal(|ui| {
                 changed |= ui
                     .checkbox(&mut config.editor.word_wrap, "Word wrap")
+                    .on_hover_text(
+                        "Wrap long lines to the editor width instead of scrolling horizontally.",
+                    )
                     .changed();
                 changed |=
                     reset_to_default(ui, &mut config.editor.word_wrap, &def.editor.word_wrap);
@@ -399,6 +447,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             ui.horizontal(|ui| {
                 changed |= ui
                     .checkbox(&mut config.editor.show_minimap, "Minimap")
+                    .on_hover_text(
+                        "Show a zoomed-out overview of the whole file alongside the editor \
+                         for quick navigation.",
+                    )
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -414,6 +466,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         &mut config.editor.render_whitespace,
                         "Render whitespace (· spaces, → tabs — experimental editor)",
                     )
+                    .on_hover_text(
+                        "Draw faint markers for spaces and tabs so invisible whitespace is \
+                         visible. Applies to the experimental rope editor.",
+                    )
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -422,6 +478,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 );
             });
         }
+        ui.add_space(6.0);
+
+        // -- Layout --
+        ui.label(egui::RichText::new("Layout").strong());
+        ui.add_space(4.0);
         if row_visible(q, "tab bar position top bottom left right") {
             // T18.4: position the open-tab strip relative to the editor.
             use scribe_core::config::TabBarPosition;
@@ -432,7 +493,8 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 (TabBarPosition::Right, "right"),
             ];
             ui.horizontal(|ui| {
-                ui.label("Tab bar position");
+                ui.label("Tab bar position")
+                    .on_hover_text("Where the strip of open-file tabs sits around the editor.");
                 egui::ComboBox::from_id_salt("tab-bar-position")
                     .selected_text(
                         positions
@@ -450,23 +512,13 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                                 changed = true;
                             }
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_text("Choose the edge where the open-tab strip is shown.");
                 changed |= reset_to_default(
                     ui,
                     &mut config.editor.tab_bar_position,
                     &def.editor.tab_bar_position,
-                );
-            });
-        }
-        if row_visible(q, "restore session") {
-            ui.horizontal(|ui| {
-                changed |= ui
-                    .checkbox(&mut config.editor.restore_session, "Restore session")
-                    .changed();
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.editor.restore_session,
-                    &def.editor.restore_session,
                 );
             });
         }
@@ -516,6 +568,26 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 );
             });
         }
+        ui.add_space(6.0);
+
+        // -- Save & Session --
+        ui.label(egui::RichText::new("Save & Session").strong());
+        ui.add_space(4.0);
+        if row_visible(q, "restore session") {
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .checkbox(&mut config.editor.restore_session, "Restore session")
+                    .on_hover_text(
+                        "Reopen the files and tabs you had open when you last closed SCR1B3.",
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.restore_session,
+                    &def.editor.restore_session,
+                );
+            });
+        }
         if row_visible(q, "session backup hot exit unsaved restore crash recovery") {
             ui.horizontal(|ui| {
                 changed |= ui
@@ -560,6 +632,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         &mut config.editor.trim_trailing_whitespace_on_save,
                         "Trim trailing whitespace on save",
                     )
+                    .on_hover_text(
+                        "Remove trailing spaces and tabs at the end of every line when a file \
+                         is saved.",
+                    )
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -575,6 +651,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         &mut config.editor.final_newline_on_save,
                         "Ensure final newline on save",
                     )
+                    .on_hover_text(
+                        "Make sure the file ends with exactly one newline character when saved.",
+                    )
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -589,6 +668,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     .checkbox(
                         &mut config.editor.restore_cursor_position,
                         "Restore caret position per file",
+                    )
+                    .on_hover_text(
+                        "Remember where the caret was in each file and jump back there when \
+                         you reopen it.",
                     )
                     .changed();
                 changed |= reset_to_default(
@@ -636,6 +719,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         egui::Slider::new(&mut config.motion.intensity, 0.0..=1.0)
                             .text("Global intensity"),
                     )
+                    .on_hover_text(
+                        "Scale the strength of all animations at once — 0 is none, 1 is full.",
+                    )
                     .changed();
                 changed |=
                     reset_to_default(ui, &mut config.motion.intensity, &def.motion.intensity);
@@ -645,6 +731,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     .checkbox(
                         &mut config.motion.respect_reduced_motion,
                         "Respect OS reduced-motion",
+                    )
+                    .on_hover_text(
+                        "Suppress motion when the operating system's reduce-motion \
+                         accessibility setting is enabled.",
                     )
                     .changed();
                 changed |= reset_to_default(
@@ -659,6 +749,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         &mut config.motion.respect_battery,
                         "Disable on battery (laptop power-save)",
                     )
+                    .on_hover_text(
+                        "Turn off animations while the device is running on battery to save power.",
+                    )
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -666,64 +759,90 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     &def.motion.respect_battery,
                 );
             });
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Per-effect catalog").strong());
+            ui.label(
+                egui::RichText::new("Per-effect (experimental — wired progressively)")
+                    .weak()
+                    .small(),
+            );
             ui.add_space(4.0);
-            ui.label(egui::RichText::new("Per-effect catalog").weak().small());
-            for (label, field, dflt) in [
-                ("Hover lift", &mut config.motion.hover, def.motion.hover),
+            for (label, field, dflt, hint) in [
+                (
+                    "Hover lift",
+                    &mut config.motion.hover,
+                    def.motion.hover,
+                    "Subtle lift / highlight when the pointer hovers an interactive element.",
+                ),
                 (
                     "Focus ring pulse",
                     &mut config.motion.focus_ring,
                     def.motion.focus_ring,
+                    "Animate the focus outline when a control gains keyboard focus.",
                 ),
                 (
                     "Panel slide",
                     &mut config.motion.panel_slide,
                     def.motion.panel_slide,
+                    "Slide side and bottom panels in and out instead of snapping.",
                 ),
                 (
                     "Tab underline",
                     &mut config.motion.tab_underline,
                     def.motion.tab_underline,
+                    "Glide the active-tab underline between tabs as you switch.",
                 ),
                 (
                     "Palette lift-in",
                     &mut config.motion.palette_lift,
                     def.motion.palette_lift,
+                    "Animate the command palette lifting into view when opened.",
                 ),
                 (
                     "Cursor blink",
                     &mut config.motion.cursor_blink,
                     def.motion.cursor_blink,
+                    "Blink the text caret instead of showing it steady.",
                 ),
                 (
                     "Status-bar breathe",
                     &mut config.motion.status_breathe,
                     def.motion.status_breathe,
+                    "Gentle pulsing of the status bar to signal background activity.",
                 ),
-                ("Toast slide", &mut config.motion.toast, def.motion.toast),
+                (
+                    "Toast slide",
+                    &mut config.motion.toast,
+                    def.motion.toast,
+                    "Slide notification toasts in and out from the edge of the window.",
+                ),
                 (
                     "Error glitch flash",
                     &mut config.motion.error_glitch,
                     def.motion.error_glitch,
+                    "Brief glitch flash to draw attention to an error.",
                 ),
                 (
                     "ASCII boot splash",
                     &mut config.motion.ascii_boot_splash,
                     def.motion.ascii_boot_splash,
+                    "Show an animated ASCII splash while the app starts up.",
                 ),
                 (
                     "Idle pulse",
                     &mut config.motion.idle_pulse,
                     def.motion.idle_pulse,
+                    "Soft ambient pulse on idle elements when nothing else is happening.",
                 ),
                 (
                     "Transition fade",
                     &mut config.motion.transition_fade,
                     def.motion.transition_fade,
+                    "Cross-fade between views instead of cutting instantly.",
                 ),
             ] {
                 ui.horizontal(|ui| {
-                    changed |= ui.checkbox(field, label).changed();
+                    changed |= ui.checkbox(field, label).on_hover_text(hint).changed();
                     changed |= reset_to_default(ui, field, &dflt);
                 });
             }
@@ -739,6 +858,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         &["mode", "opacity", "tint", "glass", "mica"],
     ) {
         ui.heading("Window");
+
+        // -- Always on top --
+        ui.label(egui::RichText::new("Always on top").strong());
+        ui.add_space(4.0);
         // F-035 — always-on-top toggle. Takes effect immediately via the
         // ViewportCommand the app issues when this checkbox flips.
         ui.horizontal(|ui| {
@@ -752,8 +875,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 &def.window.always_on_top,
             );
         });
+        ui.add_space(6.0);
+
+        // -- Transparency / glass --
+        ui.label(egui::RichText::new("Transparency / glass").strong());
         ui.add_space(4.0);
-        ui.heading("Window (transparency / glass)");
         // Master on/off switch for the whole transparency system. Off by default:
         // a normal opaque window is fast and never leaves a DWM ghost on close.
         ui.horizontal(|ui| {
@@ -800,7 +926,12 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                                 changed = true;
                             }
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_text(
+                        "Pick the window surface style: opaque, transparent, glass / acrylic, \
+                         mica (Windows 11), or vibrancy (macOS). Restart to apply blur.",
+                    );
                 changed |= reset_to_default(ui, &mut config.window.mode, &def.window.mode);
             });
             ui.add_enabled_ui(config.window.mode.is_translucent(), |ui| {
@@ -810,14 +941,24 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                             egui::Slider::new(&mut config.window.opacity, 0.30..=1.0)
                                 .text("opacity"),
                         )
+                        .on_hover_text(
+                            "How see-through the window is — 1.0 is fully opaque, lower is more \
+                             transparent. Only active for translucent modes.",
+                        )
                         .changed();
                     changed |=
                         reset_to_default(ui, &mut config.window.opacity, &def.window.opacity);
                 });
             });
             ui.horizontal(|ui| {
-                ui.label("tint");
-                changed |= ui.text_edit_singleline(&mut config.window.tint).changed();
+                ui.label("tint")
+                    .on_hover_text("Colour tint applied over the translucent surface, as a hex code (e.g. #1a1a2e).");
+                changed |= ui
+                    .text_edit_singleline(&mut config.window.tint)
+                    .on_hover_text(
+                        "Hex colour (e.g. #1a1a2e) blended over the translucent window surface.",
+                    )
+                    .changed();
                 changed |= reset_to_default(ui, &mut config.window.tint, &def.window.tint);
             });
             ui.horizontal(|ui| {
@@ -825,6 +966,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     .add(
                         egui::Slider::new(&mut config.window.tint_strength, 0.0..=1.0)
                             .text("tint strength"),
+                    )
+                    .on_hover_text(
+                        "How strongly the tint colour is blended over the surface — 0 is none, \
+                         1 is full.",
                     )
                     .changed();
                 changed |= reset_to_default(
@@ -854,15 +999,20 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.horizontal(|ui| {
             changed |= ui
                 .checkbox(&mut config.spellcheck.enabled, "Enable")
+                .on_hover_text("Turn on the offline spell checker for editor text.")
                 .changed();
             changed |=
                 reset_to_default(ui, &mut config.spellcheck.enabled, &def.spellcheck.enabled);
         });
         ui.add_enabled_ui(config.spellcheck.enabled, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Language");
+                ui.label("Language")
+                    .on_hover_text("Dictionary language code to spell-check against (e.g. en_US).");
                 changed |= ui
                     .text_edit_singleline(&mut config.spellcheck.language)
+                    .on_hover_text(
+                        "Dictionary language code, such as en_US or de_DE, used for spell checking.",
+                    )
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -873,6 +1023,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             ui.horizontal(|ui| {
                 changed |= ui
                     .checkbox(&mut config.spellcheck.check_comments, "Check comments")
+                    .on_hover_text("Spell-check words inside code comments.")
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -883,6 +1034,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             ui.horizontal(|ui| {
                 changed |= ui
                     .checkbox(&mut config.spellcheck.check_strings, "Check strings")
+                    .on_hover_text("Spell-check words inside string literals.")
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -895,6 +1047,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     .checkbox(
                         &mut config.spellcheck.check_identifiers,
                         "Check identifiers",
+                    )
+                    .on_hover_text(
+                        "Spell-check variable and function names (splits camelCase / snake_case).",
                     )
                     .changed();
                 changed |= reset_to_default(
@@ -934,17 +1089,24 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                             changed = true;
                         }
                     }
-                });
+                })
+                .response
+                .on_hover_text(
+                    "How updates are handled: off (never check), notify (tell me only), \
+                     manual (let me trigger), or auto (download and apply).",
+                );
             changed |= reset_to_default(ui, &mut config.updates.mode, &def.updates.mode);
         });
         if row_visible(q, "check interval hours") {
             ui.horizontal(|ui| {
-                ui.label("Check interval (hours)");
+                ui.label("Check interval (hours)")
+                    .on_hover_text("How often, in hours, to check for updates.");
                 changed |= ui
                     .add(egui::Slider::new(
                         &mut config.updates.check_interval_hours,
                         1..=168,
                     ))
+                    .on_hover_text("How often, in hours, to check for a new release (1–168).")
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -962,6 +1124,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.horizontal(|ui| {
             changed |= ui
                 .checkbox(&mut config.plugins.enabled, "Enable plugin/mod system")
+                .on_hover_text(
+                    "Allow SCR1B3 to load plugins / mods from the plugins directory at startup.",
+                )
                 .changed();
             changed |= reset_to_default(ui, &mut config.plugins.enabled, &def.plugins.enabled);
         });
@@ -973,7 +1138,14 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         // F-039 — open the plugin manager (Loaded / Registry / Install). The
         // request is stashed in egui temp data; the host reads + clears it
         // after `show` returns so it can open its own modal state.
-        if ui.button("Manage plugins…").clicked() {
+        if ui
+            .button("Manage plugins…")
+            .on_hover_text(
+                "Open the plugin manager to view loaded plugins, browse the registry, and \
+                 install new ones.",
+            )
+            .clicked()
+        {
             ui.ctx()
                 .data_mut(|d| d.insert_temp(open_plugin_manager_id(), true));
         }
@@ -1032,6 +1204,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
                 egui::Slider::new(&mut config.toolbar.button_size_px, 16.0..=64.0)
                     .text("Button height (px)"),
             )
+            .on_hover_text("Height of each quick-access toolbar button, in pixels.")
             .changed();
         changed |= reset_to_default(
             ui,
@@ -1045,6 +1218,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
                 egui::Slider::new(&mut config.toolbar.button_spacing_px, 0.0..=24.0)
                     .text("Button spacing (px)"),
             )
+            .on_hover_text("Gap between adjacent toolbar buttons, in pixels.")
             .changed();
         changed |= reset_to_default(
             ui,
@@ -1066,7 +1240,11 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
             &ToolbarConfig::default_icon_size(),
         );
     });
-    if ui.small_button("Reset sizing to defaults").clicked() {
+    if ui
+        .small_button("Reset sizing to defaults")
+        .on_hover_text("Restore the button height, spacing, and icon size to their defaults.")
+        .clicked()
+    {
         config.toolbar.button_size_px = scribe_core::config::ToolbarConfig::default_button_size();
         config.toolbar.button_spacing_px =
             scribe_core::config::ToolbarConfig::default_button_spacing();
@@ -1215,7 +1393,9 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label("add:");
+        ui.label("add:").on_hover_text(
+            "Append a toolbar action from the list (keyboard-friendly alternative to dragging).",
+        );
         egui::ComboBox::from_id_salt("toolbar-add")
             .selected_text("choose…")
             .show_ui(ui, |ui| {
@@ -1225,8 +1405,14 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
                         changed = true;
                     }
                 }
-            });
-        if ui.button("reset to defaults").clicked() {
+            })
+            .response
+            .on_hover_text("Pick an action to append to the toolbar.");
+        if ui
+            .button("reset to defaults")
+            .on_hover_text("Restore the toolbar's items to the default set.")
+            .clicked()
+        {
             config.toolbar = ToolbarConfig::default();
             changed = true;
         }
@@ -1257,7 +1443,11 @@ fn render_theme_export(ui: &mut egui::Ui, config: &mut Config) -> bool {
                  <config_dir>/themes/<name>.toml. Edit the TOML by hand to \
                  customise; live-reload will apply changes immediately.",
         );
-        if ui.button("Export").clicked() {
+        if ui
+            .button("Export")
+            .on_hover_text("Write the current theme's colours to an editable user TOML file.")
+            .clicked()
+        {
             let safe = new_name.trim().to_lowercase().replace([' ', '_'], "-");
             if safe.is_empty() {
                 status = "Export: name is empty".to_string();
@@ -1416,4 +1606,150 @@ enum PickerSection {
     Palette,
     Ui,
     Syntax,
+}
+
+#[cfg(test)]
+mod wiring_guard {
+    //! Proof that every control exposed in the Settings window is actually
+    //! WIRED to runtime behavior — i.e. its config field is read by code outside
+    //! `settings.rs` (the UI) and `config.rs` (the definition). A "dead" control
+    //! is one nothing reads; this guard catches them and prevents new ones.
+    //!
+    //! `KNOWN_DEAD` lists controls audited as not-yet-wired; as later phases wire
+    //! them, remove them here and the guard then REQUIRES a consumer.
+    use std::fs;
+    use std::path::Path;
+
+    /// All runtime source (scribe-app + scribe-core) minus the settings UI and
+    /// the config definition, concatenated for substring consumer-scanning.
+    fn runtime_source() -> String {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let mut out = String::new();
+        for dir in [
+            format!("{manifest}/src"),
+            format!("{manifest}/../scribe-core/src"),
+        ] {
+            collect(Path::new(&dir), &mut out);
+        }
+        out
+    }
+    fn collect(dir: &Path, out: &mut String) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                if name == "settings.rs" || name == "config.rs" {
+                    continue;
+                }
+                if let Ok(c) = fs::read_to_string(&p) {
+                    out.push_str(&c);
+                }
+            }
+        }
+    }
+
+    /// A field is consumed if its `section.field` access (or a documented
+    /// method alias that reads it) appears in runtime source.
+    fn consumed(src: &str, field: &str) -> bool {
+        if src.contains(field) {
+            return true;
+        }
+        // Fields read only through a config method (the literal `section.field`
+        // never appears at the call site).
+        match field {
+            "window.transparency_enabled" => src.contains("effective_translucent"),
+            "toolbar.button_size_px" => src.contains("clamped_button_size"),
+            "toolbar.button_spacing_px" => src.contains("clamped_button_spacing"),
+            _ => false,
+        }
+    }
+
+    /// Every Settings-exposed config field that MUST have a runtime consumer.
+    const WIRED: &[&str] = &[
+        "appearance.theme",
+        "appearance.frameless",
+        "appearance.toolbar_icons",
+        "appearance.jp_glyph_labels",
+        "fonts.editor_size",
+        "fonts.line_height",
+        "editor.tab_width",
+        "editor.insert_spaces",
+        "editor.show_line_numbers",
+        "editor.word_wrap",
+        "editor.show_minimap",
+        "editor.render_whitespace",
+        "editor.tab_bar_position",
+        "editor.restore_session",
+        "editor.grid_enabled",
+        "editor.experimental_rope_editor",
+        "editor.session_backup",
+        "editor.auto_save",
+        "editor.trim_trailing_whitespace_on_save",
+        "editor.final_newline_on_save",
+        "editor.restore_cursor_position",
+        "window.always_on_top",
+        "window.transparency_enabled",
+        "window.mode",
+        "window.opacity",
+        "window.tint",
+        "window.tint_strength",
+        "spellcheck.enabled",
+        "plugins.enabled",
+        "toolbar.button_size_px",
+        "toolbar.button_spacing_px",
+    ];
+
+    /// Controls audited as DEAD (no runtime consumer yet). Shrinks as phases wire
+    /// them; an entry here that gains a consumer fails the guard (move it to WIRED).
+    const KNOWN_DEAD: &[&str] = &[
+        "appearance.follow_os_theme",
+        "spellcheck.language",
+        "spellcheck.check_comments",
+        "spellcheck.check_strings",
+        "spellcheck.check_identifiers",
+        "updates.mode",
+        "updates.check_interval_hours",
+        "toolbar.icon_size_px",
+        "motion.enabled",
+        "motion.intensity",
+        "motion.respect_reduced_motion",
+        "motion.respect_battery",
+        "motion.hover",
+        "motion.focus_ring",
+        "motion.panel_slide",
+        "motion.tab_underline",
+        "motion.palette_lift",
+        "motion.cursor_blink",
+        "motion.status_breathe",
+        "motion.toast",
+        "motion.error_glitch",
+        "motion.ascii_boot_splash",
+        "motion.idle_pulse",
+        "motion.transition_fade",
+    ];
+
+    #[test]
+    fn every_wired_setting_has_a_runtime_consumer() {
+        let src = runtime_source();
+        for &field in WIRED {
+            assert!(
+                consumed(&src, field),
+                "DEAD CONTROL: `{field}` is exposed in Settings but no runtime code reads it",
+            );
+        }
+    }
+
+    #[test]
+    fn known_dead_controls_are_still_dead() {
+        let src = runtime_source();
+        for &field in KNOWN_DEAD {
+            assert!(
+                !consumed(&src, field),
+                "`{field}` now has a consumer -- wire-up done; remove it from KNOWN_DEAD and add to WIRED",
+            );
+        }
+    }
 }
