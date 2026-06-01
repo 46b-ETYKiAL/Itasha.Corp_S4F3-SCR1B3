@@ -67,6 +67,57 @@ fn tab_index_after_move(src: usize, target: usize, idx: usize) -> usize {
     }
 }
 
+/// Public Releases page for the manual "Check for updates" action. Opening this
+/// in the user's browser is the entire network surface of the update feature —
+/// there is no background HTTP, no version beacon, no telemetry (the bundled
+/// build ships no HTTP client by design). Same host as the installer's
+/// `ARPHELPLINK` so it is auditable against the wix manifest.
+pub(crate) const RELEASES_URL: &str =
+    "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/releases";
+
+/// Current wall-clock time in unix seconds, saturating to 0 before the epoch
+/// (a backwards-set clock yields 0 rather than panicking).
+pub(crate) fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// What the once-per-launch update reminder should do, given the user's mode +
+/// scheduling state. Pure (no I/O), so it is unit-tested directly.
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateReminder {
+    /// Do nothing — reminders are off, or the interval has not elapsed.
+    Skip,
+    /// Surface a passive hint toast pointing at the manual check.
+    Notify,
+    /// Open the releases page immediately (the proactive `auto` mode).
+    OpenReleases,
+}
+
+/// Decide the reminder action without performing any side effects. `Off` never
+/// reminds; otherwise [`scribe_core::update::is_check_due`] gates on the
+/// interval, and `auto` escalates from a toast to opening the releases page.
+fn update_reminder_action(
+    mode: scribe_core::config::UpdateMode,
+    last_check_unix: Option<u64>,
+    interval_hours: u64,
+    now: u64,
+) -> UpdateReminder {
+    use scribe_core::config::UpdateMode;
+    if mode == UpdateMode::Off {
+        return UpdateReminder::Skip;
+    }
+    if !scribe_core::update::is_check_due(last_check_unix, interval_hours, now) {
+        return UpdateReminder::Skip;
+    }
+    match mode {
+        UpdateMode::Auto => UpdateReminder::OpenReleases,
+        _ => UpdateReminder::Notify,
+    }
+}
+
 /// Apply the OS window effect for the chosen mode (best-effort, graceful on
 /// unsupported platforms). Windows: acrylic/mica; macOS: vibrancy; elsewhere the
 /// portable transparent surface + tint overlay carry the look.
@@ -329,6 +380,9 @@ pub struct ScribeApp {
     /// `appearance.follow_os_theme` watcher only re-applies on an actual change
     /// rather than every frame. `None` until the first frame reports one.
     last_os_theme: Option<egui::Theme>,
+    /// Set once we have run the per-launch update-due check (so it fires at most
+    /// once per session, on the first frame).
+    did_update_check: bool,
     hl: Highlighter,
     tabs: Vec<EditorTab>,
     active: usize,
@@ -644,6 +698,7 @@ impl ScribeApp {
             config,
             theme,
             last_os_theme: None,
+            did_update_check: false,
             hl: Highlighter::new(),
             active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
@@ -1231,6 +1286,45 @@ impl ScribeApp {
 
     /// Persist the current config to the user TOML file (creating the config
     /// dir if needed). Best-effort: surfaces a toast on failure, never panics.
+    /// Once per launch: if update reminders are enabled (`updates.mode != off`)
+    /// and the configured interval has elapsed since the last reminder, nudge
+    /// the user to check for a new release. This is the entire automatic side of
+    /// the update feature — telemetry-free by construction: it performs NO
+    /// network I/O (the bundled build ships no HTTP client). The actual check is
+    /// the user opening the Releases page (the "Check now" button in Settings,
+    /// or `ctx.open_url` here for `auto`). `is_check_due` + the persisted
+    /// `last_check_unix` make the interval honored across sessions.
+    fn maybe_remind_update(&mut self, ctx: &egui::Context) {
+        if self.did_update_check {
+            return;
+        }
+        self.did_update_check = true;
+        let action = update_reminder_action(
+            self.config.updates.mode,
+            self.config.updates.last_check_unix,
+            self.config.updates.check_interval_hours as u64,
+            now_unix(),
+        );
+        if action == UpdateReminder::Skip {
+            return;
+        }
+        // Due: record the reminder time so the interval is honored next launch.
+        self.config.updates.last_check_unix = Some(now_unix());
+        self.save_config();
+        match action {
+            UpdateReminder::OpenReleases => {
+                ctx.open_url(egui::OpenUrl::new_tab(RELEASES_URL));
+                self.toast = Some("Opened the SCR1B3 releases page to check for updates.".into());
+            }
+            UpdateReminder::Notify => {
+                self.toast = Some(
+                    "Time to check for SCR1B3 updates — Settings ▸ Updates ▸ Check now.".into(),
+                );
+            }
+            UpdateReminder::Skip => {}
+        }
+    }
+
     fn save_config(&mut self) {
         let Some(path) = Config::config_file_path() else {
             return;
@@ -3304,6 +3398,8 @@ impl ScribeApp {
                 self.reapply_theme(ctx);
             }
         }
+        // Once per launch: nudge to check for updates if the interval elapsed.
+        self.maybe_remind_update(ctx);
         // ---- Two-phase close (T19.1 ghost-window fix) ----
         // A transparent / layered window (frameless or translucent) must be
         // HIDDEN one frame before it is destroyed, or the Windows DWM keeps its
@@ -5564,6 +5660,65 @@ mod tab_reorder_tests {
         let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
         assert_eq!(ids, vec![0, 1, 2], "order unchanged");
         assert_eq!(app.active, 2, "active unchanged");
+    }
+}
+
+#[cfg(test)]
+mod update_reminder_tests {
+    //! Phase 5 — the once-per-launch update reminder mode→action mapping.
+    use super::{update_reminder_action, UpdateReminder};
+    use scribe_core::config::UpdateMode;
+
+    const HOUR: u64 = 3_600;
+
+    #[test]
+    fn off_never_reminds_even_when_overdue() {
+        assert_eq!(
+            update_reminder_action(UpdateMode::Off, None, 24, 1_000_000),
+            UpdateReminder::Skip,
+        );
+    }
+
+    #[test]
+    fn notify_skips_until_interval_elapses_then_reminds() {
+        let last = 1_000;
+        // 1h after a 24h-interval check → not due.
+        assert_eq!(
+            update_reminder_action(UpdateMode::Notify, Some(last), 24, last + HOUR),
+            UpdateReminder::Skip,
+        );
+        // 24h later → due.
+        assert_eq!(
+            update_reminder_action(UpdateMode::Notify, Some(last), 24, last + 24 * HOUR),
+            UpdateReminder::Notify,
+        );
+        // Never checked → always due.
+        assert_eq!(
+            update_reminder_action(UpdateMode::Notify, None, 24, 0),
+            UpdateReminder::Notify,
+        );
+    }
+
+    #[test]
+    fn manual_due_still_only_notifies() {
+        assert_eq!(
+            update_reminder_action(UpdateMode::Manual, None, 24, 0),
+            UpdateReminder::Notify,
+        );
+    }
+
+    #[test]
+    fn auto_due_opens_the_releases_page() {
+        assert_eq!(
+            update_reminder_action(UpdateMode::Auto, None, 24, 0),
+            UpdateReminder::OpenReleases,
+        );
+        // Auto still respects the interval (not-due → Skip).
+        let last = 1_000;
+        assert_eq!(
+            update_reminder_action(UpdateMode::Auto, Some(last), 24, last + HOUR),
+            UpdateReminder::Skip,
+        );
     }
 }
 

@@ -1092,8 +1092,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 })
                 .response
                 .on_hover_text(
-                    "How updates are handled: off (never check), notify (tell me only), \
-                     manual (let me trigger), or auto (download and apply).",
+                    "How update reminders work: off (never remind), notify (remind me when a \
+                     check is due), manual (only when I press Check now), or auto (open the \
+                     releases page automatically when due). Telemetry-free: SCR1B3 never \
+                     contacts the network in the background — a reminder only ever opens the \
+                     public GitHub releases page in your browser.",
                 );
             changed |= reset_to_default(ui, &mut config.updates.mode, &def.updates.mode);
         });
@@ -1113,6 +1116,24 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     &mut config.updates.check_interval_hours,
                     &def.updates.check_interval_hours,
                 );
+            });
+        }
+        if row_visible(q, "check for updates now") {
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Check for updates now")
+                    .on_hover_text(
+                        "Open the SCR1B3 releases page in your browser. This is the only \
+                         network action the updater ever takes, and only when you click it.",
+                    )
+                    .clicked()
+                {
+                    ui.ctx()
+                        .open_url(egui::OpenUrl::new_tab(crate::app::RELEASES_URL));
+                    // Record the check so the interval reminder respects it.
+                    config.updates.last_check_unix = Some(crate::app::now_unix());
+                    changed = true;
+                }
             });
         }
         space(ui);
@@ -1703,6 +1724,8 @@ mod wiring_guard {
         "toolbar.button_spacing_px",
         "toolbar.icon_size_px",
         "appearance.follow_os_theme",
+        "updates.mode",
+        "updates.check_interval_hours",
     ];
 
     /// Controls audited as DEAD (no runtime consumer yet). Shrinks as phases wire
@@ -1712,8 +1735,6 @@ mod wiring_guard {
         "spellcheck.check_comments",
         "spellcheck.check_strings",
         "spellcheck.check_identifiers",
-        "updates.mode",
-        "updates.check_interval_hours",
         "motion.enabled",
         "motion.intensity",
         "motion.respect_reduced_motion",

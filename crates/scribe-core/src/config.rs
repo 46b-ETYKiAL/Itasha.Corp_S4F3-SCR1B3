@@ -459,6 +459,12 @@ pub enum UpdateMode {
 pub struct UpdateConfig {
     pub mode: UpdateMode,
     pub check_interval_hours: u32,
+    /// Unix-seconds timestamp of the last time the app reminded the user to
+    /// check for a release (or they pressed "Check now"). This is persisted
+    /// *state*, not a user-facing preference, so it has no Settings control —
+    /// it just lets the interval below be honored across sessions. `None` until
+    /// the first reminder fires.
+    pub last_check_unix: Option<u64>,
 }
 
 impl Default for UpdateConfig {
@@ -466,6 +472,7 @@ impl Default for UpdateConfig {
         Self {
             mode: UpdateMode::Notify,
             check_interval_hours: 24,
+            last_check_unix: None,
         }
     }
 }
