@@ -36,12 +36,6 @@ fn tint_rgba(hex: &str, alpha: u8) -> Option<(u8, u8, u8, u8)> {
     Rgba::parse_hex(hex).map(|c| (c.r, c.g, c.b, alpha))
 }
 
-/// Drag-and-drop payload for tab reordering: the source tab's index. Stored in
-/// egui's `DragAndDrop` context while a tab is being dragged and read back by
-/// the drop zone of whichever tab the pointer releases over.
-#[derive(Clone, Copy)]
-struct TabDrag(usize);
-
 /// Pure index remap for a drag-reorder that moves the element at `src` so it
 /// takes original position `target`'s slot — the drop-on-tab, swap-style UX
 /// (drop tab A onto tab B and A lands where B was, the rest shift to fill).
@@ -1862,12 +1856,17 @@ impl ScribeApp {
         let mut close_to_right = None;
         let mut close_all = false;
         let mut toggle_pin: Option<usize> = None;
-        // Reorder request captured on drop: (source tab index, target tab index).
+        // Reorder is resolved AFTER the loop from the dragged tab's release
+        // position against the full set of tab rects. (The original code
+        // hit-tested a half-built vector and missed drop targets to the right;
+        // a later rewrite wrapped each tab in dnd_drop_zone/dnd_drag_source,
+        // whose extra interaction swallowed the click so tabs couldn't be
+        // switched. This uses ONE click_and_drag widget per tab — click switches,
+        // drag reorders — with the drop resolved here against every rect.)
         let mut reorder: Option<(usize, usize)> = None;
-
-        // Peek (without consuming) the in-flight drag payload so the tab being
-        // dragged can be dimmed. egui keeps the payload in context until release.
-        let dragging: Option<usize> = egui::DragAndDrop::payload::<TabDrag>(ui.ctx()).map(|p| p.0);
+        let mut drag_src: Option<usize> = None;
+        let mut drop_pos: Option<egui::Pos2> = None;
+        let mut rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(self.tabs.len());
 
         for i in 0..self.tabs.len() {
             let selected = i == active;
@@ -1875,62 +1874,64 @@ impl ScribeApp {
                 RichText::new(self.tabs[i].title()).color(if selected { accent } else { muted });
             let pinned = self.tabs[i].pinned;
 
-            // Drop zone wrapping a drag source: tab `i` accepts a tab dropped
-            // onto it AND can itself be picked up. The drop zone records the
-            // dropped payload (the source index) which we resolve after the row.
-            let frame = egui::Frame::default().inner_margin(egui::Margin::symmetric(1, 0));
-            let (_dz, dropped) = ui.dnd_drop_zone::<TabDrag, _>(frame, |ui| {
-                let drag_id = egui::Id::new(("scr1b3-tab-drag", i));
-                let resp = ui
-                    .dnd_drag_source(drag_id, TabDrag(i), |ui| {
-                        ui.add(egui::SelectableLabel::new(selected, label))
-                    })
-                    .inner;
-                if resp.clicked() {
-                    switch_to = Some(i);
-                }
-                if resp.clicked_by(egui::PointerButton::Middle) {
+            let resp = ui
+                .add(egui::SelectableLabel::new(selected, label))
+                .interact(egui::Sense::click_and_drag());
+            if resp.clicked() {
+                switch_to = Some(i);
+            }
+            if resp.clicked_by(egui::PointerButton::Middle) {
+                close = Some(i);
+            }
+            let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
+            resp.context_menu(|ui| {
+                if ui.button("Close").clicked() {
                     close = Some(i);
+                    ui.close_menu();
                 }
-                let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
-                resp.context_menu(|ui| {
-                    if ui.button("Close").clicked() {
-                        close = Some(i);
-                        ui.close_menu();
-                    }
-                    if ui.button("Close Others").clicked() {
-                        close_others = Some(i);
-                        ui.close_menu();
-                    }
-                    if ui.button("Close All to the Right").clicked() {
-                        close_to_right = Some(i);
-                        ui.close_menu();
-                    }
-                    if ui.button("Close All").clicked() {
-                        close_all = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button(pin_label).clicked() {
-                        toggle_pin = Some(i);
-                        ui.close_menu();
-                    }
-                });
-                // Dim the tab that is currently being dragged.
-                if dragging == Some(i) {
-                    ui.painter()
-                        .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
+                if ui.button("Close Others").clicked() {
+                    close_others = Some(i);
+                    ui.close_menu();
+                }
+                if ui.button("Close All to the Right").clicked() {
+                    close_to_right = Some(i);
+                    ui.close_menu();
+                }
+                if ui.button("Close All").clicked() {
+                    close_all = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button(pin_label).clicked() {
+                    toggle_pin = Some(i);
+                    ui.close_menu();
                 }
             });
-
-            if let Some(payload) = dropped {
-                if payload.0 != i {
-                    reorder = Some((payload.0, i));
+            // Dim the tab being dragged; capture the source + release position.
+            if resp.dragged() {
+                ui.painter()
+                    .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
+            }
+            if resp.drag_stopped() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    drag_src = Some(i);
+                    drop_pos = Some(pos);
                 }
             }
+            rects.push((i, resp.rect));
 
             if selected && ui.small_button("×").clicked() {
                 close = Some(i);
+            }
+        }
+
+        // Drag-reorder: the dragged tab was released over another tab's rect.
+        if let (Some(src), Some(pos)) = (drag_src, drop_pos) {
+            for (j, rect) in &rects {
+                if *j != src && rect.contains(pos) {
+                    reorder = Some((src, *j));
+                    break;
+                }
             }
         }
 
@@ -3871,20 +3872,22 @@ impl ScribeApp {
                 for id in &items {
                     self.toolbar_item(ui, id, &mut act, &mut save_cfg, &mut start_lsp);
                 }
-
-                // Inline tab strip — only when the user has the strip docked
-                // at the toolbar (Top, the default). Other positions render the
-                // strip in their own panel below. T18.4.
-                if self.config.editor.tab_bar_position == scribe_core::config::TabBarPosition::Top {
-                    ui.separator();
-                    self.draw_tab_strip(ui, accent, muted);
-                }
+                // The tab strip is its OWN bar (below), not crammed into the
+                // quick-access toolbar — see the tab_bar_position match below.
             });
         });
 
-        // ---- Relocated tab strip (T18.4) — Bottom / Left / Right ----
+        // ---- Tab strip in its OWN bar (T18.4) — separate from the toolbar ----
         match self.config.editor.tab_bar_position {
-            scribe_core::config::TabBarPosition::Top => {}
+            scribe_core::config::TabBarPosition::Top => {
+                // A dedicated tab bar directly below the quick-access toolbar
+                // (added after the "toolbar" top panel, so it stacks beneath it).
+                egui::TopBottomPanel::top("tabs-top")
+                    .frame(egui::Frame::default().fill(panel))
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
+                    });
+            }
             scribe_core::config::TabBarPosition::Bottom => {
                 egui::TopBottomPanel::bottom("tabs-bottom")
                     .frame(egui::Frame::default().fill(panel))
@@ -5105,7 +5108,15 @@ impl ScribeApp {
         // #4186) so we paint invisible interact rectangles at the edges + four
         // corners that send `ViewportCommand::BeginResize(dir)` on drag and
         // hint the right cursor on hover.
-        if self.config.appearance.frameless {
+        //
+        // CRITICAL: these zones are `Order::Foreground`, i.e. ABOVE egui windows
+        // (Middle). When a modal/overlay window is open (settings, find,
+        // palette) its title bar — including the ✕ close button — can fall under
+        // an edge/corner zone, which then swallows the click. That was the
+        // "settings ✕ doesn't close (only in frameless mode)" bug. You can't
+        // edge-resize the OS window while a modal is up anyway, so skip the
+        // overlay whenever one is open.
+        if self.config.appearance.frameless && !overlay_open {
             let maximized = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
             if !maximized {
                 draw_resize_overlays(ctx);
@@ -5542,7 +5553,18 @@ fn draw_resize_overlays(ctx: &egui::Context) {
             ResizeDirection::SouthEast,
         ),
     ];
+    // Only materialize a resize handle when the pointer is actually within that
+    // edge band. These are `Order::Foreground` (above panels + windows), and an
+    // interactable foreground Area swallows the pointer for the whole frame even
+    // when its rect is a thin edge strip — which is why clicking a tab or the
+    // settings ✕ did nothing in frameless mode. Gating on pointer-in-zone means
+    // the handles exist ONLY at the edges the user is actually touching, never
+    // over interior content/chrome.
+    let pointer = ctx.pointer_latest_pos();
     for (id, zone, cursor, dir) in zones {
+        if !pointer.is_some_and(|p| zone.contains(p)) {
+            continue;
+        }
         Area::new(Id::new(id))
             .order(Order::Foreground)
             .fixed_pos(zone.min)
@@ -5799,7 +5821,13 @@ mod e2e {
     //! End-to-end tests: drive the real `ScribeApp::ui` render loop headlessly
     //! through egui's own `Context::run`, exercising the full per-frame UI +
     //! state pipeline (menus, panels, editor, overlays) without a window/GPU.
+    //!
+    //! The `egui_kittest`-backed tests below go further: they simulate real user
+    //! input (clicking widgets BY LABEL via AccessKit) and assert the observable
+    //! outcome — the only kind of test that catches "clicking does nothing".
     use super::*;
+    #[allow(unused_imports)]
+    use egui_kittest::kittest::Queryable as _;
 
     /// Run `n` full UI frames against a fresh headless egui context.
     fn run_frames(app: &mut ScribeApp, n: usize) {
@@ -5821,6 +5849,104 @@ mod e2e {
         let mut app = ScribeApp::new_test(Config::default());
         run_frames(&mut app, 3);
         assert_eq!(app.tabs.len(), 1, "expected one scratch tab");
+    }
+
+    /// REAL interaction test (egui_kittest): open Settings, then click its close
+    /// (✕) the way a user does, and assert the window actually closes. This is
+    /// the kind of test that would have caught "the ✕ doesn't close".
+    #[test]
+    fn settings_close_button_actually_closes() {
+        // frameless OFF so the ONLY "Close window" button is the settings
+        // window's ✕ (the frameless app titlebar adds its own close button).
+        let mut cfg = Config::default();
+        cfg.appearance.frameless = false; // no titlebar ✕
+        cfg.editor.first_run_completed = true; // no welcome-modal ✕
+        let app = ScribeApp::new_test(cfg);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(1100.0, 720.0))
+            .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+        harness.state_mut().settings_open = true;
+        harness.run();
+        assert!(harness.state().settings_open, "settings should be open");
+        // Click the window close (✕) by its accessibility label, like a user.
+        harness.get_by_label("Close window").click();
+        harness.run();
+        assert!(
+            !harness.state().settings_open,
+            "clicking the ✕ must close the settings window"
+        );
+    }
+
+    /// Same, but in the DEFAULT frameless mode (custom titlebar) — the config
+    /// the user actually runs. Two "Close window" buttons exist (app titlebar +
+    /// settings window); we click the settings one (lower on screen) and assert
+    /// it closes. Reproduces the user's "✕ doesn't close" report if it's a
+    /// frameless-mode interaction problem.
+    #[test]
+    fn settings_close_works_in_frameless_mode() {
+        let mut cfg = Config::default();
+        cfg.appearance.frameless = true;
+        cfg.editor.first_run_completed = true;
+        let app = ScribeApp::new_test(cfg);
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(1100.0, 720.0))
+            .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+        harness.state_mut().settings_open = true;
+        harness.run();
+        // The settings window's ✕ is the "Close window" button with the LARGEST
+        // top-y (the app titlebar's sits at the very top of the screen).
+        let target = harness
+            .get_all_by_label("Close window")
+            .max_by(|a, b| {
+                a.rect()
+                    .top()
+                    .partial_cmp(&b.rect().top())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("a settings close button");
+        target.click();
+        harness.run();
+        assert!(
+            !harness.state().settings_open,
+            "clicking the settings ✕ must close it even in frameless mode"
+        );
+    }
+
+    /// REAL interaction test: with two tabs open, clicking the other tab's label
+    /// switches the active document to it. Catches the regression where the
+    /// drag-source wrapper ate the click and tabs couldn't be switched.
+    #[test]
+    fn clicking_a_tab_switches_to_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let alpha = dir.path().join("alpha.txt");
+        let beta = dir.path().join("beta.txt");
+        std::fs::write(&alpha, "A\n").unwrap();
+        std::fs::write(&beta, "B\n").unwrap();
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.appearance.frameless = true; // the user's actual mode
+        let mut app = ScribeApp::new_test(cfg);
+        app.open_path(alpha.clone());
+        app.open_path(beta.clone());
+        // beta was opened last → it is the active tab.
+        let beta_idx = app.active;
+        assert_eq!(app.tabs[beta_idx].title(), "beta.txt");
+
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(1100.0, 720.0))
+            .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+        harness.run();
+        // Click the OTHER tab the way a user does.
+        harness.get_by_label("alpha.txt").click();
+        harness.run();
+        let active_title = {
+            let app = harness.state();
+            app.tabs[app.active].title()
+        };
+        assert_eq!(
+            active_title, "alpha.txt",
+            "clicking the alpha tab must switch the active document to it"
+        );
     }
 
     /// Phase 18 T18.2 — flipping `editor.grid_enabled` on creates the
