@@ -47,6 +47,25 @@ fn tab_display_label(title: &str, pinned: bool) -> String {
     }
 }
 
+/// Pure highlight-movement for the fuzzy finder's keyboard nav (#73). Returns
+/// the new selected index after applying an Up and/or Down key, clamped to
+/// `[0, len-1]`. Down saturates at the last row; Up saturates at the first.
+/// Factored out + unit-tested so the clamp/saturation edge cases (empty-ranked
+/// guarded by the caller) cannot regress into an out-of-bounds index.
+fn fuzzy_move_selection(current: usize, len: usize, up: bool, down: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let mut sel = current.min(len - 1);
+    if down {
+        sel = (sel + 1).min(len - 1);
+    }
+    if up {
+        sel = sel.saturating_sub(1);
+    }
+    sel
+}
+
 /// Pure index remap for a drag-reorder that moves the element at `src` so it
 /// takes original position `target`'s slot — the drop-on-tab, swap-style UX
 /// (drop tab A onto tab B and A lands where B was, the rest shift to fill).
@@ -472,6 +491,10 @@ pub struct ScribeApp {
     fuzzy_index: Vec<PathBuf>,
     /// One-shot focus request for the fuzzy-finder input when it opens.
     focus_fuzzy: bool,
+    /// Index of the keyboard-highlighted row in the fuzzy finder's ranked
+    /// results (#73). Up/Down move it; Enter opens it. Reset to 0 on open and
+    /// whenever the query changes; clamped to the result count each frame.
+    fuzzy_selected: usize,
     /// F-015 from docs/audits/overlooked-surfaces-2026-05-29.md: Ctrl+G
     /// "go to line" modal. `goto_open` is the modal-open flag, `goto_query`
     /// is the typed text (accepts `N` or `N:C`), `focus_goto` is the
@@ -764,6 +787,7 @@ impl ScribeApp {
             fuzzy_query: String::new(),
             fuzzy_index: Vec::new(),
             focus_fuzzy: false,
+            fuzzy_selected: 0,
             goto_open: false,
             goto_query: String::new(),
             focus_goto: false,
@@ -4613,6 +4637,29 @@ impl ScribeApp {
         if self.fuzzy_open {
             let mut chosen: Option<PathBuf> = None;
             let mut still_open = true;
+            // Rank once up front so keyboard nav + the row list agree on the set.
+            let ranked = crate::fuzzy::rank(&self.fuzzy_index, &self.fuzzy_query, 200);
+            // #73 keyboard nav: Up/Down move the highlight, Enter opens it. A
+            // singleline TextEdit ignores Up/Down/Enter-as-newline, so reading
+            // these keys here does not fight the query field's caret.
+            let (up, down, enter) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::Enter),
+                )
+            });
+            if !ranked.is_empty() {
+                self.fuzzy_selected =
+                    fuzzy_move_selection(self.fuzzy_selected, ranked.len(), up, down);
+                if enter {
+                    chosen = Some(ranked[self.fuzzy_selected].clone());
+                }
+            } else {
+                self.fuzzy_selected = 0;
+            }
+            let selected = self.fuzzy_selected;
+            let mut query_changed = false;
             egui::Window::new(RichText::new("⌕  open file").color(accent).monospace())
                 .open(&mut still_open)
                 .collapsible(false)
@@ -4625,9 +4672,10 @@ impl ScribeApp {
                         r.request_focus();
                         self.focus_fuzzy = false;
                     }
+                    query_changed = r.changed();
                     ui.label(
                         RichText::new(format!(
-                            "indexed {} files (Ctrl+P, Esc to close)",
+                            "indexed {} files · ↑↓ select · Enter open · Esc close",
                             self.fuzzy_index.len()
                         ))
                         .color(muted)
@@ -4637,21 +4685,28 @@ impl ScribeApp {
                     egui::ScrollArea::vertical()
                         .max_height(360.0)
                         .show(ui, |ui| {
-                            let ranked =
-                                crate::fuzzy::rank(&self.fuzzy_index, &self.fuzzy_query, 200);
                             if ranked.is_empty() {
                                 ui.label(
                                     RichText::new("no match").color(muted).small().monospace(),
                                 );
                             }
-                            for p in ranked {
+                            for (idx, p) in ranked.iter().enumerate() {
                                 let label = RichText::new(p.display().to_string()).monospace();
-                                if ui.selectable_label(false, label).clicked() {
-                                    chosen = Some(p);
+                                let row = ui.selectable_label(idx == selected, label);
+                                if row.clicked() {
+                                    chosen = Some(p.clone());
+                                }
+                                // Keep the keyboard-highlighted row in view.
+                                if idx == selected && (up || down) {
+                                    row.scroll_to_me(Some(egui::Align::Center));
                                 }
                             }
                         });
                 });
+            // A new query invalidates the old highlight position.
+            if query_changed {
+                self.fuzzy_selected = 0;
+            }
             if let Some(p) = chosen {
                 self.open_path(p);
                 self.fuzzy_open = false;
@@ -5418,6 +5473,7 @@ impl ScribeApp {
             self.fuzzy_open = true;
             self.focus_fuzzy = true;
             self.fuzzy_query.clear();
+            self.fuzzy_selected = 0;
         }
         for p in act.files_to_open.drain(..) {
             self.open_path(p);
@@ -5941,8 +5997,27 @@ mod tab_reorder_tests {
     //! hit-test missed drop targets to the right of the dragged tab), so it is
     //! pinned exhaustively here; [`ScribeApp::move_tab`] is the thin wrapper
     //! that also keeps `active` pointed at the same buffer.
-    use super::{tab_index_after_move, EditorTab, ScribeApp};
+    use super::{fuzzy_move_selection, tab_index_after_move, EditorTab, ScribeApp};
     use scribe_core::Config;
+
+    #[test]
+    fn fuzzy_nav_down_advances_and_saturates_at_last() {
+        assert_eq!(fuzzy_move_selection(0, 3, false, true), 1);
+        assert_eq!(fuzzy_move_selection(2, 3, false, true), 2, "down saturates");
+    }
+
+    #[test]
+    fn fuzzy_nav_up_saturates_at_first() {
+        assert_eq!(fuzzy_move_selection(1, 3, true, false), 0);
+        assert_eq!(fuzzy_move_selection(0, 3, true, false), 0, "up saturates");
+    }
+
+    #[test]
+    fn fuzzy_nav_reclamps_when_results_shrank() {
+        // The query just narrowed the list under a stale selection index.
+        assert_eq!(fuzzy_move_selection(9, 3, false, false), 2);
+        assert_eq!(fuzzy_move_selection(9, 0, false, true), 0, "empty -> 0");
+    }
 
     #[test]
     fn move_is_identity_when_src_equals_target() {
