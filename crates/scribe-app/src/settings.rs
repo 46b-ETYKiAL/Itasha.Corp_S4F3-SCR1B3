@@ -684,30 +684,22 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         space(ui);
     }
 
-    // ---- Motion / animations (Phase 17 T17.3) ----
+    // ---- Motion / animations ----
     if section_visible(
         sel,
         q,
         "Motion",
-        &[
-            "motion",
-            "animation",
-            "hover",
-            "blink",
-            "fade",
-            "reduced motion",
-            "battery",
-        ],
+        &["motion", "animation", "blink", "fade", "cursor"],
     ) {
         ui.heading("Motion");
         // Master OFF by default — calm-surface principle (DECISION-2026-005);
         // animation is opt-in so idle frames cost the same as plain egui.
         ui.horizontal(|ui| {
             changed |= ui
-                .checkbox(&mut config.motion.enabled, "Enable motion (master)")
+                .checkbox(&mut config.motion.enabled, "Enable animations")
                 .on_hover_text(
-                    "When off, every animation is suppressed regardless of the per-effect \
-                     toggles below — idle frames cost the same as plain egui.",
+                    "Master switch. When off, transitions are instant (no fades) and the text \
+                     caret stays steady — idle frames cost the same as plain egui.",
                 )
                 .changed();
             changed |= reset_to_default(ui, &mut config.motion.enabled, &def.motion.enabled);
@@ -717,10 +709,12 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 changed |= ui
                     .add(
                         egui::Slider::new(&mut config.motion.intensity, 0.0..=1.0)
-                            .text("Global intensity"),
+                            .text("Animation speed"),
                     )
                     .on_hover_text(
-                        "Scale the strength of all animations at once — 0 is none, 1 is full.",
+                        "Scale how long animations take. 0 makes every transition instant; 1 \
+                         is egui's full animation time. Affects hover fades, panel collapses, \
+                         and value changes across the editor.",
                     )
                     .changed();
                 changed |=
@@ -728,124 +722,18 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             });
             ui.horizontal(|ui| {
                 changed |= ui
-                    .checkbox(
-                        &mut config.motion.respect_reduced_motion,
-                        "Respect OS reduced-motion",
-                    )
+                    .checkbox(&mut config.motion.cursor_blink, "Blink the text cursor")
                     .on_hover_text(
-                        "Suppress motion when the operating system's reduce-motion \
-                         accessibility setting is enabled.",
+                        "Blink the text caret instead of showing it steady. Disable for a \
+                         calmer, motion-free caret.",
                     )
                     .changed();
                 changed |= reset_to_default(
                     ui,
-                    &mut config.motion.respect_reduced_motion,
-                    &def.motion.respect_reduced_motion,
-                );
-            });
-            ui.horizontal(|ui| {
-                changed |= ui
-                    .checkbox(
-                        &mut config.motion.respect_battery,
-                        "Disable on battery (laptop power-save)",
-                    )
-                    .on_hover_text(
-                        "Turn off animations while the device is running on battery to save power.",
-                    )
-                    .changed();
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.motion.respect_battery,
-                    &def.motion.respect_battery,
-                );
-            });
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Per-effect catalog").strong());
-            ui.label(
-                egui::RichText::new("Per-effect (experimental — wired progressively)")
-                    .weak()
-                    .small(),
-            );
-            ui.add_space(4.0);
-            for (label, field, dflt, hint) in [
-                (
-                    "Hover lift",
-                    &mut config.motion.hover,
-                    def.motion.hover,
-                    "Subtle lift / highlight when the pointer hovers an interactive element.",
-                ),
-                (
-                    "Focus ring pulse",
-                    &mut config.motion.focus_ring,
-                    def.motion.focus_ring,
-                    "Animate the focus outline when a control gains keyboard focus.",
-                ),
-                (
-                    "Panel slide",
-                    &mut config.motion.panel_slide,
-                    def.motion.panel_slide,
-                    "Slide side and bottom panels in and out instead of snapping.",
-                ),
-                (
-                    "Tab underline",
-                    &mut config.motion.tab_underline,
-                    def.motion.tab_underline,
-                    "Glide the active-tab underline between tabs as you switch.",
-                ),
-                (
-                    "Palette lift-in",
-                    &mut config.motion.palette_lift,
-                    def.motion.palette_lift,
-                    "Animate the command palette lifting into view when opened.",
-                ),
-                (
-                    "Cursor blink",
                     &mut config.motion.cursor_blink,
-                    def.motion.cursor_blink,
-                    "Blink the text caret instead of showing it steady.",
-                ),
-                (
-                    "Status-bar breathe",
-                    &mut config.motion.status_breathe,
-                    def.motion.status_breathe,
-                    "Gentle pulsing of the status bar to signal background activity.",
-                ),
-                (
-                    "Toast slide",
-                    &mut config.motion.toast,
-                    def.motion.toast,
-                    "Slide notification toasts in and out from the edge of the window.",
-                ),
-                (
-                    "Error glitch flash",
-                    &mut config.motion.error_glitch,
-                    def.motion.error_glitch,
-                    "Brief glitch flash to draw attention to an error.",
-                ),
-                (
-                    "ASCII boot splash",
-                    &mut config.motion.ascii_boot_splash,
-                    def.motion.ascii_boot_splash,
-                    "Show an animated ASCII splash while the app starts up.",
-                ),
-                (
-                    "Idle pulse",
-                    &mut config.motion.idle_pulse,
-                    def.motion.idle_pulse,
-                    "Soft ambient pulse on idle elements when nothing else is happening.",
-                ),
-                (
-                    "Transition fade",
-                    &mut config.motion.transition_fade,
-                    def.motion.transition_fade,
-                    "Cross-fade between views instead of cutting instantly.",
-                ),
-            ] {
-                ui.horizontal(|ui| {
-                    changed |= ui.checkbox(field, label).on_hover_text(hint).changed();
-                    changed |= reset_to_default(ui, field, &dflt);
-                });
-            }
+                    &def.motion.cursor_blink,
+                );
+            });
         });
         space(ui);
     }
@@ -1721,6 +1609,7 @@ mod wiring_guard {
             "toolbar.button_size_px" => src.contains("clamped_button_size"),
             "toolbar.button_spacing_px" => src.contains("clamped_button_spacing"),
             "toolbar.icon_size_px" => src.contains("clamped_icon_size"),
+            "motion.intensity" => src.contains("clamped_intensity"),
             _ => false,
         }
     }
@@ -1767,28 +1656,18 @@ mod wiring_guard {
         "appearance.follow_os_theme",
         "updates.mode",
         "updates.check_interval_hours",
+        "motion.enabled",
+        "motion.intensity",
+        "motion.cursor_blink",
     ];
 
     /// Controls audited as DEAD (no runtime consumer yet). Shrinks as phases wire
     /// them; an entry here that gains a consumer fails the guard (move it to WIRED).
-    const KNOWN_DEAD: &[&str] = &[
-        "motion.enabled",
-        "motion.intensity",
-        "motion.respect_reduced_motion",
-        "motion.respect_battery",
-        "motion.hover",
-        "motion.focus_ring",
-        "motion.panel_slide",
-        "motion.tab_underline",
-        "motion.palette_lift",
-        "motion.cursor_blink",
-        "motion.status_breathe",
-        "motion.toast",
-        "motion.error_glitch",
-        "motion.ascii_boot_splash",
-        "motion.idle_pulse",
-        "motion.transition_fade",
-    ];
+    /// Now EMPTY: every Settings-exposed control has a runtime consumer. Controls
+    /// that could not be made to work (egui-impossible font-family/ligatures, the
+    /// bespoke motion catalog, OS reduced-motion / battery gates) were removed
+    /// rather than left as dead toggles, so there is nothing left to track here.
+    const KNOWN_DEAD: &[&str] = &[];
 
     #[test]
     fn every_wired_setting_has_a_runtime_consumer() {

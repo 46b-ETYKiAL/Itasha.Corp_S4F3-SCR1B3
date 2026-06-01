@@ -27,102 +27,30 @@ pub struct Config {
 /// Motion / animation catalog (Phase 17 T17.3). Master switch + per-effect
 /// toggles + global intensity. **OFF by default** — animation is opt-in so
 /// the editor matches DECISION-2026-005's "calm, legible surface; chrome is
-/// instrumentation, not decoration" through-line and so idle frames cost
-/// the same as plain egui. When `enabled` is true, individual effects
-/// follow their own toggle, the global `intensity` scales their amplitude,
-/// and the `respect_reduced_motion` + `respect_battery` flags zero-out
-/// animation when the OS asks for it or the device is on battery.
+/// instrumentation, not decoration" through-line and so idle frames cost the
+/// same as plain egui. When `enabled` is true, `intensity` scales egui's global
+/// animation time (hover fades, value lerps, panel collapses, …) and
+/// `cursor_blink` toggles the blinking text caret.
 ///
-/// The per-effect implementations are wired progressively as follow-up
-/// increments. This struct is the load-bearing scaffold every motion
-/// site consults via `MotionConfig::active_for(effect, …)`.
+/// Only effects egui drives natively are exposed. An earlier scaffold carried a
+/// 12-entry per-effect catalog (panel slide, tab-underline glide, error glitch,
+/// ASCII boot splash, …) plus OS reduced-motion / on-battery gates, but none of
+/// those had a renderer implementation and egui exposes no API to honor the OS
+/// flags, so they were removed rather than shipped as dead toggles.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MotionConfig {
-    /// Master switch. When false, every animation is suppressed regardless
-    /// of the per-effect flags below — keeps the editor cost identical to
-    /// the no-motion build.
+    /// Master switch. When false, egui's animation time is zeroed (instant, no
+    /// fades) and the caret stops blinking — idle frames cost the same as plain
+    /// egui.
     pub enabled: bool,
-    /// 0.0..=1.0 amplitude scale every effect honours.
+    /// 0.0..=1.0 scale applied to egui's global animation time when enabled.
     pub intensity: f32,
-    /// Honour the OS reduced-motion request (e.g. macOS Reduce Motion,
-    /// Windows Animate windows when minimizing OFF, Linux GNOME tweaks).
-    pub respect_reduced_motion: bool,
-    /// Suppress animation when the device reports it's on battery (laptop
-    /// power-save). Verified at runtime; falls back to `enabled` on desktops.
-    pub respect_battery: bool,
-
-    // ---- 12-effect catalog (the named animations from the plan) ----
-    pub hover: bool,
-    pub focus_ring: bool,
-    pub panel_slide: bool,
-    pub tab_underline: bool,
-    pub palette_lift: bool,
+    /// Blink the text caret (vs. a steady caret) while motion is enabled.
     pub cursor_blink: bool,
-    pub status_breathe: bool,
-    pub toast: bool,
-    pub error_glitch: bool,
-    pub ascii_boot_splash: bool,
-    pub idle_pulse: bool,
-    pub transition_fade: bool,
-}
-
-/// The 12 named motion effects. Mirrors the boolean fields on `MotionConfig`
-/// 1:1 so `active_for(effect, …)` can route each enquiry to the right flag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MotionEffect {
-    Hover,
-    FocusRing,
-    PanelSlide,
-    TabUnderline,
-    PaletteLift,
-    CursorBlink,
-    StatusBreathe,
-    Toast,
-    ErrorGlitch,
-    AsciiBootSplash,
-    IdlePulse,
-    TransitionFade,
 }
 
 impl MotionConfig {
-    /// True when motion is on AND not gated by reduced-motion or battery.
-    /// The caller supplies the live `reduced_motion` + `on_battery` flags
-    /// (the config itself stays pure / platform-agnostic).
-    pub fn effective(&self, reduced_motion: bool, on_battery: bool) -> bool {
-        if !self.enabled {
-            return false;
-        }
-        if self.respect_reduced_motion && reduced_motion {
-            return false;
-        }
-        if self.respect_battery && on_battery {
-            return false;
-        }
-        true
-    }
-
-    /// True when the master is effective AND this specific effect's toggle
-    /// is on. Every motion site should consult this before driving an
-    /// animation — never branch on `enabled` alone.
-    pub fn active_for(&self, effect: MotionEffect, reduced_motion: bool, on_battery: bool) -> bool {
-        self.effective(reduced_motion, on_battery)
-            && match effect {
-                MotionEffect::Hover => self.hover,
-                MotionEffect::FocusRing => self.focus_ring,
-                MotionEffect::PanelSlide => self.panel_slide,
-                MotionEffect::TabUnderline => self.tab_underline,
-                MotionEffect::PaletteLift => self.palette_lift,
-                MotionEffect::CursorBlink => self.cursor_blink,
-                MotionEffect::StatusBreathe => self.status_breathe,
-                MotionEffect::Toast => self.toast,
-                MotionEffect::ErrorGlitch => self.error_glitch,
-                MotionEffect::AsciiBootSplash => self.ascii_boot_splash,
-                MotionEffect::IdlePulse => self.idle_pulse,
-                MotionEffect::TransitionFade => self.transition_fade,
-            }
-    }
-
     /// Clamped intensity so a malformed user config can't drive an animation
     /// outside its design band.
     pub fn clamped_intensity(&self) -> f32 {
@@ -132,26 +60,11 @@ impl MotionConfig {
 
 impl Default for MotionConfig {
     fn default() -> Self {
-        // Master OFF by default — animation is opt-in. Per-effect flags
-        // carry the sensible "when motion is on" defaults so the user
-        // doesn't have to tick every box on first activation.
+        // Master OFF by default — animation is opt-in (calm-surface principle).
         Self {
             enabled: false,
             intensity: 0.6,
-            respect_reduced_motion: true,
-            respect_battery: true,
-            hover: true,
-            focus_ring: true,
-            panel_slide: false,
-            tab_underline: true,
-            palette_lift: false,
             cursor_blink: true,
-            status_breathe: false,
-            toast: true,
-            error_glitch: false,
-            ascii_boot_splash: false,
-            idle_pulse: false,
-            transition_fade: true,
         }
     }
 }
@@ -662,42 +575,9 @@ mod tests {
     }
 
     #[test]
-    fn motion_master_gates_all_effects() {
-        // T17.3: master switch OFF must zero every per-effect query, even
-        // when the per-effect toggle is on and reduced-motion / battery are
-        // both fine. Defaults: master off => everything off.
-        let m = MotionConfig::default();
-        assert!(!m.enabled, "master defaults OFF");
-        for effect in [
-            MotionEffect::Hover,
-            MotionEffect::CursorBlink,
-            MotionEffect::Toast,
-            MotionEffect::TransitionFade,
-            MotionEffect::IdlePulse,
-        ] {
-            assert!(
-                !m.active_for(effect, false, false),
-                "master off must gate {effect:?}"
-            );
-        }
-
-        // Master on, reduced-motion on => still off (respect_reduced_motion).
-        let m_on = MotionConfig {
-            enabled: true,
-            ..MotionConfig::default()
-        };
-        assert!(m_on.active_for(MotionEffect::Hover, false, false));
-        assert!(!m_on.active_for(MotionEffect::Hover, true, false));
-        assert!(!m_on.active_for(MotionEffect::Hover, false, true));
-
-        // Per-effect toggle OFF must gate even when master is effective.
-        let m_partial = MotionConfig {
-            enabled: true,
-            hover: false,
-            ..MotionConfig::default()
-        };
-        assert!(!m_partial.active_for(MotionEffect::Hover, false, false));
-        assert!(m_partial.active_for(MotionEffect::CursorBlink, false, false));
+    fn motion_master_off_by_default() {
+        // Calm-surface principle: animation is opt-in.
+        assert!(!MotionConfig::default().enabled, "master defaults OFF");
     }
 
     #[test]

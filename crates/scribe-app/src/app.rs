@@ -1059,6 +1059,30 @@ impl ScribeApp {
         self.last_os_theme = os_theme;
         self.theme = load_theme(&self.effective_theme_name(os_theme));
         ctx.set_visuals(self.current_visuals());
+        // `set_visuals` resets the caret style, so re-apply motion after it.
+        self.apply_motion_style(ctx);
+    }
+
+    /// Push the `motion` preferences into egui's global style. Motion off zeroes
+    /// the animation time (instant transitions, no hover fades — idle frames
+    /// cost the same as plain egui) and stops the caret blinking; otherwise the
+    /// intensity scales egui's default animation time. This is the whole Motion
+    /// feature: only effects egui drives natively are exposed, so there are no
+    /// dead per-effect toggles.
+    fn apply_motion_style(&self, ctx: &egui::Context) {
+        // egui's stock animation time is 1/12 s; scale it by intensity, or zero
+        // it when motion is disabled.
+        const EGUI_DEFAULT_ANIMATION_TIME: f32 = 1.0 / 12.0;
+        let anim = if self.config.motion.enabled {
+            EGUI_DEFAULT_ANIMATION_TIME * self.config.motion.clamped_intensity()
+        } else {
+            0.0
+        };
+        let blink = self.config.motion.enabled && self.config.motion.cursor_blink;
+        ctx.style_mut(|s| {
+            s.animation_time = anim;
+            s.visuals.text_cursor.blink = blink;
+        });
     }
 
     /// Replace the active editor's selection (or insert at the caret) with
@@ -3456,6 +3480,10 @@ impl ScribeApp {
         }
         // Once per launch: nudge to check for updates if the interval elapsed.
         self.maybe_remind_update(ctx);
+        // Keep egui's animation time + caret style in sync with the motion
+        // preferences every frame (cheap; also covers startup before any
+        // theme reapply).
+        self.apply_motion_style(ctx);
         // ---- Two-phase close (T19.1 ghost-window fix) ----
         // A transparent / layered window (frameless or translucent) must be
         // HIDDEN one frame before it is destroyed, or the Windows DWM keeps its
