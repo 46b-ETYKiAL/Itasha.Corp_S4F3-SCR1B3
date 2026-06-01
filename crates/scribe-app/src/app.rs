@@ -2510,17 +2510,18 @@ impl ScribeApp {
         }
     }
 
-    /// True when a text-input / navigation modal currently owns the keyboard
-    /// (#72). The editor-surface completion popup must defer to these so its
-    /// ↑↓/Enter interception cannot steal a modal field's keys. Kept as one
-    /// method so the modal set is defined in exactly one place.
+    /// True when a modal with a focused text field or arrow-key navigation
+    /// currently owns the keyboard (#72). The editor-surface completion popup
+    /// must defer to these so its ↑↓/Enter interception cannot steal the modal
+    /// field's keys. Kept as one method so the set is defined in exactly one
+    /// place. NOTE: the passive display modals (welcome, cheatsheet, recent —
+    /// no text entry, no arrow navigation) are deliberately EXCLUDED; they have
+    /// no keys for completion to conflict with, and the first-run welcome flag
+    /// must not suppress completion in the editor behind it.
     fn modal_owns_keyboard(&self) -> bool {
         self.find_open
             || self.palette_open
             || self.settings_open
-            || self.cheatsheet_open
-            || self.recent_open
-            || self.welcome_open
             || self.fuzzy_open
             || self.goto_open
             || self.goto_symbol_open
