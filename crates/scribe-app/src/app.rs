@@ -36,6 +36,37 @@ fn tint_rgba(hex: &str, alpha: u8) -> Option<(u8, u8, u8, u8)> {
     Rgba::parse_hex(hex).map(|c| (c.r, c.g, c.b, alpha))
 }
 
+/// Drag-and-drop payload for tab reordering: the source tab's index. Stored in
+/// egui's `DragAndDrop` context while a tab is being dragged and read back by
+/// the drop zone of whichever tab the pointer releases over.
+#[derive(Clone, Copy)]
+struct TabDrag(usize);
+
+/// Pure index remap for a drag-reorder that moves the element at `src` so it
+/// takes original position `target`'s slot — the drop-on-tab, swap-style UX
+/// (drop tab A onto tab B and A lands where B was, the rest shift to fill).
+/// Models `Vec::remove(src)` followed by `Vec::insert(target, _)` and returns
+/// the new index of whatever element currently sits at `idx`. Factored out and
+/// unit-tested (see `tab_reorder_tests`) because the index arithmetic is the
+/// part that historically went wrong — the old hand-rolled hit-test scanned a
+/// partially-built response vector and silently missed drop targets to the
+/// right of the dragged tab.
+fn tab_index_after_move(src: usize, target: usize, idx: usize) -> usize {
+    if src == target {
+        return idx;
+    }
+    if idx == src {
+        return target;
+    }
+    // Where `idx` sits after `remove(src)`, then after `insert(target, _)`.
+    let a1 = if idx < src { idx } else { idx - 1 };
+    if a1 >= target {
+        a1 + 1
+    } else {
+        a1
+    }
+}
+
 /// Apply the OS window effect for the chosen mode (best-effort, graceful on
 /// unsupported platforms). Windows: acrylic/mica; macOS: vibrancy; elsewhere the
 /// portable transparent surface + tint overlay carry the look.
@@ -441,11 +472,6 @@ pub struct ScribeApp {
     grid_tree: Option<egui_tiles::Tree<crate::grid::Pane>>,
     next_doc_id: crate::grid::DocIdAllocator,
     grid_close_queue: Vec<crate::grid::DocId>,
-    /// Index of the tab currently being dragged in the tab strip, or `None`
-    /// if no tab is mid-drag. Drives the click_and_drag swap-on-release
-    /// pattern in `draw_tab_strip` (F-001 fix from the 2026-05-29 overlooked-
-    /// surfaces audit).
-    dragged_tab: Option<usize>,
     /// Last-frame cursor position in the active buffer, expressed as
     /// `(1-based line, 1-based column)`. Sampled from the central panel's
     /// `TextEditOutput::cursor_range.primary` on every paint and rendered
@@ -678,7 +704,6 @@ impl ScribeApp {
             grid_tree: None,
             next_doc_id: crate::grid::DocIdAllocator::default(),
             grid_close_queue: Vec::new(),
-            dragged_tab: None,
             last_cursor_line_col: None,
             last_selection_chars: 0,
         }
@@ -698,15 +723,23 @@ impl ScribeApp {
         let Some(mut tree) = self.grid_tree.take() else {
             return;
         };
-        // Reset the per-frame close queue; the behavior may push into it.
-        self.grid_close_queue.clear();
-        // Use a local close-queue inside the closure so the borrow
-        // checker doesn't see `&mut self.grid_close_queue` twice (once
-        // via the body closure capture, once via the behavior field).
-        let mut close_queue: Vec<crate::grid::DocId> = Vec::new();
+        let line_height = self.config.fonts.line_height;
+        // Disjoint-field borrows captured as locals BEFORE the central-panel
+        // closure (which mutably borrows `self.tabs`). The highlighter + its
+        // cache are different fields than `tabs`, so the immutable borrows here
+        // and the closure's `&mut self.tabs` coexist under disjoint closure
+        // capture.
+        let hl = &self.hl;
+        let hl_cache = &self.hl_cache;
+        // Per-frame shared close buffer. The pane `✕` button writes here and
+        // `AppGridBehavior::retain_pane` reads it back during the SAME
+        // `tree.ui()` call, so egui_tiles prunes exactly the closed pane and
+        // preserves the rest of the user's arrangement (no full rebuild).
+        let closes: std::cell::RefCell<Vec<crate::grid::DocId>> =
+            std::cell::RefCell::new(Vec::new());
         egui::CentralPanel::default().show(ctx, |ui| {
             let tabs = &mut self.tabs;
-            let body_close_queue = &mut close_queue;
+            let render_closes = &closes;
             let mut render_body = |ui: &mut egui::Ui, doc_id: crate::grid::DocId| -> bool {
                 let Some(idx) = tabs.iter().position(|t| t.doc_id == doc_id) else {
                     ui.weak("(document closed)");
@@ -715,16 +748,12 @@ impl ScribeApp {
                 let mut drag_started = false;
                 ui.horizontal(|ui| {
                     if ui.small_button("✕").on_hover_text("Close pane").clicked() {
-                        body_close_queue.push(doc_id);
+                        render_closes.borrow_mut().push(doc_id);
                     }
-                    // F-002 fix from docs/audits/overlooked-surfaces-2026-05-29.md:
-                    // the previous code used `is_pointer_button_down_on()` which
-                    // returns `true` every frame the button is held — egui_tiles
-                    // expects `UiResponse::DragStarted` to fire ONCE on drag
-                    // start. Re-firing every frame put the tile tree's drag
-                    // state into a confused "constantly starting" loop and the
-                    // pane never actually moved. The fix uses `drag_started()`
-                    // on a click_and_drag Sense.
+                    // `drag_started()` on a click_and_drag Sense fires ONCE on
+                    // drag start (egui_tiles expects a single `DragStarted`);
+                    // an "is button held" check would re-fire every frame and
+                    // wedge the tile tree's drag state.
                     let handle = ui
                         .small_button("⠿")
                         .on_hover_text("Drag to rearrange")
@@ -733,55 +762,61 @@ impl ScribeApp {
                         drag_started = true;
                     }
                 });
+                // Per-pane syntax highlighting via the same memoizing layouter
+                // the single-pane + split paths use, keyed on THIS pane's own
+                // language hint — so each pane highlights for its own file type
+                // instead of the old plain-text downgrade. The shared single-
+                // slot `hl_cache` recomputes as focus moves between panes, which
+                // is fine at the 6-pane ceiling.
+                let ext = tabs[idx].doc.language_hint();
+                let mut layouter =
+                    make_layouter(hl, hl_cache, ext.as_deref(), font.clone(), line_height);
                 egui::ScrollArea::both()
                     .id_salt(("scr1b3-grid-pane", doc_id.raw()))
                     .show(ui, |ui| {
                         let editor = egui::TextEdit::multiline(&mut tabs[idx].text)
                             .code_editor()
-                            .font(font.clone())
                             .desired_width(f32::INFINITY)
-                            .desired_rows(20);
+                            .desired_rows(20)
+                            .layouter(&mut layouter);
                         editor.show(ui);
                     });
                 drag_started
             };
-            // egui_tiles' `retain_pane` is consulted on every paint; we
-            // wire a small empty vec so the behavior owns its own slot
-            // and the body's close_queue is the authoritative buffer
-            // we drain after the frame.
-            let mut behavior_close_requests: Vec<crate::grid::DocId> = Vec::new();
             let mut behavior = crate::grid::AppGridBehavior {
                 titles: &titles,
                 render_body: &mut render_body,
-                close_requests: &mut behavior_close_requests,
+                close_requests: &closes,
             };
             tree.ui(&mut behavior, ui);
         });
-        self.grid_close_queue.append(&mut close_queue);
         // Phase 18 T18.2 — 6-pane cap. Reads the grid storage (NOT the
-        // currently-visible tabs) and toasts when the user splits past
-        // the ceiling. The full undo-snapshot pattern from the dossier
-        // lands in a follow-up; the MVP here just warns + caps the
-        // count by capping the tab vec so the next layout-build picks
-        // up the right shape.
+        // currently-visible tabs) and toasts when the user splits past the
+        // ceiling.
         if crate::grid::count_panes(&tree) > crate::grid::MAX_PANES {
             self.toast = Some(format!(
                 "Pane limit reached ({}). Close a pane before opening more.",
                 crate::grid::MAX_PANES
             ));
         }
-        // After the frame: if the user closed any panes via the chrome,
-        // we drop those tabs as well. The simplest cleanup is to remove
-        // the tabs matching each close request; the tree itself prunes
-        // empty parents via simplification on its next paint.
-        if !self.grid_close_queue.is_empty() {
-            for doc_id in self.grid_close_queue.drain(..).collect::<Vec<_>>() {
+        // Drop the tabs the user closed via the pane chrome. `retain_pane`
+        // already pruned the matching pane(s) during the frame, so here we only
+        // remove the backing tabs — the surviving panes keep their positions.
+        let to_close = closes.into_inner();
+        if !to_close.is_empty() {
+            for doc_id in to_close {
                 self.tabs.retain(|t| t.doc_id != doc_id);
             }
             if self.tabs.is_empty() {
                 self.tabs.push(EditorTab::scratch());
             }
-            // Re-sync the tree to the surviving doc set.
+        }
+        // Reconcile additions: a tab opened while the grid is live has no pane
+        // yet. Rebuild ONLY when the doc set actually differs from the pane set,
+        // so steady-state editing and drag-rearranging never reset the layout.
+        let want: std::collections::BTreeSet<crate::grid::DocId> =
+            self.tabs.iter().map(|t| t.doc_id).collect();
+        if want != crate::grid::pane_doc_ids(&tree) {
             let docs: Vec<crate::grid::DocId> = self.tabs.iter().map(|t| t.doc_id).collect();
             tree = crate::grid::build_default_grid(&docs);
         }
@@ -1586,10 +1621,13 @@ impl ScribeApp {
     /// - **Middle-click** → close that tab (universal editor convention)
     /// - **Right-click** → context menu: Close · Close Others · Close All to the Right · Close All
     /// - **`×` button on the active tab** → close (back-compat with pre-audit behavior)
-    /// - **Drag** → rearrange. Dragging a tab over another tab swaps them on
-    ///   release. The egui pattern is `Sense::click_and_drag` per item, a
-    ///   `dragged_tab: Option<usize>` field on the app to remember which
-    ///   tab is mid-drag, and `response.drag_stopped()` to commit the swap.
+    /// - **Drag** → rearrange. Each tab is a `dnd_drag_source` wrapped in a
+    ///   `dnd_drop_zone`; dropping tab A onto tab B re-homes A into B's slot.
+    ///   This is the egui 0.34 drag-and-drop idiom (the same one the toolbar
+    ///   editor uses). It replaces an earlier hand-rolled `click_and_drag` +
+    ///   rect hit-test that scanned a *partially-built* response vector, so a
+    ///   drop onto any tab to the RIGHT of the dragged one was silently missed.
+    ///   The index arithmetic lives in [`tab_index_after_move`] (unit-tested).
     ///   Closes F-001 / F-043 from `docs/audits/overlooked-surfaces-2026-05-29.md`.
     fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
         let active = self.active;
@@ -1599,87 +1637,72 @@ impl ScribeApp {
         let mut close_to_right = None;
         let mut close_all = false;
         let mut toggle_pin: Option<usize> = None;
-        // Per-tab pointer position when a drag ends — used to compute the
-        // drop-target index without storing rects on the app.
-        let mut drop_target: Option<usize> = None;
+        // Reorder request captured on drop: (source tab index, target tab index).
+        let mut reorder: Option<(usize, usize)> = None;
 
-        // Collect per-tab Responses so we can do drop-target hit-testing in a
-        // second pass (each Response carries its rect).
-        let mut responses: Vec<egui::Response> = Vec::with_capacity(self.tabs.len());
+        // Peek (without consuming) the in-flight drag payload so the tab being
+        // dragged can be dimmed. egui keeps the payload in context until release.
+        let dragging: Option<usize> = egui::DragAndDrop::payload::<TabDrag>(ui.ctx()).map(|p| p.0);
 
-        for (i, t) in self.tabs.iter().enumerate() {
+        for i in 0..self.tabs.len() {
             let selected = i == active;
-            let label = RichText::new(t.title()).color(if selected { accent } else { muted });
-            // `click_and_drag` so the same widget services left-click switch,
-            // middle-click close, right-click context, and drag-rearrange.
-            let resp = ui
-                .add(egui::SelectableLabel::new(selected, label))
-                .interact(egui::Sense::click_and_drag());
-            if resp.clicked() {
-                switch_to = Some(i);
-            }
-            if resp.clicked_by(egui::PointerButton::Middle) {
-                close = Some(i);
-            }
-            // Right-click → context menu.
-            let pin_label = if self.tabs[i].pinned {
-                "Unpin tab"
-            } else {
-                "Pin tab"
-            };
-            resp.context_menu(|ui| {
-                if ui.button("Close").clicked() {
+            let label =
+                RichText::new(self.tabs[i].title()).color(if selected { accent } else { muted });
+            let pinned = self.tabs[i].pinned;
+
+            // Drop zone wrapping a drag source: tab `i` accepts a tab dropped
+            // onto it AND can itself be picked up. The drop zone records the
+            // dropped payload (the source index) which we resolve after the row.
+            let frame = egui::Frame::default().inner_margin(egui::Margin::symmetric(1, 0));
+            let (_dz, dropped) = ui.dnd_drop_zone::<TabDrag, _>(frame, |ui| {
+                let drag_id = egui::Id::new(("scr1b3-tab-drag", i));
+                let resp = ui
+                    .dnd_drag_source(drag_id, TabDrag(i), |ui| {
+                        ui.add(egui::SelectableLabel::new(selected, label))
+                    })
+                    .inner;
+                if resp.clicked() {
+                    switch_to = Some(i);
+                }
+                if resp.clicked_by(egui::PointerButton::Middle) {
                     close = Some(i);
-                    ui.close_menu();
                 }
-                if ui.button("Close Others").clicked() {
-                    close_others = Some(i);
-                    ui.close_menu();
-                }
-                if ui.button("Close All to the Right").clicked() {
-                    close_to_right = Some(i);
-                    ui.close_menu();
-                }
-                if ui.button("Close All").clicked() {
-                    close_all = true;
-                    ui.close_menu();
-                }
-                ui.separator();
-                if ui.button(pin_label).clicked() {
-                    toggle_pin = Some(i);
-                    ui.close_menu();
+                let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
+                resp.context_menu(|ui| {
+                    if ui.button("Close").clicked() {
+                        close = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close Others").clicked() {
+                        close_others = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All to the Right").clicked() {
+                        close_to_right = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All").clicked() {
+                        close_all = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button(pin_label).clicked() {
+                        toggle_pin = Some(i);
+                        ui.close_menu();
+                    }
+                });
+                // Dim the tab that is currently being dragged.
+                if dragging == Some(i) {
+                    ui.painter()
+                        .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
                 }
             });
 
-            // Drag bookkeeping. We start a drag the frame the press begins;
-            // we commit a swap on the frame the press ends.
-            if resp.drag_started() {
-                self.dragged_tab = Some(i);
-            }
-            if resp.drag_stopped() {
-                // The drop target is whatever tab the pointer is over now.
-                if let (Some(src), Some(pos)) = (self.dragged_tab, resp.interact_pointer_pos()) {
-                    // Find which tab rect contains the release position.
-                    for (j, other) in responses.iter().enumerate() {
-                        if other.rect.contains(pos) {
-                            drop_target = Some(j);
-                            break;
-                        }
-                    }
-                    // Special-case: released over self → no-op.
-                    if drop_target == Some(src) {
-                        drop_target = None;
-                    }
+            if let Some(payload) = dropped {
+                if payload.0 != i {
+                    reorder = Some((payload.0, i));
                 }
-                self.dragged_tab = None;
             }
-            // Visual hint while dragging: dim the dragged tab.
-            if self.dragged_tab == Some(i) && resp.dragged() {
-                ui.painter()
-                    .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
-            }
-
-            responses.push(resp);
 
             if selected && ui.small_button("×").clicked() {
                 close = Some(i);
@@ -1706,30 +1729,24 @@ impl ScribeApp {
                 self.tabs[i].pinned = !self.tabs[i].pinned;
             }
         }
-        // Commit the drag-swap. The swap is index-based; `swap` is O(1) and
-        // preserves every other tab's position.
-        if let Some(target) = drop_target {
-            // The source index is whatever was being dragged THIS frame; it
-            // was already cleared above on drag_stopped, so we recover it
-            // from the responses we collected: the dragged response had
-            // `drag_stopped()` set true above. Re-derive: there is at most
-            // one such response.
-            if let Some(src) = responses
-                .iter()
-                .position(|r| r.drag_stopped() && r.interact_pointer_pos().is_some())
-            {
-                if src < self.tabs.len() && target < self.tabs.len() && src != target {
-                    self.tabs.swap(src, target);
-                    // Keep the active tab pointing at the same buffer the
-                    // user is editing.
-                    if self.active == src {
-                        self.active = target;
-                    } else if self.active == target {
-                        self.active = src;
-                    }
-                }
-            }
+        if let Some((src, target)) = reorder {
+            self.move_tab(src, target);
         }
+    }
+
+    /// Move the tab at `src` so it takes original position `target`'s slot
+    /// (drag-and-drop reorder), keeping [`Self::active`] pointed at the same
+    /// buffer the user is editing. No-op if either index is out of range or
+    /// they are equal. Index math is in [`tab_index_after_move`].
+    fn move_tab(&mut self, src: usize, target: usize) {
+        if src >= self.tabs.len() || target >= self.tabs.len() || src == target {
+            return;
+        }
+        let new_active = tab_index_after_move(src, target, self.active);
+        let tab = self.tabs.remove(src);
+        // `target < original len` ⇒ `target <= new len`, so this never panics.
+        self.tabs.insert(target, tab);
+        self.active = new_active.min(self.tabs.len().saturating_sub(1));
     }
 
     /// Close every tab whose index is not `keep` AND is not pinned (F-044).
@@ -5394,6 +5411,105 @@ mod jp_glyph_tests {
         let text = on.text();
         assert!(text.starts_with("save"), "got {text:?}");
         assert!(text.contains("保"), "got {text:?}");
+    }
+}
+
+#[cfg(test)]
+mod tab_reorder_tests {
+    //! Phase 2 — tab drag-reorder. The index arithmetic in
+    //! [`tab_index_after_move`] is the part that historically broke (the old
+    //! hit-test missed drop targets to the right of the dragged tab), so it is
+    //! pinned exhaustively here; [`ScribeApp::move_tab`] is the thin wrapper
+    //! that also keeps `active` pointed at the same buffer.
+    use super::{tab_index_after_move, EditorTab, ScribeApp};
+    use scribe_core::Config;
+
+    #[test]
+    fn move_is_identity_when_src_equals_target() {
+        for idx in 0..5 {
+            assert_eq!(tab_index_after_move(2, 2, idx), idx);
+        }
+    }
+
+    #[test]
+    fn rightward_move_places_dragged_at_target_slot() {
+        // [0,1,2,3], drag 0 → onto 2  =>  [1,2,0,3]  (0 takes slot 2)
+        assert_eq!(tab_index_after_move(0, 2, 0), 2); // dragged element → target
+        assert_eq!(tab_index_after_move(0, 2, 1), 0); // 1 shifts left
+        assert_eq!(tab_index_after_move(0, 2, 2), 1); // 2 shifts left
+        assert_eq!(tab_index_after_move(0, 2, 3), 3); // untouched
+    }
+
+    #[test]
+    fn leftward_move_places_dragged_at_target_slot() {
+        // [0,1,2,3], drag 3 → onto 1  =>  [0,3,1,2]  (3 takes slot 1)
+        assert_eq!(tab_index_after_move(3, 1, 3), 1); // dragged element → target
+        assert_eq!(tab_index_after_move(3, 1, 0), 0); // before target, untouched
+        assert_eq!(tab_index_after_move(3, 1, 1), 2); // 1 shifts right
+        assert_eq!(tab_index_after_move(3, 1, 2), 3); // 2 shifts right
+    }
+
+    #[test]
+    fn adjacent_swap_both_directions() {
+        // drag 1 → onto 2 (rightward by one): [0,1,2] -> [0,2,1]
+        assert_eq!(tab_index_after_move(1, 2, 1), 2);
+        assert_eq!(tab_index_after_move(1, 2, 2), 1);
+        // drag 2 → onto 1 (leftward by one): [0,1,2] -> [0,2,1]
+        assert_eq!(tab_index_after_move(2, 1, 2), 1);
+        assert_eq!(tab_index_after_move(2, 1, 1), 2);
+    }
+
+    /// `move_tab` must physically reorder the tabs AND keep `active` glued to
+    /// the buffer the user was editing, whichever tab moved.
+    #[test]
+    fn move_tab_reorders_and_tracks_active() {
+        let mut app = ScribeApp::new_test(Config::default());
+        // Replace whatever the constructor produced with 4 identifiable tabs.
+        app.tabs.clear();
+        for n in 0..4u64 {
+            let mut t = EditorTab::scratch();
+            t.doc_id = crate::grid::DocId(n);
+            app.tabs.push(t);
+        }
+
+        // User is editing buffer 1 (tab index 1); drag tab 0 onto tab 2 so 0
+        // takes slot 2 => order [1,2,0,3].
+        app.active = 1;
+        app.move_tab(0, 2);
+        let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
+        assert_eq!(ids, vec![1, 2, 0, 3], "physical order after rightward move");
+        assert_eq!(app.tabs[app.active].doc_id.0, 1, "active still on buffer 1");
+
+        // Now drag the last tab (index 3, buffer 3) onto index 0 so 3 takes
+        // slot 0 => [3,1,2,0]. The user is editing buffer 1 (now at index 0);
+        // it should follow to index 1.
+        app.active = 0;
+        let active_buf = app.tabs[app.active].doc_id.0;
+        app.move_tab(3, 0);
+        let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
+        assert_eq!(ids, vec![3, 1, 2, 0], "physical order after leftward move");
+        assert_eq!(
+            app.tabs[app.active].doc_id.0, active_buf,
+            "active follows its buffer across a leftward move"
+        );
+    }
+
+    #[test]
+    fn move_tab_is_noop_on_bad_indices() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs.clear();
+        for n in 0..3u64 {
+            let mut t = EditorTab::scratch();
+            t.doc_id = crate::grid::DocId(n);
+            app.tabs.push(t);
+        }
+        app.active = 2;
+        app.move_tab(0, 0); // equal
+        app.move_tab(5, 1); // src OOB
+        app.move_tab(1, 9); // target OOB
+        let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
+        assert_eq!(ids, vec![0, 1, 2], "order unchanged");
+        assert_eq!(app.active, 2, "active unchanged");
     }
 }
 
