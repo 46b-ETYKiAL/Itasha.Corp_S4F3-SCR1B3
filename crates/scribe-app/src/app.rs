@@ -1438,7 +1438,11 @@ impl ScribeApp {
         }
         match std::fs::write(&path, self.config.to_toml_string()) {
             Ok(()) => self.status = "settings saved".to_string(),
-            Err(e) => self.toast = Some(format!("could not save settings: {e}")),
+            Err(e) => {
+                let msg = format!("could not save settings: {e}");
+                crate::action_log::record("error", &msg);
+                self.toast = Some(msg);
+            }
         }
     }
 
@@ -1481,6 +1485,7 @@ impl ScribeApp {
     fn new_tab(&mut self) {
         self.tabs.push(EditorTab::scratch());
         self.active = self.tabs.len() - 1;
+        crate::action_log::record("tab", "new");
     }
 
     /// Dispatch a [`BuiltinCommand`] selected from the command palette.
@@ -1490,6 +1495,9 @@ impl ScribeApp {
     /// changes (no drift between the two surfaces). Touches `self.config`
     /// then persists via `save_config` so toggles survive a restart.
     fn execute_builtin(&mut self, cmd: BuiltinCommand) {
+        // Action-log every command dispatch so a session is diagnosable: a
+        // command the user invoked that "did nothing" still leaves a trace here.
+        crate::action_log::record("cmd", &format!("{cmd:?}"));
         match cmd {
             BuiltinCommand::NewFile => self.new_tab(),
             BuiltinCommand::OpenFile => self.open_dialog(),
@@ -2056,6 +2064,7 @@ impl ScribeApp {
     }
 
     fn close_tab(&mut self, idx: usize) {
+        crate::action_log::record("tab", "close");
         if idx < self.tabs.len() {
             // F-021 — capture the current scroll position so the next open
             // of the same path restores it. Uses the last-frame
