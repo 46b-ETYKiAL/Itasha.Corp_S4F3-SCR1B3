@@ -4918,7 +4918,22 @@ impl ScribeApp {
                 .frame(egui::Frame::default().fill(panel).inner_margin(6.0))
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("EXPLORER").color(accent).small().monospace());
+                        // #74 — the tree supports ↑↓ Home End ⏎ navigation, but
+                        // that was undiscoverable. Surface it: a hover tip on the
+                        // header plus a always-visible muted key hint.
+                        ui.label(RichText::new("EXPLORER").color(accent).small().monospace())
+                            .on_hover_text(
+                                "File explorer. Keyboard: ↑/↓ move · Home/End jump to first/last \
+                                 · Enter open · (works when no dialog is open and the editor isn't \
+                                 focused).",
+                            );
+                        ui.label(
+                            RichText::new("↑↓ Home End ⏎")
+                                .color(muted)
+                                .small()
+                                .monospace(),
+                        )
+                        .on_hover_text("Navigate the file tree from the keyboard.");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("×").clicked() {
                                 close_tree = true;
