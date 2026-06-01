@@ -141,6 +141,62 @@ impl Theme {
         }
     }
 
+    /// The HOUSE BRAND DEFAULT, shared by every Itasha.Corp app (and identical
+    /// in spirit to C0PL4ND's `itasha-corp` theme). Two brand primaries:
+    /// electric purple #7700FF ("Itasha", structural/keyword voice) + spring
+    /// green #00FF90 (".Corp", the live accent/cursor/function voice). Deep
+    /// purple-black hull, off-white text, Akira-red alarm-only.
+    pub fn itasha_corp() -> Theme {
+        let mut palette = BTreeMap::new();
+        palette.insert("void".into(), Rgba::new(0x12, 0x12, 0x12, 255)); // neutral dark grey-black
+        palette.insert("panel".into(), Rgba::new(0x1c, 0x1c, 0x1f, 255));
+        palette.insert("bezel".into(), Rgba::new(0x2c, 0x2c, 0x33, 255));
+        palette.insert("text".into(), Rgba::new(0xe8, 0xe6, 0xf0, 255));
+        palette.insert("muted".into(), Rgba::new(0x6a, 0x64, 0x88, 255));
+        palette.insert("dim".into(), Rgba::new(0x4a, 0x43, 0x66, 255));
+        palette.insert("green".into(), Rgba::new(0x00, 0xff, 0x90, 255)); // .Corp — the live voice
+        palette.insert("purple".into(), Rgba::new(0x77, 0x00, 0xff, 255)); // Itasha — structural voice
+        palette.insert("red".into(), Rgba::new(0xff, 0x3b, 0x5c, 255)); // alarms only
+        palette.insert("amber".into(), Rgba::new(0xff, 0xc4, 0x4d, 255)); // warnings
+        palette.insert("sage".into(), Rgba::new(0x8d, 0xa8, 0x8c, 255)); // string
+        palette.insert("steel".into(), Rgba::new(0xa9, 0xc2, 0xcc, 255)); // type
+        palette.insert("sand".into(), Rgba::new(0xc9, 0xa8, 0x6a, 255)); // constant/number
+
+        let p = |k: &str| *palette.get(k).unwrap();
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), p("void"));
+        ui.insert("foreground".into(), p("text"));
+        ui.insert("panel".into(), p("panel"));
+        ui.insert("bezel".into(), p("bezel"));
+        ui.insert("gutter".into(), p("void"));
+        ui.insert("line_number".into(), p("muted"));
+        ui.insert("line_number_active".into(), p("green"));
+        ui.insert("cursor".into(), p("green"));
+        ui.insert("selection".into(), Rgba::new(0x77, 0x00, 0xff, 0x40)); // purple wash
+        ui.insert("accent".into(), p("green"));
+        ui.insert("ok".into(), p("green"));
+        ui.insert("error".into(), p("red"));
+        ui.insert("warning".into(), p("amber"));
+
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), p("purple")); // Itasha purple
+        syntax.insert("function".into(), p("green")); // .Corp green
+        syntax.insert("string".into(), p("sage"));
+        syntax.insert("comment".into(), p("dim"));
+        syntax.insert("type".into(), p("steel"));
+        syntax.insert("constant".into(), p("sand"));
+        syntax.insert("number".into(), p("sand"));
+        syntax.insert("variable".into(), p("text"));
+
+        Theme {
+            name: "itasha-corp".into(),
+            appearance: Appearance::Dark,
+            palette,
+            ui,
+            syntax,
+        }
+    }
+
     /// Alt brand theme — phosphor-amber (BBS / hairline-terminal heritage).
     /// Approved sibling to wired-noir under DECISION-2026-005; the palette
     /// shifts to an amber-on-deep-brown phosphor read while keeping the wired
@@ -933,6 +989,8 @@ impl Theme {
     /// User themes (TOML files under `<config_dir>/themes/`) compose on top.
     pub fn builtin_names() -> &'static [&'static str] {
         &[
+            // House brand default (shared across every Itasha.Corp app).
+            "itasha-corp",
             // Existing five (DECISION-2026-005).
             "wired-noir",
             "phosphor-amber",
@@ -961,6 +1019,8 @@ impl Theme {
     /// Look up a built-in theme by name. Returns `None` if no built-in matches.
     pub fn builtin(name: &str) -> Option<Theme> {
         match name {
+            // House brand default (shared across every Itasha.Corp app).
+            "itasha-corp" => Some(Theme::itasha_corp()),
             // Existing five.
             "wired-noir" => Some(Theme::wired_noir()),
             "phosphor-amber" => Some(Theme::phosphor_amber()),

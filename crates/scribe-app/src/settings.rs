@@ -1265,7 +1265,7 @@ fn render_theme_export(ui: &mut egui::Ui, config: &mut Config) -> bool {
                 let theme_dir = dir.join("themes");
                 let path = theme_dir.join(format!("{safe}.toml"));
                 let theme =
-                    Theme::builtin(&config.appearance.theme).unwrap_or_else(Theme::wired_noir);
+                    Theme::builtin(&config.appearance.theme).unwrap_or_else(Theme::itasha_corp);
                 status = match std::fs::create_dir_all(&theme_dir)
                     .and_then(|()| std::fs::write(&path, theme.to_toml_string()))
                 {
@@ -1331,7 +1331,7 @@ fn render_live_color_picker(ui: &mut egui::Ui, config: &Config) -> bool {
     };
     let mut theme = match Theme::from_toml_str(&toml_src) {
         Ok(t) => t,
-        Err(_) => Theme::builtin(theme_name).unwrap_or_else(Theme::wired_noir),
+        Err(_) => Theme::builtin(theme_name).unwrap_or_else(Theme::itasha_corp),
     };
     let mut any_changed = false;
     egui::CollapsingHeader::new("Edit colors live")
