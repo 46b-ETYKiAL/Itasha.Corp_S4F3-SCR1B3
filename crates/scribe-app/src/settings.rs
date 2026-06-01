@@ -188,7 +188,17 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
 /// squished even at the default window size.
 fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -> bool {
     let mut changed = false;
-    let space = |ui: &mut egui::Ui| ui.add_space(10.0);
+    // Roomier vertical rhythm so rows don't feel cramped — egui's default item
+    // spacing (~3px) is what made settings hard to read. Applies to every row.
+    ui.spacing_mut().item_spacing.y = 8.0;
+    let space = |ui: &mut egui::Ui| ui.add_space(12.0);
+    // Sub-group header inside a category page: a little breathing room, a strong
+    // accented label, and a thin rule, so related settings read as a group.
+    let group = |ui: &mut egui::Ui, label: &str| {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(label).strong());
+        ui.separator();
+    };
     // F-037 — the default config, used by `reset_to_default` for every
     // per-setting ↺ revert button. Cheap to construct once per render.
     let def = Config::default();
@@ -345,25 +355,39 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.heading("Fonts");
         if row_visible(q, "editor size") {
             ui.horizontal(|ui| {
+                ui.label("Size")
+                    .on_hover_text("Font size of the editor text, in points.");
+                if ui.small_button("-").on_hover_text("Smaller").clicked() {
+                    config.fonts.editor_size = (config.fonts.editor_size - 1.0).clamp(8.0, 32.0);
+                    changed = true;
+                }
                 changed |= ui
-                    .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0).text("size"))
-                    .on_hover_text("Font size of the editor text, in points.")
+                    .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0))
                     .changed();
+                if ui.small_button("+").on_hover_text("Larger").clicked() {
+                    config.fonts.editor_size = (config.fonts.editor_size + 1.0).clamp(8.0, 32.0);
+                    changed = true;
+                }
                 changed |=
                     reset_to_default(ui, &mut config.fonts.editor_size, &def.fonts.editor_size);
             });
         }
         if row_visible(q, "line height") {
             ui.horizontal(|ui| {
+                ui.label("Line height").on_hover_text(
+                    "Vertical spacing between lines, as a multiple of the font size.",
+                );
+                if ui.small_button("-").on_hover_text("Tighter").clicked() {
+                    config.fonts.line_height = (config.fonts.line_height - 0.1).clamp(1.0, 2.5);
+                    changed = true;
+                }
                 changed |= ui
-                    .add(
-                        egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5)
-                            .text("line height"),
-                    )
-                    .on_hover_text(
-                        "Vertical spacing between lines, as a multiple of the font size.",
-                    )
+                    .add(egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5))
                     .changed();
+                if ui.small_button("+").on_hover_text("Looser").clicked() {
+                    config.fonts.line_height = (config.fonts.line_height + 0.1).clamp(1.0, 2.5);
+                    changed = true;
+                }
                 changed |=
                     reset_to_default(ui, &mut config.fonts.line_height, &def.fonts.line_height);
             });
@@ -388,7 +412,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.heading("Editor");
 
         // -- Indentation --
-        ui.label(egui::RichText::new("Indentation").strong());
+        group(ui, "Indentation");
         ui.add_space(4.0);
         if row_visible(q, "tab width") {
             ui.horizontal(|ui| {
@@ -416,7 +440,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Display --
-        ui.label(egui::RichText::new("Display").strong());
+        group(ui, "Display");
         ui.add_space(4.0);
         if row_visible(q, "line numbers") {
             ui.horizontal(|ui| {
@@ -481,7 +505,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Layout --
-        ui.label(egui::RichText::new("Layout").strong());
+        group(ui, "Layout");
         ui.add_space(4.0);
         if row_visible(q, "tab bar position top bottom left right") {
             // T18.4: position the open-tab strip relative to the editor.
@@ -571,7 +595,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Save & Session --
-        ui.label(egui::RichText::new("Save & Session").strong());
+        group(ui, "Save & Session");
         ui.add_space(4.0);
         if row_visible(q, "restore session") {
             ui.horizontal(|ui| {
@@ -748,7 +772,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.heading("Window");
 
         // -- Always on top --
-        ui.label(egui::RichText::new("Always on top").strong());
+        group(ui, "Always on top");
         ui.add_space(4.0);
         // F-035 — always-on-top toggle. Takes effect immediately via the
         // ViewportCommand the app issues when this checkbox flips.
@@ -766,7 +790,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Transparency / glass --
-        ui.label(egui::RichText::new("Transparency / glass").strong());
+        group(ui, "Transparency / glass");
         ui.add_space(4.0);
         // Master on/off switch for the whole transparency system. Off by default:
         // a normal opaque window is fast and never leaves a DWM ghost on close.
