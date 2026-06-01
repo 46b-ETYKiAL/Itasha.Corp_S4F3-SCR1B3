@@ -546,6 +546,33 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 );
             });
         }
+        if row_visible(q, "side tab orientation vertical horizontal left right") {
+            // #70 — only meaningful when the tab bar is on the Left/Right; the
+            // Top/Bottom positions are always horizontal. Disable (greyed) the
+            // control otherwise so the dependency is obvious rather than silent.
+            let is_side = config.editor.tab_bar_position.is_vertical();
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(is_side, |ui| {
+                    changed |= ui
+                        .checkbox(
+                            &mut config.editor.side_tabs_vertical,
+                            "Side tabs stack vertically",
+                        )
+                        .on_hover_text(
+                            "When the tab bar is on the Left or Right: ON stacks tabs vertically \
+                             (one tab per row — the side-bar default); OFF lays them out \
+                             horizontally, wrapping to new rows. No effect for Top/Bottom \
+                             (always horizontal).",
+                        )
+                        .changed();
+                });
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.side_tabs_vertical,
+                    &def.editor.side_tabs_vertical,
+                );
+            });
+        }
         if row_visible(q, "multi-note grid panes split editor central") {
             // Phase 18 T18.2 — toggle the multi-note grid. When ON, the
             // central editor surface renders every open tab as a movable,
@@ -1653,6 +1680,7 @@ mod wiring_guard {
         "editor.show_minimap",
         "editor.render_whitespace",
         "editor.tab_bar_position",
+        "editor.side_tabs_vertical",
         "editor.restore_session",
         "editor.grid_enabled",
         "editor.experimental_rope_editor",

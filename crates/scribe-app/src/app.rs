@@ -1855,23 +1855,44 @@ impl ScribeApp {
         }
     }
 
+    /// Render the tab strip inside a Left/Right side panel, honouring the
+    /// `side_tabs_vertical` orientation option (#70). Vertical is the side-bar
+    /// default (one full-width tab per row, scrolling vertically); horizontal
+    /// lays tabs left-to-right and wraps to new rows. Either way the strip
+    /// scrolls so no tab becomes unreachable in a small window.
+    fn draw_side_tab_strip(
+        &mut self,
+        ui: &mut egui::Ui,
+        accent: Color32,
+        muted: Color32,
+        vertical: bool,
+    ) {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if vertical {
+                    ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                } else {
+                    ui.horizontal_wrapped(|ui| self.draw_tab_strip(ui, accent, muted));
+                }
+            });
+    }
+
     /// Render the tab strip — the row (or column, for side positions) of open
     /// documents with the active one accented and an `×` close button on it.
-    /// Extracted from the toolbar (T18.4) so the same widget can live inline
-    /// at the top OR in a dedicated bottom / left / right panel.
-    /// Render the tab strip with full mouse ergonomics:
+    /// Extracted from the toolbar (T18.4) so the same widget can live inline at
+    /// the top OR in a dedicated bottom / left / right panel. Mouse ergonomics:
     ///
     /// - **Click** → switch to that tab
     /// - **Middle-click** → close that tab (universal editor convention)
-    /// - **Right-click** → context menu: Close · Close Others · Close All to the Right · Close All
+    /// - **Right-click** → context menu: Close · Close Others · Close All to the Right · Close All · Pin
     /// - **`×` button on the active tab** → close (back-compat with pre-audit behavior)
-    /// - **Drag** → rearrange. Each tab is a `dnd_drag_source` wrapped in a
-    ///   `dnd_drop_zone`; dropping tab A onto tab B re-homes A into B's slot.
-    ///   This is the egui 0.34 drag-and-drop idiom (the same one the toolbar
-    ///   editor uses). It replaces an earlier hand-rolled `click_and_drag` +
-    ///   rect hit-test that scanned a *partially-built* response vector, so a
-    ///   drop onto any tab to the RIGHT of the dragged one was silently missed.
-    ///   The index arithmetic lives in [`tab_index_after_move`] (unit-tested).
+    /// - **Drag** → rearrange. Each tab is ONE `click_and_drag` widget (click
+    ///   switches, drag reorders); the drop target is resolved AFTER the loop by
+    ///   hit-testing the release position against every tab's full rect, so a
+    ///   drop onto a tab to the RIGHT of the dragged one is no longer missed and
+    ///   the extra `dnd_drop_zone` interaction that used to swallow the click is
+    ///   gone. The index arithmetic lives in [`tab_index_after_move`] (unit-tested).
     ///   Closes F-001 / F-043 from `docs/audits/overlooked-surfaces-2026-05-29.md`.
     fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
         let active = self.active;
@@ -3937,21 +3958,23 @@ impl ScribeApp {
                     });
             }
             scribe_core::config::TabBarPosition::Left => {
+                let vertical = self.config.editor.side_tabs_vertical;
                 egui::SidePanel::left("tabs-left")
                     .resizable(true)
                     .default_width(180.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                     .show(ctx, |ui| {
-                        ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                        self.draw_side_tab_strip(ui, accent, muted, vertical);
                     });
             }
             scribe_core::config::TabBarPosition::Right => {
+                let vertical = self.config.editor.side_tabs_vertical;
                 egui::SidePanel::right("tabs-right")
                     .resizable(true)
                     .default_width(180.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                     .show(ctx, |ui| {
-                        ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                        self.draw_side_tab_strip(ui, accent, muted, vertical);
                     });
             }
         }
