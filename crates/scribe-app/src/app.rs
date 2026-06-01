@@ -5949,6 +5949,128 @@ mod e2e {
         );
     }
 
+    /// Build a kittest harness over the app in the user's default (frameless)
+    /// mode, with the first-run welcome modal suppressed.
+    fn ui_harness(app: ScribeApp) -> egui_kittest::Harness<'static, ScribeApp> {
+        egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(1100.0, 720.0))
+            .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app)
+    }
+    fn fresh_app() -> ScribeApp {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        ScribeApp::new_test(cfg)
+    }
+
+    #[test]
+    fn toolbar_gear_opens_settings() {
+        let mut h = ui_harness(fresh_app());
+        h.run();
+        assert!(!h.state().settings_open);
+        h.get_by_label("⚙").click();
+        h.run();
+        assert!(h.state().settings_open, "clicking ⚙ must open Settings");
+    }
+
+    #[test]
+    fn toolbar_palette_button_opens_palette() {
+        let mut h = ui_harness(fresh_app());
+        h.run();
+        h.get_by_label(">_").click();
+        h.run();
+        assert!(
+            h.state().palette_open,
+            "clicking the >_ button must open the command palette"
+        );
+    }
+
+    #[test]
+    fn toolbar_split_button_toggles_grid() {
+        let mut h = ui_harness(fresh_app());
+        h.run();
+        assert!(!h.state().config.editor.grid_enabled);
+        h.get_by_label("split").click();
+        h.run();
+        assert!(
+            h.state().config.editor.grid_enabled,
+            "the split button must toggle the unified split/grid view on"
+        );
+    }
+
+    #[test]
+    fn middle_click_tab_closes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let alpha = dir.path().join("alpha.txt");
+        let beta = dir.path().join("beta.txt");
+        std::fs::write(&alpha, "A\n").unwrap();
+        std::fs::write(&beta, "B\n").unwrap();
+        let mut app = fresh_app();
+        app.open_path(alpha);
+        app.open_path(beta);
+        let mut h = ui_harness(app);
+        h.run();
+        h.get_by_label("beta.txt")
+            .click_button(egui::PointerButton::Middle);
+        h.run();
+        let has_beta = h.state().tabs.iter().any(|t| t.title() == "beta.txt");
+        assert!(!has_beta, "middle-clicking a tab must close it");
+    }
+
+    #[test]
+    fn command_palette_opens_then_escape_closes() {
+        let mut h = ui_harness(fresh_app());
+        h.run();
+        h.get_by_label(">_").click();
+        h.run();
+        assert!(h.state().palette_open);
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(
+            !h.state().palette_open,
+            "Escape must close the command palette"
+        );
+    }
+
+    #[test]
+    fn typing_updates_the_active_buffer() {
+        let mut app = fresh_app();
+        // Make the scratch tab empty + active so typed text is observable.
+        app.tabs[0].text.clear();
+        let mut h = ui_harness(app);
+        h.run();
+        // Focus the editor text area and type like a user.
+        let editor = h.get_by_role(egui::accesskit::Role::MultilineTextInput);
+        editor.focus();
+        h.run();
+        h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .type_text("hello");
+        h.run();
+        let active = h.state().active;
+        assert!(
+            h.state().tabs[active].text.contains("hello"),
+            "typing must update the active buffer, got {:?}",
+            h.state().tabs[active].text
+        );
+    }
+
+    #[test]
+    fn settings_toggle_flips_runtime_config() {
+        let mut h = ui_harness(fresh_app());
+        h.state_mut().settings_open = true;
+        h.run();
+        // Navigate to the Editor category, then flip "Line numbers".
+        h.get_by_label("Editor").click();
+        h.run();
+        let before = h.state().config.editor.show_line_numbers;
+        h.get_by_label("Line numbers").click();
+        h.run();
+        assert_ne!(
+            h.state().config.editor.show_line_numbers,
+            before,
+            "clicking the Line numbers checkbox must flip the setting"
+        );
+    }
+
     /// Phase 18 T18.2 — flipping `editor.grid_enabled` on creates the
     /// tile-tree at the top of the next frame and the central panel
     /// renders without panicking. Three frames are enough to exercise
