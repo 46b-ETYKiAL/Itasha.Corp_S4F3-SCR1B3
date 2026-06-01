@@ -325,6 +325,10 @@ impl EditorTab {
 pub struct ScribeApp {
     config: Config,
     theme: Theme,
+    /// Last OS-reported system theme (dark/light) we acted on, so the
+    /// `appearance.follow_os_theme` watcher only re-applies on an actual change
+    /// rather than every frame. `None` until the first frame reports one.
+    last_os_theme: Option<egui::Theme>,
     hl: Highlighter,
     tabs: Vec<EditorTab>,
     active: usize,
@@ -639,6 +643,7 @@ impl ScribeApp {
         Self {
             config,
             theme,
+            last_os_theme: None,
             hl: Highlighter::new(),
             active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
@@ -941,9 +946,37 @@ impl ScribeApp {
         v
     }
 
+    /// Resolve which theme name to actually load, honoring
+    /// `appearance.follow_os_theme`. When that is on and the OS reports its
+    /// theme, the OS decides light vs dark: a light OS → the bundled light
+    /// theme (`ghost-paper`); a dark OS → the user's chosen theme if it is
+    /// itself dark, otherwise the default dark theme (`wired-noir`). When the
+    /// toggle is off, or the OS theme is unknown, the user's chosen theme wins.
+    fn effective_theme_name(&self, os_theme: Option<egui::Theme>) -> String {
+        if self.config.appearance.follow_os_theme {
+            match os_theme {
+                Some(egui::Theme::Light) => return "ghost-paper".to_string(),
+                Some(egui::Theme::Dark) => {
+                    let chosen = load_theme(&self.config.appearance.theme);
+                    return if matches!(chosen.appearance, scribe_core::theme::Appearance::Dark) {
+                        self.config.appearance.theme.clone()
+                    } else {
+                        "wired-noir".to_string()
+                    };
+                }
+                None => {}
+            }
+        }
+        self.config.appearance.theme.clone()
+    }
+
     /// Apply the current theme to the egui context (after a theme/config change).
+    /// Reads the OS theme from `ctx` so a manual theme change while
+    /// `follow_os_theme` is on still resolves through [`Self::effective_theme_name`].
     fn reapply_theme(&mut self, ctx: &egui::Context) {
-        self.theme = load_theme(&self.config.appearance.theme);
+        let os_theme = ctx.input(|i| i.raw.system_theme);
+        self.last_os_theme = os_theme;
+        self.theme = load_theme(&self.effective_theme_name(os_theme));
         ctx.set_visuals(self.current_visuals());
     }
 
@@ -990,20 +1023,22 @@ impl ScribeApp {
         save_cfg: &mut bool,
         start_lsp: &mut bool,
     ) {
-        // Phase 16 T16.3: every toolbar label routes through `toolbar_widget(id, icons, jp)`
+        // Phase 16 T16.3: every toolbar label routes through `toolbar_widget(id, icons, jp, size)`
         // so flipping `appearance.toolbar_icons` swaps every entry between its text
         // form and its Phosphor (Thin) glyph in one place. Phase 17 T17.5: the
         // same helper also appends a verified-canonical kanji "instrument plate"
         // when `appearance.jp_glyph_labels` is on (English-redundant, dimmed, smaller).
         let icons = self.config.appearance.toolbar_icons;
         let jp = self.config.appearance.jp_glyph_labels;
+        // Phase 18 T18.5: the icon-size slider drives every toolbar glyph/label.
+        let size = self.config.toolbar.clamped_icon_size();
         match id {
             "sep" => {
                 ui.separator();
             }
             "new" => {
                 if ui
-                    .button(toolbar_widget("new", icons, jp))
+                    .button(toolbar_widget("new", icons, jp, size))
                     .on_hover_text("New file (Ctrl+N)")
                     .clicked()
                 {
@@ -1012,7 +1047,7 @@ impl ScribeApp {
             }
             "open" => {
                 if ui
-                    .button(toolbar_widget("open", icons, jp))
+                    .button(toolbar_widget("open", icons, jp, size))
                     .on_hover_text("Open file (Ctrl+O)")
                     .clicked()
                 {
@@ -1021,7 +1056,7 @@ impl ScribeApp {
             }
             "openfolder" => {
                 if ui
-                    .button(toolbar_widget("openfolder", icons, jp))
+                    .button(toolbar_widget("openfolder", icons, jp, size))
                     .on_hover_text("Open folder")
                     .clicked()
                 {
@@ -1030,7 +1065,7 @@ impl ScribeApp {
             }
             "save" => {
                 if ui
-                    .button(toolbar_widget("save", icons, jp))
+                    .button(toolbar_widget("save", icons, jp, size))
                     .on_hover_text("Save (Ctrl+S)")
                     .clicked()
                 {
@@ -1039,7 +1074,7 @@ impl ScribeApp {
             }
             "saveas" => {
                 if ui
-                    .button(toolbar_widget("saveas", icons, jp))
+                    .button(toolbar_widget("saveas", icons, jp, size))
                     .on_hover_text("Save As…")
                     .clicked()
                 {
@@ -1048,7 +1083,7 @@ impl ScribeApp {
             }
             "find" => {
                 if ui
-                    .button(toolbar_widget("find", icons, jp))
+                    .button(toolbar_widget("find", icons, jp, size))
                     .on_hover_text("Find (Ctrl+F)")
                     .clicked()
                 {
@@ -1058,7 +1093,7 @@ impl ScribeApp {
             }
             "palette" => {
                 if ui
-                    .button(toolbar_widget("palette", icons, jp))
+                    .button(toolbar_widget("palette", icons, jp, size))
                     .on_hover_text("Command palette")
                     .clicked()
                 {
@@ -1069,7 +1104,7 @@ impl ScribeApp {
             }
             "split" => {
                 if ui
-                    .selectable_label(self.split_view, toolbar_widget("split", icons, jp))
+                    .selectable_label(self.split_view, toolbar_widget("split", icons, jp, size))
                     .on_hover_text("Split view")
                     .clicked()
                 {
@@ -1080,7 +1115,7 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.editor.show_minimap,
-                        toolbar_widget("minimap", icons, jp),
+                        toolbar_widget("minimap", icons, jp, size),
                     )
                     .on_hover_text("Minimap")
                     .clicked()
@@ -1093,7 +1128,7 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.editor.word_wrap,
-                        toolbar_widget("wrap", icons, jp),
+                        toolbar_widget("wrap", icons, jp, size),
                     )
                     .on_hover_text("Word wrap")
                     .clicked()
@@ -1104,7 +1139,7 @@ impl ScribeApp {
             }
             "fold" => {
                 if ui
-                    .selectable_label(self.fold_view, toolbar_widget("fold", icons, jp))
+                    .selectable_label(self.fold_view, toolbar_widget("fold", icons, jp, size))
                     .on_hover_text("Folded view")
                     .clicked()
                 {
@@ -1115,7 +1150,7 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.editor.show_line_numbers,
-                        toolbar_widget("linenumbers", icons, jp),
+                        toolbar_widget("linenumbers", icons, jp, size),
                     )
                     .on_hover_text("Line numbers")
                     .clicked()
@@ -1128,7 +1163,7 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.spellcheck.enabled,
-                        toolbar_widget("spellcheck", icons, jp),
+                        toolbar_widget("spellcheck", icons, jp, size),
                     )
                     .on_hover_text("Spellcheck (offline)")
                     .clicked()
@@ -1139,7 +1174,7 @@ impl ScribeApp {
             }
             "lsp" => {
                 if ui
-                    .button(toolbar_widget("lsp", icons, jp))
+                    .button(toolbar_widget("lsp", icons, jp, size))
                     .on_hover_text("Start language server")
                     .clicked()
                 {
@@ -2809,19 +2844,29 @@ pub(crate) fn jp_glyph(id: &str) -> Option<&'static str> {
 /// the kanji is appended after the primary label at smaller size and
 /// reduced opacity — the "instrument plate" effect (T17.5). When OFF or
 /// when no verified kanji exists, returns the primary label unchanged.
-pub(crate) fn toolbar_widget(id: &str, icons: bool, jp_glyphs: bool) -> egui::WidgetText {
+pub(crate) fn toolbar_widget(
+    id: &str,
+    icons: bool,
+    jp_glyphs: bool,
+    size: f32,
+) -> egui::WidgetText {
     let primary = toolbar_label(id, icons);
     let kanji = if jp_glyphs { jp_glyph(id) } else { None };
     let Some(kanji) = kanji else {
-        return egui::WidgetText::from(primary);
+        // Size the primary glyph/label by `toolbar.icon_size_px` so the slider
+        // is live for the common (no-kanji) case too.
+        return egui::RichText::new(primary).size(size).into();
     };
     use egui::text::LayoutJob;
+    // The kanji "instrument plate" keeps the original 10:14 size ratio relative
+    // to the primary, so it scales with the icon-size slider.
+    let kanji_size = size * (10.0 / 14.0);
     let mut job = LayoutJob::default();
     job.append(
         primary,
         0.0,
         egui::TextFormat {
-            font_id: egui::FontId::proportional(14.0),
+            font_id: egui::FontId::proportional(size),
             ..Default::default()
         },
     );
@@ -2829,7 +2874,7 @@ pub(crate) fn toolbar_widget(id: &str, icons: bool, jp_glyphs: bool) -> egui::Wi
         &format!("  {kanji}"),
         0.0,
         egui::TextFormat {
-            font_id: egui::FontId::proportional(10.0),
+            font_id: egui::FontId::proportional(kanji_size),
             color: egui::Color32::from_rgba_unmultiplied(180, 180, 180, 160),
             ..Default::default()
         },
@@ -3250,6 +3295,15 @@ impl ScribeApp {
         // assigned) and lets the grid show up the same frame the user flips
         // the checkbox.
         self.sync_grid_state();
+        // Follow-OS-theme watcher: when `appearance.follow_os_theme` is on,
+        // re-resolve + apply the theme whenever the OS flips light/dark. Cheap
+        // — one input read; only re-applies on an actual change.
+        {
+            let os_theme = ctx.input(|i| i.raw.system_theme);
+            if self.config.appearance.follow_os_theme && os_theme != self.last_os_theme {
+                self.reapply_theme(ctx);
+            }
+        }
         // ---- Two-phase close (T19.1 ghost-window fix) ----
         // A transparent / layered window (frameless or translucent) must be
         // HIDDEN one frame before it is destroyed, or the Windows DWM keeps its
@@ -5395,11 +5449,11 @@ mod jp_glyph_tests {
     #[test]
     fn widget_falls_back_to_label_when_disabled_or_unknown() {
         // jp_glyph_labels=false → primary label only, regardless of action.
-        let off = toolbar_widget("new", false, false);
+        let off = toolbar_widget("new", false, false, 14.0);
         assert_eq!(off.text(), "new");
         // Even with the flag on, an action without verified kanji returns
         // only the primary label — no kanji is invented.
-        let on_unknown = toolbar_widget("openfolder", false, true);
+        let on_unknown = toolbar_widget("openfolder", false, true, 14.0);
         assert_eq!(on_unknown.text(), "folder");
     }
 
@@ -5407,7 +5461,7 @@ mod jp_glyph_tests {
     fn widget_appends_kanji_when_enabled_for_verified_action() {
         // jp_glyph_labels=true + verified action → primary then kanji.
         // The LayoutJob's flattened text contains both pieces.
-        let on = toolbar_widget("save", false, true);
+        let on = toolbar_widget("save", false, true, 14.0);
         let text = on.text();
         assert!(text.starts_with("save"), "got {text:?}");
         assert!(text.contains("保"), "got {text:?}");

@@ -1663,6 +1663,7 @@ mod wiring_guard {
             "window.transparency_enabled" => src.contains("effective_translucent"),
             "toolbar.button_size_px" => src.contains("clamped_button_size"),
             "toolbar.button_spacing_px" => src.contains("clamped_button_spacing"),
+            "toolbar.icon_size_px" => src.contains("clamped_icon_size"),
             _ => false,
         }
     }
@@ -1700,19 +1701,19 @@ mod wiring_guard {
         "plugins.enabled",
         "toolbar.button_size_px",
         "toolbar.button_spacing_px",
+        "toolbar.icon_size_px",
+        "appearance.follow_os_theme",
     ];
 
     /// Controls audited as DEAD (no runtime consumer yet). Shrinks as phases wire
     /// them; an entry here that gains a consumer fails the guard (move it to WIRED).
     const KNOWN_DEAD: &[&str] = &[
-        "appearance.follow_os_theme",
         "spellcheck.language",
         "spellcheck.check_comments",
         "spellcheck.check_strings",
         "spellcheck.check_identifiers",
         "updates.mode",
         "updates.check_interval_hours",
-        "toolbar.icon_size_px",
         "motion.enabled",
         "motion.intensity",
         "motion.respect_reduced_motion",

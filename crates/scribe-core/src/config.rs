@@ -420,28 +420,24 @@ impl Default for AppearanceConfig {
     }
 }
 
+/// Editor font sizing. NOTE: font *family* selection is intentionally not a
+/// config field — egui renders through `ab_glyph`, which does no font-family
+/// fallback chains or OpenType shaping, so the editor uses the bundled
+/// JetBrains Mono (see `ScribeApp::new`). For the same reason there is no
+/// `ligatures` option: ligature substitution requires a shaping engine egui
+/// does not have, so the flag could never do anything.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FontConfig {
-    pub editor_family: Vec<String>,
-    pub ui_family: Vec<String>,
     pub editor_size: f32,
     pub line_height: f32,
-    pub ligatures: bool,
 }
 
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
-            editor_family: vec![
-                "JetBrains Mono".into(),
-                "Cascadia Code".into(),
-                "Consolas".into(),
-            ],
-            ui_family: vec!["Inter".into()],
             editor_size: 14.0,
             line_height: 1.4,
-            ligatures: true,
         }
     }
 }
