@@ -452,6 +452,12 @@ pub struct ScribeApp {
     tabs: Vec<EditorTab>,
     active: usize,
     visuals_applied: bool,
+    /// One-shot guard for forcing OS window decorations OFF in frameless mode
+    /// (#79). On Windows, applying a vibrancy/transparent surface can make the
+    /// DWM re-add the native caption buttons even though the window was created
+    /// decoration-less — producing a SECOND, slightly-offset set of
+    /// minimize/maximize/close buttons over the custom titlebar.
+    decorations_forced: bool,
     /// Set when the user asks to close (custom titlebar ✕). Funnels into the
     /// same two-phase close path as an OS-initiated close.
     want_close: bool,
@@ -804,6 +810,7 @@ impl ScribeApp {
             active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
             visuals_applied: false,
+            decorations_forced: false,
             want_close: false,
             closing: false,
             find_open: false,
@@ -4056,6 +4063,17 @@ impl ScribeApp {
         if !self.visuals_applied {
             ctx.set_visuals(self.current_visuals());
             self.visuals_applied = true;
+        }
+
+        // #79 — in frameless mode, force OS decorations OFF once the window is up.
+        // Creating the window decoration-less is not always enough: applying a
+        // vibrancy/transparent surface can make the Windows DWM re-add the native
+        // caption buttons, which then sit (slightly offset) over our custom
+        // titlebar. Re-asserting Decorations(false) at runtime removes that
+        // duplicate set. Idempotent + one-shot so it never fights normal frames.
+        if self.config.appearance.frameless && !self.decorations_forced {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+            self.decorations_forced = true;
         }
 
         // Live-reload config when the file changes on disk (external edit).
