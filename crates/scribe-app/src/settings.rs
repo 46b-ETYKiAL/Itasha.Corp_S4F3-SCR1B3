@@ -284,9 +284,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                                 )
                                 .changed()
                             {
-                                // #88 — switching theme resets the background to
-                                // the new theme's background (clear the override).
+                                // #88/#106 — switching theme resets BOTH the app
+                                // and note background overrides to the new theme.
                                 config.appearance.background_override = None;
+                                config.appearance.note_background_override = None;
                                 changed = true;
                             }
                         }
@@ -311,6 +312,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     .inner;
                 if name_changed {
                     config.appearance.background_override = None;
+                    config.appearance.note_background_override = None;
                     changed = true;
                 }
             }
@@ -344,6 +346,53 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         config.appearance.background_override = None;
                         changed = true;
                     }
+                });
+            }
+            if row_visible(q, "note background link app editor separate together") {
+                // #106 — link toggle + the note (editor well) background. When
+                // linked, the note follows the app background; when separate, the
+                // note has its own colour.
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .checkbox(
+                            &mut config.appearance.link_backgrounds,
+                            "Link app & note backgrounds",
+                        )
+                        .on_hover_text(
+                            "ON: the note (editor) background follows the app background — \
+                             one control changes both. OFF: set the note background \
+                             separately below.",
+                        )
+                        .changed();
+                });
+                let linked = config.appearance.link_backgrounds;
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!linked, |ui| {
+                        ui.label("Note background").on_hover_text(
+                            "Background colour of the note/editor text area (used when \
+                             'Link app & note backgrounds' is off).",
+                        );
+                        let mut col = config
+                            .appearance
+                            .note_background_override
+                            .as_deref()
+                            .and_then(parse_hex_color)
+                            .unwrap_or(egui::Color32::from_rgb(0x0d, 0x0b, 0x14));
+                        if ui.color_edit_button_srgba(&mut col).changed() {
+                            config.appearance.note_background_override =
+                                Some(format!("#{:02x}{:02x}{:02x}", col.r(), col.g(), col.b()));
+                            changed = true;
+                        }
+                        if config.appearance.note_background_override.is_some()
+                            && ui
+                                .small_button("Follow theme")
+                                .on_hover_text("Clear the note override; follow the theme.")
+                                .clicked()
+                        {
+                            config.appearance.note_background_override = None;
+                            changed = true;
+                        }
+                    });
                 });
             }
             if row_visible(q, "export theme tom user customize edit") {
@@ -453,12 +502,13 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             "Editor font family, text size, and line spacing. (Ligatures are off — \
              the renderer does no OpenType shaping.)",
         );
-        if row_visible(q, "font family theme editor") {
-            // #87 — pick the editor monospace face from the bundled OFL fonts.
+        if row_visible(q, "font family theme editor note") {
+            // #87/#103 — the NOTE (editor) monospace face, chosen separately
+            // from the app-UI font below.
             ui.horizontal(|ui| {
-                ui.label("Font")
-                    .on_hover_text("Editor monospace font. Applies live, no restart.");
-                egui::ComboBox::from_id_salt("font-family-picker")
+                ui.label("Note font")
+                    .on_hover_text("Font for the note/editor text. Applies live, no restart.");
+                egui::ComboBox::from_id_salt("note-font-picker")
                     .selected_text(config.fonts.editor_family.clone())
                     .show_ui(ui, |ui| {
                         for (display, _key) in crate::app::FONT_FAMILIES {
@@ -475,12 +525,80 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         }
                     })
                     .response
-                    .on_hover_text("Choose one of the bundled coding fonts.");
+                    .on_hover_text("Choose one of the bundled coding fonts for the note text.");
                 changed |= reset_to_default(
                     ui,
                     &mut config.fonts.editor_family,
                     &def.fonts.editor_family,
                 );
+            });
+        }
+        if row_visible(q, "ui font app interface family") {
+            // #103 — the app-UI (proportional) font, separate from the note font.
+            ui.horizontal(|ui| {
+                ui.label("App UI font").on_hover_text(
+                    "Font for the app interface (toolbar, settings, status). \
+                     'System default' keeps the built-in UI font. Applies live.",
+                );
+                egui::ComboBox::from_id_salt("ui-font-picker")
+                    .selected_text(config.fonts.ui_family.clone())
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(
+                                &mut config.fonts.ui_family,
+                                "System default".to_string(),
+                                "System default",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        for (display, _key) in crate::app::FONT_FAMILIES {
+                            if ui
+                                .selectable_value(
+                                    &mut config.fonts.ui_family,
+                                    (*display).to_string(),
+                                    *display,
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Choose the app-interface font (or keep the system default).");
+                changed |= reset_to_default(ui, &mut config.fonts.ui_family, &def.fonts.ui_family);
+            });
+        }
+        if row_visible(q, "note colour color theme syntax text") {
+            // #104 — the note text colour scheme (syntax theme), independent of
+            // the app chrome theme. Applies live.
+            ui.horizontal(|ui| {
+                ui.label("Note colour theme").on_hover_text(
+                    "Colour scheme for the note text / syntax highlighting, separate from \
+                     the app theme. Applies live.",
+                );
+                egui::ComboBox::from_id_salt("note-theme-picker")
+                    .selected_text(config.editor.note_theme.clone())
+                    .show_ui(ui, |ui| {
+                        for name in crate::app::NOTE_THEMES {
+                            if ui
+                                .selectable_value(
+                                    &mut config.editor.note_theme,
+                                    (*name).to_string(),
+                                    *name,
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Pick a note text colour scheme.");
+                changed |=
+                    reset_to_default(ui, &mut config.editor.note_theme, &def.editor.note_theme);
             });
         }
         if row_visible(q, "editor size") {
@@ -505,7 +623,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         if row_visible(q, "line height") {
             ui.horizontal(|ui| {
                 ui.label("Line height").on_hover_text(
-                    "Vertical spacing between lines, as a multiple of the font size.",
+                    "Vertical spacing between lines, as a multiple of the font size. \
+                     Note: the text caret + selection are exactly this tall, so a larger \
+                     value also makes them taller than the glyphs. ~1.2 keeps the caret \
+                     tight to the text.",
                 );
                 if ui.small_button("-").on_hover_text("Tighter").clicked() {
                     config.fonts.line_height = (config.fonts.line_height - 0.1).clamp(1.0, 2.5);
@@ -1192,8 +1313,18 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         head(
             ui,
             "Updates (telemetry-free)",
-            "How update checks behave. No usage data ever leaves your machine.",
+            "Update REMINDERS — SCR1B3 never checks the network in the background and \
+             never auto-installs. A reminder just opens the GitHub releases page so you \
+             can compare versions and download a new build yourself.",
         );
+        // #109 — show the running version so "Check for updates now" is concretely
+        // verifiable: open the releases page, compare to this number.
+        ui.label(
+            egui::RichText::new(format!("You are running v{}.", env!("CARGO_PKG_VERSION")))
+                .weak()
+                .small(),
+        );
+        ui.add_space(4.0);
         let modes = [
             (UpdateMode::Off, "off"),
             (UpdateMode::Notify, "notify"),
@@ -1926,9 +2057,13 @@ mod wiring_guard {
         "appearance.toolbar_icons",
         "appearance.jp_glyph_labels",
         "appearance.background_override",
+        "appearance.note_background_override",
+        "appearance.link_backgrounds",
         "fonts.editor_size",
         "fonts.line_height",
         "fonts.editor_family",
+        "fonts.ui_family",
+        "editor.note_theme",
         "editor.tab_width",
         "editor.insert_spaces",
         "editor.show_line_numbers",

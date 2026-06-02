@@ -452,6 +452,10 @@ pub struct ScribeApp {
     tabs: Vec<EditorTab>,
     active: usize,
     visuals_applied: bool,
+    /// The note (editor) syntax colour theme currently applied to `hl` (#104).
+    /// When `config.editor.note_theme` diverges, the highlighter is re-themed and
+    /// the highlight cache invalidated so colours refresh live.
+    applied_note_theme: String,
     /// The editor font family currently applied to the egui context (#87). When
     /// `config.fonts.editor_family` diverges from this, the font set is rebuilt
     /// and re-applied — a restart-free font-theme switch.
@@ -655,9 +659,11 @@ impl ScribeApp {
         // so ligatures are inherently OFF (T17.2 "ligatures off-default" is
         // structural, not config — there is no path to turn them on without
         // swapping the shaper).
-        cc.egui_ctx
-            .set_fonts(build_fonts(&app.config.fonts.editor_family));
-        app.applied_font_family = app.config.fonts.editor_family.clone();
+        cc.egui_ctx.set_fonts(build_fonts(
+            &app.config.fonts.editor_family,
+            &app.config.fonts.ui_family,
+        ));
+        app.applied_font_family = font_state_key(&app.config.fonts);
         // Follow the OS theme preference so `ctx.theme()` reflects the live OS
         // light/dark setting (egui-winit updates it on OS theme-change events).
         // The app's own brand visuals are applied on top via `set_visuals`; this
@@ -786,6 +792,7 @@ impl ScribeApp {
             tabs,
             visuals_applied: false,
             applied_font_family: String::new(),
+            applied_note_theme: String::new(),
             decorations_forced: false,
             want_close: false,
             closing: false,
@@ -1115,18 +1122,28 @@ impl ScribeApp {
     /// when a translucent/glass window mode is active.
     fn current_visuals(&self) -> egui::Visuals {
         let mut v = scribe_render::theme_to_visuals(&self.theme);
-        // #88 — an explicit app-background override (independent of the theme)
-        // repaints the central panel + window backgrounds. None = follow theme.
-        if let Some(bg) = self
-            .config
-            .appearance
-            .background_override
-            .as_deref()
-            .and_then(Rgba::parse_hex)
-        {
-            let c = Color32::from_rgb(bg.r, bg.g, bg.b);
+        let parse = |o: &Option<String>| {
+            o.as_deref()
+                .and_then(Rgba::parse_hex)
+                .map(|c| Color32::from_rgb(c.r, c.g, c.b))
+        };
+        // #88 — app-background override (independent of the theme) repaints the
+        // central panel + window backgrounds. None = follow theme.
+        let app_bg = parse(&self.config.appearance.background_override);
+        if let Some(c) = app_bg {
             v.panel_fill = c;
             v.window_fill = c;
+        }
+        // #106 — note (editor well) background. When linked it follows the app
+        // background override; when unlinked it uses its own override. None at
+        // the chosen source = follow the theme's editor background.
+        let note_bg = if self.config.appearance.link_backgrounds {
+            app_bg
+        } else {
+            parse(&self.config.appearance.note_background_override)
+        };
+        if let Some(c) = note_bg {
+            v.extreme_bg_color = c;
         }
         if self.config.window.effective_translucent() {
             scribe_render::apply_window_opacity(&mut v, self.config.window.opacity);
@@ -1218,6 +1235,39 @@ impl ScribeApp {
                 egui::text::CCursor::new(new_idx),
             )));
         state.store(ctx, id);
+    }
+
+    /// Auto-indent on Enter (#107): insert a newline that keeps the current
+    /// line's leading whitespace, so indentation carries to the next line. Only
+    /// acts on a single caret (no selection); returns false so the caller lets
+    /// egui handle Enter normally otherwise.
+    fn auto_indent_newline(&mut self, ctx: &egui::Context, id: egui::Id, active: usize) -> bool {
+        let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+            return false;
+        };
+        let Some(range) = state.cursor.char_range() else {
+            return false;
+        };
+        // Only a collapsed caret — a selection+Enter should replace, which we
+        // leave to egui.
+        if range.primary.index != range.secondary.index {
+            return false;
+        }
+        let cursor = range.primary.index;
+        let (new_text, new_idx) = newline_with_indent(&self.tabs[active].text, cursor);
+        // No indent to carry → let egui insert the plain newline (cheaper, and
+        // keeps egui's own undo grouping for the common case).
+        if new_idx == cursor + 1 {
+            return false;
+        }
+        self.tabs[active].set_text(new_text);
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(new_idx),
+            )));
+        state.store(ctx, id);
+        true
     }
 
     /// Render one quick-access toolbar entry by action id and apply its effect.
@@ -3543,9 +3593,16 @@ pub(crate) fn toolbar_widget(
         0.0,
         egui::TextFormat {
             font_id: egui::FontId::proportional(size),
+            // #105 — PLACEHOLDER makes the widget substitute its normal text
+            // colour, so the ENGLISH label is the SAME colour whether kanji
+            // labels are on or off. (TextFormat::default's colour is gray, which
+            // is what made the English text change colour when kanji turned on.)
+            color: egui::Color32::PLACEHOLDER,
             ..Default::default()
         },
     );
+    // Only the appended kanji is tinted (a dim "instrument-plate" colour) — a
+    // different colour for the kanji, never for the English text.
     job.append(
         &format!("  {kanji}"),
         0.0,
@@ -3649,6 +3706,26 @@ pub(crate) const FONT_FAMILIES: &[(&str, &str)] = &[
     ("Cousine", "Cousine"),
 ];
 
+/// Selectable note (editor) colour themes (#104) — the syntect bundled set
+/// (`ThemeSet::load_defaults`). The Settings picker lists these; an unknown
+/// value is ignored by `Highlighter::set_theme`, so the list staying in sync is
+/// best-effort, never load-bearing.
+pub(crate) const NOTE_THEMES: &[&str] = &[
+    "base16-eighties.dark",
+    "base16-mocha.dark",
+    "base16-ocean.dark",
+    "base16-ocean.light",
+    "InspiredGitHub",
+    "Solarized (dark)",
+    "Solarized (light)",
+];
+
+/// Change-detection key for the live font set (#103): note family + UI family.
+/// When this string changes, the font set is rebuilt and re-applied.
+fn font_state_key(fonts: &scribe_core::config::FontConfig) -> String {
+    format!("{}\u{0}{}", fonts.editor_family, fonts.ui_family)
+}
+
 /// Resolve a font display name to its embedded family key, falling back to
 /// JetBrains Mono for an unknown / stale config value.
 fn font_family_key(display: &str) -> &'static str {
@@ -3665,7 +3742,7 @@ fn font_family_key(display: &str) -> &'static str {
 /// fallback, and the Noto Sans JP kanji subset is appended to both families so
 /// the toolbar kanji never tofu. egui's ab_glyph does no OT shaping, so
 /// ligatures are structurally off regardless of face.
-fn build_fonts(editor_family: &str) -> egui::FontDefinitions {
+fn build_fonts(editor_family: &str, ui_family: &str) -> egui::FontDefinitions {
     use std::sync::Arc;
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
@@ -3708,6 +3785,15 @@ fn build_fonts(editor_family: &str) -> egui::FontDefinitions {
         mono.insert(0, selected.to_owned());
         if selected != "JetBrainsMono" {
             mono.insert(1, "JetBrainsMono".to_owned());
+        }
+    }
+    // #103 — the UI (proportional) font is chosen SEPARATELY from the note font.
+    // "System default" (or any unknown value) leaves egui's built-in UI font
+    // untouched; a bundled family name puts that face first in the Proportional
+    // family so the whole app UI (toolbar / settings / status) uses it.
+    if let Some(&(_, ui_key)) = FONT_FAMILIES.iter().find(|(d, _)| *d == ui_family) {
+        if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            prop.insert(0, ui_key.to_owned());
         }
     }
     for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
@@ -3987,6 +4073,27 @@ fn apply_indent(text: &str, lo: usize, hi: usize, width: usize) -> (String, usiz
     (out, lo + spaces.chars().count())
 }
 
+/// Auto-indent on Enter (#107): insert a newline at `cursor` (char index) plus a
+/// copy of the CURRENT line's leading whitespace, so the new line keeps the same
+/// indentation. Returns the new text and the new cursor char index (after the
+/// inserted newline + indent). Pure + unit-tested. Preserves whatever the line
+/// uses (spaces or tabs); this is what makes `tab_width`/`insert_spaces`-driven
+/// indentation actually persist line-to-line.
+fn newline_with_indent(text: &str, cursor: usize) -> (String, usize) {
+    let bcur = char_to_byte(text, cursor);
+    // Start of the current line = byte after the previous '\n' (or 0).
+    let line_start = text[..bcur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    // Leading whitespace of the line, but not past the cursor.
+    let indent: String = text[line_start..bcur]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    let insert = format!("\n{indent}");
+    let mut out = text.to_string();
+    out.insert_str(bcur, &insert);
+    (out, cursor + insert.chars().count())
+}
+
 /// Render the completion popup as a foreground `Area` anchored just below the
 /// cursor row. Returns `Some(index)` if the user clicked a row.
 fn completion_popup(ui: &egui::Ui, pos: egui::Pos2, c: &Completion) -> Option<usize> {
@@ -4162,11 +4269,24 @@ impl ScribeApp {
             self.decorations_forced = true;
         }
 
-        // #87 — restart-free font-theme switch: rebuild + re-apply the font set
-        // whenever the chosen editor family changes (cheap string compare).
-        if self.config.fonts.editor_family != self.applied_font_family {
-            ctx.set_fonts(build_fonts(&self.config.fonts.editor_family));
-            self.applied_font_family = self.config.fonts.editor_family.clone();
+        // #87/#103 — restart-free font switch: rebuild + re-apply the font set
+        // whenever the chosen note OR UI family changes (cheap string compare).
+        let font_key = font_state_key(&self.config.fonts);
+        if font_key != self.applied_font_family {
+            ctx.set_fonts(build_fonts(
+                &self.config.fonts.editor_family,
+                &self.config.fonts.ui_family,
+            ));
+            self.applied_font_family = font_key;
+        }
+
+        // #104 — apply the note syntax colour theme to the highlighter when it
+        // changes (also runs once on the first frame to honour the saved
+        // config). Clearing the highlight cache forces a re-colour next render.
+        if self.config.editor.note_theme != self.applied_note_theme {
+            self.hl.set_theme(&self.config.editor.note_theme);
+            *self.hl_cache.borrow_mut() = None;
+            self.applied_note_theme = self.config.editor.note_theme.clone();
         }
 
         // Live-reload config when the file changes on disk (external edit).
@@ -5640,6 +5760,21 @@ impl ScribeApp {
                     self.indent_with_spaces(ctx, editor_id, active);
                 }
 
+                // #107 — auto-indent on Enter: the new line keeps the current
+                // line's leading whitespace. Only consume Enter when there IS
+                // indentation to carry (otherwise let egui insert the plain
+                // newline). Skipped while the completion popup owns Enter.
+                if !read_only
+                    && self.completion.is_none()
+                    && ctx.memory(|m| m.has_focus(editor_id))
+                    && ctx.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.is_none())
+                    && self.auto_indent_newline(ctx, editor_id, active)
+                {
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                    });
+                }
+
                 // #78 — misspellings for the active buffer, computed (memoized)
                 // BEFORE the partial borrows below so the owned Vec can move into
                 // the editor closure and drive the red underline painter.
@@ -6496,7 +6631,7 @@ mod font_theme_tests {
 
     #[test]
     fn selected_family_leads_with_jetbrains_fallback() {
-        let f = build_fonts("IBM Plex Mono");
+        let f = build_fonts("IBM Plex Mono", "System default");
         let mono = &f.families[&egui::FontFamily::Monospace];
         assert_eq!(mono[0], "IBMPlexMono", "selected face renders first");
         assert_eq!(mono[1], "JetBrainsMono", "JetBrains kept as fallback");
@@ -6509,13 +6644,25 @@ mod font_theme_tests {
     #[test]
     fn unknown_family_falls_back_to_jetbrains() {
         assert_eq!(font_family_key("No Such Font"), "JetBrainsMono");
-        let f = build_fonts("No Such Font");
+        let f = build_fonts("No Such Font", "System default");
         assert_eq!(f.families[&egui::FontFamily::Monospace][0], "JetBrainsMono");
     }
 
     #[test]
+    fn ui_family_overrides_only_the_proportional_family() {
+        // #103 — the UI family leads Proportional; the note family leads
+        // Monospace; the two are independent.
+        let f = build_fonts("JetBrains Mono", "Fira Mono");
+        assert_eq!(f.families[&egui::FontFamily::Proportional][0], "FiraMono");
+        assert_eq!(f.families[&egui::FontFamily::Monospace][0], "JetBrainsMono");
+        // "System default" leaves egui's built-in UI font at the head.
+        let f2 = build_fonts("JetBrains Mono", "System default");
+        assert_ne!(f2.families[&egui::FontFamily::Proportional][0], "FiraMono");
+    }
+
+    #[test]
     fn default_family_is_jetbrains_and_does_not_double_insert() {
-        let f = build_fonts("JetBrains Mono");
+        let f = build_fonts("JetBrains Mono", "System default");
         let mono = &f.families[&egui::FontFamily::Monospace];
         assert_eq!(mono[0], "JetBrainsMono");
         // No redundant second JetBrains entry when it's already the selection.
@@ -6548,6 +6695,36 @@ mod background_override_tests {
         let v = app.current_visuals();
         // Whatever the theme is, it must NOT be the arbitrary override colour.
         assert_ne!(v.panel_fill, egui::Color32::from_rgb(0x11, 0x22, 0x33));
+    }
+
+    #[test]
+    fn linked_note_background_follows_the_app_override() {
+        // #106 — linked (default): the note well (extreme_bg_color) tracks the
+        // app background override.
+        let mut cfg = Config::default();
+        cfg.appearance.link_backgrounds = true;
+        cfg.appearance.background_override = Some("#112233".into());
+        let app = ScribeApp::new_test(cfg);
+        let v = app.current_visuals();
+        let want = egui::Color32::from_rgb(0x11, 0x22, 0x33);
+        assert_eq!(v.panel_fill, want);
+        assert_eq!(v.extreme_bg_color, want, "linked note follows app bg");
+    }
+
+    #[test]
+    fn unlinked_note_background_is_independent() {
+        // #106 — unlinked: app + note backgrounds are set separately.
+        let mut cfg = Config::default();
+        cfg.appearance.link_backgrounds = false;
+        cfg.appearance.background_override = Some("#112233".into());
+        cfg.appearance.note_background_override = Some("#445566".into());
+        let app = ScribeApp::new_test(cfg);
+        let v = app.current_visuals();
+        assert_eq!(v.panel_fill, egui::Color32::from_rgb(0x11, 0x22, 0x33));
+        assert_eq!(
+            v.extreme_bg_color,
+            egui::Color32::from_rgb(0x44, 0x55, 0x66)
+        );
     }
 }
 
@@ -6629,6 +6806,43 @@ mod wrap_tests {
     fn wrap_on_uses_the_viewport_width() {
         assert_eq!(effective_wrap_width(true, 800.0), 800.0);
         assert_eq!(effective_wrap_width(true, 123.5), 123.5);
+    }
+}
+
+#[cfg(test)]
+mod indent_tests {
+    //! #107 — Enter auto-indent. The new line copies the current line's leading
+    //! whitespace so indentation persists (which is what makes the indentation
+    //! settings visibly do something line-to-line).
+    use super::newline_with_indent;
+
+    #[test]
+    fn carries_space_indent() {
+        let (t, c) = newline_with_indent("    code", 8);
+        assert_eq!(t, "    code\n    ");
+        assert_eq!(c, 13); // \n + 4 spaces
+    }
+
+    #[test]
+    fn no_indent_just_breaks_the_line() {
+        let (t, c) = newline_with_indent("code", 4);
+        assert_eq!(t, "code\n");
+        assert_eq!(c, 5);
+    }
+
+    #[test]
+    fn carries_tab_indent() {
+        let (t, c) = newline_with_indent("\tfoo", 4);
+        assert_eq!(t, "\tfoo\n\t");
+        assert_eq!(c, 6);
+    }
+
+    #[test]
+    fn indent_is_clamped_to_the_cursor() {
+        // Cursor after "ab" on "  abcd" → carry only the line's leading "  ".
+        let (t, c) = newline_with_indent("  abcd", 4);
+        assert_eq!(t, "  ab\n  cd");
+        assert_eq!(c, 7);
     }
 }
 
@@ -6843,6 +7057,29 @@ mod jp_glyph_tests {
         let text = on.text();
         assert!(text.starts_with("save"), "got {text:?}");
         assert!(text.contains("保"), "got {text:?}");
+    }
+
+    #[test]
+    fn kanji_label_keeps_english_text_colour_constant() {
+        // #105 — with kanji ON, the ENGLISH (primary) section must use
+        // PLACEHOLDER so the widget substitutes its normal text colour, i.e.
+        // identical to kanji-OFF. Only the kanji section is explicitly tinted.
+        let on = toolbar_widget("save", false, true, 14.0);
+        match on {
+            egui::WidgetText::LayoutJob(job) => {
+                assert_eq!(
+                    job.sections[0].format.color,
+                    egui::Color32::PLACEHOLDER,
+                    "english label must inherit the widget colour (constant on/off)"
+                );
+                assert_ne!(
+                    job.sections[1].format.color,
+                    egui::Color32::PLACEHOLDER,
+                    "the kanji section is the one that is tinted"
+                );
+            }
+            other => panic!("expected a LayoutJob with a kanji section, got {other:?}"),
+        }
     }
 }
 
@@ -7219,7 +7456,12 @@ mod e2e {
         cfg.window.mode = scribe_core::config::WindowMode::Glass;
         let mut app = ScribeApp::new_test(cfg);
         run_frames(&mut app, 3); // build_fonts reapply + tint overlay + visuals
-        assert_eq!(app.applied_font_family, "IBM Plex Mono");
+                                 // applied_font_family is the combined note+UI key (#103).
+        assert!(
+            app.applied_font_family.starts_with("IBM Plex Mono"),
+            "note family recorded in the font-state key (got {:?})",
+            app.applied_font_family
+        );
     }
 
     #[test]

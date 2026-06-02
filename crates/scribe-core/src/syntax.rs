@@ -68,6 +68,46 @@ const HL_NAMES: &[&str] = &[
     "variable.parameter",
 ];
 
+/// Representative syntect scope for a tree-sitter capture name (#104), so the
+/// tree-sitter palette can be derived from the active syntect theme.
+fn capture_to_scope(name: &str) -> &'static str {
+    if name.starts_with("keyword") {
+        "keyword.control"
+    } else if name.starts_with("function") || name.starts_with("constructor") {
+        "entity.name.function"
+    } else if name.starts_with("type") {
+        "entity.name.type"
+    } else if name.starts_with("string") || name.starts_with("escape") || name.starts_with("char") {
+        "string.quoted.double"
+    } else if name.starts_with("comment") {
+        "comment.line"
+    } else if name.starts_with("constant")
+        || name.starts_with("number")
+        || name.starts_with("float")
+    {
+        "constant.numeric"
+    } else if name.starts_with("attribute") || name.starts_with("property") {
+        "entity.other.attribute-name"
+    } else if name.starts_with("operator") || name.starts_with("punctuation") {
+        "punctuation"
+    } else if name.starts_with("label") || name.starts_with("tag") {
+        "entity.name.tag"
+    } else {
+        "source"
+    }
+}
+
+/// Foreground RGB the syntect `theme` assigns to the scope most representative
+/// of a tree-sitter capture `name` — so the tree-sitter highlight path matches
+/// the syntect path under the same theme (#104).
+fn color_from_theme(theme: &syntect::highlighting::Theme, name: &str) -> [u8; 3] {
+    use std::str::FromStr;
+    let hl = syntect::highlighting::Highlighter::new(theme);
+    let stack = ScopeStack::from_str(capture_to_scope(name)).unwrap_or_default();
+    let c = hl.style_for_stack(stack.as_slice()).foreground;
+    [c.r, c.g, c.b]
+}
+
 /// Map a capture name to an RGB color by longest-meaningful prefix.
 fn color_for(name: &str) -> [u8; 3] {
     if name.starts_with("keyword") {
@@ -170,6 +210,35 @@ impl Highlighter {
     /// Number of languages served by a native tree-sitter grammar.
     pub fn tree_sitter_language_count(&self) -> usize {
         self.ts_rust.is_some() as usize
+    }
+
+    /// The bundled note (syntax) colour themes, sorted for a stable picker order
+    /// (#104). These are the editor text colour schemes — independent of the app
+    /// chrome theme.
+    pub fn theme_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.themes.themes.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// The active note colour theme name.
+    pub fn theme_name(&self) -> &str {
+        &self.theme_name
+    }
+
+    /// Set the note colour theme (#104). Unknown names are ignored (keeps the
+    /// current theme). Re-derives the tree-sitter palette from the chosen theme
+    /// so BOTH the syntect and tree-sitter highlight paths follow it uniformly.
+    pub fn set_theme(&mut self, name: &str) {
+        if !self.themes.themes.contains_key(name) {
+            return;
+        }
+        self.theme_name = name.to_string();
+        let theme = &self.themes.themes[name];
+        self.ts_colors = HL_NAMES
+            .iter()
+            .map(|n| color_from_theme(theme, n))
+            .collect();
     }
 
     /// Resolve a syntect syntax by file extension/token, falling back to plain.
@@ -448,6 +517,33 @@ fn span_from(style: SynStyle, range: Range<usize>) -> HlSpan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_theme_switch_is_applied_and_validated() {
+        // #104 — the note colour theme can be switched; unknown names are
+        // ignored (the current theme stays).
+        let mut hl = Highlighter::new();
+        assert!(hl
+            .theme_names()
+            .contains(&"base16-eighties.dark".to_string()));
+        hl.set_theme("Solarized (dark)");
+        assert_eq!(hl.theme_name(), "Solarized (dark)");
+        hl.set_theme("no-such-theme");
+        assert_eq!(hl.theme_name(), "Solarized (dark)", "unknown theme ignored");
+    }
+
+    #[test]
+    fn different_note_themes_recolour_the_text() {
+        // #104 — switching the note theme actually changes the highlight colours
+        // (both the syntect and tree-sitter paths derive from it).
+        let mut a = Highlighter::new();
+        a.set_theme("base16-ocean.dark");
+        let mut b = Highlighter::new();
+        b.set_theme("InspiredGitHub");
+        let ca = a.highlight_document("let x = 1;\n", Some("rs"));
+        let cb = b.highlight_document("let x = 1;\n", Some("rs"));
+        assert_ne!(ca, cb, "a different note theme must recolour the text");
+    }
 
     #[test]
     fn loads_many_languages() {

@@ -162,6 +162,11 @@ pub struct EditorConfig {
     /// familiar look. No effect for the Top/Bottom positions.
     #[serde(default, alias = "side_tabs_vertical")]
     pub side_tabs_rotated: bool,
+    /// Note (editor) syntax colour theme — the text colour scheme for the note
+    /// body, independent of the app chrome theme (#104). One of the bundled
+    /// syntect themes; an unknown value falls back to the default.
+    #[serde(default = "default_note_theme")]
+    pub note_theme: String,
     /// Phase 18 T18.2 — enable the multi-note grid. When ON, the central
     /// editor surface renders every open tab as a movable, resizable pane
     /// inside an egui_tiles tree (up to 6 panes). Default OFF — the
@@ -219,6 +224,11 @@ pub struct EditorConfig {
     /// untouched whether on or off.
     #[serde(default)]
     pub render_whitespace: bool,
+}
+
+/// serde default for the note syntax-colour theme (#104).
+fn default_note_theme() -> String {
+    "base16-eighties.dark".to_string()
 }
 
 /// serde default for opt-OUT booleans (fields that should be ON unless the
@@ -290,6 +300,7 @@ impl Default for EditorConfig {
             restore_session: true,
             tab_bar_position: TabBarPosition::Top,
             side_tabs_rotated: false,
+            note_theme: default_note_theme(),
             grid_enabled: false,
             recent_files: Vec::new(),
             first_run_completed: false,
@@ -332,6 +343,16 @@ pub struct AppearanceConfig {
     /// this back to `None` so the background follows the newly-chosen theme.
     #[serde(default)]
     pub background_override: Option<String>,
+    /// Optional NOTE (editor well) background colour override (hex `#rrggbb`),
+    /// used only when `link_backgrounds` is false. `None` = follow the theme's
+    /// editor background. Cleared on theme change like `background_override`.
+    #[serde(default)]
+    pub note_background_override: Option<String>,
+    /// When true (default), the note background follows the app background — one
+    /// control changes both. When false, the note uses `note_background_override`
+    /// independently of the app background.
+    #[serde(default = "default_true")]
+    pub link_backgrounds: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -343,6 +364,8 @@ impl Default for AppearanceConfig {
             toolbar_icons: false,
             jp_glyph_labels: false,
             background_override: None,
+            note_background_override: None,
+            link_backgrounds: true,
         }
     }
 }
@@ -363,18 +386,35 @@ pub struct FontConfig {
     /// default. Default: "JetBrains Mono".
     #[serde(default = "default_editor_family")]
     pub editor_family: String,
+    /// App-UI font family (the proportional text everywhere EXCEPT the note
+    /// body): toolbar, settings, status bar, menus. One of the bundled family
+    /// names, or "System default" to keep egui's built-in UI font. Separate from
+    /// `editor_family` so the note text and the UI can use different fonts.
+    #[serde(default = "default_ui_family")]
+    pub ui_family: String,
 }
 
 fn default_editor_family() -> String {
     "JetBrains Mono".to_string()
 }
 
+fn default_ui_family() -> String {
+    "System default".to_string()
+}
+
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
             editor_size: 14.0,
-            line_height: 1.4,
+            // #108 — keep this near the font's natural row height (~1.15-1.2) by
+            // default. In egui the caret + selection rectangles ARE the line
+            // height, so a large multiplier makes them noticeably taller than the
+            // glyphs (the extra leading sits below the text). 1.2 gives a tidy
+            // caret that tracks the text; raise it for more line spacing at the
+            // cost of a taller caret.
+            line_height: 1.2,
             editor_family: default_editor_family(),
+            ui_family: default_ui_family(),
         }
     }
 }
