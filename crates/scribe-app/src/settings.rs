@@ -195,7 +195,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
                         );
                         if !query.is_empty()
                             && ui
-                                .button("✕")
+                                .button(egui_phosphor::thin::X)
                                 .on_hover_text("Clear the search filter.")
                                 .clicked()
                         {

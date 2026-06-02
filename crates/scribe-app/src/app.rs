@@ -909,26 +909,49 @@ impl ScribeApp {
                     return false;
                 };
                 let mut drag_started = false;
-                // Per-pane header: name of the note + the close affordance, so
-                // each pane in the split/grid reads as its own tab.
+                // Per-pane header (#84): a drag-handle ICON to the LEFT of the
+                // note name, a pin toggle just to the RIGHT of the name, and the
+                // close button pushed to the FAR RIGHT so notes aren't closed by
+                // accident. All phosphor glyphs (the old ✕ / ⠿ were tofu).
                 let pane_title = tabs[idx].title();
                 ui.horizontal(|ui| {
-                    if ui.small_button("✕").on_hover_text("Close pane").clicked() {
-                        render_closes.borrow_mut().push(doc_id);
-                    }
                     // `drag_started()` on a click_and_drag Sense fires ONCE on
                     // drag start (egui_tiles expects a single `DragStarted`);
                     // an "is button held" check would re-fire every frame and
                     // wedge the tile tree's drag state.
                     let handle = ui
-                        .small_button("⠿")
+                        .small_button(egui_phosphor::thin::DOTS_SIX_VERTICAL)
                         .on_hover_text("Drag to rearrange")
-                        .interact(egui::Sense::click_and_drag());
+                        .on_hover_cursor(egui::CursorIcon::Grab);
+                    let handle = handle.interact(egui::Sense::click_and_drag());
                     if handle.drag_started() {
                         drag_started = true;
                     }
                     ui.label(RichText::new(&pane_title).strong().monospace())
                         .on_hover_text(&pane_title);
+                    let pinned = tabs[idx].pinned;
+                    let pin_glyph = if pinned {
+                        egui_phosphor::thin::PUSH_PIN_SLASH
+                    } else {
+                        egui_phosphor::thin::PUSH_PIN
+                    };
+                    if ui
+                        .small_button(pin_glyph)
+                        .on_hover_text(if pinned { "Unpin note" } else { "Pin note" })
+                        .clicked()
+                    {
+                        tabs[idx].pinned = !pinned;
+                    }
+                    // Close at the far right.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button(egui_phosphor::thin::X)
+                            .on_hover_text("Close pane")
+                            .clicked()
+                        {
+                            render_closes.borrow_mut().push(doc_id);
+                        }
+                    });
                 });
                 // Per-pane syntax highlighting via the same memoizing layouter
                 // the single-pane + split paths use, keyed on THIS pane's own
