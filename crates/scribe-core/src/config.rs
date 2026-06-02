@@ -326,6 +326,12 @@ pub struct AppearanceConfig {
     /// (DECISION-2026-005 cond #4) only verified-canonical kanji ship; actions
     /// whose canonical kanji is uncertain stay English-only. Default OFF.
     pub jp_glyph_labels: bool,
+    /// Optional app-background colour override (hex `#rrggbb`), INDEPENDENT of
+    /// the theme. `None` = follow the active theme's background. Set to a colour
+    /// to pin the app background regardless of theme; switching themes clears
+    /// this back to `None` so the background follows the newly-chosen theme.
+    #[serde(default)]
+    pub background_override: Option<String>,
 }
 
 impl Default for AppearanceConfig {
@@ -336,6 +342,7 @@ impl Default for AppearanceConfig {
             frameless: true,
             toolbar_icons: false,
             jp_glyph_labels: false,
+            background_override: None,
         }
     }
 }

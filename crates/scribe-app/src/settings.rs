@@ -34,6 +34,19 @@ fn open_plugin_manager_id() -> egui::Id {
     egui::Id::new("scr1b3_open_plugin_manager")
 }
 
+/// Parse a `#rrggbb` (or `rrggbb`) hex string into an opaque `Color32` (#88).
+/// Returns `None` on malformed input so the caller can fall back to a default.
+fn parse_hex_color(s: &str) -> Option<egui::Color32> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some(egui::Color32::from_rgb(r, g, b))
+}
+
 /// egui temp-data key holding the selected Settings category. Shared by
 /// [`show`] (read + write each frame) and [`request_category`] (host deep-link
 /// pre-select) so the two never drift apart.
@@ -271,6 +284,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                                 )
                                 .changed()
                             {
+                                // #88 — switching theme resets the background to
+                                // the new theme's background (clear the override).
+                                config.appearance.background_override = None;
                                 changed = true;
                             }
                         }
@@ -281,7 +297,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     reset_to_default(ui, &mut config.appearance.theme, &def.appearance.theme);
             });
             if row_visible(q, "theme custom name") {
-                changed |= ui
+                let name_changed = ui
                     .horizontal(|ui| {
                         ui.label("…or user theme name");
                         ui.text_edit_singleline(&mut config.appearance.theme)
@@ -293,6 +309,42 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                             .changed()
                     })
                     .inner;
+                if name_changed {
+                    config.appearance.background_override = None;
+                    changed = true;
+                }
+            }
+            if row_visible(q, "background colour color app override") {
+                // #88 — app background colour, independent of the theme. The
+                // button shows the current override (or a neutral placeholder
+                // when following the theme); picking a colour pins it, "Follow
+                // theme" clears it back to the theme's background.
+                ui.horizontal(|ui| {
+                    ui.label("App background").on_hover_text(
+                        "Override the app background colour independently of the theme. \
+                         Switching themes resets this to the new theme's background.",
+                    );
+                    let mut col = config
+                        .appearance
+                        .background_override
+                        .as_deref()
+                        .and_then(parse_hex_color)
+                        .unwrap_or(egui::Color32::from_rgb(0x0d, 0x0b, 0x14));
+                    if ui.color_edit_button_srgba(&mut col).changed() {
+                        config.appearance.background_override =
+                            Some(format!("#{:02x}{:02x}{:02x}", col.r(), col.g(), col.b()));
+                        changed = true;
+                    }
+                    if config.appearance.background_override.is_some()
+                        && ui
+                            .small_button("Follow theme")
+                            .on_hover_text("Clear the override; follow the theme's background.")
+                            .clicked()
+                    {
+                        config.appearance.background_override = None;
+                        changed = true;
+                    }
+                });
             }
             if row_visible(q, "export theme tom user customize edit") {
                 // Phase 17 T17.6: export the CURRENT built-in (or wired-noir
@@ -1711,6 +1763,30 @@ enum PickerSection {
 }
 
 #[cfg(test)]
+mod hex_color {
+    use super::parse_hex_color;
+
+    #[test]
+    fn parses_with_and_without_hash() {
+        assert_eq!(
+            parse_hex_color("#112233"),
+            Some(egui::Color32::from_rgb(0x11, 0x22, 0x33))
+        );
+        assert_eq!(
+            parse_hex_color("aabbcc"),
+            Some(egui::Color32::from_rgb(0xaa, 0xbb, 0xcc))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed() {
+        assert_eq!(parse_hex_color("#123"), None);
+        assert_eq!(parse_hex_color("nothex!"), None);
+        assert_eq!(parse_hex_color(""), None);
+    }
+}
+
+#[cfg(test)]
 mod deep_link {
     //! #71 — the status-bar encoding / language chips advertise
     //! "Settings → Editor"; opening Settings must land on that category, not the
@@ -1811,6 +1887,7 @@ mod wiring_guard {
         "appearance.frameless",
         "appearance.toolbar_icons",
         "appearance.jp_glyph_labels",
+        "appearance.background_override",
         "fonts.editor_size",
         "fonts.line_height",
         "editor.tab_width",

@@ -1091,6 +1091,19 @@ impl ScribeApp {
     /// when a translucent/glass window mode is active.
     fn current_visuals(&self) -> egui::Visuals {
         let mut v = scribe_render::theme_to_visuals(&self.theme);
+        // #88 — an explicit app-background override (independent of the theme)
+        // repaints the central panel + window backgrounds. None = follow theme.
+        if let Some(bg) = self
+            .config
+            .appearance
+            .background_override
+            .as_deref()
+            .and_then(Rgba::parse_hex)
+        {
+            let c = Color32::from_rgb(bg.r, bg.g, bg.b);
+            v.panel_fill = c;
+            v.window_fill = c;
+        }
         if self.config.window.effective_translucent() {
             scribe_render::apply_window_opacity(&mut v, self.config.window.opacity);
         }
@@ -3394,8 +3407,18 @@ fn open_in_file_manager(dir: &Path) {
 /// so the OS blur (Mica/acrylic/vibrancy) or the desktop shows through the
 /// chrome — not just the central editor. When the master transparency toggle is
 /// off (or the mode is opaque) the panel stays fully opaque.
-fn panel_fill(theme: &Theme, window: &scribe_core::config::WindowConfig) -> Color32 {
-    let base = ui_color(theme, "panel", Rgba::new(0x0d, 0x0b, 0x14, 255));
+fn panel_fill(
+    theme: &Theme,
+    window: &scribe_core::config::WindowConfig,
+    background_override: Option<&str>,
+) -> Color32 {
+    // #88 — an explicit background override (hex) wins over the theme's panel
+    // colour; otherwise follow the theme. Translucency (glass mode) still
+    // applies its alpha on top, so the override composes with vibrancy.
+    let base: Color32 = match background_override.and_then(Rgba::parse_hex) {
+        Some(o) => Color32::from_rgb(o.r, o.g, o.b),
+        None => ui_color(theme, "panel", Rgba::new(0x0d, 0x0b, 0x14, 255)),
+    };
     if window.effective_translucent() {
         let a = (window.opacity.clamp(0.30, 1.0) * 255.0).round() as u8;
         Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a)
@@ -4071,7 +4094,11 @@ impl ScribeApp {
         // reduced alpha — otherwise opaque chrome covers the transparent/blurred
         // surface and "transparency doesn't work" (the T19.2 root cause). The master
         // `transparency_enabled` toggle gates this via `effective_translucent()`.
-        let panel = panel_fill(&self.theme, &self.config.window);
+        let panel = panel_fill(
+            &self.theme,
+            &self.config.window,
+            self.config.appearance.background_override.as_deref(),
+        );
         let warn = ui_color(&self.theme, "warning", Rgba::new(0xfb, 0xbf, 0x24, 255));
 
         // ---- Custom frameless titlebar ----
@@ -6024,6 +6051,34 @@ mod resize_tests {
 }
 
 #[cfg(test)]
+mod background_override_tests {
+    //! #88 — the app background override repaints panel/window fills
+    //! independently of the theme; None follows the theme.
+    use super::ScribeApp;
+    use scribe_core::Config;
+
+    #[test]
+    fn override_repaints_panel_and_window_fill() {
+        let mut cfg = Config::default();
+        cfg.appearance.background_override = Some("#112233".into());
+        let app = ScribeApp::new_test(cfg);
+        let v = app.current_visuals();
+        let want = egui::Color32::from_rgb(0x11, 0x22, 0x33);
+        assert_eq!(v.panel_fill, want);
+        assert_eq!(v.window_fill, want);
+    }
+
+    #[test]
+    fn none_follows_theme_not_the_override_colour() {
+        let cfg = Config::default(); // background_override = None
+        let app = ScribeApp::new_test(cfg);
+        let v = app.current_visuals();
+        // Whatever the theme is, it must NOT be the arbitrary override colour.
+        assert_ne!(v.panel_fill, egui::Color32::from_rgb(0x11, 0x22, 0x33));
+    }
+}
+
+#[cfg(test)]
 mod spell_underline_tests {
     //! #78 — spellcheck underlines. The byte→char mapping must be correct
     //! (galley cursors are char-indexed; spell spans are byte-indexed) and the
@@ -6865,7 +6920,7 @@ mod e2e {
             ..Default::default()
         };
         assert_eq!(
-            panel_fill(&theme, &w_off).a(),
+            panel_fill(&theme, &w_off, None).a(),
             255,
             "opaque while master toggle off"
         );
@@ -6874,7 +6929,7 @@ mod e2e {
             transparency_enabled: true,
             ..w_off
         };
-        let a = panel_fill(&theme, &w_on).a();
+        let a = panel_fill(&theme, &w_on, None).a();
         assert!(
             (76..255).contains(&a),
             "alpha reduced to ~opacity (got {a})"
