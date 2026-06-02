@@ -2593,8 +2593,13 @@ impl ScribeApp {
     /// active document with a viewport indicator; click/drag jumps the editor.
     fn show_minimap(&mut self, ctx: &egui::Context, panel: Color32, accent: Color32) {
         egui::SidePanel::right("minimap")
-            .exact_width(110.0)
-            .resizable(false)
+            // #86 — the Map view is now user-resizable (was a fixed exact_width).
+            // The minimap galley re-lays out to `available_size` each frame, so
+            // it tracks the dragged width. Floor keeps it legible; ceiling stops
+            // it eating the editor.
+            .default_width(110.0)
+            .width_range(48.0..=260.0)
+            .resizable(true)
             .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
             .show(ctx, |ui| {
                 ui.label(RichText::new("MAP").color(accent).small().monospace());
@@ -4130,6 +4135,9 @@ impl ScribeApp {
                 egui::SidePanel::left("tabs-left")
                     .resizable(true)
                     .default_width(180.0)
+                    // #85 — allow the side tab bar to shrink much smaller than
+                    // egui's default floor (e.g. for a narrow vertical strip).
+                    .width_range(40.0..=400.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                     .show(ctx, |ui| {
                         self.draw_side_tab_strip(ui, accent, muted, vertical);
@@ -4140,6 +4148,7 @@ impl ScribeApp {
                 egui::SidePanel::right("tabs-right")
                     .resizable(true)
                     .default_width(180.0)
+                    .width_range(40.0..=400.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                     .show(ctx, |ui| {
                         self.draw_side_tab_strip(ui, accent, muted, vertical);
