@@ -332,6 +332,16 @@ pub struct AppearanceConfig {
     /// this back to `None` so the background follows the newly-chosen theme.
     #[serde(default)]
     pub background_override: Option<String>,
+    /// Optional NOTE (editor well) background colour override (hex `#rrggbb`),
+    /// used only when `link_backgrounds` is false. `None` = follow the theme's
+    /// editor background. Cleared on theme change like `background_override`.
+    #[serde(default)]
+    pub note_background_override: Option<String>,
+    /// When true (default), the note background follows the app background — one
+    /// control changes both. When false, the note uses `note_background_override`
+    /// independently of the app background.
+    #[serde(default = "default_true")]
+    pub link_backgrounds: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -343,6 +353,8 @@ impl Default for AppearanceConfig {
             toolbar_icons: false,
             jp_glyph_labels: false,
             background_override: None,
+            note_background_override: None,
+            link_backgrounds: true,
         }
     }
 }

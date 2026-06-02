@@ -284,9 +284,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                                 )
                                 .changed()
                             {
-                                // #88 — switching theme resets the background to
-                                // the new theme's background (clear the override).
+                                // #88/#106 — switching theme resets BOTH the app
+                                // and note background overrides to the new theme.
                                 config.appearance.background_override = None;
+                                config.appearance.note_background_override = None;
                                 changed = true;
                             }
                         }
@@ -311,6 +312,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     .inner;
                 if name_changed {
                     config.appearance.background_override = None;
+                    config.appearance.note_background_override = None;
                     changed = true;
                 }
             }
@@ -344,6 +346,53 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         config.appearance.background_override = None;
                         changed = true;
                     }
+                });
+            }
+            if row_visible(q, "note background link app editor separate together") {
+                // #106 — link toggle + the note (editor well) background. When
+                // linked, the note follows the app background; when separate, the
+                // note has its own colour.
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .checkbox(
+                            &mut config.appearance.link_backgrounds,
+                            "Link app & note backgrounds",
+                        )
+                        .on_hover_text(
+                            "ON: the note (editor) background follows the app background — \
+                             one control changes both. OFF: set the note background \
+                             separately below.",
+                        )
+                        .changed();
+                });
+                let linked = config.appearance.link_backgrounds;
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!linked, |ui| {
+                        ui.label("Note background").on_hover_text(
+                            "Background colour of the note/editor text area (used when \
+                             'Link app & note backgrounds' is off).",
+                        );
+                        let mut col = config
+                            .appearance
+                            .note_background_override
+                            .as_deref()
+                            .and_then(parse_hex_color)
+                            .unwrap_or(egui::Color32::from_rgb(0x0d, 0x0b, 0x14));
+                        if ui.color_edit_button_srgba(&mut col).changed() {
+                            config.appearance.note_background_override =
+                                Some(format!("#{:02x}{:02x}{:02x}", col.r(), col.g(), col.b()));
+                            changed = true;
+                        }
+                        if config.appearance.note_background_override.is_some()
+                            && ui
+                                .small_button("Follow theme")
+                                .on_hover_text("Clear the note override; follow the theme.")
+                                .clicked()
+                        {
+                            config.appearance.note_background_override = None;
+                            changed = true;
+                        }
+                    });
                 });
             }
             if row_visible(q, "export theme tom user customize edit") {
@@ -1978,6 +2027,8 @@ mod wiring_guard {
         "appearance.toolbar_icons",
         "appearance.jp_glyph_labels",
         "appearance.background_override",
+        "appearance.note_background_override",
+        "appearance.link_backgrounds",
         "fonts.editor_size",
         "fonts.line_height",
         "fonts.editor_family",

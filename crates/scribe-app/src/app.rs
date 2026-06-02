@@ -1117,18 +1117,28 @@ impl ScribeApp {
     /// when a translucent/glass window mode is active.
     fn current_visuals(&self) -> egui::Visuals {
         let mut v = scribe_render::theme_to_visuals(&self.theme);
-        // #88 — an explicit app-background override (independent of the theme)
-        // repaints the central panel + window backgrounds. None = follow theme.
-        if let Some(bg) = self
-            .config
-            .appearance
-            .background_override
-            .as_deref()
-            .and_then(Rgba::parse_hex)
-        {
-            let c = Color32::from_rgb(bg.r, bg.g, bg.b);
+        let parse = |o: &Option<String>| {
+            o.as_deref()
+                .and_then(Rgba::parse_hex)
+                .map(|c| Color32::from_rgb(c.r, c.g, c.b))
+        };
+        // #88 — app-background override (independent of the theme) repaints the
+        // central panel + window backgrounds. None = follow theme.
+        let app_bg = parse(&self.config.appearance.background_override);
+        if let Some(c) = app_bg {
             v.panel_fill = c;
             v.window_fill = c;
+        }
+        // #106 — note (editor well) background. When linked it follows the app
+        // background override; when unlinked it uses its own override. None at
+        // the chosen source = follow the theme's editor background.
+        let note_bg = if self.config.appearance.link_backgrounds {
+            app_bg
+        } else {
+            parse(&self.config.appearance.note_background_override)
+        };
+        if let Some(c) = note_bg {
+            v.extreme_bg_color = c;
         }
         if self.config.window.effective_translucent() {
             scribe_render::apply_window_opacity(&mut v, self.config.window.opacity);
@@ -6658,6 +6668,36 @@ mod background_override_tests {
         // Whatever the theme is, it must NOT be the arbitrary override colour.
         assert_ne!(v.panel_fill, egui::Color32::from_rgb(0x11, 0x22, 0x33));
     }
+
+    #[test]
+    fn linked_note_background_follows_the_app_override() {
+        // #106 — linked (default): the note well (extreme_bg_color) tracks the
+        // app background override.
+        let mut cfg = Config::default();
+        cfg.appearance.link_backgrounds = true;
+        cfg.appearance.background_override = Some("#112233".into());
+        let app = ScribeApp::new_test(cfg);
+        let v = app.current_visuals();
+        let want = egui::Color32::from_rgb(0x11, 0x22, 0x33);
+        assert_eq!(v.panel_fill, want);
+        assert_eq!(v.extreme_bg_color, want, "linked note follows app bg");
+    }
+
+    #[test]
+    fn unlinked_note_background_is_independent() {
+        // #106 — unlinked: app + note backgrounds are set separately.
+        let mut cfg = Config::default();
+        cfg.appearance.link_backgrounds = false;
+        cfg.appearance.background_override = Some("#112233".into());
+        cfg.appearance.note_background_override = Some("#445566".into());
+        let app = ScribeApp::new_test(cfg);
+        let v = app.current_visuals();
+        assert_eq!(v.panel_fill, egui::Color32::from_rgb(0x11, 0x22, 0x33));
+        assert_eq!(
+            v.extreme_bg_color,
+            egui::Color32::from_rgb(0x44, 0x55, 0x66)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -7388,7 +7428,7 @@ mod e2e {
         cfg.window.mode = scribe_core::config::WindowMode::Glass;
         let mut app = ScribeApp::new_test(cfg);
         run_frames(&mut app, 3); // build_fonts reapply + tint overlay + visuals
-        // applied_font_family is the combined note+UI key (#103).
+                                 // applied_font_family is the combined note+UI key (#103).
         assert!(
             app.applied_font_family.starts_with("IBM Plex Mono"),
             "note family recorded in the font-state key (got {:?})",
