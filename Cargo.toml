@@ -34,7 +34,7 @@ notify-debouncer-mini = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Errors
-thiserror = "1"
+thiserror = "2"
 anyhow = "1"
 # UI (egui via eframe = winit + wgpu + egui, the official bundle)
 # Phase 16 / T16.2: bumped 0.29 -> 0.34 (Rounding->CornerRadius, panel/Visuals
