@@ -144,6 +144,16 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
         .default_size([760.0, 560.0])
         .min_width(420.0)
         .min_height(320.0)
+        // #77 — force the Settings window OPAQUE. The app-window transparency /
+        // glass setting drives a translucent `window_fill`; without this the
+        // Settings panel itself went see-through, which is not what the
+        // app-background transparency option is for. Take the theme's window
+        // fill but pin alpha to 255 so Settings stays readable in glass mode.
+        .frame({
+            let style = ctx.global_style();
+            let f = style.visuals.window_fill;
+            egui::Frame::window(&style).fill(egui::Color32::from_rgb(f.r(), f.g(), f.b()))
+        })
         .show(ctx, |ui| {
             ui.horizontal_top(|ui| {
                 // ---- Left category nav ----
@@ -1237,7 +1247,12 @@ enum ToolbarDrag {
 /// **additive**: keyboard users keep the buttons; pointer users get the
 /// direct-manipulation UX the plan calls out.
 fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
+    use egui_phosphor::thin as ph;
     let mut changed = false;
+    // #80 — pin the editor to the available width so its wide children (the
+    // palette's wrapped row of chips) WRAP instead of forcing the resizable
+    // Settings window to balloon to fit them.
+    ui.set_max_width(ui.available_width());
     ui.heading("Quick-access toolbar");
     ui.label(
         egui::RichText::new(
@@ -1336,16 +1351,33 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         let drag_id = egui::Id::new(("scr1b3-toolbar-item-drag", i));
         ui.dnd_drag_source(drag_id, ToolbarDrag::Reorder(i), |ui| {
             ui.horizontal(|ui| {
-                // A small grip glyph signals "this row is draggable".
-                ui.add(egui::Label::new(egui::RichText::new("⠿").weak().small()).selectable(false))
-                    .on_hover_text("Drag to reorder");
-                if ui.add_enabled(i > 0, egui::Button::new("↑")).clicked() {
+                // A grip glyph signals "this row is draggable" (#89 — phosphor
+                // icons instead of raw braille/arrows that rendered as tofu).
+                ui.add(
+                    egui::Label::new(egui::RichText::new(ph::DOTS_SIX_VERTICAL).weak())
+                        .selectable(false),
+                )
+                .on_hover_text("Drag to reorder")
+                .on_hover_cursor(egui::CursorIcon::Grab);
+                if ui
+                    .add_enabled(i > 0, egui::Button::new(ph::CARET_UP))
+                    .on_hover_text("Move up")
+                    .clicked()
+                {
                     mv = Some((i, -1));
                 }
-                if ui.add_enabled(i + 1 < n, egui::Button::new("↓")).clicked() {
+                if ui
+                    .add_enabled(i + 1 < n, egui::Button::new(ph::CARET_DOWN))
+                    .on_hover_text("Move down")
+                    .clicked()
+                {
                     mv = Some((i, 1));
                 }
-                if ui.button("✕").clicked() {
+                if ui
+                    .button(ph::X)
+                    .on_hover_text("Remove from toolbar")
+                    .clicked()
+                {
                     rm = Some(i);
                 }
                 ui.label(label);
@@ -1439,19 +1471,26 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         for (id, label) in crate::app::TOOLBAR_ACTIONS {
             let drag_id = egui::Id::new(("scr1b3-toolbar-palette-drag", *id));
             ui.dnd_drag_source(drag_id, ToolbarDrag::AddAction((*id).to_string()), |ui| {
+                // #90 — chips read as grabbable: a faint grip glyph + a filled
+                // chip background, and a grab cursor on hover. They wrap into
+                // 2-3 rows because the editor width is pinned (#80 above).
                 let chip = egui::Frame::default()
                     .inner_margin(egui::Margin::symmetric(6, 3))
+                    .fill(ui.visuals().widgets.inactive.bg_fill)
                     .stroke(egui::Stroke::new(
                         1.0,
                         ui.visuals().widgets.inactive.bg_stroke.color,
                     ))
-                    .corner_radius(egui::CornerRadius::same(3));
+                    .corner_radius(egui::CornerRadius::same(4));
                 chip.show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(egui::RichText::new(ph::DOTS_SIX_VERTICAL).weak().small());
                     ui.label(*label);
                 });
             })
             .response
-            .on_hover_text("Drag onto the list above to add");
+            .on_hover_text("Drag onto the list above to add")
+            .on_hover_cursor(egui::CursorIcon::Grab);
         }
     });
     ui.add_space(4.0);

@@ -862,6 +862,7 @@ impl ScribeApp {
             return;
         };
         let line_height = self.config.fonts.line_height;
+        let word_wrap = self.config.editor.word_wrap;
         // Disjoint-field borrows captured as locals BEFORE the central-panel
         // closure (which mutably borrows `self.tabs`). The highlighter + its
         // cache are different fields than `tabs`, so the immutable borrows here
@@ -912,8 +913,14 @@ impl ScribeApp {
                 // slot `hl_cache` recomputes as focus moves between panes, which
                 // is fine at the 6-pane ceiling.
                 let ext = tabs[idx].doc.language_hint();
-                let mut layouter =
-                    make_layouter(hl, hl_cache, ext.as_deref(), font.clone(), line_height);
+                let mut layouter = make_layouter(
+                    hl,
+                    hl_cache,
+                    ext.as_deref(),
+                    font.clone(),
+                    line_height,
+                    word_wrap,
+                );
                 egui::ScrollArea::both()
                     .id_salt(("scr1b3-grid-pane", doc_id.raw()))
                     .show(ui, |ui| {
@@ -2682,7 +2689,8 @@ impl ScribeApp {
             crate::editor_features::project_folded(&text, &regions, &self.folds);
         let line_height = self.config.fonts.line_height;
         let hl = &self.hl;
-        let mut layouter = make_layouter(hl, &self.hl_cache, ext, font, line_height);
+        let word_wrap = self.config.editor.word_wrap;
+        let mut layouter = make_layouter(hl, &self.hl_cache, ext, font, line_height, word_wrap);
         egui::ScrollArea::both()
             .id_salt("fold-scroll")
             .show(ui, |ui| {
@@ -3408,12 +3416,27 @@ fn highlight_job(
 /// Build the memoizing egui `layouter` closure for a `TextEdit`. Reuses the
 /// cached highlight `LayoutJob` unless the buffer/lang/font-size changed, so
 /// syntect/tree-sitter only re-run when the text actually changes.
+/// The wrap width our editor layouter should USE, given the word-wrap setting
+/// and the width egui hands the layouter. egui's `TextEdit` always passes the
+/// scroll-viewport `available_width` as the wrap width (NOT `desired_width`), so
+/// a custom layouter that blindly honours it wraps even when wrap is off — the
+/// "word wrap is always on" bug. When wrap is off we force infinite width so the
+/// galley lays out on one line and the `ScrollArea::both` scrolls horizontally.
+fn effective_wrap_width(word_wrap: bool, available: f32) -> f32 {
+    if word_wrap {
+        available
+    } else {
+        f32::INFINITY
+    }
+}
+
 fn make_layouter<'a>(
     hl: &'a Highlighter,
     cache: &'a std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
     ext: Option<&'a str>,
     font: FontId,
     line_height: f32,
+    word_wrap: bool,
 ) -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> std::sync::Arc<egui::Galley> + 'a {
     // egui 0.34: TextEdit::layouter callback now receives `&dyn TextBuffer`
     // instead of `&str` (so non-String buffers can be hosted). We still want
@@ -3445,7 +3468,7 @@ fn make_layouter<'a>(
             }
         };
         let mut job = (*job_arc).clone();
-        job.wrap.max_width = wrap;
+        job.wrap.max_width = effective_wrap_width(word_wrap, wrap);
         // egui 0.34: FontsView::layout_job caches into the view → needs &mut.
         ui.fonts_mut(|f| f.layout_job(job))
     }
@@ -5196,8 +5219,14 @@ impl ScribeApp {
                 let anchor: Option<(egui::Pos2, usize)> = {
                     let hl = &self.hl;
                     let ext_ref = ext.as_deref();
-                    let mut layouter =
-                        make_layouter(hl, &self.hl_cache, ext_ref, font.clone(), line_height);
+                    let mut layouter = make_layouter(
+                        hl,
+                        &self.hl_cache,
+                        ext_ref,
+                        font.clone(),
+                        line_height,
+                        word_wrap,
+                    );
                     let mut sa = if word_wrap {
                         egui::ScrollArea::vertical()
                     } else {
@@ -5808,6 +5837,17 @@ fn handle_frameless_resize(ctx: &egui::Context) {
     // (so a button/tab sitting at the very edge still gets its click).
     if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.wants_pointer_input() {
         ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+        // The OS now owns the drag. winit's modal resize loop swallows the
+        // button-up, so egui can be left believing a drag is still in progress —
+        // which makes `wants_pointer_input()` return true forever and blocks
+        // EVERY subsequent resize (the "works once, then never" bug). Clearing
+        // egui's drag bookkeeping here unsticks that state so resize re-arms.
+        ctx.stop_dragging();
+    }
+    // Belt-and-suspenders: with no button held there can be no legitimate drag,
+    // so proactively clear any phantom drag the OS resize loop may have orphaned.
+    if !ctx.input(|i| i.pointer.any_down()) {
+        ctx.stop_dragging();
     }
 }
 
@@ -5880,6 +5920,29 @@ mod resize_tests {
     fn outside_the_window_is_none() {
         assert_eq!(resize_dir_at(pos2(-5.0, 350.0), win(), 6.0, 12.0), None);
         assert_eq!(resize_dir_at(pos2(500.0, 800.0), win(), 6.0, 12.0), None);
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    //! #75 — word-wrap toggle. egui's TextEdit passes the scroll viewport's
+    //! available width to the layouter as the wrap width regardless of
+    //! `desired_width`, so the editor wrapped even with word-wrap OFF. The fix
+    //! lives in `effective_wrap_width`: infinite width when wrap is off (galley
+    //! lays out on one line, the ScrollArea scrolls horizontally), the given
+    //! viewport width when on.
+    use super::effective_wrap_width;
+
+    #[test]
+    fn wrap_off_forces_infinite_width() {
+        assert_eq!(effective_wrap_width(false, 800.0), f32::INFINITY);
+        assert_eq!(effective_wrap_width(false, 1.0), f32::INFINITY);
+    }
+
+    #[test]
+    fn wrap_on_uses_the_viewport_width() {
+        assert_eq!(effective_wrap_width(true, 800.0), 800.0);
+        assert_eq!(effective_wrap_width(true, 123.5), 123.5);
     }
 }
 
@@ -5985,8 +6048,13 @@ fn paint_tint_overlay(ctx: &egui::Context, tint_hex: &str, strength: f32) {
         return;
     };
     let a = (strength.clamp(0.0, 1.0) * 90.0).round() as u8;
+    // #77 — paint the tint at the BACKMOST layer so it washes the app
+    // background only. At Order::Foreground it painted OVER every window
+    // (including the Settings window), which is exactly the "transparency
+    // applies to the settings window" bug the user reported. Behind the panels,
+    // it shows through translucent (glass-mode) chrome but never over a window.
     let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
+        egui::Order::Background,
         egui::Id::new("tint-overlay"),
     ));
     painter.rect_filled(
