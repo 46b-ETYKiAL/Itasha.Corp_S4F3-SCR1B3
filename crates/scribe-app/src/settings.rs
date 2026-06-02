@@ -1195,8 +1195,18 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         head(
             ui,
             "Updates (telemetry-free)",
-            "How update checks behave. No usage data ever leaves your machine.",
+            "Update REMINDERS — SCR1B3 never checks the network in the background and \
+             never auto-installs. A reminder just opens the GitHub releases page so you \
+             can compare versions and download a new build yourself.",
         );
+        // #109 — show the running version so "Check for updates now" is concretely
+        // verifiable: open the releases page, compare to this number.
+        ui.label(
+            egui::RichText::new(format!("You are running v{}.", env!("CARGO_PKG_VERSION")))
+                .weak()
+                .small(),
+        );
+        ui.add_space(4.0);
         let modes = [
             (UpdateMode::Off, "off"),
             (UpdateMode::Notify, "notify"),
