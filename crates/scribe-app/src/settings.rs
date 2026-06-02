@@ -505,7 +505,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         if row_visible(q, "line height") {
             ui.horizontal(|ui| {
                 ui.label("Line height").on_hover_text(
-                    "Vertical spacing between lines, as a multiple of the font size.",
+                    "Vertical spacing between lines, as a multiple of the font size. \
+                     Note: the text caret + selection are exactly this tall, so a larger \
+                     value also makes them taller than the glyphs. ~1.2 keeps the caret \
+                     tight to the text.",
                 );
                 if ui.small_button("-").on_hover_text("Tighter").clicked() {
                     config.fonts.line_height = (config.fonts.line_height - 0.1).clamp(1.0, 2.5);

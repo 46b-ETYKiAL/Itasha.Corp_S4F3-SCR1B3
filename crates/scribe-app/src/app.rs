@@ -3543,9 +3543,16 @@ pub(crate) fn toolbar_widget(
         0.0,
         egui::TextFormat {
             font_id: egui::FontId::proportional(size),
+            // #105 — PLACEHOLDER makes the widget substitute its normal text
+            // colour, so the ENGLISH label is the SAME colour whether kanji
+            // labels are on or off. (TextFormat::default's colour is gray, which
+            // is what made the English text change colour when kanji turned on.)
+            color: egui::Color32::PLACEHOLDER,
             ..Default::default()
         },
     );
+    // Only the appended kanji is tinted (a dim "instrument-plate" colour) — a
+    // different colour for the kanji, never for the English text.
     job.append(
         &format!("  {kanji}"),
         0.0,
@@ -6843,6 +6850,29 @@ mod jp_glyph_tests {
         let text = on.text();
         assert!(text.starts_with("save"), "got {text:?}");
         assert!(text.contains("保"), "got {text:?}");
+    }
+
+    #[test]
+    fn kanji_label_keeps_english_text_colour_constant() {
+        // #105 — with kanji ON, the ENGLISH (primary) section must use
+        // PLACEHOLDER so the widget substitutes its normal text colour, i.e.
+        // identical to kanji-OFF. Only the kanji section is explicitly tinted.
+        let on = toolbar_widget("save", false, true, 14.0);
+        match on {
+            egui::WidgetText::LayoutJob(job) => {
+                assert_eq!(
+                    job.sections[0].format.color,
+                    egui::Color32::PLACEHOLDER,
+                    "english label must inherit the widget colour (constant on/off)"
+                );
+                assert_ne!(
+                    job.sections[1].format.color,
+                    egui::Color32::PLACEHOLDER,
+                    "the kanji section is the one that is tinted"
+                );
+            }
+            other => panic!("expected a LayoutJob with a kanji section, got {other:?}"),
+        }
     }
 }
 

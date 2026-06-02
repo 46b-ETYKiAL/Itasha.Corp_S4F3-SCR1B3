@@ -373,7 +373,13 @@ impl Default for FontConfig {
     fn default() -> Self {
         Self {
             editor_size: 14.0,
-            line_height: 1.4,
+            // #108 — keep this near the font's natural row height (~1.15-1.2) by
+            // default. In egui the caret + selection rectangles ARE the line
+            // height, so a large multiplier makes them noticeably taller than the
+            // glyphs (the extra leading sits below the text). 1.2 gives a tidy
+            // caret that tracks the text; raise it for more line spacing at the
+            // cost of a taller caret.
+            line_height: 1.2,
             editor_family: default_editor_family(),
         }
     }
