@@ -452,6 +452,10 @@ pub struct ScribeApp {
     tabs: Vec<EditorTab>,
     active: usize,
     visuals_applied: bool,
+    /// The editor font family currently applied to the egui context (#87). When
+    /// `config.fonts.editor_family` diverges from this, the font set is rebuilt
+    /// and re-applied — a restart-free font-theme switch.
+    applied_font_family: String,
     /// One-shot guard for forcing OS window decorations OFF in frameless mode
     /// (#79). On Windows, applying a vibrancy/transparent surface can make the
     /// DWM re-add the native caption buttons even though the window was created
@@ -651,38 +655,9 @@ impl ScribeApp {
         // so ligatures are inherently OFF (T17.2 "ligatures off-default" is
         // structural, not config — there is no path to turn them on without
         // swapping the shaper).
-        let mut fonts = egui::FontDefinitions::default();
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
-        const JETBRAINS_MONO_REGULAR: &[u8] =
-            include_bytes!("../../../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf");
-        fonts.font_data.insert(
-            "JetBrainsMono".to_owned(),
-            std::sync::Arc::new(egui::FontData::from_static(JETBRAINS_MONO_REGULAR)),
-        );
-        if let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-            monospace.insert(0, "JetBrainsMono".to_owned());
-        }
-        // CJK fallback so the toolbar's "instrument plate" kanji render real
-        // glyphs instead of tofu boxes — neither JetBrains Mono nor egui's Hack
-        // covers CJK. This is a hand-subset of Noto Sans JP (OFL-1.1, see
-        // assets/fonts/NotoSansJP/OFL.txt) pinned to Regular and containing ONLY
-        // the 11 kanji `jp_glyph()` uses (~4.5 KB; regenerate via
-        // scripts/generate-jp-kanji-subset.py). Appended at the END of both
-        // families so it ONLY fills glyphs the primary fonts lack.
-        const NOTO_SANS_JP_SUBSET: &[u8] =
-            include_bytes!("../../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf");
-        fonts.font_data.insert(
-            "NotoSansJP-Subset".to_owned(),
-            std::sync::Arc::new(egui::FontData::from_static(NOTO_SANS_JP_SUBSET)),
-        );
-        for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
-            fonts
-                .families
-                .entry(family)
-                .or_default()
-                .push("NotoSansJP-Subset".to_owned());
-        }
-        cc.egui_ctx.set_fonts(fonts);
+        cc.egui_ctx
+            .set_fonts(build_fonts(&app.config.fonts.editor_family));
+        app.applied_font_family = app.config.fonts.editor_family.clone();
         // Follow the OS theme preference so `ctx.theme()` reflects the live OS
         // light/dark setting (egui-winit updates it on OS theme-change events).
         // The app's own brand visuals are applied on top via `set_visuals`; this
@@ -810,6 +785,7 @@ impl ScribeApp {
             active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
             visuals_applied: false,
+            applied_font_family: String::new(),
             decorations_forced: false,
             want_close: false,
             closing: false,
@@ -3634,6 +3610,88 @@ fn open_in_file_manager(dir: &Path) {
 /// so the OS blur (Mica/acrylic/vibrancy) or the desktop shows through the
 /// chrome — not just the central editor. When the master transparency toggle is
 /// off (or the mode is opaque) the panel stays fully opaque.
+/// Bundled monospace "font themes" (#87): (display name, internal family key).
+/// Every face is OFL-licensed and embedded at compile time. The display names
+/// are what the Settings picker shows and what `fonts.editor_family` stores.
+pub(crate) const FONT_FAMILIES: &[(&str, &str)] = &[
+    ("JetBrains Mono", "JetBrainsMono"),
+    ("IBM Plex Mono", "IBMPlexMono"),
+    ("Fira Mono", "FiraMono"),
+    ("Space Mono", "SpaceMono"),
+    ("Cousine", "Cousine"),
+];
+
+/// Resolve a font display name to its embedded family key, falling back to
+/// JetBrains Mono for an unknown / stale config value.
+fn font_family_key(display: &str) -> &'static str {
+    FONT_FAMILIES
+        .iter()
+        .find(|(d, _)| *d == display)
+        .map(|(_, k)| *k)
+        .unwrap_or("JetBrainsMono")
+}
+
+/// Build the egui font set with `editor_family` as the primary Monospace face
+/// (#87). All bundled coding fonts are registered; the selected one is placed
+/// first in the Monospace family, JetBrains Mono is kept right behind it as a
+/// fallback, and the Noto Sans JP kanji subset is appended to both families so
+/// the toolbar kanji never tofu. egui's ab_glyph does no OT shaping, so
+/// ligatures are structurally off regardless of face.
+fn build_fonts(editor_family: &str) -> egui::FontDefinitions {
+    use std::sync::Arc;
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
+
+    macro_rules! embed {
+        ($key:literal, $path:literal) => {
+            fonts.font_data.insert(
+                $key.to_owned(),
+                Arc::new(egui::FontData::from_static(include_bytes!($path))),
+            );
+        };
+    }
+    embed!(
+        "JetBrainsMono",
+        "../../../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"
+    );
+    embed!(
+        "IBMPlexMono",
+        "../../../assets/fonts/IBMPlexMono/IBMPlexMono-Regular.ttf"
+    );
+    embed!(
+        "FiraMono",
+        "../../../assets/fonts/FiraMono/FiraMono-Regular.ttf"
+    );
+    embed!(
+        "SpaceMono",
+        "../../../assets/fonts/SpaceMono/SpaceMono-Regular.ttf"
+    );
+    embed!(
+        "Cousine",
+        "../../../assets/fonts/Cousine/Cousine-Regular.ttf"
+    );
+    embed!(
+        "NotoSansJP-Subset",
+        "../../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf"
+    );
+
+    let selected = font_family_key(editor_family);
+    if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        mono.insert(0, selected.to_owned());
+        if selected != "JetBrainsMono" {
+            mono.insert(1, "JetBrainsMono".to_owned());
+        }
+    }
+    for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("NotoSansJP-Subset".to_owned());
+    }
+    fonts
+}
+
 fn panel_fill(
     theme: &Theme,
     window: &scribe_core::config::WindowConfig,
@@ -4074,6 +4132,13 @@ impl ScribeApp {
         if self.config.appearance.frameless && !self.decorations_forced {
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
             self.decorations_forced = true;
+        }
+
+        // #87 — restart-free font-theme switch: rebuild + re-apply the font set
+        // whenever the chosen editor family changes (cheap string compare).
+        if self.config.fonts.editor_family != self.applied_font_family {
+            ctx.set_fonts(build_fonts(&self.config.fonts.editor_family));
+            self.applied_font_family = self.config.fonts.editor_family.clone();
         }
 
         // Live-reload config when the file changes on disk (external edit).
@@ -6337,6 +6402,43 @@ mod save_session_tests {
             "alpha   ",
             "with both toggles off the bytes are written verbatim"
         );
+    }
+}
+
+#[cfg(test)]
+mod font_theme_tests {
+    //! #87 — bundled font themes. The selected family must lead the Monospace
+    //! family list (so it actually renders), JetBrains Mono must stay right
+    //! behind it as a fallback, every bundled face + the JP subset must be
+    //! registered, and an unknown name must fall back gracefully.
+    use super::{build_fonts, font_family_key, FONT_FAMILIES};
+
+    #[test]
+    fn selected_family_leads_with_jetbrains_fallback() {
+        let f = build_fonts("IBM Plex Mono");
+        let mono = &f.families[&egui::FontFamily::Monospace];
+        assert_eq!(mono[0], "IBMPlexMono", "selected face renders first");
+        assert_eq!(mono[1], "JetBrainsMono", "JetBrains kept as fallback");
+        for (_, key) in FONT_FAMILIES {
+            assert!(f.font_data.contains_key(*key), "{key} registered");
+        }
+        assert!(f.font_data.contains_key("NotoSansJP-Subset"));
+    }
+
+    #[test]
+    fn unknown_family_falls_back_to_jetbrains() {
+        assert_eq!(font_family_key("No Such Font"), "JetBrainsMono");
+        let f = build_fonts("No Such Font");
+        assert_eq!(f.families[&egui::FontFamily::Monospace][0], "JetBrainsMono");
+    }
+
+    #[test]
+    fn default_family_is_jetbrains_and_does_not_double_insert() {
+        let f = build_fonts("JetBrains Mono");
+        let mono = &f.families[&egui::FontFamily::Monospace];
+        assert_eq!(mono[0], "JetBrainsMono");
+        // No redundant second JetBrains entry when it's already the selection.
+        assert_ne!(mono.get(1).map(String::as_str), Some("JetBrainsMono"));
     }
 }
 

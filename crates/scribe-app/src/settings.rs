@@ -441,13 +441,48 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
 
     // ---- Fonts ----  (no ligatures: egui has no OpenType shaping, so the
     // toggle is intentionally absent rather than shown as a dead control.)
-    if section_visible(sel, q, "Fonts", &["size", "line height"]) {
+    if section_visible(
+        sel,
+        q,
+        "Fonts",
+        &["size", "line height", "family", "font theme"],
+    ) {
         head(
             ui,
             "Fonts",
-            "Editor text size and line spacing. (Ligatures are off — the renderer \
-             does no OpenType shaping.)",
+            "Editor font family, text size, and line spacing. (Ligatures are off — \
+             the renderer does no OpenType shaping.)",
         );
+        if row_visible(q, "font family theme editor") {
+            // #87 — pick the editor monospace face from the bundled OFL fonts.
+            ui.horizontal(|ui| {
+                ui.label("Font")
+                    .on_hover_text("Editor monospace font. Applies live, no restart.");
+                egui::ComboBox::from_id_salt("font-family-picker")
+                    .selected_text(config.fonts.editor_family.clone())
+                    .show_ui(ui, |ui| {
+                        for (display, _key) in crate::app::FONT_FAMILIES {
+                            if ui
+                                .selectable_value(
+                                    &mut config.fonts.editor_family,
+                                    (*display).to_string(),
+                                    *display,
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Choose one of the bundled coding fonts.");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.fonts.editor_family,
+                    &def.fonts.editor_family,
+                );
+            });
+        }
         if row_visible(q, "editor size") {
             ui.horizontal(|ui| {
                 ui.label("Size")
@@ -1893,6 +1928,7 @@ mod wiring_guard {
         "appearance.background_override",
         "fonts.editor_size",
         "fonts.line_height",
+        "fonts.editor_family",
         "editor.tab_width",
         "editor.insert_spaces",
         "editor.show_line_numbers",

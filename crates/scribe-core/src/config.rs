@@ -358,6 +358,15 @@ impl Default for AppearanceConfig {
 pub struct FontConfig {
     pub editor_size: f32,
     pub line_height: f32,
+    /// Editor monospace font family — a "font theme". One of the bundled
+    /// (OFL-licensed) family display names; an unknown value falls back to the
+    /// default. Default: "JetBrains Mono".
+    #[serde(default = "default_editor_family")]
+    pub editor_family: String,
+}
+
+fn default_editor_family() -> String {
+    "JetBrains Mono".to_string()
 }
 
 impl Default for FontConfig {
@@ -365,6 +374,7 @@ impl Default for FontConfig {
         Self {
             editor_size: 14.0,
             line_height: 1.4,
+            editor_family: default_editor_family(),
         }
     }
 }
