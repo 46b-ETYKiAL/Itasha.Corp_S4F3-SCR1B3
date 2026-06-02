@@ -655,9 +655,11 @@ impl ScribeApp {
         // so ligatures are inherently OFF (T17.2 "ligatures off-default" is
         // structural, not config — there is no path to turn them on without
         // swapping the shaper).
-        cc.egui_ctx
-            .set_fonts(build_fonts(&app.config.fonts.editor_family));
-        app.applied_font_family = app.config.fonts.editor_family.clone();
+        cc.egui_ctx.set_fonts(build_fonts(
+            &app.config.fonts.editor_family,
+            &app.config.fonts.ui_family,
+        ));
+        app.applied_font_family = font_state_key(&app.config.fonts);
         // Follow the OS theme preference so `ctx.theme()` reflects the live OS
         // light/dark setting (egui-winit updates it on OS theme-change events).
         // The app's own brand visuals are applied on top via `set_visuals`; this
@@ -3689,6 +3691,12 @@ pub(crate) const FONT_FAMILIES: &[(&str, &str)] = &[
     ("Cousine", "Cousine"),
 ];
 
+/// Change-detection key for the live font set (#103): note family + UI family.
+/// When this string changes, the font set is rebuilt and re-applied.
+fn font_state_key(fonts: &scribe_core::config::FontConfig) -> String {
+    format!("{}\u{0}{}", fonts.editor_family, fonts.ui_family)
+}
+
 /// Resolve a font display name to its embedded family key, falling back to
 /// JetBrains Mono for an unknown / stale config value.
 fn font_family_key(display: &str) -> &'static str {
@@ -3705,7 +3713,7 @@ fn font_family_key(display: &str) -> &'static str {
 /// fallback, and the Noto Sans JP kanji subset is appended to both families so
 /// the toolbar kanji never tofu. egui's ab_glyph does no OT shaping, so
 /// ligatures are structurally off regardless of face.
-fn build_fonts(editor_family: &str) -> egui::FontDefinitions {
+fn build_fonts(editor_family: &str, ui_family: &str) -> egui::FontDefinitions {
     use std::sync::Arc;
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
@@ -3748,6 +3756,15 @@ fn build_fonts(editor_family: &str) -> egui::FontDefinitions {
         mono.insert(0, selected.to_owned());
         if selected != "JetBrainsMono" {
             mono.insert(1, "JetBrainsMono".to_owned());
+        }
+    }
+    // #103 — the UI (proportional) font is chosen SEPARATELY from the note font.
+    // "System default" (or any unknown value) leaves egui's built-in UI font
+    // untouched; a bundled family name puts that face first in the Proportional
+    // family so the whole app UI (toolbar / settings / status) uses it.
+    if let Some(&(_, ui_key)) = FONT_FAMILIES.iter().find(|(d, _)| *d == ui_family) {
+        if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            prop.insert(0, ui_key.to_owned());
         }
     }
     for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
@@ -4223,11 +4240,15 @@ impl ScribeApp {
             self.decorations_forced = true;
         }
 
-        // #87 — restart-free font-theme switch: rebuild + re-apply the font set
-        // whenever the chosen editor family changes (cheap string compare).
-        if self.config.fonts.editor_family != self.applied_font_family {
-            ctx.set_fonts(build_fonts(&self.config.fonts.editor_family));
-            self.applied_font_family = self.config.fonts.editor_family.clone();
+        // #87/#103 — restart-free font switch: rebuild + re-apply the font set
+        // whenever the chosen note OR UI family changes (cheap string compare).
+        let font_key = font_state_key(&self.config.fonts);
+        if font_key != self.applied_font_family {
+            ctx.set_fonts(build_fonts(
+                &self.config.fonts.editor_family,
+                &self.config.fonts.ui_family,
+            ));
+            self.applied_font_family = font_key;
         }
 
         // Live-reload config when the file changes on disk (external edit).
@@ -6572,7 +6593,7 @@ mod font_theme_tests {
 
     #[test]
     fn selected_family_leads_with_jetbrains_fallback() {
-        let f = build_fonts("IBM Plex Mono");
+        let f = build_fonts("IBM Plex Mono", "System default");
         let mono = &f.families[&egui::FontFamily::Monospace];
         assert_eq!(mono[0], "IBMPlexMono", "selected face renders first");
         assert_eq!(mono[1], "JetBrainsMono", "JetBrains kept as fallback");
@@ -6585,13 +6606,25 @@ mod font_theme_tests {
     #[test]
     fn unknown_family_falls_back_to_jetbrains() {
         assert_eq!(font_family_key("No Such Font"), "JetBrainsMono");
-        let f = build_fonts("No Such Font");
+        let f = build_fonts("No Such Font", "System default");
         assert_eq!(f.families[&egui::FontFamily::Monospace][0], "JetBrainsMono");
     }
 
     #[test]
+    fn ui_family_overrides_only_the_proportional_family() {
+        // #103 — the UI family leads Proportional; the note family leads
+        // Monospace; the two are independent.
+        let f = build_fonts("JetBrains Mono", "Fira Mono");
+        assert_eq!(f.families[&egui::FontFamily::Proportional][0], "FiraMono");
+        assert_eq!(f.families[&egui::FontFamily::Monospace][0], "JetBrainsMono");
+        // "System default" leaves egui's built-in UI font at the head.
+        let f2 = build_fonts("JetBrains Mono", "System default");
+        assert_ne!(f2.families[&egui::FontFamily::Proportional][0], "FiraMono");
+    }
+
+    #[test]
     fn default_family_is_jetbrains_and_does_not_double_insert() {
-        let f = build_fonts("JetBrains Mono");
+        let f = build_fonts("JetBrains Mono", "System default");
         let mono = &f.families[&egui::FontFamily::Monospace];
         assert_eq!(mono[0], "JetBrainsMono");
         // No redundant second JetBrains entry when it's already the selection.
@@ -7355,7 +7388,12 @@ mod e2e {
         cfg.window.mode = scribe_core::config::WindowMode::Glass;
         let mut app = ScribeApp::new_test(cfg);
         run_frames(&mut app, 3); // build_fonts reapply + tint overlay + visuals
-        assert_eq!(app.applied_font_family, "IBM Plex Mono");
+        // applied_font_family is the combined note+UI key (#103).
+        assert!(
+            app.applied_font_family.starts_with("IBM Plex Mono"),
+            "note family recorded in the font-state key (got {:?})",
+            app.applied_font_family
+        );
     }
 
     #[test]

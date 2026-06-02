@@ -453,12 +453,13 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             "Editor font family, text size, and line spacing. (Ligatures are off — \
              the renderer does no OpenType shaping.)",
         );
-        if row_visible(q, "font family theme editor") {
-            // #87 — pick the editor monospace face from the bundled OFL fonts.
+        if row_visible(q, "font family theme editor note") {
+            // #87/#103 — the NOTE (editor) monospace face, chosen separately
+            // from the app-UI font below.
             ui.horizontal(|ui| {
-                ui.label("Font")
-                    .on_hover_text("Editor monospace font. Applies live, no restart.");
-                egui::ComboBox::from_id_salt("font-family-picker")
+                ui.label("Note font")
+                    .on_hover_text("Font for the note/editor text. Applies live, no restart.");
+                egui::ComboBox::from_id_salt("note-font-picker")
                     .selected_text(config.fonts.editor_family.clone())
                     .show_ui(ui, |ui| {
                         for (display, _key) in crate::app::FONT_FAMILIES {
@@ -475,12 +476,50 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         }
                     })
                     .response
-                    .on_hover_text("Choose one of the bundled coding fonts.");
+                    .on_hover_text("Choose one of the bundled coding fonts for the note text.");
                 changed |= reset_to_default(
                     ui,
                     &mut config.fonts.editor_family,
                     &def.fonts.editor_family,
                 );
+            });
+        }
+        if row_visible(q, "ui font app interface family") {
+            // #103 — the app-UI (proportional) font, separate from the note font.
+            ui.horizontal(|ui| {
+                ui.label("App UI font").on_hover_text(
+                    "Font for the app interface (toolbar, settings, status). \
+                     'System default' keeps the built-in UI font. Applies live.",
+                );
+                egui::ComboBox::from_id_salt("ui-font-picker")
+                    .selected_text(config.fonts.ui_family.clone())
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_value(
+                                &mut config.fonts.ui_family,
+                                "System default".to_string(),
+                                "System default",
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                        for (display, _key) in crate::app::FONT_FAMILIES {
+                            if ui
+                                .selectable_value(
+                                    &mut config.fonts.ui_family,
+                                    (*display).to_string(),
+                                    *display,
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Choose the app-interface font (or keep the system default).");
+                changed |= reset_to_default(ui, &mut config.fonts.ui_family, &def.fonts.ui_family);
             });
         }
         if row_visible(q, "editor size") {
@@ -1942,6 +1981,7 @@ mod wiring_guard {
         "fonts.editor_size",
         "fonts.line_height",
         "fonts.editor_family",
+        "fonts.ui_family",
         "editor.tab_width",
         "editor.insert_spaces",
         "editor.show_line_numbers",

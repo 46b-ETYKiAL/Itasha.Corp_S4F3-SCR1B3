@@ -363,10 +363,20 @@ pub struct FontConfig {
     /// default. Default: "JetBrains Mono".
     #[serde(default = "default_editor_family")]
     pub editor_family: String,
+    /// App-UI font family (the proportional text everywhere EXCEPT the note
+    /// body): toolbar, settings, status bar, menus. One of the bundled family
+    /// names, or "System default" to keep egui's built-in UI font. Separate from
+    /// `editor_family` so the note text and the UI can use different fonts.
+    #[serde(default = "default_ui_family")]
+    pub ui_family: String,
 }
 
 fn default_editor_family() -> String {
     "JetBrains Mono".to_string()
+}
+
+fn default_ui_family() -> String {
+    "System default".to_string()
 }
 
 impl Default for FontConfig {
@@ -381,6 +391,7 @@ impl Default for FontConfig {
             // cost of a taller caret.
             line_height: 1.2,
             editor_family: default_editor_family(),
+            ui_family: default_ui_family(),
         }
     }
 }
