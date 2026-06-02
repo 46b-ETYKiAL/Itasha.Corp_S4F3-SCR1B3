@@ -47,6 +47,24 @@ fn tab_display_label(title: &str, pinned: bool) -> String {
     }
 }
 
+/// Size of a 90°-rotated tab cell (#82). Rotating the horizontal label swaps
+/// its axes: the label's height becomes the cell width, its width becomes the
+/// cell height. `pad` is added on each axis.
+fn rotated_tab_size(galley: egui::Vec2, pad: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(galley.y + pad.x, galley.x + pad.y)
+}
+
+/// Anchor position for painting the 90°-clockwise-rotated label inside `rect`
+/// (#82). A `+FRAC_PI_2` rotation about the returned point makes the galley
+/// extend left+down, so we anchor at the top-right of the padded inner area;
+/// the text then reads top-to-bottom inside the cell.
+fn rotated_tab_text_pos(rect: egui::Rect, galley: egui::Vec2, pad: egui::Vec2) -> egui::Pos2 {
+    egui::pos2(
+        rect.left() + pad.x / 2.0 + galley.y,
+        rect.top() + pad.y / 2.0,
+    )
+}
+
 /// Pure highlight-movement for the fuzzy finder's keyboard nav (#73). Returns
 /// the new selected index after applying an Up and/or Down key, clamped to
 /// `[0, len-1]`. Down saturates at the last row; Up saturates at the first.
@@ -1954,10 +1972,11 @@ impl ScribeApp {
     }
 
     /// Render the tab strip inside a Left/Right side panel, honouring the
-    /// `side_tabs_vertical` orientation option (#70). Vertical is the side-bar
-    /// default (one full-width tab per row, scrolling vertically); horizontal
-    /// lays tabs left-to-right and wraps to new rows. Either way the strip
-    /// scrolls so no tab becomes unreachable in a small window.
+    /// `side_tabs_rotated` orientation option (#82). A side tab bar is always a
+    /// single vertical column; when `_rotated` is on, each tab's label is drawn
+    /// rotated 90° (vertical text) via [`Self::draw_rotated_side_tabs`],
+    /// otherwise the standard horizontal-label rows. Scrolls so no tab becomes
+    /// unreachable in a small window.
     fn draw_side_tab_strip(
         &mut self,
         ui: &mut egui::Ui,
@@ -1972,8 +1991,162 @@ impl ScribeApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                if _rotated {
+                    ui.vertical(|ui| self.draw_rotated_side_tabs(ui, accent, muted));
+                } else {
+                    ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                }
             });
+    }
+
+    /// Render the side tab bar with each tab's label ROTATED 90° (vertical text,
+    /// reading top-to-bottom), still stacked in a single column (#82). The close
+    /// button sits ABOVE each tab (with the pin toggle on the active tab); the
+    /// rotated label below is the click/drag target. Drag-reorder is resolved
+    /// against the tab rects exactly like the horizontal strip.
+    fn draw_rotated_side_tabs(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
+        let active = self.active;
+        let mut switch_to = None;
+        let mut close = None;
+        let mut close_others = None;
+        let mut close_to_right = None;
+        let mut close_all = false;
+        let mut toggle_pin: Option<usize> = None;
+        let mut reorder: Option<(usize, usize)> = None;
+        let mut drag_src: Option<usize> = None;
+        let mut drop_pos: Option<egui::Pos2> = None;
+        let mut rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(self.tabs.len());
+        let mut add_tab = false;
+        let pad = egui::vec2(8.0, 10.0);
+        let font = egui::TextStyle::Button.resolve(ui.style());
+
+        for i in 0..self.tabs.len() {
+            let selected = i == active;
+            let pinned = self.tabs[i].pinned;
+            let shown = tab_display_label(&self.tabs[i].title(), pinned);
+            let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
+            ui.vertical(|ui| {
+                // Close (always) + pin toggle (active only) ABOVE the tab.
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button(egui_phosphor::thin::X)
+                        .on_hover_text("Close tab (or middle-click)")
+                        .clicked()
+                    {
+                        close = Some(i);
+                    }
+                    if selected {
+                        let glyph = if pinned {
+                            egui_phosphor::thin::PUSH_PIN_SLASH
+                        } else {
+                            egui_phosphor::thin::PUSH_PIN
+                        };
+                        if ui.small_button(glyph).on_hover_text(pin_label).clicked() {
+                            toggle_pin = Some(i);
+                        }
+                    }
+                });
+                let color = if selected { accent } else { muted };
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(shown.clone(), font.clone(), color);
+                let size = rotated_tab_size(galley.size(), pad);
+                let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                if selected {
+                    ui.painter()
+                        .rect_filled(rect, 3.0, accent.linear_multiply(0.12));
+                }
+                if resp.dragged() {
+                    ui.painter()
+                        .rect_filled(rect, 3.0, accent.linear_multiply(0.10));
+                }
+                // Paint the label rotated 90° clockwise (reads top-to-bottom).
+                let pos = rotated_tab_text_pos(rect, galley.size(), pad);
+                ui.painter().add(egui::Shape::Text(
+                    egui::epaint::TextShape::new(pos, galley, color)
+                        .with_angle(std::f32::consts::FRAC_PI_2),
+                ));
+                if resp.clicked() {
+                    switch_to = Some(i);
+                }
+                if resp.clicked_by(egui::PointerButton::Middle) {
+                    close = Some(i);
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("Close").clicked() {
+                        close = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close Others").clicked() {
+                        close_others = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All to the Right").clicked() {
+                        close_to_right = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All").clicked() {
+                        close_all = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button(pin_label).clicked() {
+                        toggle_pin = Some(i);
+                        ui.close_menu();
+                    }
+                });
+                if resp.drag_stopped() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        drag_src = Some(i);
+                        drop_pos = Some(p);
+                    }
+                }
+                rects.push((i, rect));
+            });
+            ui.add_space(2.0);
+        }
+        if ui
+            .small_button("+")
+            .on_hover_text("New tab (Ctrl+N)")
+            .clicked()
+        {
+            add_tab = true;
+        }
+        // Drag-reorder: dropped over another tab's rect.
+        if let (Some(src), Some(pos)) = (drag_src, drop_pos) {
+            for (j, rect) in &rects {
+                if *j != src && rect.contains(pos) {
+                    reorder = Some((src, *j));
+                    break;
+                }
+            }
+        }
+        if let Some(i) = switch_to {
+            self.active = i;
+        }
+        if let Some(i) = close {
+            self.close_tab(i);
+        }
+        if let Some(keep) = close_others {
+            self.close_all_tabs_except(keep);
+        }
+        if let Some(after) = close_to_right {
+            self.close_tabs_after(after);
+        }
+        if close_all {
+            self.close_all_tabs();
+        }
+        if let Some(i) = toggle_pin {
+            if i < self.tabs.len() {
+                self.tabs[i].pinned = !self.tabs[i].pinned;
+            }
+        }
+        if let Some((src, target)) = reorder {
+            self.move_tab(src, target);
+        }
+        if add_tab {
+            self.new_tab();
+        }
     }
 
     /// Render the tab strip — the row (or column, for side positions) of open
@@ -4245,7 +4418,7 @@ impl ScribeApp {
                     });
             }
             scribe_core::config::TabBarPosition::Left => {
-                let vertical = self.config.editor.side_tabs_vertical;
+                let rotated = self.config.editor.side_tabs_rotated;
                 egui::SidePanel::left("tabs-left")
                     .resizable(true)
                     .default_width(180.0)
@@ -4254,18 +4427,18 @@ impl ScribeApp {
                     .width_range(40.0..=400.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                     .show(ctx, |ui| {
-                        self.draw_side_tab_strip(ui, accent, muted, vertical);
+                        self.draw_side_tab_strip(ui, accent, muted, rotated);
                     });
             }
             scribe_core::config::TabBarPosition::Right => {
-                let vertical = self.config.editor.side_tabs_vertical;
+                let rotated = self.config.editor.side_tabs_rotated;
                 egui::SidePanel::right("tabs-right")
                     .resizable(true)
                     .default_width(180.0)
                     .width_range(40.0..=400.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                     .show(ctx, |ui| {
-                        self.draw_side_tab_strip(ui, accent, muted, vertical);
+                        self.draw_side_tab_strip(ui, accent, muted, rotated);
                     });
             }
         }
@@ -6205,6 +6378,22 @@ mod wrap_tests {
     //! lays out on one line, the ScrollArea scrolls horizontally), the given
     //! viewport width when on.
     use super::effective_wrap_width;
+
+    #[test]
+    fn rotated_tab_geometry_swaps_axes_and_anchors_top_right() {
+        use super::{rotated_tab_size, rotated_tab_text_pos};
+        // A 100x16 horizontal label with (8,10) padding → a 24-wide, 110-tall
+        // cell (height+pad.x wide, width+pad.y tall).
+        let g = egui::vec2(100.0, 16.0);
+        let pad = egui::vec2(8.0, 10.0);
+        let size = rotated_tab_size(g, pad);
+        assert_eq!(size, egui::vec2(24.0, 110.0));
+        // Anchor sits at the top-right of the padded inner area so a +90° spin
+        // drops the text into the cell.
+        let rect = egui::Rect::from_min_size(egui::pos2(5.0, 7.0), size);
+        let pos = rotated_tab_text_pos(rect, g, pad);
+        assert_eq!(pos, egui::pos2(5.0 + 4.0 + 16.0, 7.0 + 5.0));
+    }
 
     #[test]
     fn wrap_off_forces_infinite_width() {
