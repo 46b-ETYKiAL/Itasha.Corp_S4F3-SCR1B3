@@ -2031,83 +2031,96 @@ impl ScribeApp {
             let pinned = self.tabs[i].pinned;
             let shown = tab_display_label(&self.tabs[i].title(), pinned);
             let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
-            ui.vertical(|ui| {
-                // Close (always) + pin toggle (active only) ABOVE the tab.
-                ui.horizontal(|ui| {
-                    if ui
-                        .small_button(egui_phosphor::thin::X)
-                        .on_hover_text("Close tab (or middle-click)")
-                        .clicked()
-                    {
+            // The active tab is a filled chip spanning the whole vertical cell
+            // (icon row + rotated label), so it reads as a real tab.
+            let chip = egui::Frame::default()
+                .inner_margin(egui::Margin::symmetric(3, 4))
+                .corner_radius(egui::CornerRadius::same(5))
+                .fill(if selected {
+                    accent.linear_multiply(0.20)
+                } else {
+                    Color32::TRANSPARENT
+                });
+            chip.show(ui, |ui| {
+                ui.vertical(|ui| {
+                    // Close (always) + pin toggle (active only) ABOVE the tab.
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if ui
+                            .add(
+                                egui::Button::new(egui_phosphor::thin::X)
+                                    .frame(false)
+                                    .small(),
+                            )
+                            .on_hover_text("Close tab (or middle-click)")
+                            .clicked()
+                        {
+                            close = Some(i);
+                        }
+                        if selected {
+                            let glyph = if pinned {
+                                egui_phosphor::thin::PUSH_PIN_SLASH
+                            } else {
+                                egui_phosphor::thin::PUSH_PIN
+                            };
+                            if ui
+                                .add(egui::Button::new(glyph).frame(false).small())
+                                .on_hover_text(pin_label)
+                                .clicked()
+                            {
+                                toggle_pin = Some(i);
+                            }
+                        }
+                    });
+                    let color = if selected { accent } else { muted };
+                    let galley = ui
+                        .painter()
+                        .layout_no_wrap(shown.clone(), font.clone(), color);
+                    let size = rotated_tab_size(galley.size(), pad);
+                    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                    // Paint the label rotated 90° clockwise (reads top-to-bottom).
+                    let pos = rotated_tab_text_pos(rect, galley.size(), pad);
+                    ui.painter().add(egui::Shape::Text(
+                        egui::epaint::TextShape::new(pos, galley, color)
+                            .with_angle(std::f32::consts::FRAC_PI_2),
+                    ));
+                    if resp.clicked() {
+                        switch_to = Some(i);
+                    }
+                    if resp.clicked_by(egui::PointerButton::Middle) {
                         close = Some(i);
                     }
-                    if selected {
-                        let glyph = if pinned {
-                            egui_phosphor::thin::PUSH_PIN_SLASH
-                        } else {
-                            egui_phosphor::thin::PUSH_PIN
-                        };
-                        if ui.small_button(glyph).on_hover_text(pin_label).clicked() {
+                    resp.context_menu(|ui| {
+                        if ui.button("Close").clicked() {
+                            close = Some(i);
+                            ui.close_menu();
+                        }
+                        if ui.button("Close Others").clicked() {
+                            close_others = Some(i);
+                            ui.close_menu();
+                        }
+                        if ui.button("Close All to the Right").clicked() {
+                            close_to_right = Some(i);
+                            ui.close_menu();
+                        }
+                        if ui.button("Close All").clicked() {
+                            close_all = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button(pin_label).clicked() {
                             toggle_pin = Some(i);
+                            ui.close_menu();
+                        }
+                    });
+                    if resp.drag_stopped() {
+                        if let Some(p) = resp.interact_pointer_pos() {
+                            drag_src = Some(i);
+                            drop_pos = Some(p);
                         }
                     }
+                    rects.push((i, rect));
                 });
-                let color = if selected { accent } else { muted };
-                let galley = ui
-                    .painter()
-                    .layout_no_wrap(shown.clone(), font.clone(), color);
-                let size = rotated_tab_size(galley.size(), pad);
-                let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-                if selected {
-                    ui.painter()
-                        .rect_filled(rect, 3.0, accent.linear_multiply(0.12));
-                }
-                if resp.dragged() {
-                    ui.painter()
-                        .rect_filled(rect, 3.0, accent.linear_multiply(0.10));
-                }
-                // Paint the label rotated 90° clockwise (reads top-to-bottom).
-                let pos = rotated_tab_text_pos(rect, galley.size(), pad);
-                ui.painter().add(egui::Shape::Text(
-                    egui::epaint::TextShape::new(pos, galley, color)
-                        .with_angle(std::f32::consts::FRAC_PI_2),
-                ));
-                if resp.clicked() {
-                    switch_to = Some(i);
-                }
-                if resp.clicked_by(egui::PointerButton::Middle) {
-                    close = Some(i);
-                }
-                resp.context_menu(|ui| {
-                    if ui.button("Close").clicked() {
-                        close = Some(i);
-                        ui.close_menu();
-                    }
-                    if ui.button("Close Others").clicked() {
-                        close_others = Some(i);
-                        ui.close_menu();
-                    }
-                    if ui.button("Close All to the Right").clicked() {
-                        close_to_right = Some(i);
-                        ui.close_menu();
-                    }
-                    if ui.button("Close All").clicked() {
-                        close_all = true;
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button(pin_label).clicked() {
-                        toggle_pin = Some(i);
-                        ui.close_menu();
-                    }
-                });
-                if resp.drag_stopped() {
-                    if let Some(p) = resp.interact_pointer_pos() {
-                        drag_src = Some(i);
-                        drop_pos = Some(p);
-                    }
-                }
-                rects.push((i, rect));
             });
             ui.add_space(2.0);
         }
@@ -2202,25 +2215,35 @@ impl ScribeApp {
             // Pinned tabs carry a visible pin glyph so the state is obvious
             // without opening the right-click menu.
             let shown = tab_display_label(&self.tabs[i].title(), pinned);
-            // #83 — each tab is its own little group so the controls clearly
-            // belong to the tab: the selectable label (click = switch, drag =
-            // reorder), then a pin toggle shown ONLY on the active tab, then a
-            // close button shown on EVERY tab. In a horizontal strip the tabs
-            // flow left-to-right; in a side strip each group is a row with the
-            // close button on the right.
-            ui.horizontal(|ui| {
+            let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
+            // Each tab is a cohesive CHIP: the active tab gets a filled, rounded
+            // accent background spanning the label + pin + close so it reads as a
+            // real tab; inactive tabs are dimmed text. Click = switch, drag =
+            // reorder, middle-click / ✕ = close. Pin toggle shows on the active
+            // tab; close shows on every tab.
+            let chip = egui::Frame::default()
+                .inner_margin(egui::Margin::symmetric(8, 3))
+                .corner_radius(egui::CornerRadius::same(5))
+                .fill(if selected {
+                    accent.linear_multiply(0.20)
+                } else {
+                    Color32::TRANSPARENT
+                });
+            chip.show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
                 let label =
                     RichText::new(shown.clone()).color(if selected { accent } else { muted });
-                let resp = ui
-                    .add(egui::SelectableLabel::new(selected, label))
-                    .interact(egui::Sense::click_and_drag());
+                let resp = ui.add(
+                    egui::Label::new(label)
+                        .selectable(false)
+                        .sense(egui::Sense::click_and_drag()),
+                );
                 if resp.clicked() {
                     switch_to = Some(i);
                 }
                 if resp.clicked_by(egui::PointerButton::Middle) {
                     close = Some(i);
                 }
-                let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
                 resp.context_menu(|ui| {
                     if ui.button("Close").clicked() {
                         close = Some(i);
@@ -2244,10 +2267,7 @@ impl ScribeApp {
                         ui.close_menu();
                     }
                 });
-                // Dim the tab being dragged; capture the source + release position.
                 if resp.dragged() {
-                    ui.painter()
-                        .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
                     if let Some(p) = resp.interact_pointer_pos() {
                         dragging = Some((i, shown.clone(), p));
                     }
@@ -2267,13 +2287,21 @@ impl ScribeApp {
                     } else {
                         egui_phosphor::thin::PUSH_PIN
                     };
-                    if ui.small_button(glyph).on_hover_text(pin_label).clicked() {
+                    if ui
+                        .add(egui::Button::new(glyph).frame(false).small())
+                        .on_hover_text(pin_label)
+                        .clicked()
+                    {
                         toggle_pin = Some(i);
                     }
                 }
                 // Close — on EVERY tab so any tab can be closed directly.
                 if ui
-                    .small_button(egui_phosphor::thin::X)
+                    .add(
+                        egui::Button::new(egui_phosphor::thin::X)
+                            .frame(false)
+                            .small(),
+                    )
                     .on_hover_text("Close tab (or middle-click)")
                     .clicked()
                 {
