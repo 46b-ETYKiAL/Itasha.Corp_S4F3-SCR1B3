@@ -47,6 +47,24 @@ fn tab_display_label(title: &str, pinned: bool) -> String {
     }
 }
 
+/// Size of a 90°-rotated tab cell (#82). Rotating the horizontal label swaps
+/// its axes: the label's height becomes the cell width, its width becomes the
+/// cell height. `pad` is added on each axis.
+fn rotated_tab_size(galley: egui::Vec2, pad: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(galley.y + pad.x, galley.x + pad.y)
+}
+
+/// Anchor position for painting the 90°-clockwise-rotated label inside `rect`
+/// (#82). A `+FRAC_PI_2` rotation about the returned point makes the galley
+/// extend left+down, so we anchor at the top-right of the padded inner area;
+/// the text then reads top-to-bottom inside the cell.
+fn rotated_tab_text_pos(rect: egui::Rect, galley: egui::Vec2, pad: egui::Vec2) -> egui::Pos2 {
+    egui::pos2(
+        rect.left() + pad.x / 2.0 + galley.y,
+        rect.top() + pad.y / 2.0,
+    )
+}
+
 /// Pure highlight-movement for the fuzzy finder's keyboard nav (#73). Returns
 /// the new selected index after applying an Up and/or Down key, clamped to
 /// `[0, len-1]`. Down saturates at the last row; Up saturates at the first.
@@ -434,6 +452,16 @@ pub struct ScribeApp {
     tabs: Vec<EditorTab>,
     active: usize,
     visuals_applied: bool,
+    /// The editor font family currently applied to the egui context (#87). When
+    /// `config.fonts.editor_family` diverges from this, the font set is rebuilt
+    /// and re-applied — a restart-free font-theme switch.
+    applied_font_family: String,
+    /// One-shot guard for forcing OS window decorations OFF in frameless mode
+    /// (#79). On Windows, applying a vibrancy/transparent surface can make the
+    /// DWM re-add the native caption buttons even though the window was created
+    /// decoration-less — producing a SECOND, slightly-offset set of
+    /// minimize/maximize/close buttons over the custom titlebar.
+    decorations_forced: bool,
     /// Set when the user asks to close (custom titlebar ✕). Funnels into the
     /// same two-phase close path as an OS-initiated close.
     want_close: bool,
@@ -539,6 +567,11 @@ pub struct ScribeApp {
     /// Cached syntax-highlight layout (keyed by text+lang+size) so syntect only
     /// re-runs when the buffer changes, not every frame (perf hotspot fix).
     hl_cache: std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
+    /// Memoized misspellings for the active buffer (#78), keyed by a hash of
+    /// (text, enabled, scope toggles, language). Drives BOTH the status-bar
+    /// count and the red squiggle underlines painted in the editor, so the
+    /// dictionary scan runs at most once per (changed) frame.
+    spell_cache: std::cell::RefCell<Option<(u64, Vec<spell::Misspelling>)>>,
     /// Config-file watcher for live-reload (kept alive; events arrive on `cfg_rx`).
     _cfg_watcher: Option<notify::RecommendedWatcher>,
     cfg_rx: Option<std::sync::mpsc::Receiver<()>>,
@@ -622,38 +655,9 @@ impl ScribeApp {
         // so ligatures are inherently OFF (T17.2 "ligatures off-default" is
         // structural, not config — there is no path to turn them on without
         // swapping the shaper).
-        let mut fonts = egui::FontDefinitions::default();
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
-        const JETBRAINS_MONO_REGULAR: &[u8] =
-            include_bytes!("../../../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf");
-        fonts.font_data.insert(
-            "JetBrainsMono".to_owned(),
-            std::sync::Arc::new(egui::FontData::from_static(JETBRAINS_MONO_REGULAR)),
-        );
-        if let Some(monospace) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-            monospace.insert(0, "JetBrainsMono".to_owned());
-        }
-        // CJK fallback so the toolbar's "instrument plate" kanji render real
-        // glyphs instead of tofu boxes — neither JetBrains Mono nor egui's Hack
-        // covers CJK. This is a hand-subset of Noto Sans JP (OFL-1.1, see
-        // assets/fonts/NotoSansJP/OFL.txt) pinned to Regular and containing ONLY
-        // the 11 kanji `jp_glyph()` uses (~4.5 KB; regenerate via
-        // scripts/generate-jp-kanji-subset.py). Appended at the END of both
-        // families so it ONLY fills glyphs the primary fonts lack.
-        const NOTO_SANS_JP_SUBSET: &[u8] =
-            include_bytes!("../../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf");
-        fonts.font_data.insert(
-            "NotoSansJP-Subset".to_owned(),
-            std::sync::Arc::new(egui::FontData::from_static(NOTO_SANS_JP_SUBSET)),
-        );
-        for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
-            fonts
-                .families
-                .entry(family)
-                .or_default()
-                .push("NotoSansJP-Subset".to_owned());
-        }
-        cc.egui_ctx.set_fonts(fonts);
+        cc.egui_ctx
+            .set_fonts(build_fonts(&app.config.fonts.editor_family));
+        app.applied_font_family = app.config.fonts.editor_family.clone();
         // Follow the OS theme preference so `ctx.theme()` reflects the live OS
         // light/dark setting (egui-winit updates it on OS theme-change events).
         // The app's own brand visuals are applied on top via `set_visuals`; this
@@ -781,6 +785,8 @@ impl ScribeApp {
             active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
             visuals_applied: false,
+            applied_font_family: String::new(),
+            decorations_forced: false,
             want_close: false,
             closing: false,
             find_open: false,
@@ -827,6 +833,7 @@ impl ScribeApp {
             last_autosave_at: None,
             last_backup_sig: 0,
             hl_cache: std::cell::RefCell::new(None),
+            spell_cache: std::cell::RefCell::new(None),
             _cfg_watcher: cfg_watcher,
             cfg_rx: Some(cfg_rx),
             fold_view: false,
@@ -862,6 +869,7 @@ impl ScribeApp {
             return;
         };
         let line_height = self.config.fonts.line_height;
+        let word_wrap = self.config.editor.word_wrap;
         // Disjoint-field borrows captured as locals BEFORE the central-panel
         // closure (which mutably borrows `self.tabs`). The highlighter + its
         // cache are different fields than `tabs`, so the immutable borrows here
@@ -884,26 +892,49 @@ impl ScribeApp {
                     return false;
                 };
                 let mut drag_started = false;
-                // Per-pane header: name of the note + the close affordance, so
-                // each pane in the split/grid reads as its own tab.
+                // Per-pane header (#84): a drag-handle ICON to the LEFT of the
+                // note name, a pin toggle just to the RIGHT of the name, and the
+                // close button pushed to the FAR RIGHT so notes aren't closed by
+                // accident. All phosphor glyphs (the old ✕ / ⠿ were tofu).
                 let pane_title = tabs[idx].title();
                 ui.horizontal(|ui| {
-                    if ui.small_button("✕").on_hover_text("Close pane").clicked() {
-                        render_closes.borrow_mut().push(doc_id);
-                    }
                     // `drag_started()` on a click_and_drag Sense fires ONCE on
                     // drag start (egui_tiles expects a single `DragStarted`);
                     // an "is button held" check would re-fire every frame and
                     // wedge the tile tree's drag state.
                     let handle = ui
-                        .small_button("⠿")
+                        .small_button(egui_phosphor::thin::DOTS_SIX_VERTICAL)
                         .on_hover_text("Drag to rearrange")
-                        .interact(egui::Sense::click_and_drag());
+                        .on_hover_cursor(egui::CursorIcon::Grab);
+                    let handle = handle.interact(egui::Sense::click_and_drag());
                     if handle.drag_started() {
                         drag_started = true;
                     }
                     ui.label(RichText::new(&pane_title).strong().monospace())
                         .on_hover_text(&pane_title);
+                    let pinned = tabs[idx].pinned;
+                    let pin_glyph = if pinned {
+                        egui_phosphor::thin::PUSH_PIN_SLASH
+                    } else {
+                        egui_phosphor::thin::PUSH_PIN
+                    };
+                    if ui
+                        .small_button(pin_glyph)
+                        .on_hover_text(if pinned { "Unpin note" } else { "Pin note" })
+                        .clicked()
+                    {
+                        tabs[idx].pinned = !pinned;
+                    }
+                    // Close at the far right.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button(egui_phosphor::thin::X)
+                            .on_hover_text("Close pane")
+                            .clicked()
+                        {
+                            render_closes.borrow_mut().push(doc_id);
+                        }
+                    });
                 });
                 // Per-pane syntax highlighting via the same memoizing layouter
                 // the single-pane + split paths use, keyed on THIS pane's own
@@ -912,8 +943,14 @@ impl ScribeApp {
                 // slot `hl_cache` recomputes as focus moves between panes, which
                 // is fine at the 6-pane ceiling.
                 let ext = tabs[idx].doc.language_hint();
-                let mut layouter =
-                    make_layouter(hl, hl_cache, ext.as_deref(), font.clone(), line_height);
+                let mut layouter = make_layouter(
+                    hl,
+                    hl_cache,
+                    ext.as_deref(),
+                    font.clone(),
+                    line_height,
+                    word_wrap,
+                );
                 egui::ScrollArea::both()
                     .id_salt(("scr1b3-grid-pane", doc_id.raw()))
                     .show(ui, |ui| {
@@ -1078,6 +1115,19 @@ impl ScribeApp {
     /// when a translucent/glass window mode is active.
     fn current_visuals(&self) -> egui::Visuals {
         let mut v = scribe_render::theme_to_visuals(&self.theme);
+        // #88 — an explicit app-background override (independent of the theme)
+        // repaints the central panel + window backgrounds. None = follow theme.
+        if let Some(bg) = self
+            .config
+            .appearance
+            .background_override
+            .as_deref()
+            .and_then(Rgba::parse_hex)
+        {
+            let c = Color32::from_rgb(bg.r, bg.g, bg.b);
+            v.panel_fill = c;
+            v.window_fill = c;
+        }
         if self.config.window.effective_translucent() {
             scribe_render::apply_window_opacity(&mut v, self.config.window.opacity);
         }
@@ -1392,12 +1442,20 @@ impl ScribeApp {
 
     /// Count misspellings in the active buffer when spellcheck is enabled.
     fn spell_count(&self) -> usize {
+        self.misspellings_for_active().len()
+    }
+
+    /// Misspellings in the active buffer (#78), memoized by a content+config
+    /// hash so the dictionary scan runs once per changed frame and is shared by
+    /// the status-bar count and the editor underline painter. Empty when
+    /// spellcheck is off or there is no active buffer.
+    fn misspellings_for_active(&self) -> Vec<spell::Misspelling> {
         if !self.config.spellcheck.enabled {
-            return 0;
+            return Vec::new();
         }
         let active = self.active.min(self.tabs.len().saturating_sub(1));
         let Some(tab) = self.tabs.get(active) else {
-            return 0;
+            return Vec::new();
         };
         // Scope the check to the requested token classes (comments / strings /
         // identifiers) using the highlighter's classified spans, so the three
@@ -1410,6 +1468,23 @@ impl ScribeApp {
             self.config.spellcheck.check_identifiers,
         );
         let ext = tab.doc.language_hint();
+        // Cache key: text + scope toggles + language. A change to any of these
+        // invalidates the memo.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            tab.text.hash(&mut h);
+            self.config.spellcheck.check_comments.hash(&mut h);
+            self.config.spellcheck.check_strings.hash(&mut h);
+            self.config.spellcheck.check_identifiers.hash(&mut h);
+            ext.hash(&mut h);
+            h.finish()
+        };
+        if let Some((k, v)) = self.spell_cache.borrow().as_ref() {
+            if *k == key {
+                return v.clone();
+            }
+        }
         let spans = self.hl.classify_document(&tab.text, ext.as_deref());
         // Scoping (comments / strings / identifiers) is a CODE concept. When the
         // buffer has no code structure — an untitled note, plain text, markdown —
@@ -1419,10 +1494,13 @@ impl ScribeApp {
         let has_code_structure = spans
             .iter()
             .any(|s| !matches!(s.class, spell::SpanClass::Other));
-        if !has_code_structure {
-            return spell::check_text(&self.spell, &tab.text, true).len();
-        }
-        spell::check_text_scoped(&self.spell, &tab.text, &spans, scope).len()
+        let result = if has_code_structure {
+            spell::check_text_scoped(&self.spell, &tab.text, &spans, scope)
+        } else {
+            spell::check_text(&self.spell, &tab.text, true)
+        };
+        *self.spell_cache.borrow_mut() = Some((key, result.clone()));
+        result
     }
 
     /// Persist the current config to the user TOML file (creating the config
@@ -1900,26 +1978,181 @@ impl ScribeApp {
     }
 
     /// Render the tab strip inside a Left/Right side panel, honouring the
-    /// `side_tabs_vertical` orientation option (#70). Vertical is the side-bar
-    /// default (one full-width tab per row, scrolling vertically); horizontal
-    /// lays tabs left-to-right and wraps to new rows. Either way the strip
-    /// scrolls so no tab becomes unreachable in a small window.
+    /// `side_tabs_rotated` orientation option (#82). A side tab bar is always a
+    /// single vertical column; when `_rotated` is on, each tab's label is drawn
+    /// rotated 90° (vertical text) via [`Self::draw_rotated_side_tabs`],
+    /// otherwise the standard horizontal-label rows. Scrolls so no tab becomes
+    /// unreachable in a small window.
     fn draw_side_tab_strip(
         &mut self,
         ui: &mut egui::Ui,
         accent: Color32,
         muted: Color32,
-        vertical: bool,
+        _rotated: bool,
     ) {
+        // A side tab bar is ALWAYS a single vertical column of tabs (one per
+        // row). The earlier horizontal-wrap experiment was wrong — the user
+        // wants the column preserved; the orientation option (#82) only rotates
+        // each tab's TEXT, not the stacking. Scrolls so no tab is unreachable.
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if vertical {
-                    ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                if _rotated {
+                    ui.vertical(|ui| self.draw_rotated_side_tabs(ui, accent, muted));
                 } else {
-                    ui.horizontal_wrapped(|ui| self.draw_tab_strip(ui, accent, muted));
+                    ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
                 }
             });
+    }
+
+    /// Render the side tab bar with each tab's label ROTATED 90° (vertical text,
+    /// reading top-to-bottom), still stacked in a single column (#82). The close
+    /// button sits ABOVE each tab (with the pin toggle on the active tab); the
+    /// rotated label below is the click/drag target. Drag-reorder is resolved
+    /// against the tab rects exactly like the horizontal strip.
+    fn draw_rotated_side_tabs(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
+        let active = self.active;
+        let mut switch_to = None;
+        let mut close = None;
+        let mut close_others = None;
+        let mut close_to_right = None;
+        let mut close_all = false;
+        let mut toggle_pin: Option<usize> = None;
+        let mut reorder: Option<(usize, usize)> = None;
+        let mut drag_src: Option<usize> = None;
+        let mut drop_pos: Option<egui::Pos2> = None;
+        let mut rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(self.tabs.len());
+        let mut add_tab = false;
+        let pad = egui::vec2(8.0, 10.0);
+        let font = egui::TextStyle::Button.resolve(ui.style());
+
+        for i in 0..self.tabs.len() {
+            let selected = i == active;
+            let pinned = self.tabs[i].pinned;
+            let shown = tab_display_label(&self.tabs[i].title(), pinned);
+            let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
+            ui.vertical(|ui| {
+                // Close (always) + pin toggle (active only) ABOVE the tab.
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button(egui_phosphor::thin::X)
+                        .on_hover_text("Close tab (or middle-click)")
+                        .clicked()
+                    {
+                        close = Some(i);
+                    }
+                    if selected {
+                        let glyph = if pinned {
+                            egui_phosphor::thin::PUSH_PIN_SLASH
+                        } else {
+                            egui_phosphor::thin::PUSH_PIN
+                        };
+                        if ui.small_button(glyph).on_hover_text(pin_label).clicked() {
+                            toggle_pin = Some(i);
+                        }
+                    }
+                });
+                let color = if selected { accent } else { muted };
+                let galley = ui
+                    .painter()
+                    .layout_no_wrap(shown.clone(), font.clone(), color);
+                let size = rotated_tab_size(galley.size(), pad);
+                let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                if selected {
+                    ui.painter()
+                        .rect_filled(rect, 3.0, accent.linear_multiply(0.12));
+                }
+                if resp.dragged() {
+                    ui.painter()
+                        .rect_filled(rect, 3.0, accent.linear_multiply(0.10));
+                }
+                // Paint the label rotated 90° clockwise (reads top-to-bottom).
+                let pos = rotated_tab_text_pos(rect, galley.size(), pad);
+                ui.painter().add(egui::Shape::Text(
+                    egui::epaint::TextShape::new(pos, galley, color)
+                        .with_angle(std::f32::consts::FRAC_PI_2),
+                ));
+                if resp.clicked() {
+                    switch_to = Some(i);
+                }
+                if resp.clicked_by(egui::PointerButton::Middle) {
+                    close = Some(i);
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("Close").clicked() {
+                        close = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close Others").clicked() {
+                        close_others = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All to the Right").clicked() {
+                        close_to_right = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All").clicked() {
+                        close_all = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button(pin_label).clicked() {
+                        toggle_pin = Some(i);
+                        ui.close_menu();
+                    }
+                });
+                if resp.drag_stopped() {
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        drag_src = Some(i);
+                        drop_pos = Some(p);
+                    }
+                }
+                rects.push((i, rect));
+            });
+            ui.add_space(2.0);
+        }
+        if ui
+            .small_button("+")
+            .on_hover_text("New tab (Ctrl+N)")
+            .clicked()
+        {
+            add_tab = true;
+        }
+        // Drag-reorder: dropped over another tab's rect.
+        if let (Some(src), Some(pos)) = (drag_src, drop_pos) {
+            for (j, rect) in &rects {
+                if *j != src && rect.contains(pos) {
+                    reorder = Some((src, *j));
+                    break;
+                }
+            }
+        }
+        if let Some(i) = switch_to {
+            self.active = i;
+        }
+        if let Some(i) = close {
+            self.close_tab(i);
+        }
+        if let Some(keep) = close_others {
+            self.close_all_tabs_except(keep);
+        }
+        if let Some(after) = close_to_right {
+            self.close_tabs_after(after);
+        }
+        if close_all {
+            self.close_all_tabs();
+        }
+        if let Some(i) = toggle_pin {
+            if i < self.tabs.len() {
+                self.tabs[i].pinned = !self.tabs[i].pinned;
+            }
+        }
+        if let Some((src, target)) = reorder {
+            self.move_tab(src, target);
+        }
+        if add_tab {
+            self.new_tab();
+        }
     }
 
     /// Render the tab strip — the row (or column, for side positions) of open
@@ -1969,60 +2202,84 @@ impl ScribeApp {
             // Pinned tabs carry a visible pin glyph so the state is obvious
             // without opening the right-click menu.
             let shown = tab_display_label(&self.tabs[i].title(), pinned);
-            let label = RichText::new(shown.clone()).color(if selected { accent } else { muted });
-
-            let resp = ui
-                .add(egui::SelectableLabel::new(selected, label))
-                .interact(egui::Sense::click_and_drag());
-            if resp.clicked() {
-                switch_to = Some(i);
-            }
-            if resp.clicked_by(egui::PointerButton::Middle) {
-                close = Some(i);
-            }
-            let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
-            resp.context_menu(|ui| {
-                if ui.button("Close").clicked() {
+            // #83 — each tab is its own little group so the controls clearly
+            // belong to the tab: the selectable label (click = switch, drag =
+            // reorder), then a pin toggle shown ONLY on the active tab, then a
+            // close button shown on EVERY tab. In a horizontal strip the tabs
+            // flow left-to-right; in a side strip each group is a row with the
+            // close button on the right.
+            ui.horizontal(|ui| {
+                let label =
+                    RichText::new(shown.clone()).color(if selected { accent } else { muted });
+                let resp = ui
+                    .add(egui::SelectableLabel::new(selected, label))
+                    .interact(egui::Sense::click_and_drag());
+                if resp.clicked() {
+                    switch_to = Some(i);
+                }
+                if resp.clicked_by(egui::PointerButton::Middle) {
                     close = Some(i);
-                    ui.close_menu();
                 }
-                if ui.button("Close Others").clicked() {
-                    close_others = Some(i);
-                    ui.close_menu();
+                let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
+                resp.context_menu(|ui| {
+                    if ui.button("Close").clicked() {
+                        close = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close Others").clicked() {
+                        close_others = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All to the Right").clicked() {
+                        close_to_right = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All").clicked() {
+                        close_all = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button(pin_label).clicked() {
+                        toggle_pin = Some(i);
+                        ui.close_menu();
+                    }
+                });
+                // Dim the tab being dragged; capture the source + release position.
+                if resp.dragged() {
+                    ui.painter()
+                        .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        dragging = Some((i, shown.clone(), p));
+                    }
                 }
-                if ui.button("Close All to the Right").clicked() {
-                    close_to_right = Some(i);
-                    ui.close_menu();
+                if resp.drag_stopped() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        drag_src = Some(i);
+                        drop_pos = Some(pos);
+                    }
                 }
-                if ui.button("Close All").clicked() {
-                    close_all = true;
-                    ui.close_menu();
+                rects.push((i, resp.rect));
+                // Pin TOGGLE — only on the active tab (the pin GLYPH in the label
+                // still marks any pinned tab, so non-active pins stay visible).
+                if selected {
+                    let glyph = if pinned {
+                        egui_phosphor::thin::PUSH_PIN_SLASH
+                    } else {
+                        egui_phosphor::thin::PUSH_PIN
+                    };
+                    if ui.small_button(glyph).on_hover_text(pin_label).clicked() {
+                        toggle_pin = Some(i);
+                    }
                 }
-                ui.separator();
-                if ui.button(pin_label).clicked() {
-                    toggle_pin = Some(i);
-                    ui.close_menu();
+                // Close — on EVERY tab so any tab can be closed directly.
+                if ui
+                    .small_button(egui_phosphor::thin::X)
+                    .on_hover_text("Close tab (or middle-click)")
+                    .clicked()
+                {
+                    close = Some(i);
                 }
             });
-            // Dim the tab being dragged; capture the source + release position.
-            if resp.dragged() {
-                ui.painter()
-                    .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
-                if let Some(p) = resp.interact_pointer_pos() {
-                    dragging = Some((i, shown.clone(), p));
-                }
-            }
-            if resp.drag_stopped() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    drag_src = Some(i);
-                    drop_pos = Some(pos);
-                }
-            }
-            rects.push((i, resp.rect));
-
-            if selected && ui.small_button("×").clicked() {
-                close = Some(i);
-            }
         }
 
         // "+" — add a new tab at the end of the strip (same as Ctrl+N).
@@ -2586,8 +2843,13 @@ impl ScribeApp {
     /// active document with a viewport indicator; click/drag jumps the editor.
     fn show_minimap(&mut self, ctx: &egui::Context, panel: Color32, accent: Color32) {
         egui::SidePanel::right("minimap")
-            .exact_width(110.0)
-            .resizable(false)
+            // #86 — the Map view is now user-resizable (was a fixed exact_width).
+            // The minimap galley re-lays out to `available_size` each frame, so
+            // it tracks the dragged width. Floor keeps it legible; ceiling stops
+            // it eating the editor.
+            .default_width(110.0)
+            .width_range(48.0..=260.0)
+            .resizable(true)
             .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
             .show(ctx, |ui| {
                 ui.label(RichText::new("MAP").color(accent).small().monospace());
@@ -2682,7 +2944,8 @@ impl ScribeApp {
             crate::editor_features::project_folded(&text, &regions, &self.folds);
         let line_height = self.config.fonts.line_height;
         let hl = &self.hl;
-        let mut layouter = make_layouter(hl, &self.hl_cache, ext, font, line_height);
+        let word_wrap = self.config.editor.word_wrap;
+        let mut layouter = make_layouter(hl, &self.hl_cache, ext, font, line_height, word_wrap);
         egui::ScrollArea::both()
             .id_salt("fold-scroll")
             .show(ui, |ui| {
@@ -3347,8 +3610,100 @@ fn open_in_file_manager(dir: &Path) {
 /// so the OS blur (Mica/acrylic/vibrancy) or the desktop shows through the
 /// chrome — not just the central editor. When the master transparency toggle is
 /// off (or the mode is opaque) the panel stays fully opaque.
-fn panel_fill(theme: &Theme, window: &scribe_core::config::WindowConfig) -> Color32 {
-    let base = ui_color(theme, "panel", Rgba::new(0x0d, 0x0b, 0x14, 255));
+/// Bundled monospace "font themes" (#87): (display name, internal family key).
+/// Every face is OFL-licensed and embedded at compile time. The display names
+/// are what the Settings picker shows and what `fonts.editor_family` stores.
+pub(crate) const FONT_FAMILIES: &[(&str, &str)] = &[
+    ("JetBrains Mono", "JetBrainsMono"),
+    ("IBM Plex Mono", "IBMPlexMono"),
+    ("Fira Mono", "FiraMono"),
+    ("Space Mono", "SpaceMono"),
+    ("Cousine", "Cousine"),
+];
+
+/// Resolve a font display name to its embedded family key, falling back to
+/// JetBrains Mono for an unknown / stale config value.
+fn font_family_key(display: &str) -> &'static str {
+    FONT_FAMILIES
+        .iter()
+        .find(|(d, _)| *d == display)
+        .map(|(_, k)| *k)
+        .unwrap_or("JetBrainsMono")
+}
+
+/// Build the egui font set with `editor_family` as the primary Monospace face
+/// (#87). All bundled coding fonts are registered; the selected one is placed
+/// first in the Monospace family, JetBrains Mono is kept right behind it as a
+/// fallback, and the Noto Sans JP kanji subset is appended to both families so
+/// the toolbar kanji never tofu. egui's ab_glyph does no OT shaping, so
+/// ligatures are structurally off regardless of face.
+fn build_fonts(editor_family: &str) -> egui::FontDefinitions {
+    use std::sync::Arc;
+    let mut fonts = egui::FontDefinitions::default();
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Thin);
+
+    macro_rules! embed {
+        ($key:literal, $path:literal) => {
+            fonts.font_data.insert(
+                $key.to_owned(),
+                Arc::new(egui::FontData::from_static(include_bytes!($path))),
+            );
+        };
+    }
+    embed!(
+        "JetBrainsMono",
+        "../../../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"
+    );
+    embed!(
+        "IBMPlexMono",
+        "../../../assets/fonts/IBMPlexMono/IBMPlexMono-Regular.ttf"
+    );
+    embed!(
+        "FiraMono",
+        "../../../assets/fonts/FiraMono/FiraMono-Regular.ttf"
+    );
+    embed!(
+        "SpaceMono",
+        "../../../assets/fonts/SpaceMono/SpaceMono-Regular.ttf"
+    );
+    embed!(
+        "Cousine",
+        "../../../assets/fonts/Cousine/Cousine-Regular.ttf"
+    );
+    embed!(
+        "NotoSansJP-Subset",
+        "../../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf"
+    );
+
+    let selected = font_family_key(editor_family);
+    if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        mono.insert(0, selected.to_owned());
+        if selected != "JetBrainsMono" {
+            mono.insert(1, "JetBrainsMono".to_owned());
+        }
+    }
+    for family in [egui::FontFamily::Monospace, egui::FontFamily::Proportional] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("NotoSansJP-Subset".to_owned());
+    }
+    fonts
+}
+
+fn panel_fill(
+    theme: &Theme,
+    window: &scribe_core::config::WindowConfig,
+    background_override: Option<&str>,
+) -> Color32 {
+    // #88 — an explicit background override (hex) wins over the theme's panel
+    // colour; otherwise follow the theme. Translucency (glass mode) still
+    // applies its alpha on top, so the override composes with vibrancy.
+    let base: Color32 = match background_override.and_then(Rgba::parse_hex) {
+        Some(o) => Color32::from_rgb(o.r, o.g, o.b),
+        None => ui_color(theme, "panel", Rgba::new(0x0d, 0x0b, 0x14, 255)),
+    };
     if window.effective_translucent() {
         let a = (window.opacity.clamp(0.30, 1.0) * 255.0).round() as u8;
         Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a)
@@ -3408,12 +3763,56 @@ fn highlight_job(
 /// Build the memoizing egui `layouter` closure for a `TextEdit`. Reuses the
 /// cached highlight `LayoutJob` unless the buffer/lang/font-size changed, so
 /// syntect/tree-sitter only re-run when the text actually changes.
+/// The wrap width our editor layouter should USE, given the word-wrap setting
+/// and the width egui hands the layouter. egui's `TextEdit` always passes the
+/// scroll-viewport `available_width` as the wrap width (NOT `desired_width`), so
+/// a custom layouter that blindly honours it wraps even when wrap is off — the
+/// "word wrap is always on" bug. When wrap is off we force infinite width so the
+/// galley lays out on one line and the `ScrollArea::both` scrolls horizontally.
+fn effective_wrap_width(word_wrap: bool, available: f32) -> f32 {
+    if word_wrap {
+        available
+    } else {
+        f32::INFINITY
+    }
+}
+
+/// Char index of byte offset `byte` in `s` (#78 — spell spans are byte offsets,
+/// galley cursors are char indices). Clamps to the nearest char boundary at or
+/// before `byte`, so a mid-codepoint offset never panics.
+fn byte_to_char_index(s: &str, byte: usize) -> usize {
+    s.char_indices().take_while(|(i, _)| *i < byte).count()
+}
+
+/// Paint a red spellcheck squiggle from `x0` to `x1` along baseline `y` (#78).
+/// A small triangle wave reads as the universal "misspelled" underline.
+fn paint_squiggle(painter: &egui::Painter, x0: f32, x1: f32, y: f32, color: Color32) {
+    if x1 <= x0 {
+        return;
+    }
+    let amp = 1.5;
+    let step = 3.0;
+    let stroke = egui::Stroke::new(1.0, color);
+    let mut x = x0;
+    let mut up = true;
+    let mut prev = egui::pos2(x0, y);
+    while x < x1 {
+        x = (x + step).min(x1);
+        let ny = if up { y - amp } else { y + amp };
+        let next = egui::pos2(x, ny);
+        painter.line_segment([prev, next], stroke);
+        prev = next;
+        up = !up;
+    }
+}
+
 fn make_layouter<'a>(
     hl: &'a Highlighter,
     cache: &'a std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
     ext: Option<&'a str>,
     font: FontId,
     line_height: f32,
+    word_wrap: bool,
 ) -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> std::sync::Arc<egui::Galley> + 'a {
     // egui 0.34: TextEdit::layouter callback now receives `&dyn TextBuffer`
     // instead of `&str` (so non-String buffers can be hosted). We still want
@@ -3445,7 +3844,7 @@ fn make_layouter<'a>(
             }
         };
         let mut job = (*job_arc).clone();
-        job.wrap.max_width = wrap;
+        job.wrap.max_width = effective_wrap_width(word_wrap, wrap);
         // egui 0.34: FontsView::layout_job caches into the view → needs &mut.
         ui.fonts_mut(|f| f.layout_job(job))
     }
@@ -3724,6 +4123,24 @@ impl ScribeApp {
             self.visuals_applied = true;
         }
 
+        // #79 — in frameless mode, force OS decorations OFF once the window is up.
+        // Creating the window decoration-less is not always enough: applying a
+        // vibrancy/transparent surface can make the Windows DWM re-add the native
+        // caption buttons, which then sit (slightly offset) over our custom
+        // titlebar. Re-asserting Decorations(false) at runtime removes that
+        // duplicate set. Idempotent + one-shot so it never fights normal frames.
+        if self.config.appearance.frameless && !self.decorations_forced {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+            self.decorations_forced = true;
+        }
+
+        // #87 — restart-free font-theme switch: rebuild + re-apply the font set
+        // whenever the chosen editor family changes (cheap string compare).
+        if self.config.fonts.editor_family != self.applied_font_family {
+            ctx.set_fonts(build_fonts(&self.config.fonts.editor_family));
+            self.applied_font_family = self.config.fonts.editor_family.clone();
+        }
+
         // Live-reload config when the file changes on disk (external edit).
         let mut reload_cfg = false;
         if let Some(rx) = &self.cfg_rx {
@@ -3980,7 +4397,11 @@ impl ScribeApp {
         // reduced alpha — otherwise opaque chrome covers the transparent/blurred
         // surface and "transparency doesn't work" (the T19.2 root cause). The master
         // `transparency_enabled` toggle gates this via `effective_translucent()`.
-        let panel = panel_fill(&self.theme, &self.config.window);
+        let panel = panel_fill(
+            &self.theme,
+            &self.config.window,
+            self.config.appearance.background_override.as_deref(),
+        );
         let warn = ui_color(&self.theme, "warning", Rgba::new(0xfb, 0xbf, 0x24, 255));
 
         // ---- Custom frameless titlebar ----
@@ -4103,23 +4524,27 @@ impl ScribeApp {
                     });
             }
             scribe_core::config::TabBarPosition::Left => {
-                let vertical = self.config.editor.side_tabs_vertical;
+                let rotated = self.config.editor.side_tabs_rotated;
                 egui::SidePanel::left("tabs-left")
                     .resizable(true)
                     .default_width(180.0)
+                    // #85 — allow the side tab bar to shrink much smaller than
+                    // egui's default floor (e.g. for a narrow vertical strip).
+                    .width_range(40.0..=400.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                     .show(ctx, |ui| {
-                        self.draw_side_tab_strip(ui, accent, muted, vertical);
+                        self.draw_side_tab_strip(ui, accent, muted, rotated);
                     });
             }
             scribe_core::config::TabBarPosition::Right => {
-                let vertical = self.config.editor.side_tabs_vertical;
+                let rotated = self.config.editor.side_tabs_rotated;
                 egui::SidePanel::right("tabs-right")
                     .resizable(true)
                     .default_width(180.0)
+                    .width_range(40.0..=400.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                     .show(ctx, |ui| {
-                        self.draw_side_tab_strip(ui, accent, muted, vertical);
+                        self.draw_side_tab_strip(ui, accent, muted, rotated);
                     });
             }
         }
@@ -5187,6 +5612,10 @@ impl ScribeApp {
                     self.indent_with_spaces(ctx, editor_id, active);
                 }
 
+                // #78 — misspellings for the active buffer, computed (memoized)
+                // BEFORE the partial borrows below so the owned Vec can move into
+                // the editor closure and drive the red underline painter.
+                let misspellings = self.misspellings_for_active();
                 // Scope the layouter (which borrows `self.hl`) so it drops before
                 // the `&mut self` completion calls below.
                 let mut new_gutter: Vec<f32> = Vec::new();
@@ -5196,8 +5625,14 @@ impl ScribeApp {
                 let anchor: Option<(egui::Pos2, usize)> = {
                     let hl = &self.hl;
                     let ext_ref = ext.as_deref();
-                    let mut layouter =
-                        make_layouter(hl, &self.hl_cache, ext_ref, font.clone(), line_height);
+                    let mut layouter = make_layouter(
+                        hl,
+                        &self.hl_cache,
+                        ext_ref,
+                        font.clone(),
+                        line_height,
+                        word_wrap,
+                    );
                     let mut sa = if word_wrap {
                         egui::ScrollArea::vertical()
                     } else {
@@ -5222,6 +5657,30 @@ impl ScribeApp {
                             .interactive(!read_only)
                             .layouter(&mut layouter);
                         let out = editor.show(ui);
+                        // #78 — paint a red squiggle under each misspelling. Map
+                        // the byte span to galley cursor rects and draw a wavy
+                        // underline along the word's baseline. Painted on the
+                        // editor's own layer so it scrolls with the text.
+                        if !misspellings.is_empty() {
+                            let text_ref = &self.tabs[active].text;
+                            let painter = ui.painter();
+                            let red = Color32::from_rgb(0xe5, 0x3e, 0x3e);
+                            for m in &misspellings {
+                                let c0 = byte_to_char_index(text_ref, m.start);
+                                let c1 = byte_to_char_index(text_ref, m.end);
+                                let r0 = out.galley.pos_from_cursor(egui::text::CCursor::new(c0));
+                                let r1 = out.galley.pos_from_cursor(egui::text::CCursor::new(c1));
+                                // Same row only (words don't wrap); skip if the
+                                // span spans rows (rare) to avoid a stray line.
+                                if (r0.min.y - r1.min.y).abs() > 0.5 {
+                                    continue;
+                                }
+                                let y = out.galley_pos.y + r0.max.y;
+                                let x0 = out.galley_pos.x + r0.min.x;
+                                let x1 = out.galley_pos.x + r1.min.x;
+                                paint_squiggle(painter, x0, x1, y, red);
+                            }
+                        }
                         if let Some(range) = out.cursor_range {
                             // egui 0.34: CursorRange.primary is a CCursor directly
                             // (no nested .ccursor); Galley::pos_from_ccursor was
@@ -5808,6 +6267,17 @@ fn handle_frameless_resize(ctx: &egui::Context) {
     // (so a button/tab sitting at the very edge still gets its click).
     if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.wants_pointer_input() {
         ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+        // The OS now owns the drag. winit's modal resize loop swallows the
+        // button-up, so egui can be left believing a drag is still in progress —
+        // which makes `wants_pointer_input()` return true forever and blocks
+        // EVERY subsequent resize (the "works once, then never" bug). Clearing
+        // egui's drag bookkeeping here unsticks that state so resize re-arms.
+        ctx.stop_dragging();
+    }
+    // Belt-and-suspenders: with no button held there can be no legitimate drag,
+    // so proactively clear any phantom drag the OS resize loop may have orphaned.
+    if !ctx.input(|i| i.pointer.any_down()) {
+        ctx.stop_dragging();
     }
 }
 
@@ -5880,6 +6350,257 @@ mod resize_tests {
     fn outside_the_window_is_none() {
         assert_eq!(resize_dir_at(pos2(-5.0, 350.0), win(), 6.0, 12.0), None);
         assert_eq!(resize_dir_at(pos2(500.0, 800.0), win(), 6.0, 12.0), None);
+    }
+}
+
+#[cfg(test)]
+mod save_session_tests {
+    //! #81 — prove (not just assert wired) that the Save & Session settings the
+    //! user couldn't tell were working actually change what hits disk. These run
+    //! the real open_path → save_active pipeline against a temp file, no GUI
+    //! focus or timing needed.
+    use super::ScribeApp;
+    use scribe_core::Config;
+
+    #[test]
+    fn trim_and_final_newline_on_save_take_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("note.txt");
+        std::fs::write(&p, "seed").unwrap();
+        let mut cfg = Config::default();
+        cfg.editor.trim_trailing_whitespace_on_save = true;
+        cfg.editor.final_newline_on_save = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.open_path(p.clone());
+        let active = app.active;
+        app.tabs[active].text = "alpha   \nbeta".into(); // trailing spaces, no final \n
+        app.save_active();
+        let on_disk = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            !on_disk.contains("alpha   "),
+            "trailing whitespace must be trimmed: {on_disk:?}"
+        );
+        assert!(on_disk.ends_with('\n'), "a final newline must be ensured");
+        assert_eq!(on_disk, "alpha\nbeta\n");
+    }
+
+    #[test]
+    fn save_hygiene_is_a_noop_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("note.txt");
+        std::fs::write(&p, "seed").unwrap();
+        let mut cfg = Config::default();
+        cfg.editor.trim_trailing_whitespace_on_save = false;
+        cfg.editor.final_newline_on_save = false;
+        let mut app = ScribeApp::new_test(cfg);
+        app.open_path(p.clone());
+        let active = app.active;
+        app.tabs[active].text = "alpha   ".into();
+        app.save_active();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "alpha   ",
+            "with both toggles off the bytes are written verbatim"
+        );
+    }
+}
+
+#[cfg(test)]
+mod perf_and_security_tests {
+    //! #91 — perf + security smoke coverage. The perf test guards against a
+    //! pathological-slowdown regression on a large buffer; the security tests
+    //! assert untrusted / hostile buffer content and traversal-shaped paths are
+    //! handled without panicking.
+    use super::{byte_to_char_index, ScribeApp};
+    use scribe_core::Config;
+
+    #[test]
+    fn large_buffer_spell_scan_stays_bounded() {
+        let mut cfg = Config::default();
+        cfg.spellcheck.enabled = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "word ".repeat(20_000); // ~100 KB / 20k words
+        let t = std::time::Instant::now();
+        let _ = app.misspellings_for_active();
+        // Memoized + linear; a generous ceiling that still catches an O(n^2)
+        // regression without being flaky on slow CI.
+        assert!(
+            t.elapsed().as_secs() < 10,
+            "spell scan on a 100 KB buffer must stay well under 10s"
+        );
+    }
+
+    #[test]
+    fn hostile_buffer_content_does_not_panic() {
+        let mut app = ScribeApp::new_test(Config::default());
+        // NUL + control chars + a very long line + an RTL-override + combining.
+        app.tabs[0].text = format!("\0\u{1}\u{7f}{}\u{202e}rtl\u{0301}", "x".repeat(50_000));
+        let _ = app.misspellings_for_active();
+        let _ = app.spell_count();
+        // Byte→char mapping must clamp, never index mid-codepoint or overflow.
+        let _ = byte_to_char_index(&app.tabs[0].text, 49_999);
+        let _ = byte_to_char_index(&app.tabs[0].text, usize::MAX);
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn traversal_shaped_open_path_is_handled_gracefully() {
+        let mut app = ScribeApp::new_test(Config::default());
+        let before = app.tabs.len();
+        // A nonexistent, traversal-shaped path must not panic or open a phantom
+        // tab; from_path fails and is surfaced as a toast.
+        app.open_path(std::path::PathBuf::from("../../../../nonexistent/passwd"));
+        assert_eq!(
+            app.tabs.len(),
+            before,
+            "no tab opened for an unreadable path"
+        );
+    }
+}
+
+#[cfg(test)]
+mod font_theme_tests {
+    //! #87 — bundled font themes. The selected family must lead the Monospace
+    //! family list (so it actually renders), JetBrains Mono must stay right
+    //! behind it as a fallback, every bundled face + the JP subset must be
+    //! registered, and an unknown name must fall back gracefully.
+    use super::{build_fonts, font_family_key, FONT_FAMILIES};
+
+    #[test]
+    fn selected_family_leads_with_jetbrains_fallback() {
+        let f = build_fonts("IBM Plex Mono");
+        let mono = &f.families[&egui::FontFamily::Monospace];
+        assert_eq!(mono[0], "IBMPlexMono", "selected face renders first");
+        assert_eq!(mono[1], "JetBrainsMono", "JetBrains kept as fallback");
+        for (_, key) in FONT_FAMILIES {
+            assert!(f.font_data.contains_key(*key), "{key} registered");
+        }
+        assert!(f.font_data.contains_key("NotoSansJP-Subset"));
+    }
+
+    #[test]
+    fn unknown_family_falls_back_to_jetbrains() {
+        assert_eq!(font_family_key("No Such Font"), "JetBrainsMono");
+        let f = build_fonts("No Such Font");
+        assert_eq!(f.families[&egui::FontFamily::Monospace][0], "JetBrainsMono");
+    }
+
+    #[test]
+    fn default_family_is_jetbrains_and_does_not_double_insert() {
+        let f = build_fonts("JetBrains Mono");
+        let mono = &f.families[&egui::FontFamily::Monospace];
+        assert_eq!(mono[0], "JetBrainsMono");
+        // No redundant second JetBrains entry when it's already the selection.
+        assert_ne!(mono.get(1).map(String::as_str), Some("JetBrainsMono"));
+    }
+}
+
+#[cfg(test)]
+mod background_override_tests {
+    //! #88 — the app background override repaints panel/window fills
+    //! independently of the theme; None follows the theme.
+    use super::ScribeApp;
+    use scribe_core::Config;
+
+    #[test]
+    fn override_repaints_panel_and_window_fill() {
+        let mut cfg = Config::default();
+        cfg.appearance.background_override = Some("#112233".into());
+        let app = ScribeApp::new_test(cfg);
+        let v = app.current_visuals();
+        let want = egui::Color32::from_rgb(0x11, 0x22, 0x33);
+        assert_eq!(v.panel_fill, want);
+        assert_eq!(v.window_fill, want);
+    }
+
+    #[test]
+    fn none_follows_theme_not_the_override_colour() {
+        let cfg = Config::default(); // background_override = None
+        let app = ScribeApp::new_test(cfg);
+        let v = app.current_visuals();
+        // Whatever the theme is, it must NOT be the arbitrary override colour.
+        assert_ne!(v.panel_fill, egui::Color32::from_rgb(0x11, 0x22, 0x33));
+    }
+}
+
+#[cfg(test)]
+mod spell_underline_tests {
+    //! #78 — spellcheck underlines. The byte→char mapping must be correct
+    //! (galley cursors are char-indexed; spell spans are byte-indexed) and the
+    //! active-buffer misspelling scan must actually flag a bad word so the
+    //! painter has something to draw.
+    use super::{byte_to_char_index, ScribeApp};
+    use scribe_core::Config;
+
+    #[test]
+    fn byte_to_char_handles_multibyte() {
+        // "café word" — 'é' is 2 bytes, so byte 6 (start of "word") is char 5.
+        let s = "café word";
+        assert_eq!(byte_to_char_index(s, 0), 0);
+        assert_eq!(byte_to_char_index(s, 5), 4, "byte after é → char 4");
+        assert_eq!(byte_to_char_index(s, 6), 5, "start of 'word' → char 5");
+        assert_eq!(byte_to_char_index(s, 999), s.chars().count(), "clamps");
+    }
+
+    #[test]
+    fn active_buffer_misspelling_is_detected_when_enabled() {
+        let mut cfg = Config::default();
+        cfg.spellcheck.enabled = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "this zxqwyzz is wrong".into();
+        let found = app.misspellings_for_active();
+        assert!(
+            found.iter().any(|m| m.word.contains("zxqwyzz")),
+            "the nonsense word must be flagged (got {found:?})"
+        );
+    }
+
+    #[test]
+    fn no_misspellings_when_spellcheck_disabled() {
+        let mut cfg = Config::default();
+        cfg.spellcheck.enabled = false;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "zxqwyzz".into();
+        assert!(app.misspellings_for_active().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    //! #75 — word-wrap toggle. egui's TextEdit passes the scroll viewport's
+    //! available width to the layouter as the wrap width regardless of
+    //! `desired_width`, so the editor wrapped even with word-wrap OFF. The fix
+    //! lives in `effective_wrap_width`: infinite width when wrap is off (galley
+    //! lays out on one line, the ScrollArea scrolls horizontally), the given
+    //! viewport width when on.
+    use super::effective_wrap_width;
+
+    #[test]
+    fn rotated_tab_geometry_swaps_axes_and_anchors_top_right() {
+        use super::{rotated_tab_size, rotated_tab_text_pos};
+        // A 100x16 horizontal label with (8,10) padding → a 24-wide, 110-tall
+        // cell (height+pad.x wide, width+pad.y tall).
+        let g = egui::vec2(100.0, 16.0);
+        let pad = egui::vec2(8.0, 10.0);
+        let size = rotated_tab_size(g, pad);
+        assert_eq!(size, egui::vec2(24.0, 110.0));
+        // Anchor sits at the top-right of the padded inner area so a +90° spin
+        // drops the text into the cell.
+        let rect = egui::Rect::from_min_size(egui::pos2(5.0, 7.0), size);
+        let pos = rotated_tab_text_pos(rect, g, pad);
+        assert_eq!(pos, egui::pos2(5.0 + 4.0 + 16.0, 7.0 + 5.0));
+    }
+
+    #[test]
+    fn wrap_off_forces_infinite_width() {
+        assert_eq!(effective_wrap_width(false, 800.0), f32::INFINITY);
+        assert_eq!(effective_wrap_width(false, 1.0), f32::INFINITY);
+    }
+
+    #[test]
+    fn wrap_on_uses_the_viewport_width() {
+        assert_eq!(effective_wrap_width(true, 800.0), 800.0);
+        assert_eq!(effective_wrap_width(true, 123.5), 123.5);
     }
 }
 
@@ -5985,8 +6706,13 @@ fn paint_tint_overlay(ctx: &egui::Context, tint_hex: &str, strength: f32) {
         return;
     };
     let a = (strength.clamp(0.0, 1.0) * 90.0).round() as u8;
+    // #77 — paint the tint at the BACKMOST layer so it washes the app
+    // background only. At Order::Foreground it painted OVER every window
+    // (including the Settings window), which is exactly the "transparency
+    // applies to the settings window" bug the user reported. Behind the panels,
+    // it shows through translucent (glass-mode) chrome but never over a window.
     let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Foreground,
+        egui::Order::Background,
         egui::Id::new("tint-overlay"),
     ));
     painter.rect_filled(
@@ -6415,6 +7141,59 @@ mod e2e {
         ScribeApp::new_test(cfg)
     }
 
+    // #91 render-coverage: exercise the new render paths headlessly via
+    // run_frames so the GUI-heavy code (rotated side tabs, spell underline
+    // painter, font-theme reapply, background tint) is actually executed.
+
+    #[test]
+    fn render_rotated_left_tab_bar_does_not_panic() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.editor.tab_bar_position = scribe_core::config::TabBarPosition::Left;
+        cfg.editor.side_tabs_rotated = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.new_tab();
+        app.tabs[0].pinned = true; // exercise the pin-glyph path too
+        run_frames(&mut app, 3);
+        assert!(app.tabs.len() >= 2);
+    }
+
+    #[test]
+    fn render_horizontal_left_tab_bar_does_not_panic() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.editor.tab_bar_position = scribe_core::config::TabBarPosition::Right;
+        cfg.editor.side_tabs_rotated = false;
+        let mut app = ScribeApp::new_test(cfg);
+        app.new_tab();
+        run_frames(&mut app, 3);
+        assert!(app.tabs.len() >= 2);
+    }
+
+    #[test]
+    fn render_spellcheck_underline_path_runs() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.spellcheck.enabled = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "this zxqwyzz wordd is rong".into();
+        run_frames(&mut app, 3); // paints the squiggles
+        assert!(!app.misspellings_for_active().is_empty());
+    }
+
+    #[test]
+    fn render_font_theme_bg_override_and_glass_paths_run() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.fonts.editor_family = "IBM Plex Mono".into();
+        cfg.appearance.background_override = Some("#203040".into());
+        cfg.window.transparency_enabled = true;
+        cfg.window.mode = scribe_core::config::WindowMode::Glass;
+        let mut app = ScribeApp::new_test(cfg);
+        run_frames(&mut app, 3); // build_fonts reapply + tint overlay + visuals
+        assert_eq!(app.applied_font_family, "IBM Plex Mono");
+    }
+
     #[test]
     fn toolbar_gear_opens_settings() {
         let mut h = ui_harness(fresh_app());
@@ -6655,7 +7434,7 @@ mod e2e {
             ..Default::default()
         };
         assert_eq!(
-            panel_fill(&theme, &w_off).a(),
+            panel_fill(&theme, &w_off, None).a(),
             255,
             "opaque while master toggle off"
         );
@@ -6664,7 +7443,7 @@ mod e2e {
             transparency_enabled: true,
             ..w_off
         };
-        let a = panel_fill(&theme, &w_on).a();
+        let a = panel_fill(&theme, &w_on, None).a();
         assert!(
             (76..255).contains(&a),
             "alpha reduced to ~opacity (got {a})"

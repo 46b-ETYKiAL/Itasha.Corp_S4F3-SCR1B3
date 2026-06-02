@@ -34,6 +34,19 @@ fn open_plugin_manager_id() -> egui::Id {
     egui::Id::new("scr1b3_open_plugin_manager")
 }
 
+/// Parse a `#rrggbb` (or `rrggbb`) hex string into an opaque `Color32` (#88).
+/// Returns `None` on malformed input so the caller can fall back to a default.
+fn parse_hex_color(s: &str) -> Option<egui::Color32> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some(egui::Color32::from_rgb(r, g, b))
+}
+
 /// egui temp-data key holding the selected Settings category. Shared by
 /// [`show`] (read + write each frame) and [`request_category`] (host deep-link
 /// pre-select) so the two never drift apart.
@@ -144,6 +157,16 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
         .default_size([760.0, 560.0])
         .min_width(420.0)
         .min_height(320.0)
+        // #77 — force the Settings window OPAQUE. The app-window transparency /
+        // glass setting drives a translucent `window_fill`; without this the
+        // Settings panel itself went see-through, which is not what the
+        // app-background transparency option is for. Take the theme's window
+        // fill but pin alpha to 255 so Settings stays readable in glass mode.
+        .frame({
+            let style = ctx.global_style();
+            let f = style.visuals.window_fill;
+            egui::Frame::window(&style).fill(egui::Color32::from_rgb(f.r(), f.g(), f.b()))
+        })
         .show(ctx, |ui| {
             ui.horizontal_top(|ui| {
                 // ---- Left category nav ----
@@ -172,7 +195,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
                         );
                         if !query.is_empty()
                             && ui
-                                .button("✕")
+                                .button(egui_phosphor::thin::X)
                                 .on_hover_text("Clear the search filter.")
                                 .clicked()
                         {
@@ -261,6 +284,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                                 )
                                 .changed()
                             {
+                                // #88 — switching theme resets the background to
+                                // the new theme's background (clear the override).
+                                config.appearance.background_override = None;
                                 changed = true;
                             }
                         }
@@ -271,7 +297,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     reset_to_default(ui, &mut config.appearance.theme, &def.appearance.theme);
             });
             if row_visible(q, "theme custom name") {
-                changed |= ui
+                let name_changed = ui
                     .horizontal(|ui| {
                         ui.label("…or user theme name");
                         ui.text_edit_singleline(&mut config.appearance.theme)
@@ -283,6 +309,42 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                             .changed()
                     })
                     .inner;
+                if name_changed {
+                    config.appearance.background_override = None;
+                    changed = true;
+                }
+            }
+            if row_visible(q, "background colour color app override") {
+                // #88 — app background colour, independent of the theme. The
+                // button shows the current override (or a neutral placeholder
+                // when following the theme); picking a colour pins it, "Follow
+                // theme" clears it back to the theme's background.
+                ui.horizontal(|ui| {
+                    ui.label("App background").on_hover_text(
+                        "Override the app background colour independently of the theme. \
+                         Switching themes resets this to the new theme's background.",
+                    );
+                    let mut col = config
+                        .appearance
+                        .background_override
+                        .as_deref()
+                        .and_then(parse_hex_color)
+                        .unwrap_or(egui::Color32::from_rgb(0x0d, 0x0b, 0x14));
+                    if ui.color_edit_button_srgba(&mut col).changed() {
+                        config.appearance.background_override =
+                            Some(format!("#{:02x}{:02x}{:02x}", col.r(), col.g(), col.b()));
+                        changed = true;
+                    }
+                    if config.appearance.background_override.is_some()
+                        && ui
+                            .small_button("Follow theme")
+                            .on_hover_text("Clear the override; follow the theme's background.")
+                            .clicked()
+                    {
+                        config.appearance.background_override = None;
+                        changed = true;
+                    }
+                });
             }
             if row_visible(q, "export theme tom user customize edit") {
                 // Phase 17 T17.6: export the CURRENT built-in (or wired-noir
@@ -379,13 +441,48 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
 
     // ---- Fonts ----  (no ligatures: egui has no OpenType shaping, so the
     // toggle is intentionally absent rather than shown as a dead control.)
-    if section_visible(sel, q, "Fonts", &["size", "line height"]) {
+    if section_visible(
+        sel,
+        q,
+        "Fonts",
+        &["size", "line height", "family", "font theme"],
+    ) {
         head(
             ui,
             "Fonts",
-            "Editor text size and line spacing. (Ligatures are off — the renderer \
-             does no OpenType shaping.)",
+            "Editor font family, text size, and line spacing. (Ligatures are off — \
+             the renderer does no OpenType shaping.)",
         );
+        if row_visible(q, "font family theme editor") {
+            // #87 — pick the editor monospace face from the bundled OFL fonts.
+            ui.horizontal(|ui| {
+                ui.label("Font")
+                    .on_hover_text("Editor monospace font. Applies live, no restart.");
+                egui::ComboBox::from_id_salt("font-family-picker")
+                    .selected_text(config.fonts.editor_family.clone())
+                    .show_ui(ui, |ui| {
+                        for (display, _key) in crate::app::FONT_FAMILIES {
+                            if ui
+                                .selectable_value(
+                                    &mut config.fonts.editor_family,
+                                    (*display).to_string(),
+                                    *display,
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Choose one of the bundled coding fonts.");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.fonts.editor_family,
+                    &def.fonts.editor_family,
+                );
+            });
+        }
         if row_visible(q, "editor size") {
             ui.horizontal(|ui| {
                 ui.label("Size")
@@ -584,8 +681,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 );
             });
         }
-        if row_visible(q, "side tab orientation vertical horizontal left right") {
-            // #70 — only meaningful when the tab bar is on the Left/Right; the
+        if row_visible(
+            q,
+            "side tab orientation vertical horizontal rotate left right",
+        ) {
+            // #82 — only meaningful when the tab bar is on the Left/Right; the
             // Top/Bottom positions are always horizontal. Disable (greyed) the
             // control otherwise so the dependency is obvious rather than silent.
             let is_side = config.editor.tab_bar_position.is_vertical();
@@ -593,21 +693,21 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 ui.add_enabled_ui(is_side, |ui| {
                     changed |= ui
                         .checkbox(
-                            &mut config.editor.side_tabs_vertical,
-                            "Side tabs stack vertically",
+                            &mut config.editor.side_tabs_rotated,
+                            "Rotate side tabs (vertical text)",
                         )
                         .on_hover_text(
-                            "When the tab bar is on the Left or Right: ON stacks tabs vertically \
-                             (one tab per row — the side-bar default); OFF lays them out \
-                             horizontally, wrapping to new rows. No effect for Top/Bottom \
-                             (always horizontal).",
+                            "When the tab bar is on the Left or Right: ON rotates each tab's \
+                             label 90° so the text reads vertically, while the tabs stay in a \
+                             single column. OFF keeps the labels horizontal. No effect for \
+                             Top/Bottom.",
                         )
                         .changed();
                 });
                 changed |= reset_to_default(
                     ui,
-                    &mut config.editor.side_tabs_vertical,
-                    &def.editor.side_tabs_vertical,
+                    &mut config.editor.side_tabs_rotated,
+                    &def.editor.side_tabs_rotated,
                 );
             });
         }
@@ -1237,7 +1337,12 @@ enum ToolbarDrag {
 /// **additive**: keyboard users keep the buttons; pointer users get the
 /// direct-manipulation UX the plan calls out.
 fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
+    use egui_phosphor::thin as ph;
     let mut changed = false;
+    // #80 — pin the editor to the available width so its wide children (the
+    // palette's wrapped row of chips) WRAP instead of forcing the resizable
+    // Settings window to balloon to fit them.
+    ui.set_max_width(ui.available_width());
     ui.heading("Quick-access toolbar");
     ui.label(
         egui::RichText::new(
@@ -1336,16 +1441,33 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         let drag_id = egui::Id::new(("scr1b3-toolbar-item-drag", i));
         ui.dnd_drag_source(drag_id, ToolbarDrag::Reorder(i), |ui| {
             ui.horizontal(|ui| {
-                // A small grip glyph signals "this row is draggable".
-                ui.add(egui::Label::new(egui::RichText::new("⠿").weak().small()).selectable(false))
-                    .on_hover_text("Drag to reorder");
-                if ui.add_enabled(i > 0, egui::Button::new("↑")).clicked() {
+                // A grip glyph signals "this row is draggable" (#89 — phosphor
+                // icons instead of raw braille/arrows that rendered as tofu).
+                ui.add(
+                    egui::Label::new(egui::RichText::new(ph::DOTS_SIX_VERTICAL).weak())
+                        .selectable(false),
+                )
+                .on_hover_text("Drag to reorder")
+                .on_hover_cursor(egui::CursorIcon::Grab);
+                if ui
+                    .add_enabled(i > 0, egui::Button::new(ph::CARET_UP))
+                    .on_hover_text("Move up")
+                    .clicked()
+                {
                     mv = Some((i, -1));
                 }
-                if ui.add_enabled(i + 1 < n, egui::Button::new("↓")).clicked() {
+                if ui
+                    .add_enabled(i + 1 < n, egui::Button::new(ph::CARET_DOWN))
+                    .on_hover_text("Move down")
+                    .clicked()
+                {
                     mv = Some((i, 1));
                 }
-                if ui.button("✕").clicked() {
+                if ui
+                    .button(ph::X)
+                    .on_hover_text("Remove from toolbar")
+                    .clicked()
+                {
                     rm = Some(i);
                 }
                 ui.label(label);
@@ -1439,19 +1561,26 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         for (id, label) in crate::app::TOOLBAR_ACTIONS {
             let drag_id = egui::Id::new(("scr1b3-toolbar-palette-drag", *id));
             ui.dnd_drag_source(drag_id, ToolbarDrag::AddAction((*id).to_string()), |ui| {
+                // #90 — chips read as grabbable: a faint grip glyph + a filled
+                // chip background, and a grab cursor on hover. They wrap into
+                // 2-3 rows because the editor width is pinned (#80 above).
                 let chip = egui::Frame::default()
                     .inner_margin(egui::Margin::symmetric(6, 3))
+                    .fill(ui.visuals().widgets.inactive.bg_fill)
                     .stroke(egui::Stroke::new(
                         1.0,
                         ui.visuals().widgets.inactive.bg_stroke.color,
                     ))
-                    .corner_radius(egui::CornerRadius::same(3));
+                    .corner_radius(egui::CornerRadius::same(4));
                 chip.show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(egui::RichText::new(ph::DOTS_SIX_VERTICAL).weak().small());
                     ui.label(*label);
                 });
             })
             .response
-            .on_hover_text("Drag onto the list above to add");
+            .on_hover_text("Drag onto the list above to add")
+            .on_hover_cursor(egui::CursorIcon::Grab);
         }
     });
     ui.add_space(4.0);
@@ -1672,6 +1801,30 @@ enum PickerSection {
 }
 
 #[cfg(test)]
+mod hex_color {
+    use super::parse_hex_color;
+
+    #[test]
+    fn parses_with_and_without_hash() {
+        assert_eq!(
+            parse_hex_color("#112233"),
+            Some(egui::Color32::from_rgb(0x11, 0x22, 0x33))
+        );
+        assert_eq!(
+            parse_hex_color("aabbcc"),
+            Some(egui::Color32::from_rgb(0xaa, 0xbb, 0xcc))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed() {
+        assert_eq!(parse_hex_color("#123"), None);
+        assert_eq!(parse_hex_color("nothex!"), None);
+        assert_eq!(parse_hex_color(""), None);
+    }
+}
+
+#[cfg(test)]
 mod deep_link {
     //! #71 — the status-bar encoding / language chips advertise
     //! "Settings → Editor"; opening Settings must land on that category, not the
@@ -1772,8 +1925,10 @@ mod wiring_guard {
         "appearance.frameless",
         "appearance.toolbar_icons",
         "appearance.jp_glyph_labels",
+        "appearance.background_override",
         "fonts.editor_size",
         "fonts.line_height",
+        "fonts.editor_family",
         "editor.tab_width",
         "editor.insert_spaces",
         "editor.show_line_numbers",
@@ -1781,7 +1936,7 @@ mod wiring_guard {
         "editor.show_minimap",
         "editor.render_whitespace",
         "editor.tab_bar_position",
-        "editor.side_tabs_vertical",
+        "editor.side_tabs_rotated",
         "editor.restore_session",
         "editor.grid_enabled",
         "editor.experimental_rope_editor",

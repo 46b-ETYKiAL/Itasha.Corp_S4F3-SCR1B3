@@ -156,12 +156,12 @@ pub struct EditorConfig {
     /// Where the open-tab strip lives: top (default, inline with the toolbar),
     /// bottom (status-side), left, or right. Phase 18 T18.4.
     pub tab_bar_position: TabBarPosition,
-    /// When the tab bar is on the Left or Right, lay the tabs out as a vertical
-    /// stack (one full-width tab per row — the side-bar default). Set false to
-    /// lay them out horizontally (wrapping) inside the side panel instead. Has
-    /// no effect for the Top/Bottom positions (those are always horizontal).
-    #[serde(default = "default_true")]
-    pub side_tabs_vertical: bool,
+    /// When the tab bar is on the Left or Right, ROTATE each tab's label 90° so
+    /// the text reads vertically (bottom-to-top), while the tabs stay stacked in
+    /// a single column. `false` (default) keeps the labels horizontal — the
+    /// familiar look. No effect for the Top/Bottom positions.
+    #[serde(default, alias = "side_tabs_vertical")]
+    pub side_tabs_rotated: bool,
     /// Phase 18 T18.2 — enable the multi-note grid. When ON, the central
     /// editor surface renders every open tab as a movable, resizable pane
     /// inside an egui_tiles tree (up to 6 panes). Default OFF — the
@@ -289,7 +289,7 @@ impl Default for EditorConfig {
             auto_save: false,
             restore_session: true,
             tab_bar_position: TabBarPosition::Top,
-            side_tabs_vertical: true,
+            side_tabs_rotated: false,
             grid_enabled: false,
             recent_files: Vec::new(),
             first_run_completed: false,
@@ -326,6 +326,12 @@ pub struct AppearanceConfig {
     /// (DECISION-2026-005 cond #4) only verified-canonical kanji ship; actions
     /// whose canonical kanji is uncertain stay English-only. Default OFF.
     pub jp_glyph_labels: bool,
+    /// Optional app-background colour override (hex `#rrggbb`), INDEPENDENT of
+    /// the theme. `None` = follow the active theme's background. Set to a colour
+    /// to pin the app background regardless of theme; switching themes clears
+    /// this back to `None` so the background follows the newly-chosen theme.
+    #[serde(default)]
+    pub background_override: Option<String>,
 }
 
 impl Default for AppearanceConfig {
@@ -336,6 +342,7 @@ impl Default for AppearanceConfig {
             frameless: true,
             toolbar_icons: false,
             jp_glyph_labels: false,
+            background_override: None,
         }
     }
 }
@@ -351,6 +358,15 @@ impl Default for AppearanceConfig {
 pub struct FontConfig {
     pub editor_size: f32,
     pub line_height: f32,
+    /// Editor monospace font family — a "font theme". One of the bundled
+    /// (OFL-licensed) family display names; an unknown value falls back to the
+    /// default. Default: "JetBrains Mono".
+    #[serde(default = "default_editor_family")]
+    pub editor_family: String,
+}
+
+fn default_editor_family() -> String {
+    "JetBrains Mono".to_string()
 }
 
 impl Default for FontConfig {
@@ -358,6 +374,7 @@ impl Default for FontConfig {
         Self {
             editor_size: 14.0,
             line_height: 1.4,
+            editor_family: default_editor_family(),
         }
     }
 }
@@ -633,21 +650,26 @@ mod tests {
         assert!(!TabBarPosition::Bottom.is_vertical());
         assert!(TabBarPosition::Left.is_vertical());
         assert!(TabBarPosition::Right.is_vertical());
-        // The side-tab orientation override defaults to the vertical stack so
-        // existing side-bar users see no layout change.
-        assert!(EditorConfig::default().side_tabs_vertical);
+        // Side-tab rotation defaults OFF — labels stay horizontal (the familiar
+        // look) until the user opts into vertical text.
+        assert!(!EditorConfig::default().side_tabs_rotated);
     }
 
     #[test]
-    fn side_tabs_vertical_round_trips_and_back_fills_true_when_absent() {
-        // A config written before the field existed must deserialize with the
-        // field defaulting to true (the prior behaviour), not false.
+    fn side_tabs_rotated_round_trips_and_accepts_legacy_alias() {
+        // Absent → default false.
         let older = "tab_width = 2\n";
         let cfg: EditorConfig = toml::from_str(older).unwrap();
-        assert!(cfg.side_tabs_vertical, "absent field back-fills to true");
-        let explicit = "tab_width = 2\nside_tabs_vertical = false\n";
+        assert!(!cfg.side_tabs_rotated, "absent field defaults to false");
+        // Explicit new name.
+        let explicit = "tab_width = 2\nside_tabs_rotated = true\n";
         let cfg2: EditorConfig = toml::from_str(explicit).unwrap();
-        assert!(!cfg2.side_tabs_vertical);
+        assert!(cfg2.side_tabs_rotated);
+        // The old `side_tabs_vertical` name is accepted via serde alias so
+        // existing configs don't error.
+        let legacy = "tab_width = 2\nside_tabs_vertical = true\n";
+        let cfg3: EditorConfig = toml::from_str(legacy).unwrap();
+        assert!(cfg3.side_tabs_rotated, "legacy alias maps to the new field");
     }
 
     #[test]
