@@ -7141,6 +7141,59 @@ mod e2e {
         ScribeApp::new_test(cfg)
     }
 
+    // #91 render-coverage: exercise the new render paths headlessly via
+    // run_frames so the GUI-heavy code (rotated side tabs, spell underline
+    // painter, font-theme reapply, background tint) is actually executed.
+
+    #[test]
+    fn render_rotated_left_tab_bar_does_not_panic() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.editor.tab_bar_position = scribe_core::config::TabBarPosition::Left;
+        cfg.editor.side_tabs_rotated = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.new_tab();
+        app.tabs[0].pinned = true; // exercise the pin-glyph path too
+        run_frames(&mut app, 3);
+        assert!(app.tabs.len() >= 2);
+    }
+
+    #[test]
+    fn render_horizontal_left_tab_bar_does_not_panic() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.editor.tab_bar_position = scribe_core::config::TabBarPosition::Right;
+        cfg.editor.side_tabs_rotated = false;
+        let mut app = ScribeApp::new_test(cfg);
+        app.new_tab();
+        run_frames(&mut app, 3);
+        assert!(app.tabs.len() >= 2);
+    }
+
+    #[test]
+    fn render_spellcheck_underline_path_runs() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.spellcheck.enabled = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "this zxqwyzz wordd is rong".into();
+        run_frames(&mut app, 3); // paints the squiggles
+        assert!(!app.misspellings_for_active().is_empty());
+    }
+
+    #[test]
+    fn render_font_theme_bg_override_and_glass_paths_run() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.fonts.editor_family = "IBM Plex Mono".into();
+        cfg.appearance.background_override = Some("#203040".into());
+        cfg.window.transparency_enabled = true;
+        cfg.window.mode = scribe_core::config::WindowMode::Glass;
+        let mut app = ScribeApp::new_test(cfg);
+        run_frames(&mut app, 3); // build_fonts reapply + tint overlay + visuals
+        assert_eq!(app.applied_font_family, "IBM Plex Mono");
+    }
+
     #[test]
     fn toolbar_gear_opens_settings() {
         let mut h = ui_harness(fresh_app());
