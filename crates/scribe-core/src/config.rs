@@ -162,6 +162,11 @@ pub struct EditorConfig {
     /// familiar look. No effect for the Top/Bottom positions.
     #[serde(default, alias = "side_tabs_vertical")]
     pub side_tabs_rotated: bool,
+    /// Note (editor) syntax colour theme — the text colour scheme for the note
+    /// body, independent of the app chrome theme (#104). One of the bundled
+    /// syntect themes; an unknown value falls back to the default.
+    #[serde(default = "default_note_theme")]
+    pub note_theme: String,
     /// Phase 18 T18.2 — enable the multi-note grid. When ON, the central
     /// editor surface renders every open tab as a movable, resizable pane
     /// inside an egui_tiles tree (up to 6 panes). Default OFF — the
@@ -219,6 +224,11 @@ pub struct EditorConfig {
     /// untouched whether on or off.
     #[serde(default)]
     pub render_whitespace: bool,
+}
+
+/// serde default for the note syntax-colour theme (#104).
+fn default_note_theme() -> String {
+    "base16-eighties.dark".to_string()
 }
 
 /// serde default for opt-OUT booleans (fields that should be ON unless the
@@ -290,6 +300,7 @@ impl Default for EditorConfig {
             restore_session: true,
             tab_bar_position: TabBarPosition::Top,
             side_tabs_rotated: false,
+            note_theme: default_note_theme(),
             grid_enabled: false,
             recent_files: Vec::new(),
             first_run_completed: false,

@@ -571,6 +571,36 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 changed |= reset_to_default(ui, &mut config.fonts.ui_family, &def.fonts.ui_family);
             });
         }
+        if row_visible(q, "note colour color theme syntax text") {
+            // #104 — the note text colour scheme (syntax theme), independent of
+            // the app chrome theme. Applies live.
+            ui.horizontal(|ui| {
+                ui.label("Note colour theme").on_hover_text(
+                    "Colour scheme for the note text / syntax highlighting, separate from \
+                     the app theme. Applies live.",
+                );
+                egui::ComboBox::from_id_salt("note-theme-picker")
+                    .selected_text(config.editor.note_theme.clone())
+                    .show_ui(ui, |ui| {
+                        for name in crate::app::NOTE_THEMES {
+                            if ui
+                                .selectable_value(
+                                    &mut config.editor.note_theme,
+                                    (*name).to_string(),
+                                    *name,
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Pick a note text colour scheme.");
+                changed |=
+                    reset_to_default(ui, &mut config.editor.note_theme, &def.editor.note_theme);
+            });
+        }
         if row_visible(q, "editor size") {
             ui.horizontal(|ui| {
                 ui.label("Size")
@@ -2033,6 +2063,7 @@ mod wiring_guard {
         "fonts.line_height",
         "fonts.editor_family",
         "fonts.ui_family",
+        "editor.note_theme",
         "editor.tab_width",
         "editor.insert_spaces",
         "editor.show_line_numbers",

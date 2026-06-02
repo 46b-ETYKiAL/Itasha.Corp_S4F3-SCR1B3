@@ -452,6 +452,10 @@ pub struct ScribeApp {
     tabs: Vec<EditorTab>,
     active: usize,
     visuals_applied: bool,
+    /// The note (editor) syntax colour theme currently applied to `hl` (#104).
+    /// When `config.editor.note_theme` diverges, the highlighter is re-themed and
+    /// the highlight cache invalidated so colours refresh live.
+    applied_note_theme: String,
     /// The editor font family currently applied to the egui context (#87). When
     /// `config.fonts.editor_family` diverges from this, the font set is rebuilt
     /// and re-applied — a restart-free font-theme switch.
@@ -788,6 +792,7 @@ impl ScribeApp {
             tabs,
             visuals_applied: false,
             applied_font_family: String::new(),
+            applied_note_theme: String::new(),
             decorations_forced: false,
             want_close: false,
             closing: false,
@@ -3701,6 +3706,20 @@ pub(crate) const FONT_FAMILIES: &[(&str, &str)] = &[
     ("Cousine", "Cousine"),
 ];
 
+/// Selectable note (editor) colour themes (#104) — the syntect bundled set
+/// (`ThemeSet::load_defaults`). The Settings picker lists these; an unknown
+/// value is ignored by `Highlighter::set_theme`, so the list staying in sync is
+/// best-effort, never load-bearing.
+pub(crate) const NOTE_THEMES: &[&str] = &[
+    "base16-eighties.dark",
+    "base16-mocha.dark",
+    "base16-ocean.dark",
+    "base16-ocean.light",
+    "InspiredGitHub",
+    "Solarized (dark)",
+    "Solarized (light)",
+];
+
 /// Change-detection key for the live font set (#103): note family + UI family.
 /// When this string changes, the font set is rebuilt and re-applied.
 fn font_state_key(fonts: &scribe_core::config::FontConfig) -> String {
@@ -4259,6 +4278,15 @@ impl ScribeApp {
                 &self.config.fonts.ui_family,
             ));
             self.applied_font_family = font_key;
+        }
+
+        // #104 — apply the note syntax colour theme to the highlighter when it
+        // changes (also runs once on the first frame to honour the saved
+        // config). Clearing the highlight cache forces a re-colour next render.
+        if self.config.editor.note_theme != self.applied_note_theme {
+            self.hl.set_theme(&self.config.editor.note_theme);
+            *self.hl_cache.borrow_mut() = None;
+            self.applied_note_theme = self.config.editor.note_theme.clone();
         }
 
         // Live-reload config when the file changes on disk (external edit).
