@@ -1963,16 +1963,16 @@ impl ScribeApp {
         ui: &mut egui::Ui,
         accent: Color32,
         muted: Color32,
-        vertical: bool,
+        _rotated: bool,
     ) {
+        // A side tab bar is ALWAYS a single vertical column of tabs (one per
+        // row). The earlier horizontal-wrap experiment was wrong — the user
+        // wants the column preserved; the orientation option (#82) only rotates
+        // each tab's TEXT, not the stacking. Scrolls so no tab is unreachable.
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if vertical {
-                    ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
-                } else {
-                    ui.horizontal_wrapped(|ui| self.draw_tab_strip(ui, accent, muted));
-                }
+                ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
             });
     }
 
@@ -2023,60 +2023,84 @@ impl ScribeApp {
             // Pinned tabs carry a visible pin glyph so the state is obvious
             // without opening the right-click menu.
             let shown = tab_display_label(&self.tabs[i].title(), pinned);
-            let label = RichText::new(shown.clone()).color(if selected { accent } else { muted });
-
-            let resp = ui
-                .add(egui::SelectableLabel::new(selected, label))
-                .interact(egui::Sense::click_and_drag());
-            if resp.clicked() {
-                switch_to = Some(i);
-            }
-            if resp.clicked_by(egui::PointerButton::Middle) {
-                close = Some(i);
-            }
-            let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
-            resp.context_menu(|ui| {
-                if ui.button("Close").clicked() {
+            // #83 — each tab is its own little group so the controls clearly
+            // belong to the tab: the selectable label (click = switch, drag =
+            // reorder), then a pin toggle shown ONLY on the active tab, then a
+            // close button shown on EVERY tab. In a horizontal strip the tabs
+            // flow left-to-right; in a side strip each group is a row with the
+            // close button on the right.
+            ui.horizontal(|ui| {
+                let label =
+                    RichText::new(shown.clone()).color(if selected { accent } else { muted });
+                let resp = ui
+                    .add(egui::SelectableLabel::new(selected, label))
+                    .interact(egui::Sense::click_and_drag());
+                if resp.clicked() {
+                    switch_to = Some(i);
+                }
+                if resp.clicked_by(egui::PointerButton::Middle) {
                     close = Some(i);
-                    ui.close_menu();
                 }
-                if ui.button("Close Others").clicked() {
-                    close_others = Some(i);
-                    ui.close_menu();
+                let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
+                resp.context_menu(|ui| {
+                    if ui.button("Close").clicked() {
+                        close = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close Others").clicked() {
+                        close_others = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All to the Right").clicked() {
+                        close_to_right = Some(i);
+                        ui.close_menu();
+                    }
+                    if ui.button("Close All").clicked() {
+                        close_all = true;
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button(pin_label).clicked() {
+                        toggle_pin = Some(i);
+                        ui.close_menu();
+                    }
+                });
+                // Dim the tab being dragged; capture the source + release position.
+                if resp.dragged() {
+                    ui.painter()
+                        .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        dragging = Some((i, shown.clone(), p));
+                    }
                 }
-                if ui.button("Close All to the Right").clicked() {
-                    close_to_right = Some(i);
-                    ui.close_menu();
+                if resp.drag_stopped() {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        drag_src = Some(i);
+                        drop_pos = Some(pos);
+                    }
                 }
-                if ui.button("Close All").clicked() {
-                    close_all = true;
-                    ui.close_menu();
+                rects.push((i, resp.rect));
+                // Pin TOGGLE — only on the active tab (the pin GLYPH in the label
+                // still marks any pinned tab, so non-active pins stay visible).
+                if selected {
+                    let glyph = if pinned {
+                        egui_phosphor::thin::PUSH_PIN_SLASH
+                    } else {
+                        egui_phosphor::thin::PUSH_PIN
+                    };
+                    if ui.small_button(glyph).on_hover_text(pin_label).clicked() {
+                        toggle_pin = Some(i);
+                    }
                 }
-                ui.separator();
-                if ui.button(pin_label).clicked() {
-                    toggle_pin = Some(i);
-                    ui.close_menu();
+                // Close — on EVERY tab so any tab can be closed directly.
+                if ui
+                    .small_button(egui_phosphor::thin::X)
+                    .on_hover_text("Close tab (or middle-click)")
+                    .clicked()
+                {
+                    close = Some(i);
                 }
             });
-            // Dim the tab being dragged; capture the source + release position.
-            if resp.dragged() {
-                ui.painter()
-                    .rect_filled(resp.rect, 0.0, accent.linear_multiply(0.10));
-                if let Some(p) = resp.interact_pointer_pos() {
-                    dragging = Some((i, shown.clone(), p));
-                }
-            }
-            if resp.drag_stopped() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    drag_src = Some(i);
-                    drop_pos = Some(pos);
-                }
-            }
-            rects.push((i, resp.rect));
-
-            if selected && ui.small_button("×").clicked() {
-                close = Some(i);
-            }
         }
 
         // "+" — add a new tab at the end of the strip (same as Ctrl+N).
