@@ -539,6 +539,11 @@ pub struct ScribeApp {
     /// Cached syntax-highlight layout (keyed by text+lang+size) so syntect only
     /// re-runs when the buffer changes, not every frame (perf hotspot fix).
     hl_cache: std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
+    /// Memoized misspellings for the active buffer (#78), keyed by a hash of
+    /// (text, enabled, scope toggles, language). Drives BOTH the status-bar
+    /// count and the red squiggle underlines painted in the editor, so the
+    /// dictionary scan runs at most once per (changed) frame.
+    spell_cache: std::cell::RefCell<Option<(u64, Vec<spell::Misspelling>)>>,
     /// Config-file watcher for live-reload (kept alive; events arrive on `cfg_rx`).
     _cfg_watcher: Option<notify::RecommendedWatcher>,
     cfg_rx: Option<std::sync::mpsc::Receiver<()>>,
@@ -827,6 +832,7 @@ impl ScribeApp {
             last_autosave_at: None,
             last_backup_sig: 0,
             hl_cache: std::cell::RefCell::new(None),
+            spell_cache: std::cell::RefCell::new(None),
             _cfg_watcher: cfg_watcher,
             cfg_rx: Some(cfg_rx),
             fold_view: false,
@@ -1399,12 +1405,20 @@ impl ScribeApp {
 
     /// Count misspellings in the active buffer when spellcheck is enabled.
     fn spell_count(&self) -> usize {
+        self.misspellings_for_active().len()
+    }
+
+    /// Misspellings in the active buffer (#78), memoized by a content+config
+    /// hash so the dictionary scan runs once per changed frame and is shared by
+    /// the status-bar count and the editor underline painter. Empty when
+    /// spellcheck is off or there is no active buffer.
+    fn misspellings_for_active(&self) -> Vec<spell::Misspelling> {
         if !self.config.spellcheck.enabled {
-            return 0;
+            return Vec::new();
         }
         let active = self.active.min(self.tabs.len().saturating_sub(1));
         let Some(tab) = self.tabs.get(active) else {
-            return 0;
+            return Vec::new();
         };
         // Scope the check to the requested token classes (comments / strings /
         // identifiers) using the highlighter's classified spans, so the three
@@ -1417,6 +1431,23 @@ impl ScribeApp {
             self.config.spellcheck.check_identifiers,
         );
         let ext = tab.doc.language_hint();
+        // Cache key: text + scope toggles + language. A change to any of these
+        // invalidates the memo.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            tab.text.hash(&mut h);
+            self.config.spellcheck.check_comments.hash(&mut h);
+            self.config.spellcheck.check_strings.hash(&mut h);
+            self.config.spellcheck.check_identifiers.hash(&mut h);
+            ext.hash(&mut h);
+            h.finish()
+        };
+        if let Some((k, v)) = self.spell_cache.borrow().as_ref() {
+            if *k == key {
+                return v.clone();
+            }
+        }
         let spans = self.hl.classify_document(&tab.text, ext.as_deref());
         // Scoping (comments / strings / identifiers) is a CODE concept. When the
         // buffer has no code structure — an untitled note, plain text, markdown —
@@ -1426,10 +1457,13 @@ impl ScribeApp {
         let has_code_structure = spans
             .iter()
             .any(|s| !matches!(s.class, spell::SpanClass::Other));
-        if !has_code_structure {
-            return spell::check_text(&self.spell, &tab.text, true).len();
-        }
-        spell::check_text_scoped(&self.spell, &tab.text, &spans, scope).len()
+        let result = if has_code_structure {
+            spell::check_text_scoped(&self.spell, &tab.text, &spans, scope)
+        } else {
+            spell::check_text(&self.spell, &tab.text, true)
+        };
+        *self.spell_cache.borrow_mut() = Some((key, result.clone()));
+        result
     }
 
     /// Persist the current config to the user TOML file (creating the config
@@ -3435,6 +3469,35 @@ fn effective_wrap_width(word_wrap: bool, available: f32) -> f32 {
     }
 }
 
+/// Char index of byte offset `byte` in `s` (#78 — spell spans are byte offsets,
+/// galley cursors are char indices). Clamps to the nearest char boundary at or
+/// before `byte`, so a mid-codepoint offset never panics.
+fn byte_to_char_index(s: &str, byte: usize) -> usize {
+    s.char_indices().take_while(|(i, _)| *i < byte).count()
+}
+
+/// Paint a red spellcheck squiggle from `x0` to `x1` along baseline `y` (#78).
+/// A small triangle wave reads as the universal "misspelled" underline.
+fn paint_squiggle(painter: &egui::Painter, x0: f32, x1: f32, y: f32, color: Color32) {
+    if x1 <= x0 {
+        return;
+    }
+    let amp = 1.5;
+    let step = 3.0;
+    let stroke = egui::Stroke::new(1.0, color);
+    let mut x = x0;
+    let mut up = true;
+    let mut prev = egui::pos2(x0, y);
+    while x < x1 {
+        x = (x + step).min(x1);
+        let ny = if up { y - amp } else { y + amp };
+        let next = egui::pos2(x, ny);
+        painter.line_segment([prev, next], stroke);
+        prev = next;
+        up = !up;
+    }
+}
+
 fn make_layouter<'a>(
     hl: &'a Highlighter,
     cache: &'a std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
@@ -5219,6 +5282,10 @@ impl ScribeApp {
                     self.indent_with_spaces(ctx, editor_id, active);
                 }
 
+                // #78 — misspellings for the active buffer, computed (memoized)
+                // BEFORE the partial borrows below so the owned Vec can move into
+                // the editor closure and drive the red underline painter.
+                let misspellings = self.misspellings_for_active();
                 // Scope the layouter (which borrows `self.hl`) so it drops before
                 // the `&mut self` completion calls below.
                 let mut new_gutter: Vec<f32> = Vec::new();
@@ -5260,6 +5327,30 @@ impl ScribeApp {
                             .interactive(!read_only)
                             .layouter(&mut layouter);
                         let out = editor.show(ui);
+                        // #78 — paint a red squiggle under each misspelling. Map
+                        // the byte span to galley cursor rects and draw a wavy
+                        // underline along the word's baseline. Painted on the
+                        // editor's own layer so it scrolls with the text.
+                        if !misspellings.is_empty() {
+                            let text_ref = &self.tabs[active].text;
+                            let painter = ui.painter();
+                            let red = Color32::from_rgb(0xe5, 0x3e, 0x3e);
+                            for m in &misspellings {
+                                let c0 = byte_to_char_index(text_ref, m.start);
+                                let c1 = byte_to_char_index(text_ref, m.end);
+                                let r0 = out.galley.pos_from_cursor(egui::text::CCursor::new(c0));
+                                let r1 = out.galley.pos_from_cursor(egui::text::CCursor::new(c1));
+                                // Same row only (words don't wrap); skip if the
+                                // span spans rows (rare) to avoid a stray line.
+                                if (r0.min.y - r1.min.y).abs() > 0.5 {
+                                    continue;
+                                }
+                                let y = out.galley_pos.y + r0.max.y;
+                                let x0 = out.galley_pos.x + r0.min.x;
+                                let x1 = out.galley_pos.x + r1.min.x;
+                                paint_squiggle(painter, x0, x1, y, red);
+                            }
+                        }
                         if let Some(range) = out.cursor_range {
                             // egui 0.34: CursorRange.primary is a CCursor directly
                             // (no nested .ccursor); Galley::pos_from_ccursor was
@@ -5929,6 +6020,48 @@ mod resize_tests {
     fn outside_the_window_is_none() {
         assert_eq!(resize_dir_at(pos2(-5.0, 350.0), win(), 6.0, 12.0), None);
         assert_eq!(resize_dir_at(pos2(500.0, 800.0), win(), 6.0, 12.0), None);
+    }
+}
+
+#[cfg(test)]
+mod spell_underline_tests {
+    //! #78 — spellcheck underlines. The byte→char mapping must be correct
+    //! (galley cursors are char-indexed; spell spans are byte-indexed) and the
+    //! active-buffer misspelling scan must actually flag a bad word so the
+    //! painter has something to draw.
+    use super::{byte_to_char_index, ScribeApp};
+    use scribe_core::Config;
+
+    #[test]
+    fn byte_to_char_handles_multibyte() {
+        // "café word" — 'é' is 2 bytes, so byte 6 (start of "word") is char 5.
+        let s = "café word";
+        assert_eq!(byte_to_char_index(s, 0), 0);
+        assert_eq!(byte_to_char_index(s, 5), 4, "byte after é → char 4");
+        assert_eq!(byte_to_char_index(s, 6), 5, "start of 'word' → char 5");
+        assert_eq!(byte_to_char_index(s, 999), s.chars().count(), "clamps");
+    }
+
+    #[test]
+    fn active_buffer_misspelling_is_detected_when_enabled() {
+        let mut cfg = Config::default();
+        cfg.spellcheck.enabled = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "this zxqwyzz is wrong".into();
+        let found = app.misspellings_for_active();
+        assert!(
+            found.iter().any(|m| m.word.contains("zxqwyzz")),
+            "the nonsense word must be flagged (got {found:?})"
+        );
+    }
+
+    #[test]
+    fn no_misspellings_when_spellcheck_disabled() {
+        let mut cfg = Config::default();
+        cfg.spellcheck.enabled = false;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "zxqwyzz".into();
+        assert!(app.misspellings_for_active().is_empty());
     }
 }
 
