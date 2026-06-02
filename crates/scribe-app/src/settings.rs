@@ -4,7 +4,7 @@
 //! `ScribeApp` borrow.
 //!
 //! Layout: a resizable window with a left category nav + a searchable,
-//! internally-scrolling content pane — so every setting is reachable at the
+//! internally-scrolling content pane â so every setting is reachable at the
 //! default size without resizing, while the window can still be dragged,
 //! resized, and closed normally (`ScrollArea` with `auto_shrink([false,
 //! false])` is the load-bearing idiom here). Every control carries an
@@ -27,9 +27,9 @@ const CATEGORIES: &[&str] = &[
     "Toolbar",
 ];
 
-/// egui temp-data key the Plugins section sets when "Manage plugins…" is
+/// egui temp-data key the Plugins section sets when "Manage pluginsâ¦" is
 /// clicked. The host reads + clears it after [`show`] returns and opens its
-/// own plugin-manager modal — settings owns no modal state of its own.
+/// own plugin-manager modal â settings owns no modal state of its own.
 fn open_plugin_manager_id() -> egui::Id {
     egui::Id::new("scr1b3_open_plugin_manager")
 }
@@ -56,10 +56,10 @@ fn settings_cat_id() -> egui::Id {
 
 /// Pre-select which category [`show`] opens on. The host calls this when it
 /// opens Settings from a deep-link affordance (e.g. the status-bar encoding /
-/// language chips that advertise "Settings → Editor"). [`show`] reads the same
+/// language chips that advertise "Settings â Editor"). [`show`] reads the same
 /// temp key on its next frame, so the window opens on `category` instead of the
 /// last-used / default "Appearance". No-op if `category` is not a real section
-/// name — the nav simply falls back to its default selection.
+/// name â the nav simply falls back to its default selection.
 pub fn request_category(ctx: &egui::Context, category: &str) {
     ctx.data_mut(|d| d.insert_temp(settings_cat_id(), category.to_string()));
 }
@@ -93,7 +93,7 @@ fn row_visible(q: &str, label: &str) -> bool {
     q.is_empty() || label.to_lowercase().contains(q)
 }
 
-/// F-037 — a per-setting "restore default" affordance. Renders a small ↺
+/// F-037 â a per-setting "restore default" affordance. Renders a small âº
 /// button that is enabled only when `cur != def`; clicking it resets the
 /// field and returns `true` so the caller marks settings dirty. Placed at the
 /// end of a setting's row, it gives every scalar setting its own one-click
@@ -103,7 +103,7 @@ fn reset_to_default<T: PartialEq + Clone>(ui: &mut egui::Ui, cur: &mut T, def: &
     let resp = ui
         .add_enabled(
             differs,
-            egui::Button::new(egui::RichText::new("↺").small()).frame(false),
+            egui::Button::new(egui::RichText::new("âº").small()).frame(false),
         )
         .on_hover_text(if differs {
             "Restore default"
@@ -117,10 +117,10 @@ fn reset_to_default<T: PartialEq + Clone>(ui: &mut egui::Ui, cur: &mut T, def: &
     false
 }
 
-/// Human label for a toolbar action id (`"sep"` → separator).
+/// Human label for a toolbar action id (`"sep"` â separator).
 fn action_label(id: &str) -> String {
     if id == "sep" {
-        return "— separator —".to_string();
+        return "â separator â".to_string();
     }
     crate::app::TOOLBAR_ACTIONS
         .iter()
@@ -149,7 +149,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
         .collapsible(false)
         // Resizable + a default (not fixed) size restores egui's standard
         // window layout: a full-width title bar that is draggable across its
-        // whole span, a correctly-placed close (✕) button, and resize handles.
+        // whole span, a correctly-placed close (â) button, and resize handles.
         // The previous `.resizable(false).fixed_size(...)` was the single root
         // cause of "only the left half drags", the dead close button, and the
         // un-resizable window.
@@ -157,7 +157,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
         .default_size([760.0, 560.0])
         .min_width(420.0)
         .min_height(320.0)
-        // #77 — force the Settings window OPAQUE. The app-window transparency /
+        // #77 â force the Settings window OPAQUE. The app-window transparency /
         // glass setting drives a translucent `window_fill`; without this the
         // Settings panel itself went see-through, which is not what the
         // app-background transparency option is for. Take the theme's window
@@ -183,7 +183,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
                 // ---- Searchable content pane ----
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
-                        ui.label("🔍");
+                        ui.label("ð");
                         ui.add(
                             egui::TextEdit::singleline(&mut query)
                                 .hint_text("search settings")
@@ -228,15 +228,20 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
 /// squished even at the default window size.
 fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -> bool {
     let mut changed = false;
-    // Roomier vertical rhythm so rows don't feel cramped — egui's default item
+    // Roomier vertical rhythm so rows don't feel cramped â egui's default item
     // spacing (~3px) is what made settings hard to read. Applies to every row.
     ui.spacing_mut().item_spacing.y = 8.0;
     let space = |ui: &mut egui::Ui| ui.add_space(12.0);
-    // Sub-group header inside a category page: a little breathing room, a strong
-    // accented label, and a thin rule, so related settings read as a group.
-    let group = |ui: &mut egui::Ui, label: &str| {
-        ui.add_space(6.0);
+    // Sub-group header inside a category page (Copland-style #102): a strong
+    // single-concept label, a muted one-line "what it controls" sentence, and a
+    // thin rule â mirroring Copland's CONFIG.md section formatting so every
+    // group reads as a self-explanatory section.
+    let group = |ui: &mut egui::Ui, label: &str, desc: &str| {
+        ui.add_space(8.0);
         ui.label(egui::RichText::new(label).strong());
+        if !desc.is_empty() {
+            ui.label(egui::RichText::new(desc).weak().small());
+        }
         ui.separator();
     };
     // Category page header: the heading plus a muted one-line description of what
@@ -246,8 +251,8 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.label(egui::RichText::new(desc).weak().small());
         ui.add_space(2.0);
     };
-    // F-037 — the default config, used by `reset_to_default` for every
-    // per-setting ↺ revert button. Cheap to construct once per render.
+    // F-037 â the default config, used by `reset_to_default` for every
+    // per-setting âº revert button. Cheap to construct once per render.
     let def = Config::default();
 
     // ---- Appearance ----
@@ -284,7 +289,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                                 )
                                 .changed()
                             {
-                                // #88/#106 — switching theme resets BOTH the app
+                                // #88/#106 â switching theme resets BOTH the app
                                 // and note background overrides to the new theme.
                                 config.appearance.background_override = None;
                                 config.appearance.note_background_override = None;
@@ -300,7 +305,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             if row_visible(q, "theme custom name") {
                 let name_changed = ui
                     .horizontal(|ui| {
-                        ui.label("…or user theme name");
+                        ui.label("â¦or user theme name");
                         ui.text_edit_singleline(&mut config.appearance.theme)
                             .on_hover_text(
                                 "If a TOML at <config_dir>/themes/<name>.toml exists \
@@ -317,7 +322,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 }
             }
             if row_visible(q, "background colour color app override") {
-                // #88 — app background colour, independent of the theme. The
+                // #88 â app background colour, independent of the theme. The
                 // button shows the current override (or a neutral placeholder
                 // when following the theme); picking a colour pins it, "Follow
                 // theme" clears it back to the theme's background.
@@ -349,7 +354,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 });
             }
             if row_visible(q, "note background link app editor separate together") {
-                // #106 — link toggle + the note (editor well) background. When
+                // #106 â link toggle + the note (editor well) background. When
                 // linked, the note follows the app background; when separate, the
                 // note has its own colour.
                 ui.horizontal(|ui| {
@@ -359,7 +364,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                             "Link app & note backgrounds",
                         )
                         .on_hover_text(
-                            "ON: the note (editor) background follows the app background — \
+                            "ON: the note (editor) background follows the app background â \
                              one control changes both. OFF: set the note background \
                              separately below.",
                         )
@@ -403,7 +408,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 changed |= render_theme_export(ui, config);
             }
             if row_visible(q, "live color picker edit theme customize palette") {
-                // Phase 17 T17.6b — in-app live color editor. Only renders
+                // Phase 17 T17.6b â in-app live color editor. Only renders
                 // when the active theme has a user TOML on disk (Export
                 // first if not). Pickers write changes back to the TOML;
                 // the watcher reloads + applies them live.
@@ -453,7 +458,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     )
                     .on_hover_text(
                         "When off, the quick-access toolbar renders text labels (the default). \
-                         When on, items render as Phosphor Thin icon glyphs — compact, brand-aligned.",
+                         When on, items render as Phosphor Thin icon glyphs â compact, brand-aligned.",
                     )
                     .changed();
                 changed |= reset_to_default(
@@ -468,12 +473,12 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 changed |= ui
                     .checkbox(
                         &mut config.appearance.jp_glyph_labels,
-                        "Toolbar — show kanji instrument labels (additive)",
+                        "Toolbar â show kanji instrument labels (additive)",
                     )
                     .on_hover_text(
                         "Adds a small, dim kanji to each toolbar action whose canonical \
-                         Japanese term is verified (e.g. New → 新, Save → 保, Find → 検). \
-                         English-redundant — the kanji never replaces the label. \
+                         Japanese term is verified (e.g. New â æ°, Save â ä¿, Find â æ¤). \
+                         English-redundant â the kanji never replaces the label. \
                          Actions whose canonical kanji is uncertain stay English-only \
                          (Folklore-Consultant gate, DECISION-2026-005).",
                     )
@@ -499,11 +504,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         head(
             ui,
             "Fonts",
-            "Editor font family, text size, and line spacing. (Ligatures are off — \
+            "Editor font family, text size, and line spacing. (Ligatures are off â \
              the renderer does no OpenType shaping.)",
         );
         if row_visible(q, "font family theme editor note") {
-            // #87/#103 — the NOTE (editor) monospace face, chosen separately
+            // #87/#103 â the NOTE (editor) monospace face, chosen separately
             // from the app-UI font below.
             ui.horizontal(|ui| {
                 ui.label("Note font")
@@ -534,7 +539,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             });
         }
         if row_visible(q, "ui font app interface family") {
-            // #103 — the app-UI (proportional) font, separate from the note font.
+            // #103 â the app-UI (proportional) font, separate from the note font.
             ui.horizontal(|ui| {
                 ui.label("App UI font").on_hover_text(
                     "Font for the app interface (toolbar, settings, status). \
@@ -572,7 +577,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             });
         }
         if row_visible(q, "note colour color theme syntax text") {
-            // #104 — the note text colour scheme (syntax theme), independent of
+            // #104 â the note text colour scheme (syntax theme), independent of
             // the app chrome theme. Applies live.
             ui.horizontal(|ui| {
                 ui.label("Note colour theme").on_hover_text(
@@ -668,7 +673,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         );
 
         // -- Indentation --
-        group(ui, "Indentation");
+        group(
+            ui,
+            "Indentation",
+            "Tabs vs spaces, and how wide one indent step is.",
+        );
         ui.add_space(4.0);
         if row_visible(q, "tab width") {
             ui.horizontal(|ui| {
@@ -696,7 +705,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Display --
-        group(ui, "Display");
+        group(
+            ui,
+            "Display",
+            "What is shown around the text — line numbers, minimap, wrapping, whitespace.",
+        );
         ui.add_space(4.0);
         if row_visible(q, "line numbers") {
             ui.horizontal(|ui| {
@@ -744,7 +757,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 changed |= ui
                     .checkbox(
                         &mut config.editor.render_whitespace,
-                        "Render whitespace (· spaces, → tabs — experimental editor)",
+                        "Render whitespace (Â· spaces, â tabs â experimental editor)",
                     )
                     .on_hover_text(
                         "Draw faint markers for spaces and tabs so invisible whitespace is \
@@ -761,7 +774,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Layout --
-        group(ui, "Layout");
+        group(
+            ui,
+            "Layout",
+            "Where the tab bar sits and how the editor surface is arranged.",
+        );
         ui.add_space(4.0);
         if row_visible(q, "tab bar position top bottom left right") {
             // T18.4: position the open-tab strip relative to the editor.
@@ -806,7 +823,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             q,
             "side tab orientation vertical horizontal rotate left right",
         ) {
-            // #82 — only meaningful when the tab bar is on the Left/Right; the
+            // #82 â only meaningful when the tab bar is on the Left/Right; the
             // Top/Bottom positions are always horizontal. Disable (greyed) the
             // control otherwise so the dependency is obvious rather than silent.
             let is_side = config.editor.tab_bar_position.is_vertical();
@@ -819,7 +836,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         )
                         .on_hover_text(
                             "When the tab bar is on the Left or Right: ON rotates each tab's \
-                             label 90° so the text reads vertically, while the tabs stay in a \
+                             label 90Â° so the text reads vertically, while the tabs stay in a \
                              single column. OFF keeps the labels horizontal. No effect for \
                              Top/Bottom.",
                         )
@@ -833,7 +850,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             });
         }
         if row_visible(q, "multi-note grid panes split editor central") {
-            // Phase 18 T18.2 — toggle the multi-note grid. When ON, the
+            // Phase 18 T18.2 â toggle the multi-note grid. When ON, the
             // central editor surface renders every open tab as a movable,
             // resizable pane via egui_tiles. The single-pane code path
             // is unchanged for users who don't opt in.
@@ -846,7 +863,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     .on_hover_text(
                         "Render every open tab as a movable / resizable pane in the central \
                          editor. Drag tabs between panes to rearrange; drag the splitter to resize. \
-                         Cap of 6 panes lands in a follow-up; for now use the close ✕ on each pane \
+                         Cap of 6 panes lands in a follow-up; for now use the close â on each pane \
                          to dismiss.",
                     )
                     .changed();
@@ -881,7 +898,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Save & Session --
-        group(ui, "Save & Session");
+        group(
+            ui,
+            "Save & Session",
+            "Autosave, session restore, and on-save cleanup.",
+        );
         ui.add_space(4.0);
         if row_visible(q, "restore session") {
             ui.horizontal(|ui| {
@@ -907,7 +928,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     )
                     .on_hover_text(
                         "Keeps a backup of unsaved buffers (including never-saved scratch \
-                         notes) so they come back after a restart or crash — no save needed. \
+                         notes) so they come back after a restart or crash â no save needed. \
                          Backups live in the config 'backup' folder and are deleted once you \
                          save. On by default.",
                     )
@@ -1006,14 +1027,14 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             "Motion",
             "Subtle interface animation. Turn off for a fully static UI.",
         );
-        // Master OFF by default — calm-surface principle (DECISION-2026-005);
+        // Master OFF by default â calm-surface principle (DECISION-2026-005);
         // animation is opt-in so idle frames cost the same as plain egui.
         ui.horizontal(|ui| {
             changed |= ui
                 .checkbox(&mut config.motion.enabled, "Enable animations")
                 .on_hover_text(
                     "Master switch. When off, transitions are instant (no fades) and the text \
-                     caret stays steady — idle frames cost the same as plain egui.",
+                     caret stays steady â idle frames cost the same as plain egui.",
                 )
                 .changed();
             changed |= reset_to_default(ui, &mut config.motion.enabled, &def.motion.enabled);
@@ -1066,9 +1087,9 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         );
 
         // -- Always on top --
-        group(ui, "Always on top");
+        group(ui, "Always on top", "Keep the window above other windows.");
         ui.add_space(4.0);
-        // F-035 — always-on-top toggle. Takes effect immediately via the
+        // F-035 â always-on-top toggle. Takes effect immediately via the
         // ViewportCommand the app issues when this checkbox flips.
         ui.horizontal(|ui| {
             changed |= ui
@@ -1084,7 +1105,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         ui.add_space(6.0);
 
         // -- Transparency / glass --
-        group(ui, "Transparency / glass");
+        group(
+            ui,
+            "Transparency / glass",
+            "Window translucency and the OS glass / blur effect.",
+        );
         ui.add_space(4.0);
         // Master on/off switch for the whole transparency system. Off by default:
         // a normal opaque window is fast and never leaves a DWM ghost on close.
@@ -1148,7 +1173,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                                 .text("opacity"),
                         )
                         .on_hover_text(
-                            "How see-through the window is — 1.0 is fully opaque, lower is more \
+                            "How see-through the window is â 1.0 is fully opaque, lower is more \
                              transparent. Only active for translucent modes.",
                         )
                         .changed();
@@ -1174,7 +1199,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                             .text("tint strength"),
                     )
                     .on_hover_text(
-                        "How strongly the tint colour is blended over the surface — 0 is none, \
+                        "How strongly the tint colour is blended over the surface â 0 is none, \
                          1 is full.",
                     )
                     .changed();
@@ -1204,7 +1229,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         head(
             ui,
             "Spellcheck (offline)",
-            "Dictionary spellchecking that runs entirely on-device — no network.",
+            "Dictionary spellchecking that runs entirely on-device â no network.",
         );
         ui.horizontal(|ui| {
             changed |= ui
@@ -1313,11 +1338,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
         head(
             ui,
             "Updates (telemetry-free)",
-            "Update REMINDERS — SCR1B3 never checks the network in the background and \
+            "Update REMINDERS â SCR1B3 never checks the network in the background and \
              never auto-installs. A reminder just opens the GitHub releases page so you \
              can compare versions and download a new build yourself.",
         );
-        // #109 — show the running version so "Check for updates now" is concretely
+        // #109 â show the running version so "Check for updates now" is concretely
         // verifiable: open the releases page, compare to this number.
         ui.label(
             egui::RichText::new(format!("You are running v{}.", env!("CARGO_PKG_VERSION")))
@@ -1355,7 +1380,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     "How update reminders work: off (never remind), notify (remind me when a \
                      check is due), manual (only when I press Check now), or auto (open the \
                      releases page automatically when due). Telemetry-free: SCR1B3 never \
-                     contacts the network in the background — a reminder only ever opens the \
+                     contacts the network in the background â a reminder only ever opens the \
                      public GitHub releases page in your browser.",
                 );
             changed |= reset_to_default(ui, &mut config.updates.mode, &def.updates.mode);
@@ -1369,7 +1394,7 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                         &mut config.updates.check_interval_hours,
                         1..=168,
                     ))
-                    .on_hover_text("How often, in hours, to check for a new release (1–168).")
+                    .on_hover_text("How often, in hours, to check for a new release (1â168).")
                     .changed();
                 changed |= reset_to_default(
                     ui,
@@ -1417,15 +1442,15 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
             changed |= reset_to_default(ui, &mut config.plugins.enabled, &def.plugins.enabled);
         });
         ui.label(
-            egui::RichText::new("Drop mods into the plugins dir — see PLUGINS.md")
+            egui::RichText::new("Drop mods into the plugins dir â see PLUGINS.md")
                 .weak()
                 .small(),
         );
-        // F-039 — open the plugin manager (Loaded / Registry / Install). The
+        // F-039 â open the plugin manager (Loaded / Registry / Install). The
         // request is stashed in egui temp data; the host reads + clears it
         // after `show` returns so it can open its own modal state.
         if ui
-            .button("Manage plugins…")
+            .button("Manage pluginsâ¦")
             .on_hover_text(
                 "Open the plugin manager to view loaded plugins, browse the registry, and \
                  install new ones.",
@@ -1463,14 +1488,14 @@ enum ToolbarDrag {
 /// Add / remove / reorder the quick-access toolbar items. Returns `true` on any
 /// edit so the caller persists the new layout.
 ///
-/// Phase 18 T18.5b — drag-to-reorder + drag-from-palette layered on top of the
-/// existing keyboard-accessible ↑/↓/✕ controls. The drag-and-drop is
+/// Phase 18 T18.5b â drag-to-reorder + drag-from-palette layered on top of the
+/// existing keyboard-accessible â/â/â controls. The drag-and-drop is
 /// **additive**: keyboard users keep the buttons; pointer users get the
 /// direct-manipulation UX the plan calls out.
 fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     use egui_phosphor::thin as ph;
     let mut changed = false;
-    // #80 — pin the editor to the available width so its wide children (the
+    // #80 â pin the editor to the available width so its wide children (the
     // palette's wrapped row of chips) WRAP instead of forcing the resizable
     // Settings window to balloon to fit them.
     ui.set_max_width(ui.available_width());
@@ -1486,7 +1511,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     ui.label(
         egui::RichText::new(
             "Choose what shows in the top bar. Drag rows to reorder; drag from the \
-             palette to add. Keyboard: ↑/↓ reorder, ✕ removes.",
+             palette to add. Keyboard: â/â reorder, â removes.",
         )
         .weak()
         .small(),
@@ -1568,11 +1593,11 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     for i in 0..n {
         let label = action_label(&config.toolbar.items[i]);
         // Each row is a drag source carrying `Reorder(i)`. egui paints the
-        // body at the cursor while dragging — free live preview.
+        // body at the cursor while dragging â free live preview.
         let drag_id = egui::Id::new(("scr1b3-toolbar-item-drag", i));
         ui.dnd_drag_source(drag_id, ToolbarDrag::Reorder(i), |ui| {
             ui.horizontal(|ui| {
-                // A grip glyph signals "this row is draggable" (#89 — phosphor
+                // A grip glyph signals "this row is draggable" (#89 â phosphor
                 // icons instead of raw braille/arrows that rendered as tofu).
                 ui.add(
                     egui::Label::new(egui::RichText::new(ph::DOTS_SIX_VERTICAL).weak())
@@ -1626,7 +1651,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         }
     }
     // A leading drop zone before the first row so the user can drop AT
-    // INDEX 0. Rendered AFTER the loop to keep the row indices stable —
+    // INDEX 0. Rendered AFTER the loop to keep the row indices stable â
     // the drop position is recorded as 0.
     let (_lead_resp, lead_dropped) = ui.dnd_drop_zone::<ToolbarDrag, _>(
         egui::Frame::default()
@@ -1681,7 +1706,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     }
 
     ui.add_space(6.0);
-    // Palette — each available action is a drag source carrying its id.
+    // Palette â each available action is a drag source carrying its id.
     // The original ComboBox (keyboard discoverable) stays for keyboard users.
     ui.label(
         egui::RichText::new("Palette (drag onto the list)")
@@ -1692,7 +1717,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         for (id, label) in crate::app::TOOLBAR_ACTIONS {
             let drag_id = egui::Id::new(("scr1b3-toolbar-palette-drag", *id));
             ui.dnd_drag_source(drag_id, ToolbarDrag::AddAction((*id).to_string()), |ui| {
-                // #90 — chips read as grabbable: a faint grip glyph + a filled
+                // #90 â chips read as grabbable: a faint grip glyph + a filled
                 // chip background, and a grab cursor on hover. They wrap into
                 // 2-3 rows because the editor width is pinned (#80 above).
                 let chip = egui::Frame::default()
@@ -1720,7 +1745,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
             "Append a toolbar action from the list (keyboard-friendly alternative to dragging).",
         );
         egui::ComboBox::from_id_salt("toolbar-add")
-            .selected_text("choose…")
+            .selected_text("chooseâ¦")
             .show_ui(ui, |ui| {
                 for (id, label) in crate::app::TOOLBAR_ACTIONS {
                     if ui.selectable_label(false, *label).clicked() {
@@ -1743,7 +1768,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     changed
 }
 
-/// Phase 17 T17.6 — export the current built-in theme to a user TOML file
+/// Phase 17 T17.6 â export the current built-in theme to a user TOML file
 /// the user can edit by hand. The watcher reloads on change so saved edits
 /// land live. Foundation for the in-app live-color-picker editor.
 fn render_theme_export(ui: &mut egui::Ui, config: &mut Config) -> bool {
@@ -1785,7 +1810,7 @@ fn render_theme_export(ui: &mut egui::Ui, config: &mut Config) -> bool {
                     Ok(()) => {
                         config.appearance.theme = safe.clone();
                         changed = true;
-                        format!("Saved to {} — now editable", path.display())
+                        format!("Saved to {} â now editable", path.display())
                     }
                     Err(e) => format!("Export failed: {e}"),
                 };
@@ -1804,14 +1829,14 @@ fn render_theme_export(ui: &mut egui::Ui, config: &mut Config) -> bool {
     changed
 }
 
-/// Phase 17 T17.6b — in-app live color editor. Renders one egui color
+/// Phase 17 T17.6b â in-app live color editor. Renders one egui color
 /// picker per `[palette]` / `[ui]` / `[syntax]` key of the active user
 /// theme. Every change writes the modified theme TOML back to disk; the
 /// existing watcher reloads it and the editor reflects the change live.
 ///
 /// Only renders when a user theme TOML exists at
 /// `<config_dir>/themes/<active>.toml`. For built-in themes the user
-/// is directed to the **Export to user theme** action above — built-ins
+/// is directed to the **Export to user theme** action above â built-ins
 /// stay immutable so a switch-back is always possible.
 ///
 /// Returns true when the user mutated a color (so the caller can request
@@ -1825,7 +1850,7 @@ fn render_live_color_picker(ui: &mut egui::Ui, config: &Config) -> bool {
     let theme_name = &config.appearance.theme;
     let path = theme_dir.join(format!("{theme_name}.toml"));
     if !path.exists() {
-        // Quiet hint — the export-to-user-theme button right above is the
+        // Quiet hint â the export-to-user-theme button right above is the
         // forward path; no need to show the picker UI when there's nothing
         // editable.
         ui.label(
@@ -1881,7 +1906,7 @@ fn render_live_color_picker(ui: &mut egui::Ui, config: &Config) -> bool {
                             PickerSection::Ui => &mut theme.ui,
                             PickerSection::Syntax => &mut theme.syntax,
                         };
-                        // Stable iteration order — BTreeMap walks sorted.
+                        // Stable iteration order â BTreeMap walks sorted.
                         let keys: Vec<String> = map.keys().cloned().collect();
                         for k in keys {
                             let r = match map.get_mut(&k) {
@@ -1918,7 +1943,7 @@ fn render_live_color_picker(ui: &mut egui::Ui, config: &Config) -> bool {
     if any_changed {
         // Persist immediately; the watcher will pick it up on its next
         // scan tick and apply the change live. Write errors stay quiet
-        // here — surface a status string if this ever needs operator UX.
+        // here â surface a status string if this ever needs operator UX.
         let _ = std::fs::write(&path, theme.to_toml_string());
     }
     any_changed
@@ -1957,8 +1982,8 @@ mod hex_color {
 
 #[cfg(test)]
 mod deep_link {
-    //! #71 — the status-bar encoding / language chips advertise
-    //! "Settings → Editor"; opening Settings must land on that category, not the
+    //! #71 â the status-bar encoding / language chips advertise
+    //! "Settings â Editor"; opening Settings must land on that category, not the
     //! last-used / default "Appearance". The host calls [`request_category`]
     //! before flipping the window open; [`show`] reads the SAME temp key on its
     //! next frame. This pins that both sides agree on the key + value so the
@@ -1992,7 +2017,7 @@ mod deep_link {
 #[cfg(test)]
 mod wiring_guard {
     //! Proof that every control exposed in the Settings window is actually
-    //! WIRED to runtime behavior — i.e. its config field is read by code outside
+    //! WIRED to runtime behavior â i.e. its config field is read by code outside
     //! `settings.rs` (the UI) and `config.rs` (the definition). A "dead" control
     //! is one nothing reads; this guard catches them and prevents new ones.
     //!
