@@ -1220,6 +1220,39 @@ impl ScribeApp {
         state.store(ctx, id);
     }
 
+    /// Auto-indent on Enter (#107): insert a newline that keeps the current
+    /// line's leading whitespace, so indentation carries to the next line. Only
+    /// acts on a single caret (no selection); returns false so the caller lets
+    /// egui handle Enter normally otherwise.
+    fn auto_indent_newline(&mut self, ctx: &egui::Context, id: egui::Id, active: usize) -> bool {
+        let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+            return false;
+        };
+        let Some(range) = state.cursor.char_range() else {
+            return false;
+        };
+        // Only a collapsed caret — a selection+Enter should replace, which we
+        // leave to egui.
+        if range.primary.index != range.secondary.index {
+            return false;
+        }
+        let cursor = range.primary.index;
+        let (new_text, new_idx) = newline_with_indent(&self.tabs[active].text, cursor);
+        // No indent to carry → let egui insert the plain newline (cheaper, and
+        // keeps egui's own undo grouping for the common case).
+        if new_idx == cursor + 1 {
+            return false;
+        }
+        self.tabs[active].set_text(new_text);
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(new_idx),
+            )));
+        state.store(ctx, id);
+        true
+    }
+
     /// Render one quick-access toolbar entry by action id and apply its effect.
     /// Buttons set the pending-action flags; toggles flip the live config/state
     /// and request a config save. The id `"sep"` draws a divider.
@@ -3994,6 +4027,27 @@ fn apply_indent(text: &str, lo: usize, hi: usize, width: usize) -> (String, usiz
     (out, lo + spaces.chars().count())
 }
 
+/// Auto-indent on Enter (#107): insert a newline at `cursor` (char index) plus a
+/// copy of the CURRENT line's leading whitespace, so the new line keeps the same
+/// indentation. Returns the new text and the new cursor char index (after the
+/// inserted newline + indent). Pure + unit-tested. Preserves whatever the line
+/// uses (spaces or tabs); this is what makes `tab_width`/`insert_spaces`-driven
+/// indentation actually persist line-to-line.
+fn newline_with_indent(text: &str, cursor: usize) -> (String, usize) {
+    let bcur = char_to_byte(text, cursor);
+    // Start of the current line = byte after the previous '\n' (or 0).
+    let line_start = text[..bcur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    // Leading whitespace of the line, but not past the cursor.
+    let indent: String = text[line_start..bcur]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect();
+    let insert = format!("\n{indent}");
+    let mut out = text.to_string();
+    out.insert_str(bcur, &insert);
+    (out, cursor + insert.chars().count())
+}
+
 /// Render the completion popup as a foreground `Area` anchored just below the
 /// cursor row. Returns `Some(index)` if the user clicked a row.
 fn completion_popup(ui: &egui::Ui, pos: egui::Pos2, c: &Completion) -> Option<usize> {
@@ -5647,6 +5701,21 @@ impl ScribeApp {
                     self.indent_with_spaces(ctx, editor_id, active);
                 }
 
+                // #107 — auto-indent on Enter: the new line keeps the current
+                // line's leading whitespace. Only consume Enter when there IS
+                // indentation to carry (otherwise let egui insert the plain
+                // newline). Skipped while the completion popup owns Enter.
+                if !read_only
+                    && self.completion.is_none()
+                    && ctx.memory(|m| m.has_focus(editor_id))
+                    && ctx.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.is_none())
+                    && self.auto_indent_newline(ctx, editor_id, active)
+                {
+                    ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                    });
+                }
+
                 // #78 — misspellings for the active buffer, computed (memoized)
                 // BEFORE the partial borrows below so the owned Vec can move into
                 // the editor closure and drive the red underline painter.
@@ -6636,6 +6705,43 @@ mod wrap_tests {
     fn wrap_on_uses_the_viewport_width() {
         assert_eq!(effective_wrap_width(true, 800.0), 800.0);
         assert_eq!(effective_wrap_width(true, 123.5), 123.5);
+    }
+}
+
+#[cfg(test)]
+mod indent_tests {
+    //! #107 — Enter auto-indent. The new line copies the current line's leading
+    //! whitespace so indentation persists (which is what makes the indentation
+    //! settings visibly do something line-to-line).
+    use super::newline_with_indent;
+
+    #[test]
+    fn carries_space_indent() {
+        let (t, c) = newline_with_indent("    code", 8);
+        assert_eq!(t, "    code\n    ");
+        assert_eq!(c, 13); // \n + 4 spaces
+    }
+
+    #[test]
+    fn no_indent_just_breaks_the_line() {
+        let (t, c) = newline_with_indent("code", 4);
+        assert_eq!(t, "code\n");
+        assert_eq!(c, 5);
+    }
+
+    #[test]
+    fn carries_tab_indent() {
+        let (t, c) = newline_with_indent("\tfoo", 4);
+        assert_eq!(t, "\tfoo\n\t");
+        assert_eq!(c, 6);
+    }
+
+    #[test]
+    fn indent_is_clamped_to_the_cursor() {
+        // Cursor after "ab" on "  abcd" → carry only the line's leading "  ".
+        let (t, c) = newline_with_indent("  abcd", 4);
+        assert_eq!(t, "  ab\n  cd");
+        assert_eq!(c, 7);
     }
 }
 
