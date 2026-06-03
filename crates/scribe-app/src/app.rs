@@ -423,12 +423,15 @@ impl EditorTab {
     }
 
     fn title(&self) -> String {
+        // #R5: title() stays plain. The pin marker is added by the renderers as
+        // a phosphor glyph (`tab_display_label` for the tab strip, the chip
+        // header for grid panes) — emitting "📌" here rendered as tofu in the
+        // bundled fonts AND double-marked pinned tabs (renderer pin + emoji).
         let name = self.doc.file_name();
-        let pin = if self.pinned { "📌 " } else { "" };
         if self.is_dirty() {
-            format!("{pin}● {name}")
+            format!("● {name}")
         } else {
-            format!("{pin}{name}")
+            name.to_string()
         }
     }
 
@@ -884,6 +887,11 @@ impl ScribeApp {
         // capture.
         let hl = &self.hl;
         let hl_cache = &self.hl_cache;
+        // #R5: theme colours + focused-pane id for the chip-styled pane headers
+        // (the per-pane note bar now mirrors the top tab strip's chip look).
+        let accent = ui_color(&self.theme, "accent", Rgba::new(0, 255, 254, 255));
+        let muted = ui_color(&self.theme, "line_number", Rgba::new(0x5a, 0x58, 0x69, 255));
+        let active_doc = self.tabs.get(self.active).map(|t| t.doc_id);
         // Per-frame shared close buffer. The pane `✕` button writes here and
         // `AppGridBehavior::retain_pane` reads it back during the SAME
         // `tree.ui()` call, so egui_tiles prunes exactly the closed pane and
@@ -899,49 +907,94 @@ impl ScribeApp {
                     return false;
                 };
                 let mut drag_started = false;
-                // Per-pane header (#84): a drag-handle ICON to the LEFT of the
-                // note name, a pin toggle just to the RIGHT of the name, and the
-                // close button pushed to the FAR RIGHT so notes aren't closed by
-                // accident. All phosphor glyphs (the old ✕ / ⠿ were tofu).
+                // #R5 — per-pane header rendered as a tab CHIP that mirrors the
+                // top tab strip: a filled accent chip on the focused pane,
+                // transparent otherwise; drag-handle ICON on the left, note name,
+                // pin toggle, close ✕ on the far right. Pinned notes drop the
+                // drag handle + ✕ (anchored, can't be moved/closed). All glyphs
+                // are phosphor (the old ✕ / ⠿ were tofu).
                 let pane_title = tabs[idx].title();
-                ui.horizontal(|ui| {
-                    // `drag_started()` on a click_and_drag Sense fires ONCE on
-                    // drag start (egui_tiles expects a single `DragStarted`);
-                    // an "is button held" check would re-fire every frame and
-                    // wedge the tile tree's drag state.
-                    let handle = ui
-                        .small_button(egui_phosphor::thin::DOTS_SIX_VERTICAL)
-                        .on_hover_text("Drag to rearrange")
-                        .on_hover_cursor(egui::CursorIcon::Grab);
-                    let handle = handle.interact(egui::Sense::click_and_drag());
-                    if handle.drag_started() {
-                        drag_started = true;
-                    }
-                    ui.label(RichText::new(&pane_title).strong().monospace())
-                        .on_hover_text(&pane_title);
-                    let pinned = tabs[idx].pinned;
-                    let pin_glyph = if pinned {
-                        egui_phosphor::thin::PUSH_PIN_SLASH
+                let pinned = tabs[idx].pinned;
+                let is_active = active_doc == Some(doc_id);
+                let chip = egui::Frame::default()
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .corner_radius(egui::CornerRadius::same(5))
+                    .fill(if is_active {
+                        accent.linear_multiply(0.20)
                     } else {
-                        egui_phosphor::thin::PUSH_PIN
-                    };
-                    if ui
-                        .small_button(pin_glyph)
-                        .on_hover_text(if pinned { "Unpin note" } else { "Pin note" })
-                        .clicked()
-                    {
-                        tabs[idx].pinned = !pinned;
-                    }
-                    // Close at the far right.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .small_button(egui_phosphor::thin::X)
-                            .on_hover_text("Close pane")
-                            .clicked()
-                        {
-                            render_closes.borrow_mut().push(doc_id);
-                        }
+                        Color32::TRANSPARENT
                     });
+                // ONE horizontal header row: the chip (handle · name · pin) on
+                // the left, the close ✕ pushed to the far right. egui_tiles gives
+                // each pane a TOP-DOWN ui, so the chip body MUST set a horizontal
+                // layout itself or the glyphs stack vertically.
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    chip.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            // Drag handle — greyed + non-interactive on pinned notes.
+                            if pinned {
+                                ui.add_enabled(
+                                    false,
+                                    egui::Button::new(egui_phosphor::thin::DOTS_SIX_VERTICAL)
+                                        .frame(false)
+                                        .small(),
+                                )
+                                .on_hover_text("Pinned — drag disabled");
+                            } else {
+                                // `drag_started()` fires ONCE on drag start (egui_tiles
+                                // expects a single `DragStarted`); a held-button check
+                                // would re-fire every frame and wedge the tile drag.
+                                let handle = ui
+                                    .add(
+                                        egui::Button::new(egui_phosphor::thin::DOTS_SIX_VERTICAL)
+                                            .frame(false)
+                                            .small(),
+                                    )
+                                    .on_hover_text("Drag to rearrange")
+                                    .on_hover_cursor(egui::CursorIcon::Grab);
+                                let handle = handle.interact(egui::Sense::click_and_drag());
+                                if handle.drag_started() {
+                                    drag_started = true;
+                                }
+                            }
+                            ui.label(RichText::new(&pane_title).monospace().color(if is_active {
+                                accent
+                            } else {
+                                muted
+                            }))
+                            .on_hover_text(&pane_title);
+                            let pin_glyph = if pinned {
+                                egui_phosphor::thin::PUSH_PIN_SLASH
+                            } else {
+                                egui_phosphor::thin::PUSH_PIN
+                            };
+                            if ui
+                                .add(egui::Button::new(pin_glyph).frame(false).small())
+                                .on_hover_text(if pinned { "Unpin note" } else { "Pin note" })
+                                .clicked()
+                            {
+                                tabs[idx].pinned = !pinned;
+                            }
+                        });
+                    });
+                    // Close at the far right — hidden on pinned notes.
+                    if !pinned {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    egui::Button::new(egui_phosphor::thin::X)
+                                        .frame(false)
+                                        .small(),
+                                )
+                                .on_hover_text("Close pane")
+                                .clicked()
+                            {
+                                render_closes.borrow_mut().push(doc_id);
+                            }
+                        });
+                    }
                 });
                 // Per-pane syntax highlighting via the same memoizing layouter
                 // the single-pane + split paths use, keyed on THIS pane's own
@@ -1586,9 +1639,10 @@ impl ScribeApp {
                 self.toast = Some("Opened the SCR1B3 releases page to check for updates.".into());
             }
             UpdateReminder::Notify => {
-                self.toast = Some(
-                    "Time to check for SCR1B3 updates — Settings ▸ Updates ▸ Check now.".into(),
-                );
+                self.toast = Some(format!(
+                    "Time to check for SCR1B3 updates — Settings {a} Updates {a} Check now.",
+                    a = egui_phosphor::thin::ARROW_RIGHT
+                ));
             }
             UpdateReminder::Skip => {}
         }
@@ -1771,7 +1825,7 @@ impl ScribeApp {
                     if sorted != self.tabs[active].text {
                         self.tabs[active].set_text(sorted);
                         self.tabs[active].doc.mark_dirty();
-                        self.status = "sorted lines (A→Z)".to_string();
+                        self.status = "sorted lines (A-Z)".to_string();
                     }
                 }
             }
@@ -1990,7 +2044,8 @@ impl ScribeApp {
         for i in to_warn {
             if let Some(name) = self.tabs[i].doc.path().map(|p| p.display().to_string()) {
                 self.toast = Some(format!(
-                    "⚠ {name} changed on disk while you have local edits. Save will overwrite."
+                    "{} {name} changed on disk while you have local edits. Save will overwrite.",
+                    egui_phosphor::thin::WARNING
                 ));
                 // Don't refresh disk_mtime — keep showing the warning until
                 // the user explicitly saves (which sets a fresh mtime) or
@@ -2291,7 +2346,7 @@ impl ScribeApp {
                 if resp.clicked() {
                     switch_to = Some(i);
                 }
-                if resp.clicked_by(egui::PointerButton::Middle) {
+                if resp.clicked_by(egui::PointerButton::Middle) && !pinned {
                     close = Some(i);
                 }
                 resp.context_menu(|ui| {
@@ -2317,12 +2372,14 @@ impl ScribeApp {
                         ui.close_menu();
                     }
                 });
-                if resp.dragged() {
+                // #R5: pinned notes are anchored — they switch on click but
+                // never initiate a drag-reorder (no ghost, no drop resolution).
+                if resp.dragged() && !pinned {
                     if let Some(p) = resp.interact_pointer_pos() {
                         dragging = Some((i, shown.clone(), p));
                     }
                 }
-                if resp.drag_stopped() {
+                if resp.drag_stopped() && !pinned {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         drag_src = Some(i);
                         drop_pos = Some(pos);
@@ -2345,15 +2402,18 @@ impl ScribeApp {
                         toggle_pin = Some(i);
                     }
                 }
-                // Close — on EVERY tab so any tab can be closed directly.
-                if ui
-                    .add(
-                        egui::Button::new(egui_phosphor::thin::X)
-                            .frame(false)
-                            .small(),
-                    )
-                    .on_hover_text("Close tab (or middle-click)")
-                    .clicked()
+                // Close — on every UNPINNED tab. A pinned note hides the ✕ (and
+                // refuses middle-click / context Close) so it can't be closed by
+                // accident; unpin first (#R5).
+                if !pinned
+                    && ui
+                        .add(
+                            egui::Button::new(egui_phosphor::thin::X)
+                                .frame(false)
+                                .small(),
+                        )
+                        .on_hover_text("Close tab (or middle-click)")
+                        .clicked()
                 {
                     close = Some(i);
                 }
@@ -2479,6 +2539,10 @@ impl ScribeApp {
         if src >= self.tabs.len() || target >= self.tabs.len() || src == target {
             return;
         }
+        // #R5: pinned notes are anchored — refuse to reorder a pinned tab.
+        if self.tabs[src].pinned {
+            return;
+        }
         let new_active = tab_index_after_move(src, target, self.active);
         let tab = self.tabs.remove(src);
         // `target < original len` ⇒ `target <= new len`, so this never panics.
@@ -2535,6 +2599,13 @@ impl ScribeApp {
     }
 
     fn close_tab(&mut self, idx: usize) {
+        // #R5: pinned notes can't be closed directly — unpin first. This is the
+        // single chokepoint behind the ✕ button, middle-click, and the
+        // context-menu "Close" in the tab strip.
+        if idx < self.tabs.len() && self.tabs[idx].pinned {
+            self.status = "Note is pinned — unpin it to close".to_string();
+            return;
+        }
         crate::action_log::record("tab", "close");
         if idx < self.tabs.len() {
             // F-021 — capture the current scroll position so the next open
@@ -2626,13 +2697,13 @@ impl ScribeApp {
             *text = text.replace(&pat, &rep);
             let replaced = text.len() != n_before;
             self.status = if replaced {
-                format!("replaced all '{pat}' → '{rep}'")
+                format!("replaced all '{pat}' -> '{rep}'")
             } else {
                 format!("no match for '{pat}'")
             };
         } else if let Some(pos) = text.find(&pat) {
             text.replace_range(pos..pos + pat.len(), &rep);
-            self.status = format!("replaced '{pat}' → '{rep}'");
+            self.status = format!("replaced '{pat}' -> '{rep}'");
         } else {
             self.status = format!("no match for '{pat}'");
         }
@@ -3248,7 +3319,9 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
         action: "Redo",
     },
     ShortcutEntry {
-        chord: "Ctrl+Alt+↓ / ↑",
+        // Phosphor (Thin) ARROW_DOWN (U+E03E) / ARROW_UP (U+E08E) — the bare
+        // U+2193/U+2191 arrows were tofu in the bundled fonts.
+        chord: "Ctrl+Alt+\u{E03E} / \u{E08E}",
         action: "Add caret below / above (multi-cursor — experimental editor)",
     },
     ShortcutEntry {
@@ -3455,7 +3528,7 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         action: BuiltinCommand::OpenPalette,
     },
     BuiltinEntry {
-        label: "Sort lines (A→Z)",
+        label: "Sort lines (A-Z)",
         shortcut: "",
         action: BuiltinCommand::SortLines,
     },
@@ -4624,8 +4697,10 @@ impl ScribeApp {
                 // Settings + command palette are always present; the palette is
                 // the discoverable backbone for every action, so keep it visible.
                 // The gear toggles settings — clicking it while open closes it.
+                // Phosphor GEAR_SIX (loaded thin font) — the bare "⚙" U+2699
+                // emoji has no glyph in JetBrains Mono and rendered as tofu (#R5).
                 if ui
-                    .selectable_label(self.settings_open, "⚙")
+                    .selectable_label(self.settings_open, egui_phosphor::thin::GEAR_SIX)
                     .on_hover_text("Settings")
                     .clicked()
                 {
@@ -4654,46 +4729,53 @@ impl ScribeApp {
         });
 
         // ---- Tab strip in its OWN bar (T18.4) — separate from the toolbar ----
-        match self.config.editor.tab_bar_position {
-            scribe_core::config::TabBarPosition::Top => {
-                // A dedicated tab bar directly below the quick-access toolbar
-                // (added after the "toolbar" top panel, so it stacks beneath it).
-                egui::TopBottomPanel::top("tabs-top")
-                    .frame(egui::Frame::default().fill(panel))
-                    .show(ctx, |ui| {
-                        ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
-                    });
-            }
-            scribe_core::config::TabBarPosition::Bottom => {
-                egui::TopBottomPanel::bottom("tabs-bottom")
-                    .frame(egui::Frame::default().fill(panel))
-                    .show(ctx, |ui| {
-                        ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
-                    });
-            }
-            scribe_core::config::TabBarPosition::Left => {
-                let rotated = self.config.editor.side_tabs_rotated;
-                egui::SidePanel::left("tabs-left")
-                    .resizable(true)
-                    .default_width(180.0)
-                    // #85 — allow the side tab bar to shrink much smaller than
-                    // egui's default floor (e.g. for a narrow vertical strip).
-                    .width_range(40.0..=400.0)
-                    .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
-                    .show(ctx, |ui| {
-                        self.draw_side_tab_strip(ui, accent, muted, rotated);
-                    });
-            }
-            scribe_core::config::TabBarPosition::Right => {
-                let rotated = self.config.editor.side_tabs_rotated;
-                egui::SidePanel::right("tabs-right")
-                    .resizable(true)
-                    .default_width(180.0)
-                    .width_range(40.0..=400.0)
-                    .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
-                    .show(ctx, |ui| {
-                        self.draw_side_tab_strip(ui, accent, muted, rotated);
-                    });
+        //
+        // #R5: in split/grid view the top tab strip is redundant — every pane
+        // now carries its own chip header (note name + pin + close), so the
+        // global strip is suppressed. New notes remain reachable via Ctrl+N,
+        // the command palette, and the toolbar's customizable items.
+        if !self.config.editor.grid_enabled {
+            match self.config.editor.tab_bar_position {
+                scribe_core::config::TabBarPosition::Top => {
+                    // A dedicated tab bar directly below the quick-access toolbar
+                    // (added after the "toolbar" top panel, so it stacks beneath it).
+                    egui::TopBottomPanel::top("tabs-top")
+                        .frame(egui::Frame::default().fill(panel))
+                        .show(ctx, |ui| {
+                            ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
+                        });
+                }
+                scribe_core::config::TabBarPosition::Bottom => {
+                    egui::TopBottomPanel::bottom("tabs-bottom")
+                        .frame(egui::Frame::default().fill(panel))
+                        .show(ctx, |ui| {
+                            ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
+                        });
+                }
+                scribe_core::config::TabBarPosition::Left => {
+                    let rotated = self.config.editor.side_tabs_rotated;
+                    egui::SidePanel::left("tabs-left")
+                        .resizable(true)
+                        .default_width(180.0)
+                        // #85 — allow the side tab bar to shrink much smaller than
+                        // egui's default floor (e.g. for a narrow vertical strip).
+                        .width_range(40.0..=400.0)
+                        .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
+                        .show(ctx, |ui| {
+                            self.draw_side_tab_strip(ui, accent, muted, rotated);
+                        });
+                }
+                scribe_core::config::TabBarPosition::Right => {
+                    let rotated = self.config.editor.side_tabs_rotated;
+                    egui::SidePanel::right("tabs-right")
+                        .resizable(true)
+                        .default_width(180.0)
+                        .width_range(40.0..=400.0)
+                        .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
+                        .show(ctx, |ui| {
+                            self.draw_side_tab_strip(ui, accent, muted, rotated);
+                        });
+                }
             }
         }
 
@@ -4717,7 +4799,11 @@ impl ScribeApp {
                 )
                 .show(ctx, |ui| {
                     ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("⚠").color(warn).strong());
+                        ui.label(
+                            RichText::new(egui_phosphor::thin::WARNING)
+                                .color(warn)
+                                .strong(),
+                        );
                         ui.label(
                             RichText::new(format!("Config has errors: {msg}"))
                                 .color(warn)
@@ -4801,66 +4887,70 @@ impl ScribeApp {
         // searches both.
         let mut run_builtin: Option<BuiltinCommand> = None;
         if self.palette_open {
-            egui::Window::new(RichText::new("⌘ command palette").color(accent).monospace())
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 64.0])
-                .show(ctx, |ui| {
-                    let r = ui.text_edit_singleline(&mut self.palette_query);
-                    if self.focus_palette {
-                        r.request_focus();
-                        self.focus_palette = false;
-                    }
-                    let q = self.palette_query.to_lowercase();
-                    egui::ScrollArea::vertical()
-                        .max_height(360.0)
-                        .show(ui, |ui| {
-                            let mut any = false;
-                            // Built-in commands first — universally available even
-                            // with zero plugins.
-                            for cmd in BUILTIN_COMMANDS {
-                                let label = cmd.label;
-                                let shortcut = cmd.shortcut;
-                                if q.is_empty()
-                                    || label.to_lowercase().contains(&q)
-                                    || shortcut.to_lowercase().contains(&q)
-                                {
-                                    any = true;
-                                    let display = if shortcut.is_empty() {
-                                        label.to_string()
-                                    } else {
-                                        format!("{label}  ·  {shortcut}")
-                                    };
-                                    if ui.selectable_label(false, display).clicked() {
-                                        run_builtin = Some(cmd.action);
-                                    }
+            egui::Window::new(
+                RichText::new(format!("{}  command palette", egui_phosphor::thin::COMMAND))
+                    .color(accent)
+                    .monospace(),
+            )
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 64.0])
+            .show(ctx, |ui| {
+                let r = ui.text_edit_singleline(&mut self.palette_query);
+                if self.focus_palette {
+                    r.request_focus();
+                    self.focus_palette = false;
+                }
+                let q = self.palette_query.to_lowercase();
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        let mut any = false;
+                        // Built-in commands first — universally available even
+                        // with zero plugins.
+                        for cmd in BUILTIN_COMMANDS {
+                            let label = cmd.label;
+                            let shortcut = cmd.shortcut;
+                            if q.is_empty()
+                                || label.to_lowercase().contains(&q)
+                                || shortcut.to_lowercase().contains(&q)
+                            {
+                                any = true;
+                                let display = if shortcut.is_empty() {
+                                    label.to_string()
+                                } else {
+                                    format!("{label}  ·  {shortcut}")
+                                };
+                                if ui.selectable_label(false, display).clicked() {
+                                    run_builtin = Some(cmd.action);
                                 }
                             }
-                            if !self.plugin_cmds.is_empty() {
-                                ui.separator();
-                            }
-                            for c in &self.plugin_cmds {
-                                if q.is_empty()
-                                    || c.label.to_lowercase().contains(&q)
-                                    || c.id.contains(&q)
+                        }
+                        if !self.plugin_cmds.is_empty() {
+                            ui.separator();
+                        }
+                        for c in &self.plugin_cmds {
+                            if q.is_empty()
+                                || c.label.to_lowercase().contains(&q)
+                                || c.id.contains(&q)
+                            {
+                                any = true;
+                                if ui
+                                    .selectable_label(
+                                        false,
+                                        format!("{}  ·  {}", c.label, c.plugin_id),
+                                    )
+                                    .clicked()
                                 {
-                                    any = true;
-                                    if ui
-                                        .selectable_label(
-                                            false,
-                                            format!("{}  ·  {}", c.label, c.plugin_id),
-                                        )
-                                        .clicked()
-                                    {
-                                        run_cmd = Some(c.id.clone());
-                                    }
+                                    run_cmd = Some(c.id.clone());
                                 }
                             }
-                            if !any {
-                                ui.label(RichText::new("no match").color(muted).small());
-                            }
-                        });
-                });
+                        }
+                        if !any {
+                            ui.label(RichText::new("no match").color(muted).small());
+                        }
+                    });
+            });
         }
 
         // ---- Settings window (deep customization, live preview) ----
@@ -4899,9 +4989,12 @@ impl ScribeApp {
         if self.cheatsheet_open {
             let mut still_open = true;
             egui::Window::new(
-                RichText::new("⌨  keyboard shortcuts")
-                    .color(accent)
-                    .monospace(),
+                RichText::new(format!(
+                    "{}  keyboard shortcuts",
+                    egui_phosphor::thin::KEYBOARD
+                ))
+                .color(accent)
+                .monospace(),
             )
             .open(&mut still_open)
             .collapsible(false)
@@ -4975,33 +5068,40 @@ impl ScribeApp {
         if self.goto_open {
             let mut want_apply = false;
             let mut want_close = false;
-            egui::Window::new(RichText::new("⇁ go to line").color(accent).monospace())
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        let r = ui.text_edit_singleline(&mut self.goto_query);
-                        if self.focus_goto {
-                            r.request_focus();
-                            self.focus_goto = false;
-                        }
-                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            want_apply = true;
-                        }
-                        if ui.button("Go").clicked() {
-                            want_apply = true;
-                        }
-                        if ui.button("Close").clicked() {
-                            want_close = true;
-                        }
-                    });
-                    ui.label(
-                        RichText::new("line, or line:column (e.g. 42:10)")
-                            .color(muted)
-                            .small(),
-                    );
+            egui::Window::new(
+                RichText::new(format!(
+                    "{}  go to line",
+                    egui_phosphor::thin::ARROW_LINE_RIGHT
+                ))
+                .color(accent)
+                .monospace(),
+            )
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let r = ui.text_edit_singleline(&mut self.goto_query);
+                    if self.focus_goto {
+                        r.request_focus();
+                        self.focus_goto = false;
+                    }
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        want_apply = true;
+                    }
+                    if ui.button("Go").clicked() {
+                        want_apply = true;
+                    }
+                    if ui.button("Close").clicked() {
+                        want_close = true;
+                    }
                 });
+                ui.label(
+                    RichText::new("line, or line:column (e.g. 42:10)")
+                        .color(muted)
+                        .small(),
+                );
+            });
             if want_apply {
                 if let Some((line, _col)) = parse_goto_query(&self.goto_query) {
                     self.goto_line(line);
@@ -5031,70 +5131,74 @@ impl ScribeApp {
             let mut chosen: Option<usize> = None;
             let mut want_close = false;
             let mut first_match: Option<usize> = None;
-            egui::Window::new(RichText::new("◇ go to symbol").color(accent).monospace())
-                .collapsible(false)
-                .resizable(true)
-                .default_width(520.0)
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
-                .show(ctx, |ui| {
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut self.goto_symbol_query)
-                            .hint_text("filter symbols")
-                            .desired_width(f32::INFINITY),
-                    );
-                    if self.focus_goto_symbol {
-                        r.request_focus();
-                        self.focus_goto_symbol = false;
-                    }
-                    // Enter jumps to the first match; Esc closes (handled in input).
-                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    ui.separator();
-                    if symbols.is_empty() {
-                        ui.label(
-                            RichText::new("no symbols in this buffer")
-                                .color(muted)
-                                .small(),
-                        );
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .max_height(360.0)
-                            .show(ui, |ui| {
-                                for s in &symbols {
-                                    if !q.is_empty() && !s.label.to_lowercase().contains(&q) {
-                                        continue;
-                                    }
-                                    if first_match.is_none() {
-                                        first_match = Some(s.start_line);
-                                    }
-                                    // Indent by nesting depth; show the 1-based line.
-                                    let indent = "  ".repeat(s.depth);
-                                    let label = RichText::new(format!(
-                                        "{indent}{}  ·  {}",
-                                        s.label,
-                                        s.start_line + 1
-                                    ))
-                                    .monospace();
-                                    if ui.selectable_label(false, label).clicked() {
-                                        chosen = Some(s.start_line);
-                                    }
-                                }
-                            });
-                    }
-                    if enter {
-                        if let Some(line0) = first_match {
-                            chosen = Some(line0);
-                        } else {
-                            want_close = true;
-                        }
-                    }
-                    ui.add_space(6.0);
+            egui::Window::new(
+                RichText::new(format!("{}  go to symbol", egui_phosphor::thin::DIAMOND))
+                    .color(accent)
+                    .monospace(),
+            )
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
+            .show(ctx, |ui| {
+                let r = ui.add(
+                    egui::TextEdit::singleline(&mut self.goto_symbol_query)
+                        .hint_text("filter symbols")
+                        .desired_width(f32::INFINITY),
+                );
+                if self.focus_goto_symbol {
+                    r.request_focus();
+                    self.focus_goto_symbol = false;
+                }
+                // Enter jumps to the first match; Esc closes (handled in input).
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.separator();
+                if symbols.is_empty() {
                     ui.label(
-                        RichText::new("Enter jumps to the first match · Esc closes")
+                        RichText::new("no symbols in this buffer")
                             .color(muted)
-                            .small()
-                            .monospace(),
+                            .small(),
                     );
-                });
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            for s in &symbols {
+                                if !q.is_empty() && !s.label.to_lowercase().contains(&q) {
+                                    continue;
+                                }
+                                if first_match.is_none() {
+                                    first_match = Some(s.start_line);
+                                }
+                                // Indent by nesting depth; show the 1-based line.
+                                let indent = "  ".repeat(s.depth);
+                                let label = RichText::new(format!(
+                                    "{indent}{}  ·  {}",
+                                    s.label,
+                                    s.start_line + 1
+                                ))
+                                .monospace();
+                                if ui.selectable_label(false, label).clicked() {
+                                    chosen = Some(s.start_line);
+                                }
+                            }
+                        });
+                }
+                if enter {
+                    if let Some(line0) = first_match {
+                        chosen = Some(line0);
+                    } else {
+                        want_close = true;
+                    }
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Enter jumps to the first match · Esc closes")
+                        .color(muted)
+                        .small()
+                        .monospace(),
+                );
+            });
             if let Some(line0) = chosen {
                 self.goto_line(line0 + 1);
                 self.goto_symbol_open = false;
@@ -5112,39 +5216,46 @@ impl ScribeApp {
         if self.recent_open {
             let mut chosen: Option<PathBuf> = None;
             let mut still_open = true;
-            egui::Window::new(RichText::new("⌖  recent files").color(accent).monospace())
-                .open(&mut still_open)
-                .collapsible(false)
-                .resizable(true)
-                .default_width(520.0)
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
-                .show(ctx, |ui| {
-                    if self.config.editor.recent_files.is_empty() {
-                        ui.label(
-                            RichText::new("no recent files yet — open something first")
-                                .color(muted)
-                                .small(),
-                        );
-                    } else {
-                        egui::ScrollArea::vertical()
-                            .max_height(360.0)
-                            .show(ui, |ui| {
-                                for p in &self.config.editor.recent_files {
-                                    let label = RichText::new(p.display().to_string()).monospace();
-                                    if ui.selectable_label(false, label).clicked() {
-                                        chosen = Some(p.clone());
-                                    }
-                                }
-                            });
-                    }
-                    ui.add_space(6.0);
+            egui::Window::new(
+                RichText::new(format!(
+                    "{}  recent files",
+                    egui_phosphor::thin::CLOCK_COUNTER_CLOCKWISE
+                ))
+                .color(accent)
+                .monospace(),
+            )
+            .open(&mut still_open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
+            .show(ctx, |ui| {
+                if self.config.editor.recent_files.is_empty() {
                     ui.label(
-                        RichText::new("press Ctrl+R or Esc to close")
+                        RichText::new("no recent files yet — open something first")
                             .color(muted)
-                            .small()
-                            .monospace(),
+                            .small(),
                     );
-                });
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            for p in &self.config.editor.recent_files {
+                                let label = RichText::new(p.display().to_string()).monospace();
+                                if ui.selectable_label(false, label).clicked() {
+                                    chosen = Some(p.clone());
+                                }
+                            }
+                        });
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("press Ctrl+R or Esc to close")
+                        .color(muted)
+                        .small()
+                        .monospace(),
+                );
+            });
             if let Some(p) = chosen {
                 self.open_path(p);
                 self.recent_open = false;
@@ -5187,27 +5298,68 @@ impl ScribeApp {
                         .monospace(),
                 );
                 ui.add_space(10.0);
-                if ui.button("📄  New file (Ctrl+N)").clicked() {
+                // Phosphor glyphs (loaded thin font); the old emoji (📄📂🗂⌖⌨✓)
+                // have no glyph in JetBrains Mono and rendered as tofu (#R5).
+                if ui
+                    .button(format!(
+                        "{}  New file (Ctrl+N)",
+                        egui_phosphor::thin::FILE_PLUS
+                    ))
+                    .clicked()
+                {
                     want_new = true;
                 }
-                if ui.button("📂  Open file… (Ctrl+O)").clicked() {
+                if ui
+                    .button(format!(
+                        "{}  Open file… (Ctrl+O)",
+                        egui_phosphor::thin::FILE_TEXT
+                    ))
+                    .clicked()
+                {
                     want_open = true;
                 }
-                if ui.button("🗂  Open folder…").clicked() {
+                if ui
+                    .button(format!(
+                        "{}  Open folder…",
+                        egui_phosphor::thin::FOLDER_OPEN
+                    ))
+                    .clicked()
+                {
                     want_open_folder = true;
                 }
-                if ui.button("⌖  Recent files (Ctrl+R)").clicked() {
+                if ui
+                    .button(format!(
+                        "{}  Recent files (Ctrl+R)",
+                        egui_phosphor::thin::CLOCK_COUNTER_CLOCKWISE
+                    ))
+                    .clicked()
+                {
                     want_recent = true;
                 }
                 ui.separator();
-                if ui.button("⚙  Open Settings").clicked() {
+                if ui
+                    .button(format!("{}  Open Settings", egui_phosphor::thin::GEAR_SIX))
+                    .clicked()
+                {
                     want_settings = true;
                 }
-                if ui.button("⌨  Show keyboard shortcuts (F1)").clicked() {
+                if ui
+                    .button(format!(
+                        "{}  Show keyboard shortcuts (F1)",
+                        egui_phosphor::thin::KEYBOARD
+                    ))
+                    .clicked()
+                {
                     want_cheatsheet = true;
                 }
                 ui.add_space(10.0);
-                if ui.button("✓  Don't show this again").clicked() {
+                if ui
+                    .button(format!(
+                        "{}  Don't show this again",
+                        egui_phosphor::thin::CHECK
+                    ))
+                    .clicked()
+                {
                     want_dismiss_permanent = true;
                 }
                 ui.label(
@@ -5283,49 +5435,56 @@ impl ScribeApp {
             }
             let selected = self.fuzzy_selected;
             let mut query_changed = false;
-            egui::Window::new(RichText::new("⌕  open file").color(accent).monospace())
-                .open(&mut still_open)
-                .collapsible(false)
-                .resizable(true)
-                .default_width(560.0)
-                .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
-                .show(ctx, |ui| {
-                    let r = ui.text_edit_singleline(&mut self.fuzzy_query);
-                    if self.focus_fuzzy {
-                        r.request_focus();
-                        self.focus_fuzzy = false;
-                    }
-                    query_changed = r.changed();
-                    ui.label(
-                        RichText::new(format!(
-                            "indexed {} files · ↑↓ select · Enter open · Esc close",
-                            self.fuzzy_index.len()
-                        ))
-                        .color(muted)
-                        .small(),
-                    );
-                    ui.separator();
-                    egui::ScrollArea::vertical()
-                        .max_height(360.0)
-                        .show(ui, |ui| {
-                            if ranked.is_empty() {
-                                ui.label(
-                                    RichText::new("no match").color(muted).small().monospace(),
-                                );
+            egui::Window::new(
+                RichText::new(format!(
+                    "{}  open file",
+                    egui_phosphor::thin::MAGNIFYING_GLASS
+                ))
+                .color(accent)
+                .monospace(),
+            )
+            .open(&mut still_open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 80.0])
+            .show(ctx, |ui| {
+                let r = ui.text_edit_singleline(&mut self.fuzzy_query);
+                if self.focus_fuzzy {
+                    r.request_focus();
+                    self.focus_fuzzy = false;
+                }
+                query_changed = r.changed();
+                ui.label(
+                    RichText::new(format!(
+                        "indexed {} files · {}{} select · Enter open · Esc close",
+                        self.fuzzy_index.len(),
+                        egui_phosphor::thin::ARROW_UP,
+                        egui_phosphor::thin::ARROW_DOWN
+                    ))
+                    .color(muted)
+                    .small(),
+                );
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        if ranked.is_empty() {
+                            ui.label(RichText::new("no match").color(muted).small().monospace());
+                        }
+                        for (idx, p) in ranked.iter().enumerate() {
+                            let label = RichText::new(p.display().to_string()).monospace();
+                            let row = ui.selectable_label(idx == selected, label);
+                            if row.clicked() {
+                                chosen = Some(p.clone());
                             }
-                            for (idx, p) in ranked.iter().enumerate() {
-                                let label = RichText::new(p.display().to_string()).monospace();
-                                let row = ui.selectable_label(idx == selected, label);
-                                if row.clicked() {
-                                    chosen = Some(p.clone());
-                                }
-                                // Keep the keyboard-highlighted row in view.
-                                if idx == selected && (up || down) {
-                                    row.scroll_to_me(Some(egui::Align::Center));
-                                }
+                            // Keep the keyboard-highlighted row in view.
+                            if idx == selected && (up || down) {
+                                row.scroll_to_me(Some(egui::Align::Center));
                             }
-                        });
-                });
+                        }
+                    });
+            });
             // A new query invalidates the old highlight position.
             if query_changed {
                 self.fuzzy_selected = 0;
@@ -5442,7 +5601,7 @@ impl ScribeApp {
                         }
                         if spell_on {
                             let (txt, col) = if spell_misspellings == 0 {
-                                ("spell ✓".to_string(), accent)
+                                (format!("spell {}", egui_phosphor::thin::CHECK), accent)
                             } else {
                                 (format!("spell: {spell_misspellings}"), warn)
                             };
@@ -5451,10 +5610,13 @@ impl ScribeApp {
                         if diag_total > 0 {
                             let col = if diag_errors > 0 { warn } else { muted };
                             ui.label(
-                                RichText::new(format!("⊘ {diag_errors}e / {diag_total}"))
-                                    .color(col)
-                                    .small()
-                                    .monospace(),
+                                RichText::new(format!(
+                                    "{} {diag_errors}e / {diag_total}",
+                                    egui_phosphor::thin::PROHIBIT
+                                ))
+                                .color(col)
+                                .small()
+                                .monospace(),
                             );
                         }
                     }
@@ -5521,10 +5683,15 @@ impl ScribeApp {
                                  focused).",
                             );
                         ui.label(
-                            RichText::new("↑↓ Home End ⏎")
-                                .color(muted)
-                                .small()
-                                .monospace(),
+                            RichText::new(format!(
+                                "{}{} Home End {}",
+                                egui_phosphor::thin::ARROW_UP,
+                                egui_phosphor::thin::ARROW_DOWN,
+                                egui_phosphor::thin::ARROW_ELBOW_DOWN_LEFT
+                            ))
+                            .color(muted)
+                            .small()
+                            .monospace(),
                         )
                         .on_hover_text("Navigate the file tree from the keyboard.");
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -7199,6 +7366,49 @@ mod tab_reorder_tests {
         assert_eq!(ids, vec![0, 1, 2], "order unchanged");
         assert_eq!(app.active, 2, "active unchanged");
     }
+
+    #[test]
+    fn move_tab_refuses_to_move_a_pinned_tab() {
+        // #R5: pinned notes are anchored — move_tab is a no-op when the source
+        // tab is pinned, so a pinned note can't be drag-reordered.
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs.clear();
+        for n in 0..3u64 {
+            let mut t = EditorTab::scratch();
+            t.doc_id = crate::grid::DocId(n);
+            app.tabs.push(t);
+        }
+        app.tabs[0].pinned = true;
+        app.active = 0;
+        app.move_tab(0, 2); // try to drag the pinned tab to the end
+        let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
+        assert_eq!(ids, vec![0, 1, 2], "a pinned tab must not move");
+    }
+
+    #[test]
+    fn close_tab_refuses_to_close_a_pinned_tab() {
+        // #R5: pinned notes can't be closed directly — close_tab is the single
+        // chokepoint and refuses a pinned index, while unpinned tabs still close.
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs.clear();
+        for n in 0..3u64 {
+            let mut t = EditorTab::scratch();
+            t.doc_id = crate::grid::DocId(n);
+            app.tabs.push(t);
+        }
+        app.tabs[1].pinned = true;
+        app.close_tab(1);
+        let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
+        assert_eq!(
+            ids,
+            vec![0, 1, 2],
+            "a pinned tab must not be closed directly"
+        );
+        // An unpinned tab still closes normally.
+        app.close_tab(0);
+        let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
+        assert_eq!(ids, vec![1, 2], "an unpinned tab still closes");
+    }
 }
 
 #[cfg(test)]
@@ -7469,9 +7679,14 @@ mod e2e {
         let mut h = ui_harness(fresh_app());
         h.run();
         assert!(!h.state().settings_open);
-        h.get_by_label("⚙").click();
+        // #R5: the gear is the phosphor GEAR_SIX glyph (the bare "⚙" emoji was
+        // tofu in the bundled fonts).
+        h.get_by_label(egui_phosphor::thin::GEAR_SIX).click();
         h.run();
-        assert!(h.state().settings_open, "clicking ⚙ must open Settings");
+        assert!(
+            h.state().settings_open,
+            "clicking the settings gear must open Settings"
+        );
     }
 
     #[test]

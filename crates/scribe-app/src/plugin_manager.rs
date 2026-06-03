@@ -232,7 +232,7 @@ impl PluginManagerState {
         }
         let mut still_open = true;
         egui::Window::new(
-            egui::RichText::new("⧉  plugin manager")
+            egui::RichText::new(format!("{}  plugin manager", egui_phosphor::thin::CARDS))
                 .color(accent)
                 .monospace(),
         )
@@ -400,7 +400,12 @@ impl PluginManagerState {
                             );
                         }
                         if entry.stable_release().is_some()
-                            && ui.small_button("install →").clicked()
+                            && ui
+                                .small_button(format!(
+                                    "install {}",
+                                    egui_phosphor::thin::ARROW_RIGHT
+                                ))
+                                .clicked()
                         {
                             prefill = Some(entry.clone());
                         }
@@ -495,14 +500,14 @@ impl PluginManagerState {
             match result {
                 Ok(msg) => {
                     ui.label(
-                        egui::RichText::new(format!("✓ {msg}"))
+                        egui::RichText::new(format!("{} {msg}", egui_phosphor::thin::CHECK))
                             .color(accent)
                             .small(),
                     );
                 }
                 Err(msg) => {
                     ui.label(
-                        egui::RichText::new(format!("✗ {msg}"))
+                        egui::RichText::new(format!("{} {msg}", egui_phosphor::thin::X))
                             .color(egui::Color32::from_rgb(0xE0, 0x6C, 0x6C))
                             .small(),
                     );
