@@ -15,15 +15,16 @@
 //!   and the renderer needs `&mut ScribeApp` reachable (syntax cache, LSP
 //!   state, completion popups). The pane stores the id only; the look-up
 //!   is `O(n)` over `Vec<EditorTab>` where `n ≤ 20`.
-//! - [`MAX_PANES`] — hard cap (six). Enforced post-frame via undo-snapshot:
-//!   clone the `Tree` before each frame, snap back to the pre-frame copy if
-//!   `count > MAX_PANES`, toast the user. `Tree` clone at `n ≤ 12` tile-graph
-//!   entries is microseconds.
+//! - [`MAX_PANES`] — hard cap (six), enforced at BUILD time:
+//!   [`build_default_grid`] only ever lays out the first `MAX_PANES` documents,
+//!   so the tree never holds more than six panes. Extra documents stay open as
+//!   tabs and the editor toasts to say so.
 
 use serde::{Deserialize, Serialize};
 
-/// Hard upper bound on simultaneously visible panes. Enforced post-`on_edit`
-/// via undo-snapshot. Above this, splitting/adding refuses and the editor
+/// Hard upper bound on simultaneously visible panes. Enforced by
+/// [`build_default_grid`], which caps the doc list it lays out. Above this,
+/// extra documents remain open as tabs (not shown in the grid) and the editor
 /// toasts a hint.
 pub const MAX_PANES: usize = 6;
 
@@ -114,7 +115,13 @@ pub fn count_panes(tree: &egui_tiles::Tree<Pane>) -> usize {
 /// tab list stays the single source of truth for which documents are open, and
 /// the grid just shows them all at once. The id-stack key `"scribe-grid"` is
 /// fixed so persistence is stable across versions.
+///
+/// The doc list is capped at [`MAX_PANES`] — the grid never builds more than
+/// six panes (the enforcement the module promised but previously only toasted
+/// about). Extra documents stay open as tabs; they just aren't shown in the
+/// grid until a pane frees up.
 pub fn build_default_grid(docs: &[DocId]) -> egui_tiles::Tree<Pane> {
+    let docs = &docs[..docs.len().min(MAX_PANES)];
     let mut tiles = egui_tiles::Tiles::default();
     let pane_ids: Vec<egui_tiles::TileId> = docs
         .iter()
@@ -125,6 +132,22 @@ pub fn build_default_grid(docs: &[DocId]) -> egui_tiles::Tree<Pane> {
     }
     let root = tiles.insert_grid_tile(pane_ids);
     egui_tiles::Tree::new("scribe-grid", root, tiles)
+}
+
+/// Serialise the grid layout to a JSON string for persistence. A direct TOML
+/// round-trip fails on egui_tiles' `Container::Tabs.height` serialise/
+/// deserialise asymmetry; JSON of the Grid-container trees this module builds
+/// round-trips cleanly (see [`from_json`]). Returns `None` on serialisation
+/// failure (treated by callers as "no saved layout").
+pub fn to_json(tree: &egui_tiles::Tree<Pane>) -> Option<String> {
+    serde_json::to_string(tree).ok()
+}
+
+/// Rebuild a grid layout from a [`to_json`] string. Returns `None` on any parse
+/// error so a corrupt or stale saved layout degrades to a freshly-built default
+/// rather than refusing to open.
+pub fn from_json(s: &str) -> Option<egui_tiles::Tree<Pane>> {
+    serde_json::from_str(s).ok()
 }
 
 /// The set of doc ids currently represented by a pane in the tree. Used to
@@ -312,25 +335,45 @@ mod tests {
     /// `Clone` (see `grid_layout_clones_losslessly` above), which is what the
     /// 6-pane cap enforcement actually depends on at runtime.
     #[test]
-    fn tree_direct_toml_round_trip_is_a_known_gap() {
+    fn grid_layout_round_trips_through_json() {
+        // #R6 — the grid layout now persists via a JSON string. The
+        // Grid-container trees this module builds round-trip cleanly through
+        // `to_json`/`from_json`, preserving the panes + their doc ids.
+        let docs = [DocId(10), DocId(20), DocId(30)];
+        let tree = build_default_grid(&docs);
+        let json = to_json(&tree).expect("serialise grid to JSON");
+        let back = from_json(&json).expect("deserialise grid from JSON");
+        assert_eq!(count_panes(&back), 3);
+        assert_eq!(pane_doc_ids(&back), pane_doc_ids(&tree));
+        // Garbage in -> None (degrade to a default layout), never a panic.
+        assert!(from_json("not json").is_none());
+    }
+
+    #[test]
+    fn tree_direct_toml_round_trip_remains_a_known_gap() {
+        // Documents WHY persistence routes through JSON rather than TOML:
+        // egui_tiles drops `Container::Tabs.height` on serialise and then
+        // requires it on deserialise, so a direct TOML round-trip fails.
         let docs = [DocId(10), DocId(20), DocId(30)];
         let tree = build_default_grid(&docs);
         #[derive(Serialize, Deserialize)]
         struct Wrap {
             tree: egui_tiles::Tree<Pane>,
         }
-        let w = Wrap { tree };
-        // Serialisation is now lossy under toml 1.x — drops Container.Tabs.height.
-        let s = toml::to_string(&w).expect("toml 1.x serialises egui_tiles::Tree (lossily)");
-        assert!(
-            s.contains("[tree]"),
-            "expected [tree] table in serialised output, got {s}",
-        );
-        // Round-trip fails: the deserialiser requires the dropped field.
+        let s = toml::to_string(&Wrap { tree }).expect("toml serialises (lossily)");
         let back: Result<Wrap, _> = toml::from_str(&s);
         assert!(
             back.is_err(),
-            "expected deserialise to fail until JSON-string-in-TOML wrapper lands, got Ok",
+            "direct TOML round-trip is the gap the JSON wrapper avoids",
         );
+    }
+
+    #[test]
+    fn build_default_grid_caps_panes_at_max() {
+        // #R6 — the 6-pane cap is enforced at build time: more docs than
+        // MAX_PANES still produce only MAX_PANES panes.
+        let docs: Vec<DocId> = (0..(MAX_PANES as u64 + 4)).map(DocId).collect();
+        let tree = build_default_grid(&docs);
+        assert_eq!(count_panes(&tree), MAX_PANES);
     }
 }

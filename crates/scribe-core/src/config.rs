@@ -174,6 +174,13 @@ pub struct EditorConfig {
     /// opt in.
     #[serde(default)]
     pub grid_enabled: bool,
+    /// #R6 — persisted multi-note grid layout (a JSON-serialised
+    /// `egui_tiles::Tree<Pane>` from `grid::to_json`). Restored on launch when
+    /// the grid is enabled and the persisted panes match the reopened doc set,
+    /// so a split arrangement survives a restart. `None` until a grid layout has
+    /// been used.
+    #[serde(default)]
+    pub grid_layout: Option<String>,
     /// F-012 from docs/audits/overlooked-surfaces-2026-05-29.md: MRU
     /// list of recently-opened file paths. Capped at
     /// [`RECENT_FILES_MAX`]; freshly opened paths push to the front and
@@ -302,6 +309,7 @@ impl Default for EditorConfig {
             side_tabs_rotated: false,
             note_theme: default_note_theme(),
             grid_enabled: false,
+            grid_layout: None,
             recent_files: Vec::new(),
             first_run_completed: false,
             scroll_positions: std::collections::HashMap::new(),

@@ -3379,6 +3379,7 @@ dependencies = [
  "scribe-core",
  "scribe-render",
  "serde",
+ "serde_json",
  "skrifa",
  "tempfile",
  "toml",

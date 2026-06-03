@@ -1285,11 +1285,11 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     (UpdateMode::Auto, "auto"),
                 ];
                 ui.label("Mode").on_hover_text(
-                    "How update reminders work: off (never remind), notify (remind me when a \
-                     check is due), manual (only when I press Check now), or auto (open the \
-                     releases page automatically when due). Telemetry-free: SCR1B3 never \
-                     contacts the network in the background — a reminder only ever opens the \
-                     public GitHub releases page in your browser.",
+                    "How update reminders work: off (never remind), notify or auto (a passive \
+                     toast reminds you when a check is due), manual (only when you press Check \
+                     now). Telemetry-free: SCR1B3 never contacts the network in the background \
+                     and never opens the browser on its own — you click Check now to open the \
+                     public GitHub releases page.",
                 );
                 egui::ComboBox::from_id_salt("update-mode")
                     .selected_text(

@@ -157,13 +157,15 @@ enum UpdateReminder {
     Skip,
     /// Surface a passive hint toast pointing at the manual check.
     Notify,
-    /// Open the releases page immediately (the proactive `auto` mode).
-    OpenReleases,
 }
 
 /// Decide the reminder action without performing any side effects. `Off` never
 /// reminds; otherwise [`scribe_core::update::is_check_due`] gates on the
-/// interval, and `auto` escalates from a toast to opening the releases page.
+/// interval. #R6: a due reminder is ALWAYS passive (a toast) — SCR1B3 never
+/// opens the browser on its own. `auto` and `notify` therefore behave the same
+/// (a reminder when due); the user clicks "Check for updates now" to open the
+/// releases page. This keeps the telemetry-free editor from doing anything
+/// surprising on launch.
 fn update_reminder_action(
     mode: scribe_core::config::UpdateMode,
     last_check_unix: Option<u64>,
@@ -177,10 +179,7 @@ fn update_reminder_action(
     if !scribe_core::update::is_check_due(last_check_unix, interval_hours, now) {
         return UpdateReminder::Skip;
     }
-    match mode {
-        UpdateMode::Auto => UpdateReminder::OpenReleases,
-        _ => UpdateReminder::Notify,
-    }
+    UpdateReminder::Notify
 }
 
 /// Apply the OS window effect for the chosen mode (best-effort, graceful on
@@ -479,6 +478,13 @@ pub struct ScribeApp {
     closing: bool,
     find_open: bool,
     find_query: String,
+    /// #R6 — currently-selected match in the find bar (0-based). Drives the
+    /// "{i}/{n}" counter and Next/Prev/F3 navigation; reset when the query
+    /// changes. Clamped to the live match count each frame.
+    find_match_idx: usize,
+    /// The find query the match index was last computed against, so editing the
+    /// query resets navigation to the first match.
+    find_last_query: String,
     /// Replace-bar inputs (F-008 from docs/audits/overlooked-surfaces-2026-05-29.md).
     /// `Ctrl+H` opens the find bar with focus on `replace_query`; the bar
     /// renders a 2nd text field + "Replace next" + "Replace all" buttons
@@ -867,6 +873,8 @@ impl ScribeApp {
             closing: false,
             find_open: false,
             find_query: String::new(),
+            find_match_idx: 0,
+            find_last_query: String::new(),
             replace_query: String::new(),
             focus_replace: false,
             config_error_banner,
@@ -1097,13 +1105,17 @@ impl ScribeApp {
             };
             tree.ui(&mut behavior, ui);
         });
-        // Phase 18 T18.2 — 6-pane cap. Reads the grid storage (NOT the
-        // currently-visible tabs) and toasts when the user splits past the
-        // ceiling.
-        if crate::grid::count_panes(&tree) > crate::grid::MAX_PANES {
+        // Phase 18 T18.2 / #R6 — 6-pane cap, now actually ENFORCED:
+        // `build_default_grid` caps the tree at MAX_PANES panes, so the grid
+        // never shows more than six. When more tabs than that are open, the
+        // extras stay open as tabs and we tell the user why they aren't gridded.
+        let shown = crate::grid::count_panes(&tree);
+        if self.tabs.len() > shown {
             self.toast = Some(format!(
-                "Pane limit reached ({}). Close a pane before opening more.",
-                crate::grid::MAX_PANES
+                "Grid shows the first {} notes; {} more stay open as tabs. Close a pane to \
+                 show another.",
+                shown,
+                self.tabs.len() - shown
             ));
         }
         // Drop the tabs the user closed via the pane chrome. `retain_pane`
@@ -1119,12 +1131,18 @@ impl ScribeApp {
             }
         }
         // Reconcile additions: a tab opened while the grid is live has no pane
-        // yet. Rebuild ONLY when the doc set actually differs from the pane set,
-        // so steady-state editing and drag-rearranging never reset the layout.
-        let want: std::collections::BTreeSet<crate::grid::DocId> =
-            self.tabs.iter().map(|t| t.doc_id).collect();
+        // yet. Rebuild ONLY when the (capped) doc set actually differs from the
+        // pane set, so steady-state editing and drag-rearranging never reset the
+        // layout. The want-set is capped to MAX_PANES to match the capped tree —
+        // otherwise a 7th tab would force a rebuild every frame.
+        let docs: Vec<crate::grid::DocId> = self
+            .tabs
+            .iter()
+            .map(|t| t.doc_id)
+            .take(crate::grid::MAX_PANES)
+            .collect();
+        let want: std::collections::BTreeSet<crate::grid::DocId> = docs.iter().copied().collect();
         if want != crate::grid::pane_doc_ids(&tree) {
-            let docs: Vec<crate::grid::DocId> = self.tabs.iter().map(|t| t.doc_id).collect();
             tree = crate::grid::build_default_grid(&docs);
         }
         self.grid_tree = Some(tree);
@@ -1149,8 +1167,27 @@ impl ScribeApp {
         // Pass 2: align tree state with the config flag.
         match (self.config.editor.grid_enabled, self.grid_tree.is_some()) {
             (true, false) => {
-                let docs: Vec<crate::grid::DocId> = self.tabs.iter().map(|t| t.doc_id).collect();
-                self.grid_tree = Some(crate::grid::build_default_grid(&docs));
+                let docs: Vec<crate::grid::DocId> = self
+                    .tabs
+                    .iter()
+                    .map(|t| t.doc_id)
+                    .take(crate::grid::MAX_PANES)
+                    .collect();
+                // #R6 — restore the persisted layout if it still references
+                // exactly the reopened doc set (DocIds are assigned in tab order,
+                // so a stable session reproduces them); otherwise fall back to a
+                // fresh default grid. A corrupt/stale layout never blocks startup.
+                let want: std::collections::BTreeSet<crate::grid::DocId> =
+                    docs.iter().copied().collect();
+                let restored = self
+                    .config
+                    .editor
+                    .grid_layout
+                    .as_deref()
+                    .and_then(crate::grid::from_json)
+                    .filter(|t| crate::grid::pane_doc_ids(t) == want);
+                self.grid_tree =
+                    Some(restored.unwrap_or_else(|| crate::grid::build_default_grid(&docs)));
             }
             (false, true) => {
                 self.grid_tree = None;
@@ -1678,10 +1715,11 @@ impl ScribeApp {
     /// the user to check for a new release. This is the entire automatic side of
     /// the update feature — telemetry-free by construction: it performs NO
     /// network I/O (the bundled build ships no HTTP client). The actual check is
-    /// the user opening the Releases page (the "Check now" button in Settings,
-    /// or `ctx.open_url` here for `auto`). `is_check_due` + the persisted
-    /// `last_check_unix` make the interval honored across sessions.
-    fn maybe_remind_update(&mut self, ctx: &egui::Context) {
+    /// the user opening the Releases page (the "Check now" button in Settings).
+    /// #R6: this reminder NEVER opens the browser on its own — it only shows a
+    /// passive toast. `is_check_due` + the persisted `last_check_unix` make the
+    /// interval honored across sessions.
+    fn maybe_remind_update(&mut self) {
         if self.did_update_check {
             return;
         }
@@ -1699,10 +1737,6 @@ impl ScribeApp {
         self.config.updates.last_check_unix = Some(now_unix());
         self.save_config();
         match action {
-            UpdateReminder::OpenReleases => {
-                ctx.open_url(egui::OpenUrl::new_tab(RELEASES_URL));
-                self.toast = Some("Opened the SCR1B3 releases page to check for updates.".into());
-            }
             UpdateReminder::Notify => {
                 self.toast = Some(format!(
                     "Time to check for SCR1B3 updates — Settings {a} Updates {a} Check now.",
@@ -3010,6 +3044,61 @@ impl ScribeApp {
             self.pending_scroll = Some((line0 as f32) * lh);
         }
         self.status = format!("go to line {line_1based}");
+    }
+
+    /// #R6 — all matches of the current find query in the active buffer (empty
+    /// when there is no query / no buffer / the regex is invalid).
+    fn find_matches_active(&self) -> Vec<scribe_core::search::Match> {
+        if self.find_query.is_empty() || self.active >= self.tabs.len() {
+            return Vec::new();
+        }
+        let q = scribe_core::search::Query {
+            pattern: self.find_query.clone(),
+            ..Default::default()
+        };
+        scribe_core::search::find_all(&self.tabs[self.active].text, &q).unwrap_or_default()
+    }
+
+    /// Scroll the editor so the byte offset `start` is in view, reusing the
+    /// gutter-Y scroll pipe `goto_line` uses (without its status message).
+    fn scroll_to_offset(&mut self, start: usize) {
+        if self.active >= self.tabs.len() {
+            return;
+        }
+        let line0 = {
+            let text = &self.tabs[self.active].text;
+            let clamped = start.min(text.len());
+            text.as_bytes()[..clamped]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count()
+        };
+        if let Some(&y) = self.line_gutter.get(line0) {
+            self.pending_scroll = Some(y.max(0.0));
+        } else {
+            let lh = self.config.fonts.editor_size * self.config.fonts.line_height;
+            self.pending_scroll = Some((line0 as f32) * lh);
+        }
+    }
+
+    /// Move to the next (`forward`) or previous find match, wrapping around, and
+    /// scroll it into view. No-op when there are no matches.
+    fn find_navigate(&mut self, forward: bool) {
+        let matches = self.find_matches_active();
+        if matches.is_empty() {
+            return;
+        }
+        let n = matches.len();
+        // Clamp first (the buffer or query may have changed since last frame).
+        self.find_match_idx = self.find_match_idx.min(n - 1);
+        self.find_match_idx = if forward {
+            (self.find_match_idx + 1) % n
+        } else {
+            (self.find_match_idx + n - 1) % n
+        };
+        let start = matches[self.find_match_idx].start;
+        self.scroll_to_offset(start);
+        self.status = format!("match {} of {}", self.find_match_idx + 1, n);
     }
 
     /// 0-based cursor line of the active tab (from `last_cursor_line_col`,
@@ -4353,6 +4442,14 @@ impl eframe::App for ScribeApp {
     // current window geometry to the user TOML so the next launch restores
     // the same position + size.
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        // #R6 — persist the multi-note grid layout so a split arrangement
+        // survives a restart (restored in `sync_grid_state` when the panes
+        // match the reopened doc set). Only meaningful while the grid is on.
+        self.config.editor.grid_layout = if self.config.editor.grid_enabled {
+            self.grid_tree.as_ref().and_then(crate::grid::to_json)
+        } else {
+            self.config.editor.grid_layout.take()
+        };
         // We don't use eframe's own Storage (no JSON-blob serialisation —
         // SCR1B3 owns its config). Persist via save_config, which writes the
         // single canonical TOML.
@@ -4411,7 +4508,7 @@ impl ScribeApp {
             }
         }
         // Once per launch: nudge to check for updates if the interval elapsed.
-        self.maybe_remind_update(ctx);
+        self.maybe_remind_update();
         // Keep egui's animation time + caret style in sync with the motion
         // preferences every frame (cheap; also covers startup before any
         // theme reapply).
@@ -4500,6 +4597,9 @@ impl ScribeApp {
 
         // Collect deferred actions from shortcuts.
         let mut act = Pending::default();
+        // #R6 — find-bar F3 navigation direction, recorded here and applied
+        // after the input closure so `find_navigate` can re-borrow `self`.
+        let mut find_nav: Option<bool> = None;
         ctx.input(|i| {
             let cmd = i.modifiers.command;
             act.new = cmd && i.key_pressed(egui::Key::N);
@@ -4657,6 +4757,10 @@ impl ScribeApp {
                     act.next_bookmark = true;
                 }
             }
+            // #R6 — F3 / Shift+F3 cycle find matches while the find bar is open.
+            if self.find_open && i.key_pressed(egui::Key::F3) {
+                find_nav = Some(!i.modifiers.shift);
+            }
             // F-010 — Ctrl+P opens the fuzzy file finder (rebuilds the
             // file index on first open so cold-start cost lands here,
             // not on launch).
@@ -4674,6 +4778,11 @@ impl ScribeApp {
                 self.fuzzy_open = false;
             }
         });
+        // #R6 — apply the find-bar F3 navigation collected above (outside the
+        // input borrow so `find_navigate` can re-borrow `self`).
+        if let Some(forward) = find_nav {
+            self.find_navigate(forward);
+        }
         // #72 — identifier completion is an EDITOR-surface popup. While any
         // text-input / navigation modal owns the keyboard (find bar, command
         // palette, fuzzy finder, go-to-symbol / go-to-line, recent files,
@@ -4952,22 +5061,47 @@ impl ScribeApp {
                         r.request_focus();
                         self.focus_find = false;
                     }
-                    let count = if self.find_query.is_empty() || self.active >= self.tabs.len() {
-                        0
+                    // Editing the query restarts navigation at the first match.
+                    if self.find_query != self.find_last_query {
+                        self.find_match_idx = 0;
+                        self.find_last_query = self.find_query.clone();
+                    }
+                    let count = self.find_matches_active().len();
+                    self.find_match_idx = self.find_match_idx.min(count.saturating_sub(1));
+                    // Enter in the find field jumps to the next match.
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.find_navigate(true);
+                    }
+                    if ui
+                        .add_enabled(
+                            count > 0,
+                            egui::Button::new(egui_phosphor::thin::ARROW_UP).small(),
+                        )
+                        .on_hover_text("Previous match (Shift+F3)")
+                        .clicked()
+                    {
+                        self.find_navigate(false);
+                    }
+                    if ui
+                        .add_enabled(
+                            count > 0,
+                            egui::Button::new(egui_phosphor::thin::ARROW_DOWN).small(),
+                        )
+                        .on_hover_text("Next match (F3 / Enter)")
+                        .clicked()
+                    {
+                        self.find_navigate(true);
+                    }
+                    let counter = if count == 0 {
+                        if self.find_query.is_empty() {
+                            String::new()
+                        } else {
+                            "no matches".to_string()
+                        }
                     } else {
-                        let q = scribe_core::search::Query {
-                            pattern: self.find_query.clone(),
-                            ..Default::default()
-                        };
-                        scribe_core::search::find_all(&self.tabs[self.active].text, &q)
-                            .map(|m| m.len())
-                            .unwrap_or(0)
+                        format!("{}/{}", self.find_match_idx + 1, count)
                     };
-                    ui.label(
-                        RichText::new(format!("{count} matches"))
-                            .color(muted)
-                            .small(),
-                    );
+                    ui.label(RichText::new(counter).color(muted).small());
                     if ui.button("close").clicked() {
                         self.find_open = false;
                     }
@@ -5675,13 +5809,13 @@ impl ScribeApp {
                         // SCR1B3 targets (multi-GB files go through the rope
                         // browser which sets is_read_only_large and short-
                         // circuits this segment).
-                        let words = if t.doc.is_read_only_large() {
-                            0
+                        let (words, chars) = if t.doc.is_read_only_large() {
+                            (0, 0)
                         } else {
-                            t.text.split_whitespace().count()
+                            (t.text.split_whitespace().count(), t.text.chars().count())
                         };
                         ui.label(
-                            RichText::new(format!("{lines} ln · {words} w"))
+                            RichText::new(format!("{lines} ln · {words} w · {chars} ch"))
                                 .color(muted)
                                 .small()
                                 .monospace(),
@@ -7526,6 +7660,32 @@ mod tab_reorder_tests {
         let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
         assert_eq!(ids, vec![1, 2], "an unpinned tab still closes");
     }
+
+    #[test]
+    fn find_navigate_cycles_through_matches_and_wraps() {
+        // #R6 — the find bar can jump between matches (Next/Prev/F3), not just
+        // count them.
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "foo bar foo baz foo".to_string(); // three "foo"
+        app.find_query = "foo".to_string();
+        app.find_open = true;
+        assert_eq!(app.find_matches_active().len(), 3);
+
+        app.find_match_idx = 0;
+        app.find_navigate(true);
+        assert_eq!(app.find_match_idx, 1);
+        app.find_navigate(true);
+        assert_eq!(app.find_match_idx, 2);
+        app.find_navigate(true); // wraps to the first
+        assert_eq!(app.find_match_idx, 0);
+        app.find_navigate(false); // wraps back to the last
+        assert_eq!(app.find_match_idx, 2);
+
+        // No matches -> no-op, never panics.
+        app.find_query = "this-string-is-absent".to_string();
+        app.find_navigate(true);
+        assert!(app.find_matches_active().is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -7573,10 +7733,12 @@ mod update_reminder_tests {
     }
 
     #[test]
-    fn auto_due_opens_the_releases_page() {
+    fn auto_due_reminds_passively_never_opens_browser() {
+        // #R6: `auto` reminds with a passive toast when due — it does NOT open
+        // the browser on its own (no Notify→OpenReleases escalation any more).
         assert_eq!(
             update_reminder_action(UpdateMode::Auto, None, 24, 0),
-            UpdateReminder::OpenReleases,
+            UpdateReminder::Notify,
         );
         // Auto still respects the interval (not-due → Skip).
         let last = 1_000;
