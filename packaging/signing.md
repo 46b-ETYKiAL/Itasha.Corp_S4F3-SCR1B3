@@ -37,11 +37,10 @@ The signing flow above is **automated**, gated on the secrets/vars being set:
 
 | Secret / var | Kind | Purpose |
 |---|---|---|
-| `MINISIGN_SECRET_KEY` | secret | The ed25519 secret key. Present → the release job installs minisign and signs every asset (`*.minisig`). Absent → the job logs a `::warning::` and ships checksummed-but-**unsigned** artifacts (the in-app updater then rejects them — fail-closed). |
-| `MINISIGN_PASSWORD` | secret | Password for the secret key (empty for a `-W` no-password key). |
-| `SCR1B3_MINISIGN_PUBLIC_KEY` | var (optional) | The PUBLIC key box-form. When set, the build job swaps it into `EMBEDDED_PUBLIC_KEY` at build time — an alternative to committing the key into `verify.rs` by hand. When unset, whatever is committed in `verify.rs` is used (the all-zeros placeholder rejects everything until you commit the real key or set this var). |
+| `MINISIGN_SECRET_KEY` | secret | The **passwordless** ed25519 secret key (generate with `rsign generate -W`, or `minisign -G -W`). Present → the release job installs rsign2 and signs every asset (`*.minisig`). Absent → the job logs a `::warning::` and ships checksummed-but-**unsigned** artifacts (the in-app updater then rejects them — fail-closed). The CI signs with rsign2, the same tool used to generate the key; the app verifies with the `minisign-verify` crate (interoperable). |
+| `SCR1B3_MINISIGN_PUBLIC_KEY` | var (optional) | The PUBLIC key box-form. When set, the build job swaps it into `EMBEDDED_PUBLIC_KEY` at build time — an alternative to committing the key into `verify.rs` by hand. When unset, whatever is committed in `verify.rs` is used. |
 
-So a maintainer activates signed auto-updates by: (1) generating the keypair once (above), (2) committing the public key into `verify.rs` **or** setting the `SCR1B3_MINISIGN_PUBLIC_KEY` var, and (3) adding the `MINISIGN_SECRET_KEY` (+ `MINISIGN_PASSWORD`) secret. Until then releases are unsigned and the updater is inert by design — never insecure.
+The real public key is committed in `crates/scribe-core/src/update/verify.rs` (`EMBEDDED_PUBLIC_KEY` — a public value). A maintainer activates signed auto-updates by adding the `MINISIGN_SECRET_KEY` secret; the matching public key is already embedded. Until the secret is set, releases are unsigned and the updater is inert by design — never insecure. (Use a passwordless key so the non-interactive CI sign needs no password secret.)
 
 ## Windows code signing (separate concern)
 
