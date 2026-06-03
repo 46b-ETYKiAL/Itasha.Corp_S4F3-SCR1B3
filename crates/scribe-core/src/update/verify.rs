@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 /// verifies every downloaded artifact against it; only the holder of the
 /// matching secret key (a GitHub Actions secret, never committed) can produce
 /// an accepted signature.
-pub const EMBEDDED_PUBLIC_KEY: &str = "untrusted comment: minisign public key: EAF9AC0C656E5A63\nRWRjWm5lDKz56qYOp/YzNsKqIO699Q77292KSPBkJ2KQQZKk7ynAI2bE";
+pub const EMBEDDED_PUBLIC_KEY: &str = "untrusted comment: minisign public key: BD4ADF9145E13B17\nRWQXO+FFkd9Kvdw2hUrWtt5Eoebj41ckYRPGs7tTH+zym1moqwXT5D7N";
 
 /// Hex-encoded SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
