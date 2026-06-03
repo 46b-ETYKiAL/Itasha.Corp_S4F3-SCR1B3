@@ -7,10 +7,12 @@
 
 use sha2::{Digest, Sha256};
 
-/// The embedded minisign public key (full box form). Replaced at release time
-/// with the real key. The placeholder is intentionally invalid so an
-/// unconfigured build refuses every signature rather than accepting one.
-pub const EMBEDDED_PUBLIC_KEY: &str = "untrusted comment: SCR1B3 release signing key (placeholder)\nRWQ0000000000000000000000000000000000000000000000000000000000000000";
+/// The embedded minisign public key (full box form). This is the REAL SCR1B3
+/// release signing key — a PUBLIC value, safe to commit. The in-app updater
+/// verifies every downloaded artifact against it; only the holder of the
+/// matching secret key (a GitHub Actions secret, never committed) can produce
+/// an accepted signature.
+pub const EMBEDDED_PUBLIC_KEY: &str = "untrusted comment: minisign public key: EAF9AC0C656E5A63\nRWRjWm5lDKz56qYOp/YzNsKqIO699Q77292KSPBkJ2KQQZKk7ynAI2bE";
 
 /// Hex-encoded SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -98,10 +100,18 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_key_rejects_everything() {
-        // The unconfigured embedded key must not validate a bogus signature.
+    fn embedded_key_rejects_bogus_signatures() {
+        // The embedded release key must reject a malformed / forged signature
+        // (it only accepts artifacts signed by the matching secret key).
         assert!(
             verify_signature(b"x", "untrusted comment: x\nbogus", EMBEDDED_PUBLIC_KEY).is_err()
         );
+    }
+
+    #[test]
+    fn embedded_key_decodes() {
+        // The committed embedded key must be a well-formed minisign public key
+        // (so a real signature CAN verify against it).
+        assert!(minisign_verify::PublicKey::decode(EMBEDDED_PUBLIC_KEY).is_ok());
     }
 }
