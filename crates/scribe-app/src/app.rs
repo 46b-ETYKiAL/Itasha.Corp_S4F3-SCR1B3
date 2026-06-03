@@ -497,6 +497,10 @@ pub struct ScribeApp {
     toast: Option<String>,
     /// Plugin/mod host (Rhai easy-mode); loaded from the plugins dir on start.
     plugins: PluginHost,
+    /// #R6 — ids of discovered plugins held back at load because the user has
+    /// not approved their current entry script (TOFU trust gate). Surfaced in
+    /// the plugin manager so the user can review + approve them.
+    pending_plugins: Vec<String>,
     plugin_cmds: Vec<CommandInfo>,
     /// Offline spellcheck engine (bundled en_US); checked only when enabled.
     spell: HashSetEngine,
@@ -748,22 +752,84 @@ impl ScribeApp {
 
         // Load user mods/plugins (no-build-step Rhai scripts) from the plugins
         // dir, unless the user disabled the plugin system.
+        //
+        // #R6 — TRUST GATE. A plugin script is only ever executed when EITHER:
+        //   * `require_signed` is on AND it carries a minisign signature over
+        //     the entry script from a pinned author key that verifies, OR
+        //   * the user has approved THIS EXACT entry script (its SHA-256 is in
+        //     `config.plugins.trusted`).
+        // Otherwise the plugin is held back as "pending approval" and NOT run.
+        // This closes the prior gap where dropping any folder into the plugins
+        // dir auto-executed unsigned, unreviewed code on the next launch.
         let mut plugins = PluginHost::new();
+        let mut pending_plugins: Vec<String> = Vec::new();
         if config.plugins.enabled {
             if let Some(dir) = Config::config_dir() {
                 let (found, errors) = plugin::discover(&dir.join("plugins"));
+                let mut key_store = scribe_core::plugin::PinnedKeyStore::new(&dir);
                 for p in found {
                     if config.plugins.disabled.contains(&p.manifest.id) {
                         continue;
                     }
-                    if let Ok(src) = std::fs::read_to_string(p.entry_path()) {
-                        if let Err(e) = plugins.load_script(&p.manifest.id, &src) {
-                            tracing::warn!("plugin load failed: {e}");
+                    let Ok(src) = std::fs::read_to_string(p.entry_path()) else {
+                        continue;
+                    };
+                    let sha = scribe_core::update::verify::sha256_hex(src.as_bytes());
+                    let may_run = if config.plugins.require_signed {
+                        // Strict mode: pinned author key (TOFU) + a valid
+                        // minisign signature over the entry script.
+                        let verified = match (&p.manifest.author_pubkey, &p.manifest.signature) {
+                            (Some(pk), Some(sig)) => {
+                                let pinned = matches!(
+                                    key_store.pin_or_match(&p.manifest.id, pk),
+                                    Ok(scribe_core::plugin::PinOutcome::Match
+                                        | scribe_core::plugin::PinOutcome::New)
+                                );
+                                pinned
+                                    && scribe_core::update::verify::verify_signature(
+                                        src.as_bytes(),
+                                        sig,
+                                        pk,
+                                    )
+                                    .is_ok()
+                            }
+                            _ => false,
+                        };
+                        if !verified {
+                            tracing::warn!(
+                                "plugin '{}' rejected: require_signed is on but it is \
+                                 unsigned or fails verification",
+                                p.manifest.id
+                            );
                         }
+                        verified
+                    } else {
+                        // Default mode: trust-on-first-use by entry checksum.
+                        scribe_core::plugin::entry_is_trusted(
+                            &p.manifest.id,
+                            &sha,
+                            &config.plugins.trusted,
+                        )
+                    };
+                    if !may_run {
+                        if !config.plugins.require_signed {
+                            pending_plugins.push(p.manifest.id.clone());
+                        }
+                        continue;
+                    }
+                    if let Err(e) = plugins.load_script(&p.manifest.id, &src) {
+                        tracing::warn!("plugin load failed: {e}");
                     }
                 }
                 if !errors.is_empty() && toast.is_none() {
                     toast = Some(format!("{} plugin(s) skipped (see log)", errors.len()));
+                }
+                if !pending_plugins.is_empty() && toast.is_none() {
+                    toast = Some(format!(
+                        "{} plugin(s) need your approval before they run — open Settings \
+                         → Plugins → Manage plugins",
+                        pending_plugins.len()
+                    ));
                 }
             }
         }
@@ -811,6 +877,7 @@ impl ScribeApp {
             ),
             toast,
             plugins,
+            pending_plugins,
             plugin_cmds,
             spell,
             palette_open: false,
@@ -1073,11 +1140,9 @@ impl ScribeApp {
         // reference. DocId(0) is the legacy / unallocated sentinel.
         for tab in self.tabs.iter_mut() {
             if tab.doc_id.0 == 0 {
+                // The allocator reserves 0 and starts at 1, so a single next()
+                // always yields a real (non-sentinel) id.
                 tab.doc_id = self.next_doc_id.next();
-                // Ensure the first real id is >= 1 (next() starts at 0).
-                if tab.doc_id.0 == 0 {
-                    tab.doc_id = self.next_doc_id.next();
-                }
             }
             self.next_doc_id.observe(tab.doc_id);
         }
@@ -1681,14 +1746,45 @@ impl ScribeApp {
         let (found, _errors) = plugin::discover(plugins_dir);
         found
             .into_iter()
-            .map(|p| crate::plugin_manager::LoadedRow {
-                enabled: !self.config.plugins.disabled.contains(&p.manifest.id),
-                id: p.manifest.id,
-                name: p.manifest.name,
-                version: p.manifest.version,
-                description: p.manifest.description,
+            .map(|p| {
+                let id = p.manifest.id;
+                crate::plugin_manager::LoadedRow {
+                    enabled: !self.config.plugins.disabled.contains(&id),
+                    pending: self.pending_plugins.contains(&id),
+                    name: p.manifest.name,
+                    version: p.manifest.version,
+                    description: p.manifest.description,
+                    id,
+                }
             })
             .collect()
+    }
+
+    /// #R6 — approve a pending plugin: hash its current entry script, record
+    /// that hash in `config.plugins.trusted`, persist the config, and load the
+    /// script into the live host so it runs immediately (no restart needed).
+    fn approve_plugin(&mut self, id: &str) {
+        let Some(dir) = Config::config_dir() else {
+            return;
+        };
+        let (found, _errors) = plugin::discover(&dir.join("plugins"));
+        let Some(p) = found.into_iter().find(|p| p.manifest.id == id) else {
+            return;
+        };
+        let Ok(src) = std::fs::read_to_string(p.entry_path()) else {
+            self.toast = Some(format!("could not read plugin '{id}' entry script"));
+            return;
+        };
+        let sha = scribe_core::update::verify::sha256_hex(src.as_bytes());
+        self.config.plugins.trusted.insert(id.to_string(), sha);
+        self.save_config();
+        match self.plugins.load_script(id, &src) {
+            Ok(()) => {
+                self.pending_plugins.retain(|p| p != id);
+                self.status = format!("approved + loaded plugin '{id}'");
+            }
+            Err(e) => self.toast = Some(format!("plugin '{id}' approved but failed to load: {e}")),
+        }
     }
 
     /// F-020 — sample the current viewport inner rect + outer position and
@@ -1920,8 +2016,17 @@ impl ScribeApp {
             return;
         }
         match self.tabs[active].doc.save() {
-            Ok(()) => {
+            Ok(lossy) => {
                 self.status = format!("saved {}", self.tabs[active].doc.file_name());
+                // #R6 — the file's encoding can't represent every character;
+                // those were replaced (data lost). Warn loudly + offer the fix.
+                if lossy {
+                    self.toast = Some(format!(
+                        "Saved, but some characters can't be written as {} — they were \
+                         replaced. Convert the file to UTF-8 to keep them.",
+                        self.tabs[active].doc.encoding().name
+                    ));
+                }
                 // F-022 — refresh the disk fingerprint after a successful
                 // save so the next poll doesn't false-positive.
                 self.tabs[active].disk_text = self.tabs[active].text.clone();
@@ -2076,7 +2181,16 @@ impl ScribeApp {
             let text = self.tabs[active].text.clone();
             self.tabs[active].doc.set_text(&text);
             match self.tabs[active].doc.save_as(&path) {
-                Ok(()) => self.status = format!("saved {}", path.display()),
+                Ok(lossy) => {
+                    self.status = format!("saved {}", path.display());
+                    if lossy {
+                        self.toast = Some(format!(
+                            "Saved, but some characters can't be written as {} — they were \
+                             replaced. Convert the file to UTF-8 to keep them.",
+                            self.tabs[active].doc.encoding().name
+                        ));
+                    }
+                }
                 Err(e) => self.toast = Some(format!("save failed: {e}")),
             }
         }
@@ -5056,6 +5170,9 @@ impl ScribeApp {
                 // then open it in the OS file manager.
                 let _ = std::fs::create_dir_all(&plugins_dir);
                 open_in_file_manager(&plugins_dir);
+            }
+            if let Some(id) = action.approve {
+                self.approve_plugin(&id);
             }
         }
 

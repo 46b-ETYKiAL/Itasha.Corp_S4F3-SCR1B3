@@ -56,10 +56,13 @@ pub fn decode(bytes: &[u8]) -> (String, DetectedEncoding) {
 }
 
 /// Encode a `String` back to bytes using the named encoding, re-emitting a BOM
-/// if the original had one. Falls back to UTF-8 for unknown names.
-pub fn encode(text: &str, enc: &DetectedEncoding) -> Vec<u8> {
+/// if the original had one. Falls back to UTF-8 for unknown names. The returned
+/// `bool` is `true` when one or more characters could **not** be represented in
+/// the target encoding: `encoding_rs` substitutes a replacement, so those
+/// characters are silently LOST on save and the caller MUST warn the user.
+pub fn encode_checked(text: &str, enc: &DetectedEncoding) -> (Vec<u8>, bool) {
     let encoding = Encoding::for_label(enc.name.as_bytes()).unwrap_or(encoding_rs::UTF_8);
-    let (cow, _, _) = encoding.encode(text);
+    let (cow, _, had_unmappable) = encoding.encode(text);
     let mut out = Vec::with_capacity(cow.len() + 3);
     if enc.had_bom {
         // Re-emit UTF-8/16 BOMs; other encodings have none.
@@ -71,7 +74,13 @@ pub fn encode(text: &str, enc: &DetectedEncoding) -> Vec<u8> {
         }
     }
     out.extend_from_slice(&cow);
-    out
+    (out, had_unmappable)
+}
+
+/// Encode a `String` back to bytes (see [`encode_checked`] to also learn whether
+/// any characters were lost). Re-emits a BOM if the original had one.
+pub fn encode(text: &str, enc: &DetectedEncoding) -> Vec<u8> {
+    encode_checked(text, enc).0
 }
 
 #[cfg(test)]
@@ -105,5 +114,30 @@ mod tests {
         assert_eq!(text, "Hi");
         assert_eq!(enc.name, "UTF-16LE");
         assert!(enc.had_bom);
+    }
+
+    #[test]
+    fn encode_checked_flags_unmappable_characters() {
+        // A file opened as windows-1252 can't represent a kanji; encoding_rs
+        // replaces it, so the character is lost on save — encode_checked must
+        // report that so the editor can warn the user.
+        let enc = DetectedEncoding {
+            name: "windows-1252".to_string(),
+            had_bom: false,
+        };
+        let (_bytes, lossy) = encode_checked("speak 速記 friend", &enc);
+        assert!(lossy, "kanji is unmappable in windows-1252");
+
+        // A fully representable string is NOT lossy.
+        let (_b, lossy2) = encode_checked("plain ascii", &enc);
+        assert!(!lossy2);
+
+        // UTF-8 can represent everything → never lossy.
+        let utf8 = DetectedEncoding {
+            name: "UTF-8".to_string(),
+            had_bom: false,
+        };
+        let (_b, lossy3) = encode_checked("速記 ok", &utf8);
+        assert!(!lossy3);
     }
 }

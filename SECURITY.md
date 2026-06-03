@@ -30,13 +30,14 @@ When an update is downloaded, SCR1B3 **cryptographically verifies it before appl
 
 To verify a release manually, use the published `minisign` public key against the release's signature file (instructions accompany each release).
 
-## Plugin capability-consent model
+## Plugin trust + sandbox model
 
 The user plugin/mod system is opt-in and sandboxed (see [PLUGINS.md](PLUGINS.md)):
 
-- Plugins **declare the capabilities they need** (for example, reading a file, watching the buffer). You **approve** those capabilities before the plugin runs.
-- Compiled extensions run in a **WASM sandbox**; the scripting "easy mode" runs in a restricted Rhai engine with seven caps wired (operations, call depth, string size, array size, map size, modules, expression depth) plus a wall-clock deadline. Both the `eval` and `import` keywords are removed from the parser, and the module resolver is a no-op — a script using them fails to **compile**, never just at runtime.
-- A plugin cannot silently gain network access, exfiltrate file contents, or escalate privileges — anything beyond its consented capabilities is denied.
+- **A plugin only runs after you approve it.** Dropping a folder into the plugins dir does **not** auto-execute it. By default the editor uses **trust-on-first-use**: it records the SHA-256 of the *exact* entry script you approved (in `[plugins] trusted`) and refuses to run a brand-new **or silently modified** script until you approve it again (Settings → Plugins → Manage plugins → **Approve & run**). A held-back plugin is shown as "not running — needs your approval".
+- **Strict signed mode.** Set `[plugins] require_signed = true` and a plugin runs only when it carries a valid **minisign** signature over its entry script from a **pinned author key** (TOFU key-pinning; a changed key is refused). This authenticates the *code that runs*, not just metadata, via the same `update::verify` cryptographic surface as the auto-updater.
+- **Sandbox.** The scripting "easy mode" runs in a restricted Rhai engine with seven caps wired (operations, call depth, string size, array size, map size, modules, expression depth) plus a wall-clock deadline. Both the `eval` and `import` keywords are removed from the parser and the module resolver is a no-op — a script using them fails to **compile**, never just at runtime. (Compiled WASM extensions run in a WASM sandbox.)
+- **Capability surface.** The v1 host exposes only buffer-text operations to scripts — there is **no** ambient filesystem, network, or process access for a script to reach, so a plugin cannot silently exfiltrate files or open the network. Privileged host capabilities (and the per-capability consent prompt the manifest models) are not yet exposed; any future privileged capability will be gated behind explicit consent before it ships.
 - You can disable any plugin via `[plugins] disabled` or turn the whole system off with `[plugins] enabled = false`.
 
 ## Configuration is data, not code

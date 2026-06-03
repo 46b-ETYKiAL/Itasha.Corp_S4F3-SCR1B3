@@ -38,13 +38,19 @@ fn open_plugin_manager_id() -> egui::Id {
 /// Returns `None` on malformed input so the caller can fall back to a default.
 fn parse_hex_color(s: &str) -> Option<egui::Color32> {
     let h = s.trim().trim_start_matches('#');
-    if h.len() != 6 {
+    // `h.len()` is the BYTE length; a 6-byte value containing a multibyte char
+    // (e.g. `aa€b`) passed the `== 6` check then panicked on `&h[0..2]` slicing
+    // through the char boundary. Reject non-ASCII first so byte-length and the
+    // ASCII hex windows agree, and slice via `get`/`from_utf8` so no range can
+    // panic.
+    if !h.is_ascii() || h.len() != 6 {
         return None;
     }
-    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
-    Some(egui::Color32::from_rgb(r, g, b))
+    let comp = |i: usize| -> Option<u8> {
+        let bytes = h.as_bytes().get(i..i + 2)?;
+        u8::from_str_radix(std::str::from_utf8(bytes).ok()?, 16).ok()
+    };
+    Some(egui::Color32::from_rgb(comp(0)?, comp(2)?, comp(4)?))
 }
 
 /// egui temp-data key holding the selected Settings category. Shared by
@@ -1902,6 +1908,18 @@ mod hex_color {
         assert_eq!(parse_hex_color("#123"), None);
         assert_eq!(parse_hex_color("nothex!"), None);
         assert_eq!(parse_hex_color(""), None);
+    }
+
+    #[test]
+    fn rejects_non_ascii_without_panicking() {
+        // A multibyte char can make a value 6 BYTES long while crossing a char
+        // boundary inside the `&h[0..2]` / `&h[2..4]` windows — the old code
+        // panicked (aborting the whole app) instead of returning `None`.
+        // `€` is 3 bytes: `aa€` strips to 5 bytes; `aa€b` = 6 bytes → the old
+        // `== 6` check passed and `&h[2..4]` sliced through `€`.
+        assert_eq!(parse_hex_color("aa\u{20ac}b"), None); // 6 bytes, splits €
+        assert_eq!(parse_hex_color("#aa\u{20ac}b"), None); // same, with hash
+        assert_eq!(parse_hex_color("\u{20ac}\u{20ac}"), None); // 6 bytes, all non-ascii
     }
 }
 

@@ -459,9 +459,20 @@ pub enum EditKind {
     Other,
 }
 
+/// Default byte budget for the combined undo+redo snapshot text. A snapshot
+/// holds the WHOLE buffer, so a count-only cap lets a 512-deep stack of a
+/// multi-GiB buffer pin tens of GiB resident. The byte budget bounds that:
+/// once the summed snapshot text exceeds it, the oldest checkpoints are evicted
+/// even if the count cap is not yet reached. 64 MiB comfortably holds a deep
+/// stack of ordinary source files while capping the pathological large-rope
+/// case.
+pub const DEFAULT_HISTORY_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+
 /// A bounded undo/redo history of [`Snapshot`]s. The caller records the
 /// pre-edit snapshot after each edit; `undo`/`redo` swap snapshots with the
-/// live state. Depth is capped (oldest dropped) to bound memory + disk size.
+/// live state. Depth is bounded by BOTH a count cap (oldest dropped) AND a byte
+/// budget over the summed snapshot text (oldest dropped) so editing a large
+/// rope can't blow up resident memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct History {
     undo: Vec<Snapshot>,
@@ -469,16 +480,65 @@ pub struct History {
     /// Kind of the most recently recorded edit, for coalescing.
     last_kind: Option<EditKind>,
     cap: usize,
+    /// Max summed bytes of `undo` + `redo` snapshot text. Older snapshots are
+    /// evicted when this is exceeded. `#[serde(default)]` so histories
+    /// persisted before this field existed still deserialize (defaulting to 0,
+    /// which `byte_budget()` promotes to the named default).
+    #[serde(default)]
+    byte_budget: usize,
 }
 
 impl History {
-    /// A new history holding up to `cap` undo checkpoints (`cap >= 1`).
+    /// A new history holding up to `cap` undo checkpoints (`cap >= 1`) within
+    /// the [`DEFAULT_HISTORY_BYTE_BUDGET`] byte budget.
     pub fn new(cap: usize) -> Self {
+        Self::with_byte_budget(cap, DEFAULT_HISTORY_BYTE_BUDGET)
+    }
+
+    /// A new history with an explicit count cap AND byte budget (both `>= 1`).
+    pub fn with_byte_budget(cap: usize, byte_budget: usize) -> Self {
         Self {
             undo: Vec::new(),
             redo: Vec::new(),
             last_kind: None,
             cap: cap.max(1),
+            byte_budget: byte_budget.max(1),
+        }
+    }
+
+    /// The effective byte budget, promoting a 0 (legacy-deserialized) value to
+    /// the named default.
+    fn byte_budget(&self) -> usize {
+        if self.byte_budget == 0 {
+            DEFAULT_HISTORY_BYTE_BUDGET
+        } else {
+            self.byte_budget
+        }
+    }
+
+    /// Summed bytes of every retained `undo` + `redo` snapshot's text.
+    pub fn retained_bytes(&self) -> usize {
+        self.undo
+            .iter()
+            .chain(self.redo.iter())
+            .map(|s| s.text.len())
+            .sum()
+    }
+
+    /// Drop the oldest `undo` checkpoints until BOTH the count cap and byte
+    /// budget hold. The `undo` front is the oldest history; the `redo` stack
+    /// is short-lived (cleared on every `record`) so it is left intact and the
+    /// most-recent checkpoint is always preserved.
+    fn enforce_limits(&mut self) {
+        while self.undo.len() > self.cap {
+            self.undo.remove(0);
+        }
+        let budget = self.byte_budget();
+        // Never evict the single most-recent undo checkpoint, even if it alone
+        // exceeds the budget — losing it would silently drop the user's last
+        // undo step. Evict only while there is more than one to trim.
+        while self.undo.len() > 1 && self.retained_bytes() > budget {
+            self.undo.remove(0);
         }
     }
 
@@ -496,9 +556,7 @@ impl History {
             return;
         }
         self.undo.push(before);
-        if self.undo.len() > self.cap {
-            self.undo.remove(0);
-        }
+        self.enforce_limits();
     }
 
     /// Undo: return the snapshot to restore, pushing `current` onto the redo
@@ -507,6 +565,7 @@ impl History {
         let prev = self.undo.pop()?;
         self.redo.push(current);
         self.last_kind = None; // the next edit starts a fresh group
+        self.enforce_limits();
         Some(prev)
     }
 
@@ -516,6 +575,7 @@ impl History {
         let next = self.redo.pop()?;
         self.undo.push(current);
         self.last_kind = None;
+        self.enforce_limits();
         Some(next)
     }
 
@@ -757,6 +817,63 @@ mod tests {
         assert!(h.undo(Snapshot::new("cur", 0)).is_some());
         assert!(h.undo(Snapshot::new("cur", 0)).is_some());
         assert!(h.undo(Snapshot::new("cur", 0)).is_none());
+    }
+
+    #[test]
+    fn history_respects_byte_budget() {
+        // A 1 KiB budget with a generous count cap: pushing many large
+        // snapshots must evict oldest so retained bytes stay under budget,
+        // while the most-recent checkpoint is preserved.
+        let budget = 1024;
+        let mut h = History::with_byte_budget(1000, budget);
+        let big = "x".repeat(400); // 400 bytes each
+        for i in 0..20 {
+            // Distinct kinds so nothing coalesces — every push is a checkpoint.
+            h.record(Snapshot::new(format!("{big}{i}"), 0), EditKind::Other);
+        }
+        // Count cap (1000) never reached, but the byte budget bounds retention.
+        assert!(
+            h.retained_bytes() <= budget,
+            "retained {} > budget {budget}",
+            h.retained_bytes()
+        );
+        // The most-recent checkpoint survives: undoing returns the latest text.
+        let restored = h.undo(Snapshot::new("cur", 0)).unwrap();
+        assert!(
+            restored.text.ends_with("19"),
+            "most-recent checkpoint must be preserved, got {:?}",
+            restored.text
+        );
+    }
+
+    #[test]
+    fn history_byte_budget_enforced_on_redo_push() {
+        // The redo() path pushes `current` onto the undo stack; that push must
+        // also honour the budget (the bug was that only record() trimmed).
+        let budget = 1024;
+        let mut h = History::with_byte_budget(1000, budget);
+        let big = "y".repeat(400);
+        // Build a few checkpoints, then undo once to populate redo.
+        for i in 0..3 {
+            h.record(Snapshot::new(format!("{big}{i}"), 0), EditKind::Other);
+        }
+        h.undo(Snapshot::new(format!("{big}cur"), 0));
+        // Redo pushes a 400+ byte `current` back onto undo; budget still holds.
+        h.redo(Snapshot::new(format!("{big}redoing"), 0));
+        assert!(
+            h.retained_bytes() <= budget,
+            "redo push must respect the byte budget: {} > {budget}",
+            h.retained_bytes()
+        );
+    }
+
+    #[test]
+    fn history_default_byte_budget_is_named_const() {
+        let h = History::default();
+        // The default-constructed history uses the named 64 MiB budget.
+        assert_eq!(super::DEFAULT_HISTORY_BYTE_BUDGET, 64 * 1024 * 1024);
+        // Empty history retains zero bytes.
+        assert_eq!(h.retained_bytes(), 0);
     }
 
     #[test]

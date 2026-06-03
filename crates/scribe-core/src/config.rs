@@ -485,6 +485,18 @@ pub struct PluginConfig {
     pub enabled: bool,
     /// Plugin ids the user has explicitly disabled.
     pub disabled: Vec<String>,
+    /// Trust-on-first-use approvals: plugin id -> the SHA-256 of the entry
+    /// script the user approved. A discovered plugin is only ever RUN when its
+    /// current entry-script hash matches the approved one — so dropping a new
+    /// (or silently-modified) plugin folder into the plugins dir does NOT
+    /// auto-execute it; the user must approve it first. This is the real
+    /// consent gate the security docs describe.
+    pub trusted: std::collections::BTreeMap<String, String>,
+    /// Strict mode: when true, a plugin must additionally carry a valid minisign
+    /// signature over its manifest from a pinned author key (the manifest's
+    /// `signature` + `author_pubkey`). Default off so existing unsigned local
+    /// script plugins keep working under the TOFU gate above.
+    pub require_signed: bool,
 }
 
 impl Default for PluginConfig {
@@ -492,6 +504,8 @@ impl Default for PluginConfig {
         Self {
             enabled: true,
             disabled: Vec::new(),
+            trusted: std::collections::BTreeMap::new(),
+            require_signed: false,
         }
     }
 }

@@ -131,14 +131,22 @@ impl PluginHost {
         engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
 
         // Wall-clock guard: abort if a script runs past its deadline.
+        // #R6: every shared-state lock here uses `unwrap_or_else(|e|
+        // e.into_inner())` rather than `.unwrap()`. Plugin scripts are
+        // semi-trusted; if one panics while holding a lock the Mutex is
+        // poisoned, and a plain `.unwrap()` would then abort the WHOLE editor on
+        // the next access. Recovering the guard contains the failure to the one
+        // plugin instead of taking the process down.
         let deadline: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
         let dl = Arc::clone(&deadline);
-        engine.on_progress(move |_ops| match *dl.lock().unwrap() {
-            Some(end) if Instant::now() > end => {
-                Some(rhai::Dynamic::from("plugin exceeded time limit"))
-            }
-            _ => None,
-        });
+        engine.on_progress(
+            move |_ops| match *dl.lock().unwrap_or_else(|e| e.into_inner()) {
+                Some(end) if Instant::now() > end => {
+                    Some(rhai::Dynamic::from("plugin exceeded time limit"))
+                }
+                _ => None,
+            },
+        );
 
         register_host_fns(&mut engine, &shared);
         Self {
@@ -151,7 +159,8 @@ impl PluginHost {
 
     /// Arm the wall-clock deadline for the next script run.
     fn arm_deadline(&self) {
-        *self.deadline.lock().unwrap() = Some(Instant::now() + PLUGIN_DEADLINE);
+        *self.deadline.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(Instant::now() + PLUGIN_DEADLINE);
     }
 
     /// Compile + load a script plugin. Runs its top-level statements once (which
@@ -163,7 +172,7 @@ impl PluginHost {
             .compile(source)
             .map_err(|e| format!("{plugin_id}: parse: {e}"))?;
         {
-            let mut s = self.shared.lock().unwrap();
+            let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.current_plugin = Some(plugin_id.to_string());
         }
         self.arm_deadline();
@@ -171,7 +180,7 @@ impl PluginHost {
             .run_ast(&ast)
             .map_err(|e| format!("{plugin_id}: load: {e}"))?;
         {
-            let mut s = self.shared.lock().unwrap();
+            let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.current_plugin = None;
         }
         ast.clear_statements(); // keep only fn defs for later invocation
@@ -184,7 +193,11 @@ impl PluginHost {
 
     /// All registered commands (for the command palette).
     pub fn commands(&self) -> Vec<CommandInfo> {
-        self.shared.lock().unwrap().commands.clone()
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .commands
+            .clone()
     }
 
     pub fn plugin_count(&self) -> usize {
@@ -196,7 +209,7 @@ impl PluginHost {
     /// written back into `ctx`.
     pub fn run_command(&self, command_id: &str, ctx: &mut PluginContext) -> Result<(), String> {
         let (plugin_id, fn_name) = {
-            let s = self.shared.lock().unwrap();
+            let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             let cmd = s
                 .commands
                 .iter()
@@ -213,7 +226,7 @@ impl PluginHost {
     /// Fire a lifecycle event to every plugin that hooked it.
     pub fn fire_event(&self, event: HookEvent, ctx: &mut PluginContext) -> Result<(), String> {
         let hooks: Vec<(String, String)> = {
-            let s = self.shared.lock().unwrap();
+            let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.hooks
                 .iter()
                 .filter(|(_, e, _)| *e == event)
@@ -238,7 +251,7 @@ impl PluginHost {
             .find(|p| p.id == plugin_id)
             .ok_or_else(|| format!("plugin not loaded: {plugin_id}"))?;
         {
-            let mut s = self.shared.lock().unwrap();
+            let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.buffer_text = ctx.text.clone();
             s.notifications.clear();
         }
@@ -247,7 +260,7 @@ impl PluginHost {
         self.engine
             .call_fn::<()>(&mut scope, &plugin.ast, fn_name, ())
             .map_err(|e| format!("{plugin_id}.{fn_name}: {e}"))?;
-        let mut s = self.shared.lock().unwrap();
+        let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         ctx.text = s.buffer_text.clone();
         ctx.notifications.append(&mut s.notifications);
         Ok(())
@@ -264,15 +277,22 @@ fn command_fn_name(s: &Shared, command_id: &str) -> Option<String> {
 fn register_host_fns(engine: &mut Engine, shared: &Arc<Mutex<Shared>>) {
     let sh = Arc::clone(shared);
     engine.register_fn("buffer_text", move || -> ImmutableString {
-        sh.lock().unwrap().buffer_text.clone().into()
+        sh.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .buffer_text
+            .clone()
+            .into()
     });
     let sh = Arc::clone(shared);
     engine.register_fn("set_buffer_text", move |t: ImmutableString| {
-        sh.lock().unwrap().buffer_text = t.to_string();
+        sh.lock().unwrap_or_else(|e| e.into_inner()).buffer_text = t.to_string();
     });
     let sh = Arc::clone(shared);
     engine.register_fn("notify", move |m: ImmutableString| {
-        sh.lock().unwrap().notifications.push(m.to_string());
+        sh.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .notifications
+            .push(m.to_string());
     });
     engine.register_fn("log", move |m: ImmutableString| {
         tracing::info!(target: "scribe::plugin", "{m}");
@@ -281,7 +301,7 @@ fn register_host_fns(engine: &mut Engine, shared: &Arc<Mutex<Shared>>) {
     engine.register_fn(
         "register_command",
         move |id: ImmutableString, label: ImmutableString, fn_name: ImmutableString| {
-            let mut s = sh.lock().unwrap();
+            let mut s = sh.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(pid) = s.current_plugin.clone() {
                 s.commands.push(CommandInfo {
                     plugin_id: pid,
@@ -296,7 +316,7 @@ fn register_host_fns(engine: &mut Engine, shared: &Arc<Mutex<Shared>>) {
     engine.register_fn(
         "on_event",
         move |event: ImmutableString, fn_name: ImmutableString| {
-            let mut s = sh.lock().unwrap();
+            let mut s = sh.lock().unwrap_or_else(|e| e.into_inner());
             if let (Some(pid), Some(ev)) = (s.current_plugin.clone(), HookEvent::parse(&event)) {
                 s.hooks.push((pid, ev, fn_name.to_string()));
             }

@@ -17,6 +17,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use scribe_core::Config;
 
+/// Size cap for the action log. When the file grows past this, it is rotated
+/// (the current file is renamed to `<name>.1`, replacing any previous `.1`) so
+/// the live log restarts empty. Telemetry-free local diagnostics never need an
+/// unbounded log; one rotated generation keeps recent history available.
+pub const ACTION_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
 /// The resolved log path, cached. `None` when disabled via env or when there is
 /// no config dir (then `record` is a no-op).
 fn path() -> Option<&'static PathBuf> {
@@ -48,6 +54,7 @@ pub fn append_line(path: &Path, category: &str, detail: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    rotate_if_oversized(path, ACTION_LOG_MAX_BYTES);
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -59,9 +66,26 @@ pub fn append_line(path: &Path, category: &str, detail: &str) {
     }
 }
 
+/// Best-effort log rotation: when `path` exceeds `max_bytes`, rename it to
+/// `<path>.1` (overwriting any previous rotation) so the live log restarts
+/// empty while one prior generation of history is retained. Never panics; any
+/// I/O error leaves the log as-is (the next append simply tries again).
+fn rotate_if_oversized(path: &Path, max_bytes: u64) {
+    let oversized = std::fs::metadata(path)
+        .map(|m| m.len() > max_bytes)
+        .unwrap_or(false);
+    if !oversized {
+        return;
+    }
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    // `rename` atomically replaces an existing `.1` on every supported OS.
+    let _ = std::fs::rename(path, &rotated);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::append_line;
+    use super::{append_line, rotate_if_oversized};
 
     #[test]
     fn append_line_writes_one_tab_separated_record_per_call() {
@@ -87,5 +111,41 @@ mod tests {
             1,
             "a multiline/tabbed detail must not split into several records"
         );
+    }
+
+    #[test]
+    fn oversized_log_rotates_to_dot_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("session-actions.log");
+        let rotated = {
+            let mut s = p.as_os_str().to_owned();
+            s.push(".1");
+            std::path::PathBuf::from(s)
+        };
+        // Seed a log larger than our tiny test threshold.
+        std::fs::write(&p, "x".repeat(2048)).unwrap();
+        // Below threshold → no rotation.
+        rotate_if_oversized(&p, 4096);
+        assert!(p.exists());
+        assert!(!rotated.exists());
+        // Above threshold → rotate to `<name>.1`; live log is gone (recreated
+        // on the next append).
+        rotate_if_oversized(&p, 1024);
+        assert!(rotated.exists(), "rotated generation must exist");
+        assert!(!p.exists(), "live log must be cleared after rotation");
+        assert_eq!(std::fs::read_to_string(&rotated).unwrap().len(), 2048);
+    }
+
+    #[test]
+    fn append_line_triggers_rotation_at_cap() {
+        // End-to-end: a pre-existing oversized log is rotated by the next
+        // append, and the new live log holds only the fresh record.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.log");
+        std::fs::write(&p, "y".repeat(super::ACTION_LOG_MAX_BYTES as usize + 1)).unwrap();
+        append_line(&p, "tab", "after rotation");
+        let body = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(body.lines().count(), 1, "live log restarted after rotation");
+        assert!(body.contains("after rotation"));
     }
 }

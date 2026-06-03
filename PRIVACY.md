@@ -75,15 +75,19 @@ No data is written outside these directories.
 Plugins run inside an embedded Rhai interpreter that is **sandboxed by
 construction**:
 
-- No ambient filesystem access (every read/write goes through the
-  capability-consent API; the user approves capabilities per plugin).
+- No ambient filesystem access — the v1 host exposes only buffer-text
+  operations to scripts, so there is nothing for a script to read or
+  write on disk.
 - No ambient network access.
 - Bounded by an operation count + wall-clock deadline so a runaway
   script cannot hang the editor.
 
-A plugin's capability set is recorded on first install and re-prompted
-on capability-diff (a plugin update requesting new capabilities prompts
-again). See [`PLUGINS.md`](PLUGINS.md) for the full sandbox boundary.
+A plugin only runs after you approve its exact entry script
+(trust-on-first-use by SHA-256), or — with `[plugins] require_signed`
+— after a minisign signature over the script verifies under a pinned
+author key. A new or silently-changed script is held back until you
+approve it again. See [`PLUGINS.md`](PLUGINS.md) for the full sandbox
+boundary.
 
 ## Clearing local state
 

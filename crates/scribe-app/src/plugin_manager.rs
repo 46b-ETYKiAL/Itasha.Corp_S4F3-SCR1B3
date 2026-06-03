@@ -44,6 +44,9 @@ pub struct LoadedRow {
     pub version: String,
     pub description: String,
     pub enabled: bool,
+    /// #R6 — the plugin was discovered but is held back (its current entry
+    /// script has not been approved by the user). It is NOT running.
+    pub pending: bool,
 }
 
 /// The action the modal asks the host to apply this frame. The modal never
@@ -55,11 +58,14 @@ pub struct PluginManagerAction {
     pub toggle_disabled: Option<String>,
     /// Open the plugins directory in the OS file manager (drop-in install).
     pub open_plugins_dir: bool,
+    /// #R6 — approve this plugin id: record + trust its CURRENT entry script so
+    /// it may run, then load it.
+    pub approve: Option<String>,
 }
 
 impl PluginManagerAction {
     fn is_empty(&self) -> bool {
-        self.toggle_disabled.is_none() && !self.open_plugins_dir
+        self.toggle_disabled.is_none() && !self.open_plugins_dir && self.approve.is_none()
     }
 }
 
@@ -317,6 +323,30 @@ impl PluginManagerState {
                     });
                     if !row.description.is_empty() {
                         ui.label(egui::RichText::new(&row.description).color(muted).small());
+                    }
+                    // #R6 — pending-approval row: the plugin is NOT running until
+                    // the user reviews + approves its current entry script.
+                    if row.pending {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{}  not running — needs your approval",
+                                    egui_phosphor::thin::WARNING
+                                ))
+                                .color(egui::Color32::from_rgb(0xfb, 0xbf, 0x24))
+                                .small(),
+                            );
+                            if ui
+                                .button("Approve & run")
+                                .on_hover_text(
+                                    "Trust THIS version of the plugin's script and run it. \
+                                     If the script changes later it must be approved again.",
+                                )
+                                .clicked()
+                            {
+                                action.approve = Some(row.id.clone());
+                            }
+                        });
                     }
                     ui.add_space(6.0);
                 }

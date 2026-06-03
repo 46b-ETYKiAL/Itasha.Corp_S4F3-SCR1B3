@@ -17,7 +17,7 @@ SCR1B3 is configured by a single, live-reloading **TOML** file. Great defaults o
 - **A missing file is fine.** Absent config silently uses defaults.
 - **Live reload.** Saving the file applies changes without a restart.
 
-All settings are grouped into seven tables: `[editor]`, `[appearance]`, `[fonts]`, `[effects]`, `[updates]`, `[spellcheck]`, `[plugins]`.
+All settings are grouped into six tables: `[editor]`, `[appearance]`, `[fonts]`, `[updates]`, `[spellcheck]`, `[plugins]`.
 
 ---
 
@@ -54,21 +54,6 @@ JetBrains Mono Regular is **bundled** with the binary (OFL-1.1, see `assets/font
 | `editor_size` | float | `14.0` | Editor font size in points. |
 | `line_height` | float | `1.4` | Line height as a multiple of the font size. |
 | `ligatures` | boolean | `true` | Enable programming ligatures where the font supports them. |
-
-## `[effects]` — CRT / retro post-process
-
-The CRT post-process pass is **disabled by default** (zero cost when off). When enabled, each value is an intensity in the `0.0`–`1.0` range. Effects are suppressed automatically when the OS requests reduced motion (if `respect_reduced_motion` is on).
-
-| Key | Type | Default | Description |
-|---|---|---|---|
-| `crt_enabled` | boolean | `false` | Master toggle for the CRT/retro post-process shader. |
-| `scanline` | float | `0.30` | Scanline intensity. |
-| `phosphor_glow` | float | `0.20` | Phosphor-glow intensity. |
-| `bloom` | float | `0.15` | Bloom intensity on bright pixels. |
-| `vignette` | float | `0.25` | Edge-darkening vignette intensity. |
-| `curvature` | float | `0.0` | Screen-curvature amount (`0.0` = flat). |
-| `chromatic_aberration` | float | `0.05` | RGB-fringe chromatic aberration intensity. |
-| `respect_reduced_motion` | boolean | `true` | Disable animated CRT effects when the OS requests reduced motion. |
 
 ## `[updates]` — telemetry-free auto-update
 
@@ -129,16 +114,6 @@ editor_size = 14.0
 line_height = 1.4
 ligatures = true
 
-[effects]
-crt_enabled = false
-scanline = 0.30
-phosphor_glow = 0.20
-bloom = 0.15
-vignette = 0.25
-curvature = 0.0
-chromatic_aberration = 0.05
-respect_reduced_motion = true
-
 [updates]
 mode = "notify"
 check_interval_hours = 24
@@ -163,10 +138,6 @@ A real config rarely needs more than a few lines:
 ```toml
 [appearance]
 theme = "wired-noir"
-
-[effects]
-crt_enabled = true
-scanline = 0.45
 
 [editor]
 tab_width = 2

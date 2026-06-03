@@ -58,15 +58,29 @@ impl Pane {
 /// Monotonic `DocId` allocator. Held by the app; bumped on every new doc.
 /// The high bit will not overflow within the lifetime of any reasonable
 /// session (would need `2^63` document opens).
-#[derive(Debug, Default)]
+///
+/// `DocId(0)` is RESERVED as the never-allocated "unassigned" sentinel — a tab
+/// constructed before it joins the grid carries id 0, and `sync_grid_state`
+/// reassigns any id-0 tab a real id. So the allocator starts at 1; if it ever
+/// handed out 0 it would collide with that sentinel and the grid's
+/// pane->tab look-up could map several panes onto the same tab.
+#[derive(Debug)]
 pub struct DocIdAllocator {
     next: u64,
 }
 
+impl Default for DocIdAllocator {
+    fn default() -> Self {
+        Self { next: 1 }
+    }
+}
+
 impl DocIdAllocator {
     pub fn next(&mut self) -> DocId {
-        let id = DocId(self.next);
-        self.next = self.next.wrapping_add(1);
+        // Never hand out 0 (the reserved sentinel), even across the practically
+        // unreachable u64 wrap.
+        let id = DocId(self.next.max(1));
+        self.next = self.next.wrapping_add(1).max(1);
         id
     }
 
@@ -74,7 +88,7 @@ impl DocIdAllocator {
     /// observed id so we never collide with a restored pane.
     pub fn observe(&mut self, seen: DocId) {
         if seen.0 >= self.next {
-            self.next = seen.0.saturating_add(1);
+            self.next = seen.0.saturating_add(1).max(1);
         }
     }
 }
@@ -212,6 +226,16 @@ mod tests {
         let a2 = a.next();
         assert!(a0.0 < a1.0);
         assert!(a1.0 < a2.0);
+    }
+
+    #[test]
+    fn doc_id_allocator_never_yields_the_zero_sentinel() {
+        // DocId(0) is the reserved "unassigned" sentinel; the allocator must
+        // never hand it out (else grid pane->tab look-up aliases tabs).
+        let mut a = DocIdAllocator::default();
+        for _ in 0..1000 {
+            assert_ne!(a.next(), DocId(0));
+        }
     }
 
     #[test]
