@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="SCR1B3 caret-in-circle sigil">
+  <!--
+    SCR1B3 monochrome app-icon source: the central banner sigil
+    (daemon-seal caret-in-circle) rendered as a single white foreground on a
+    fully transparent background. NO background rect / scanlines / vignette /
+    gradient / blur. Strokes are thickened proportionally so the ring + caret +
+    cardinal ticks stay legible down to 16px. Same glyph family as banner.svg
+    (DECISION-2026-008). The shell/taskbar tints and plates this white form.
+  -->
+  <g fill="none" stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="128" cy="128" r="84" stroke-width="20"/>
+    <line x1="128" y1="22" x2="128" y2="40" stroke-width="12"/>
+    <line x1="128" y1="216" x2="128" y2="234" stroke-width="12"/>
+    <line x1="22" y1="128" x2="40" y2="128" stroke-width="12"/>
+    <line x1="216" y1="128" x2="234" y2="128" stroke-width="12"/>
+    <line x1="128" y1="96" x2="128" y2="140" stroke-width="22"/>
+    <line x1="104" y1="160" x2="152" y2="160" stroke-width="14"/>
+  </g>
+</svg>

@@ -27,6 +27,9 @@ sha2 = "0.10"                                    # checksum verification for upd
 minisign-verify = "0.2"                          # pure-Rust ed25519 update-signature verify
 self-replace = "1"                               # atomic running-binary swap (Win rename-trick)
 semver.workspace = true                          # plugin manifest min_app_version SemVer compare
+ureq = { version = "3", features = ["json"] }    # pure-Rust (rustls) blocking HTTP for the self-updater network half
+flate2 = "1"                                     # pure-Rust (miniz_oxide) gzip decode for the release .tar.gz
+tar = "0.4"                                       # tar archive extraction of the release binary
 
 [dev-dependencies]
 tempfile = "3"

@@ -109,11 +109,12 @@ fn tab_index_after_move(src: usize, target: usize, idx: usize) -> usize {
     }
 }
 
-/// Public Releases page for the manual "Check for updates" action. Opening this
-/// in the user's browser is the entire network surface of the update feature —
-/// there is no background HTTP, no version beacon, no telemetry (the bundled
-/// build ships no HTTP client by design). Same host as the installer's
-/// `ARPHELPLINK` so it is auditable against the wix manifest.
+/// Public Releases page, opened by the "View all releases on GitHub" link in
+/// Settings (a convenience, not the update mechanism). The actual version check
+/// and download go through a direct GitHub Releases API call (see
+/// [`crate::updater`] and `scribe_core::update::net`); it sends no identifiers
+/// and no telemetry. Same host as the installer's `ARPHELPLINK` so it is
+/// auditable against the wix manifest.
 pub(crate) const RELEASES_URL: &str =
     "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/releases";
 
@@ -149,37 +150,28 @@ fn build_spell_engine(config: &Config) -> HashSetEngine {
     engine
 }
 
-/// What the once-per-launch update reminder should do, given the user's mode +
-/// scheduling state. Pure (no I/O), so it is unit-tested directly.
-#[derive(Debug, PartialEq, Eq)]
-enum UpdateReminder {
-    /// Do nothing — reminders are off, or the interval has not elapsed.
-    Skip,
-    /// Surface a passive hint toast pointing at the manual check.
-    Notify,
-}
-
-/// Decide the reminder action without performing any side effects. `Off` never
-/// reminds; otherwise [`scribe_core::update::is_check_due`] gates on the
-/// interval. #R6: a due reminder is ALWAYS passive (a toast) — SCR1B3 never
-/// opens the browser on its own. `auto` and `notify` therefore behave the same
-/// (a reminder when due); the user clicks "Check for updates now" to open the
-/// releases page. This keeps the telemetry-free editor from doing anything
-/// surprising on launch.
-fn update_reminder_action(
+/// Decide the once-per-launch automatic update action, given the user's mode +
+/// scheduling state. Pure (no I/O), so it is unit-tested directly. `Off` and
+/// `Manual` never do automatic network activity (telemetry-free default).
+/// `Notify` and `Auto` perform a single GitHub-Releases check when the interval
+/// is due — `Notify` later surfaces a passive toast, `Auto` opens the yes/no
+/// modal. Returns `None` when no automatic check should run this launch.
+fn update_launch_action(
     mode: scribe_core::config::UpdateMode,
     last_check_unix: Option<u64>,
     interval_hours: u64,
     now: u64,
-) -> UpdateReminder {
+) -> Option<crate::updater::LaunchKind> {
     use scribe_core::config::UpdateMode;
-    if mode == UpdateMode::Off {
-        return UpdateReminder::Skip;
-    }
+    let kind = match mode {
+        UpdateMode::Off | UpdateMode::Manual => return None,
+        UpdateMode::Notify => crate::updater::LaunchKind::Notify,
+        UpdateMode::Auto => crate::updater::LaunchKind::Auto,
+    };
     if !scribe_core::update::is_check_due(last_check_unix, interval_hours, now) {
-        return UpdateReminder::Skip;
+        return None;
     }
-    UpdateReminder::Notify
+    Some(kind)
 }
 
 /// Apply the OS window effect for the chosen mode (best-effort, graceful on
@@ -450,6 +442,8 @@ pub struct ScribeApp {
     /// Set once we have run the per-launch update-due check (so it fires at most
     /// once per session, on the first frame).
     did_update_check: bool,
+    /// In-app self-updater state machine (network check + download + apply).
+    updater: crate::updater::Updater,
     hl: Highlighter,
     tabs: Vec<EditorTab>,
     active: usize,
@@ -862,6 +856,7 @@ impl ScribeApp {
             theme,
             last_os_theme: None,
             did_update_check: false,
+            updater: crate::updater::Updater::default(),
             hl: Highlighter::new(),
             active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
@@ -1708,42 +1703,120 @@ impl ScribeApp {
         result
     }
 
-    /// Persist the current config to the user TOML file (creating the config
-    /// dir if needed). Best-effort: surfaces a toast on failure, never panics.
-    /// Once per launch: if update reminders are enabled (`updates.mode != off`)
-    /// and the configured interval has elapsed since the last reminder, nudge
-    /// the user to check for a new release. This is the entire automatic side of
-    /// the update feature — telemetry-free by construction: it performs NO
-    /// network I/O (the bundled build ships no HTTP client). The actual check is
-    /// the user opening the Releases page (the "Check now" button in Settings).
-    /// #R6: this reminder NEVER opens the browser on its own — it only shows a
-    /// passive toast. `is_check_due` + the persisted `last_check_unix` make the
-    /// interval honored across sessions.
-    fn maybe_remind_update(&mut self) {
+    /// Once per launch: if the user opted into automatic update checks
+    /// (`updates.mode` = `notify` or `auto`) and the configured interval has
+    /// elapsed, run a single GitHub-Releases version check on a background
+    /// thread. `notify` then surfaces a passive toast if an update is found;
+    /// `auto` opens a yes/no modal. `off` and `manual` do NO network at all —
+    /// the telemetry-free default. The check itself only reads the public
+    /// Releases API and sends no identifiers (see PRIVACY.md). `is_check_due` +
+    /// the persisted `last_check_unix` honour the interval across sessions.
+    fn maybe_remind_update(&mut self, ctx: &egui::Context) {
         if self.did_update_check {
             return;
         }
         self.did_update_check = true;
-        let action = update_reminder_action(
+        let Some(kind) = update_launch_action(
             self.config.updates.mode,
             self.config.updates.last_check_unix,
             self.config.updates.check_interval_hours as u64,
             now_unix(),
-        );
-        if action == UpdateReminder::Skip {
+        ) else {
             return;
-        }
-        // Due: record the reminder time so the interval is honored next launch.
+        };
+        // Due: record the check time so the interval is honored next launch.
         self.config.updates.last_check_unix = Some(now_unix());
         self.save_config();
-        match action {
-            UpdateReminder::Notify => {
-                self.toast = Some(format!(
-                    "Time to check for SCR1B3 updates — Settings {a} Updates {a} Check now.",
-                    a = egui_phosphor::thin::ARROW_RIGHT
-                ));
+        self.updater.start_check(ctx, kind);
+    }
+
+    /// `auto`-mode on-launch update modal. When the launch check finds a newer
+    /// release it asks yes/no; the SAME modal then follows the flow through
+    /// download → verify → "Restart to finish", so the whole Auto update is
+    /// self-contained. "Later" dismisses it for this session (won't re-prompt
+    /// for the same version). The manual flow in Settings covers every other case.
+    fn render_update_prompt(&mut self, ctx: &egui::Context) {
+        if !self.updater.show_prompt {
+            return;
+        }
+        use crate::updater::UpdateState;
+        // Defer mutating calls past the immutable state borrow in the closure.
+        enum Act {
+            Download(scribe_core::update::ReleaseInfo),
+            Apply,
+            Skip(String),
+            Close,
+        }
+        let mut act: Option<Act> = None;
+        egui::Modal::new(egui::Id::new("scr1b3_update_prompt")).show(ctx, |ui| {
+            ui.set_max_width(400.0);
+            ui.heading("Update available");
+            ui.add_space(8.0);
+            match &self.updater.state {
+                UpdateState::Available(info) => {
+                    let v = info.version.to_string();
+                    ui.label(format!(
+                        "SCR1B3 v{v} is available (you have v{}). Update now?",
+                        crate::updater::current_version()
+                    ));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Update now").clicked() {
+                            act = Some(Act::Download(info.clone()));
+                        }
+                        if ui.button("Later").clicked() {
+                            act = Some(Act::Skip(v.clone()));
+                        }
+                    });
+                }
+                UpdateState::Downloading { received, total } => {
+                    let frac = if *total > 0 {
+                        *received as f32 / *total as f32
+                    } else {
+                        0.0
+                    };
+                    ui.label("Downloading and verifying…");
+                    ui.add_space(6.0);
+                    ui.add(egui::ProgressBar::new(frac).show_percentage());
+                }
+                UpdateState::ReadyToApply { version, .. } => {
+                    ui.label(format!("v{version} downloaded and verified."));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Restart to finish").clicked() {
+                            act = Some(Act::Apply);
+                        }
+                        if ui.button("Later").clicked() {
+                            act = Some(Act::Close);
+                        }
+                    });
+                }
+                UpdateState::Applied { version } => {
+                    ui.label(format!("Updated to v{version} — restarting…"));
+                }
+                UpdateState::Failed(e) => {
+                    let err = ui.visuals().error_fg_color;
+                    ui.colored_label(err, format!("Update failed: {e}"));
+                    ui.add_space(8.0);
+                    if ui.button("Close").clicked() {
+                        act = Some(Act::Close);
+                    }
+                }
+                // Nothing to prompt about — close the modal.
+                UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate => {
+                    act = Some(Act::Close);
+                }
             }
-            UpdateReminder::Skip => {}
+        });
+        match act {
+            Some(Act::Download(info)) => self.updater.start_download(ctx, info),
+            Some(Act::Apply) => self.updater.apply_and_restart(ctx),
+            Some(Act::Skip(v)) => {
+                self.updater.skipped_version = Some(v);
+                self.updater.show_prompt = false;
+            }
+            Some(Act::Close) => self.updater.show_prompt = false,
+            None => {}
         }
     }
 
@@ -1818,23 +1891,6 @@ impl ScribeApp {
                 self.status = format!("approved + loaded plugin '{id}'");
             }
             Err(e) => self.toast = Some(format!("plugin '{id}' approved but failed to load: {e}")),
-        }
-    }
-
-    /// F-020 — sample the current viewport inner rect + outer position and
-    /// record it on `self.config.window.last_geometry` so the next launch
-    /// restores it. Called from the eframe `save()` lifecycle hook and
-    /// opportunistically by [`Self::persist_geometry_if_changed`] each frame.
-    fn capture_window_geometry(&mut self, ctx: &egui::Context) {
-        let (pos, size) = ctx.input(|i| {
-            let vp = i.viewport();
-            (vp.outer_rect, vp.inner_rect)
-        });
-        if let (Some(pos), Some(size)) = (pos, size) {
-            let g = (pos.min.x, pos.min.y, size.width(), size.height());
-            if self.config.window.last_geometry != Some(g) {
-                self.config.window.last_geometry = Some(g);
-            }
         }
     }
 
@@ -4437,10 +4493,10 @@ impl eframe::App for ScribeApp {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    // F-020 — eframe::App::save runs on graceful shutdown and (depending on
-    // backend) periodically while the app is running. We use it to write the
-    // current window geometry to the user TOML so the next launch restores
-    // the same position + size.
+    // eframe::App::save runs on graceful shutdown and (with the `persistence`
+    // feature on) periodically while the app is running. We use it to flush the
+    // grid layout, the canonical TOML config, and the session backup. Native
+    // window geometry is persisted separately by eframe itself (persist_window).
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         // #R6 — persist the multi-note grid layout so a split arrangement
         // survives a restart (restored in `sync_grid_state` when the panes
@@ -4484,10 +4540,6 @@ impl ScribeApp {
         // renders, so the injected event reaches the central editor (shown
         // later this frame) and egui's TextEdit performs it natively.
         self.drain_pending_editor_action(ctx);
-        // F-020 — capture the live window geometry each frame so save_config
-        // (called on settings change OR on eframe::App::save) records the
-        // latest position + size. Cheap (one input-read clone).
-        self.capture_window_geometry(ctx);
         // F-022 — poll the disk mtimes of every open file-backed tab. Cheap
         // when nothing changed (one stat per tab); silent reload when the
         // buffer is clean; status toast when local edits would be clobbered.
@@ -4507,8 +4559,18 @@ impl ScribeApp {
                 self.reapply_theme(ctx);
             }
         }
-        // Once per launch: nudge to check for updates if the interval elapsed.
-        self.maybe_remind_update();
+        // Once per launch: kick off an automatic update check if opted in.
+        self.maybe_remind_update(ctx);
+        // Drain the updater worker each frame. A `notify`-mode launch check that
+        // found a release queues a one-shot passive toast (plain text, no glyphs).
+        self.updater.poll();
+        if let Some(v) = self.updater.toast_pending.take() {
+            self.toast = Some(format!(
+                "SCR1B3 v{v} is available. Open Settings and choose Updates to install."
+            ));
+        }
+        // `auto`-mode found-an-update yes/no modal.
+        self.render_update_prompt(ctx);
         // Keep egui's animation time + caret style in sync with the motion
         // preferences every frame (cheap; also covers startup before any
         // theme reapply).
@@ -5203,7 +5265,12 @@ impl ScribeApp {
 
         // ---- Settings window (deep customization, live preview) ----
         if self.settings_open {
-            let changed = crate::settings::show(ctx, &mut self.config, &mut self.settings_open);
+            let changed = crate::settings::show(
+                ctx,
+                &mut self.config,
+                &mut self.settings_open,
+                &mut self.updater,
+            );
             // F-039 — the Plugins section's "Manage plugins…" button stashes a
             // request flag; pick it up and open the plugin-manager modal.
             if crate::settings::take_open_plugin_manager_request(ctx) {
@@ -7690,61 +7757,63 @@ mod tab_reorder_tests {
 
 #[cfg(test)]
 mod update_reminder_tests {
-    //! Phase 5 — the once-per-launch update reminder mode→action mapping.
-    use super::{update_reminder_action, UpdateReminder};
+    //! The once-per-launch automatic-update mode→action mapping. `off`/`manual`
+    //! never do automatic network activity; `notify`/`auto` run a check when due.
+    use super::update_launch_action;
+    use crate::updater::LaunchKind;
     use scribe_core::config::UpdateMode;
 
     const HOUR: u64 = 3_600;
 
     #[test]
-    fn off_never_reminds_even_when_overdue() {
+    fn off_never_checks_even_when_overdue() {
         assert_eq!(
-            update_reminder_action(UpdateMode::Off, None, 24, 1_000_000),
-            UpdateReminder::Skip,
+            update_launch_action(UpdateMode::Off, None, 24, 1_000_000),
+            None
         );
     }
 
     #[test]
-    fn notify_skips_until_interval_elapses_then_reminds() {
+    fn manual_never_checks_automatically() {
+        // `manual` = the user checks via the Settings button; no on-launch network.
+        assert_eq!(update_launch_action(UpdateMode::Manual, None, 24, 0), None);
+        assert_eq!(
+            update_launch_action(UpdateMode::Manual, None, 24, 1_000_000),
+            None
+        );
+    }
+
+    #[test]
+    fn notify_checks_when_due_as_notify_kind() {
         let last = 1_000;
         // 1h after a 24h-interval check → not due.
         assert_eq!(
-            update_reminder_action(UpdateMode::Notify, Some(last), 24, last + HOUR),
-            UpdateReminder::Skip,
+            update_launch_action(UpdateMode::Notify, Some(last), 24, last + HOUR),
+            None,
         );
-        // 24h later → due.
+        // 24h later → due → a Notify-kind check.
         assert_eq!(
-            update_reminder_action(UpdateMode::Notify, Some(last), 24, last + 24 * HOUR),
-            UpdateReminder::Notify,
+            update_launch_action(UpdateMode::Notify, Some(last), 24, last + 24 * HOUR),
+            Some(LaunchKind::Notify),
         );
         // Never checked → always due.
         assert_eq!(
-            update_reminder_action(UpdateMode::Notify, None, 24, 0),
-            UpdateReminder::Notify,
+            update_launch_action(UpdateMode::Notify, None, 24, 0),
+            Some(LaunchKind::Notify),
         );
     }
 
     #[test]
-    fn manual_due_still_only_notifies() {
+    fn auto_checks_when_due_as_auto_kind_and_respects_interval() {
         assert_eq!(
-            update_reminder_action(UpdateMode::Manual, None, 24, 0),
-            UpdateReminder::Notify,
+            update_launch_action(UpdateMode::Auto, None, 24, 0),
+            Some(LaunchKind::Auto),
         );
-    }
-
-    #[test]
-    fn auto_due_reminds_passively_never_opens_browser() {
-        // #R6: `auto` reminds with a passive toast when due — it does NOT open
-        // the browser on its own (no Notify→OpenReleases escalation any more).
-        assert_eq!(
-            update_reminder_action(UpdateMode::Auto, None, 24, 0),
-            UpdateReminder::Notify,
-        );
-        // Auto still respects the interval (not-due → Skip).
+        // Auto still respects the interval (not-due → no check).
         let last = 1_000;
         assert_eq!(
-            update_reminder_action(UpdateMode::Auto, Some(last), 24, last + HOUR),
-            UpdateReminder::Skip,
+            update_launch_action(UpdateMode::Auto, Some(last), 24, last + HOUR),
+            None,
         );
     }
 }

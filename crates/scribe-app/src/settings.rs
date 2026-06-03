@@ -137,7 +137,12 @@ fn action_label(id: &str) -> String {
 
 /// Render the settings window. `open` is toggled false when the user closes it.
 /// Returns `true` if any field changed this frame.
-pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
+pub fn show(
+    ctx: &egui::Context,
+    config: &mut Config,
+    open: &mut bool,
+    updater: &mut crate::updater::Updater,
+) -> bool {
     let mut changed = false;
     let mut keep_open = *open;
 
@@ -151,6 +156,11 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
         .unwrap_or_default();
 
     egui::Window::new("settings")
+        // Stable, section-independent Id so the window's persisted size+position
+        // (eframe `persistence` feature) survive restart and never shift with the
+        // selected category. The visible title never changes, but pin the Id
+        // explicitly so persistence can't break if it ever does.
+        .id(egui::Id::new("scr1b3_settings"))
         .open(&mut keep_open)
         .collapsible(false)
         // Resizable + a default (not fixed) size restores egui's standard
@@ -163,6 +173,13 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
         .default_size([760.0, 560.0])
         .min_width(420.0)
         .min_height(320.0)
+        // Cap the window so a wide section (e.g. the full-width search field or a
+        // long row) can never blow it out: it stays the same size regardless of
+        // which category is open, while the user can still resize freely within
+        // these bounds. Pairs with the vertical ScrollArea `auto_shrink([false,
+        // false])` below, which stops the grow-to-content feedback loop.
+        .max_width(940.0)
+        .max_height(820.0)
         // #77 — force the Settings window OPAQUE. The app-window transparency /
         // glass setting drives a translucent `window_fill`; without this the
         // Settings panel itself went see-through, which is not what the
@@ -216,7 +233,7 @@ pub fn show(ctx: &egui::Context, config: &mut Config, open: &mut bool) -> bool {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            changed |= render_sections(ui, config, sel, &q);
+                            changed |= render_sections(ui, config, updater, sel, &q);
                         });
                 });
             });
@@ -273,7 +290,13 @@ fn grid_bool(
 /// Render every category section that is visible for the current selection /
 /// search query. Comfortable spacing (group gaps) keeps it from feeling
 /// squished even at the default window size.
-fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -> bool {
+fn render_sections(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    updater: &mut crate::updater::Updater,
+    sel: &str,
+    q: &str,
+) -> bool {
     let mut changed = false;
     // Roomier vertical rhythm so rows don't feel cramped — egui's default item
     // spacing (~3px) is what made settings hard to read. Applies to every row.
@@ -1263,13 +1286,13 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
     if section_visible(sel, q, "Updates", &["update", "mode", "notify", "auto"]) {
         head(
             ui,
-            "Updates (telemetry-free)",
-            "Update REMINDERS — SCR1B3 never checks the network in the background and \
-             never auto-installs. A reminder just opens the GitHub releases page so you \
-             can compare versions and download a new build yourself.",
+            "Updates",
+            "Check for new SCR1B3 releases. A check reads only the public GitHub releases \
+             API and sends no identifiers — no analytics, no telemetry. Off and Manual \
+             never touch the network on their own; Notify and Auto check once per launch \
+             when due (Notify shows a toast; Auto asks before installing).",
         );
-        // #109 — show the running version so "Check for updates now" is concretely
-        // verifiable: open the releases page, compare to this number.
+        // Show the running version so the result of a check is concretely verifiable.
         ui.label(
             egui::RichText::new(format!("You are running v{}.", env!("CARGO_PKG_VERSION")))
                 .weak()
@@ -1285,11 +1308,10 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     (UpdateMode::Auto, "auto"),
                 ];
                 ui.label("Mode").on_hover_text(
-                    "How update reminders work: off (never remind), notify or auto (a passive \
-                     toast reminds you when a check is due), manual (only when you press Check \
-                     now). Telemetry-free: SCR1B3 never contacts the network in the background \
-                     and never opens the browser on its own — you click Check now to open the \
-                     public GitHub releases page.",
+                    "When SCR1B3 checks for updates: off (never), manual (only when you press \
+                     Check for updates), notify (check once per launch, show a toast if a newer \
+                     version exists), auto (check once per launch, ask before installing). A \
+                     check reads only the public GitHub releases API and sends no identifiers.",
                 );
                 egui::ComboBox::from_id_salt("update-mode")
                     .selected_text(
@@ -1311,7 +1333,8 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                     })
                     .response
                     .on_hover_text(
-                        "Telemetry-free — a reminder only opens the GitHub releases page.",
+                        "A check reads only the public GitHub releases API; no analytics or \
+                         identifiers are sent.",
                     );
                 changed |= reset_to_default(ui, &mut config.updates.mode, &def.updates.mode);
                 ui.end_row();
@@ -1333,21 +1356,33 @@ fn render_sections(ui: &mut egui::Ui, config: &mut Config, sel: &str, q: &str) -
                 ui.end_row();
             }
         });
-        if row_visible(q, "check for updates now") {
-            ui.add_space(4.0);
+        if row_visible(q, "check for updates now install update") {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                let busy = updater.is_busy();
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Check for updates"))
+                    .on_hover_text(
+                        "Ask the public GitHub releases API whether a newer version exists. \
+                         No identifiers are sent.",
+                    )
+                    .clicked()
+                {
+                    updater.start_check(ui.ctx(), crate::updater::LaunchKind::Manual);
+                    // Record the check so the on-launch interval respects it.
+                    config.updates.last_check_unix = Some(crate::app::now_unix());
+                    changed = true;
+                }
+                render_update_status(ui, updater);
+            });
+            ui.add_space(2.0);
             if ui
-                .button("Check for updates now")
-                .on_hover_text(
-                    "Open the SCR1B3 releases page in your browser. This is the only network \
-                     action the updater ever takes, and only when you click it.",
-                )
+                .link("View all releases on GitHub")
+                .on_hover_text("Open the SCR1B3 releases page in your browser.")
                 .clicked()
             {
                 ui.ctx()
                     .open_url(egui::OpenUrl::new_tab(crate::app::RELEASES_URL));
-                // Record the check so the interval reminder respects it.
-                config.updates.last_check_unix = Some(crate::app::now_unix());
-                changed = true;
             }
         }
         space(ui);
@@ -1423,6 +1458,88 @@ enum ToolbarDrag {
 /// existing keyboard-accessible ↑/↓/✕ controls. The drag-and-drop is
 /// **additive**: keyboard users keep the buttons; pointer users get the
 /// direct-manipulation UX the plan calls out.
+/// Render the inline update status + action buttons next to the "Check for
+/// updates" button, driven by the [`crate::updater::UpdateState`] machine.
+/// Mutating calls (start download, apply) are deferred past the immutable
+/// state borrow so the borrow checker is satisfied.
+fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater) {
+    use crate::updater::UpdateState;
+    enum Act {
+        Download(scribe_core::update::ReleaseInfo),
+        Apply,
+        Recheck,
+    }
+    let mut act: Option<Act> = None;
+    match &updater.state {
+        UpdateState::Idle => {}
+        UpdateState::Checking => {
+            ui.spinner();
+            ui.label("Checking…");
+        }
+        UpdateState::UpToDate => {
+            ui.label(
+                egui::RichText::new(format!(
+                    "You're on the latest version (v{}).",
+                    crate::updater::current_version()
+                ))
+                .weak(),
+            );
+        }
+        UpdateState::Available(info) => {
+            ui.label(format!("v{} is available.", info.version));
+            if ui.button("Update now").clicked() {
+                act = Some(Act::Download(info.clone()));
+            }
+            if ui
+                .link("changelog")
+                .on_hover_text("Open this release's notes in your browser.")
+                .clicked()
+            {
+                ui.ctx()
+                    .open_url(egui::OpenUrl::new_tab(info.html_url.clone()));
+            }
+        }
+        UpdateState::Downloading { received, total } => {
+            let frac = if *total > 0 {
+                *received as f32 / *total as f32
+            } else {
+                0.0
+            };
+            ui.add(
+                egui::ProgressBar::new(frac)
+                    .show_percentage()
+                    .desired_width(160.0),
+            );
+        }
+        UpdateState::ReadyToApply { version, .. } => {
+            ui.label(format!("v{version} downloaded + verified."));
+            if ui
+                .button("Restart to finish update")
+                .on_hover_text("Replace the running SCR1B3 with the new version and relaunch.")
+                .clicked()
+            {
+                act = Some(Act::Apply);
+            }
+        }
+        UpdateState::Applied { version } => {
+            ui.label(format!("Updated to v{version} — restarting…"));
+        }
+        UpdateState::Failed(e) => {
+            let err = ui.visuals().error_fg_color;
+            ui.colored_label(err, format!("Update failed: {e}"));
+            if ui.button("Retry").clicked() {
+                act = Some(Act::Recheck);
+            }
+        }
+    }
+    match act {
+        Some(Act::Download(info)) => updater.start_download(ui.ctx(), info),
+        Some(Act::Apply) => updater.apply_and_restart(ui.ctx()),
+        Some(Act::Recheck) => updater.start_check(ui.ctx(), crate::updater::LaunchKind::Manual),
+        None => {}
+    }
+}
+
 fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     use egui_phosphor::thin as ph;
     let mut changed = false;

@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 description = "SCR1B3 — standalone cross-platform code/text editor (the binary)."
 default-run = "scr1b3"
+build = "build.rs"
 
 [[bin]]
 name = "scr1b3"
@@ -14,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 scribe-core.workspace = true
 scribe-render.workspace = true
+semver.workspace = true        # parse env!(CARGO_PKG_VERSION) for the self-updater version compare
 eframe.workspace = true
 egui.workspace = true
 egui-phosphor.workspace = true                 # hairline Phosphor icon font (Phase 16 T16.3)
@@ -41,3 +43,9 @@ minisign = "0.9"                               # sign in plugin-manager verify t
 # does — not state-set-then-assert. Lockstep with egui 0.34; default features
 # off (no GPU/snapshot backend needed for click/type interaction tests).
 egui_kittest = { version = "0.34", default-features = false }
+
+# Windows-only: embeds the multi-size .ico as a Win32 resource via build.rs so
+# Explorer / taskbar / pre-launch Alt-Tab show the app icon. Scoped to
+# cfg(windows) build-deps so Linux/macOS CI builds never pull it in.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

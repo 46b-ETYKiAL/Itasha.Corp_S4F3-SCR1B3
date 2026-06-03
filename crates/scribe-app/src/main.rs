@@ -19,6 +19,7 @@ mod fuzzy;
 mod grid;
 mod plugin_manager;
 mod settings;
+mod updater;
 
 use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
@@ -57,20 +58,22 @@ fn main() -> ExitCode {
 
     let (config, config_err) = scribe_core::Config::load_or_default();
 
-    // F-020 from docs/audits/overlooked-surfaces-2026-05-29.md: restore the
-    // last known window geometry. Fall back to the hard-coded default size
-    // when no geometry was persisted (first launch).
-    let (init_x, init_w, init_h) = match config.window.last_geometry {
-        Some((x, y, w, h)) if w >= 200.0 && h >= 150.0 => (Some((x, y)), w, h),
-        _ => (None, 1100.0, 720.0),
-    };
+    // Window geometry (position + size) is persisted natively by eframe via
+    // `NativeOptions.persist_window` + the `persistence` feature (stored under
+    // the `with_app_id` folder). We set only the FIRST-RUN default size here;
+    // eframe restores the user's last position + size on subsequent launches.
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([init_w, init_h])
+        .with_inner_size([1100.0, 720.0])
         .with_min_inner_size([520.0, 360.0])
         .with_app_id("com.itashacorp.scr1b3")
         .with_title(scribe_core::PRODUCT_NAME);
-    if let Some((x, y)) = init_x {
-        viewport = viewport.with_position([x, y]);
+    // Runtime window + taskbar icon. The embedded .exe resource (build.rs +
+    // winresource) covers Explorer / Alt-Tab / pre-launch on Windows; this sets
+    // the live window + taskbar icon at runtime (and is the icon source on
+    // Linux/Wayland, where there is no .exe resource). Non-fatal on decode error.
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/scr1b3-256.png"))
+    {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
     }
     // F-035: keep the window on top when the user has enabled it.
     if config.window.always_on_top {
@@ -90,6 +93,10 @@ fn main() -> ExitCode {
 
     let native_options = eframe::NativeOptions {
         viewport,
+        // Persist native window position + size across restarts (pairs with the
+        // eframe `persistence` feature + the stable `with_app_id` above). eframe
+        // also fires `App::save()` on exit/interval once persistence is on.
+        persist_window: true,
         ..Default::default()
     };
 
