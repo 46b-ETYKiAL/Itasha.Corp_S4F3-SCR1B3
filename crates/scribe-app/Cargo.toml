@@ -45,7 +45,11 @@ minisign = "0.9"                               # sign in plugin-manager verify t
 egui_kittest = { version = "0.34", default-features = false }
 
 # Windows-only: embeds the multi-size .ico as a Win32 resource via build.rs so
-# Explorer / taskbar / pre-launch Alt-Tab show the app icon. Scoped to
-# cfg(windows) build-deps so Linux/macOS CI builds never pull it in.
-[target.'cfg(windows)'.build-dependencies]
+# Explorer / taskbar / pre-launch Alt-Tab show the app icon. Unconditional
+# build-dep so build.rs compiles on EVERY host (winresource is cross-platform,
+# used even by Linux/macOS hosts cross-compiling to Windows); build.rs only
+# INVOKES it when CARGO_CFG_TARGET_OS == "windows", so non-Windows targets embed
+# nothing. A cfg(windows) scope would make the `winresource::` path in build.rs
+# fail to resolve on macOS/Linux.
+[build-dependencies]
 winresource = "0.1"

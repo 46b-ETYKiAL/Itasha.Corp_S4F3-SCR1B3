@@ -42,6 +42,10 @@ allow = [
     # `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0` (egui
     # bundles Ubuntu Light as one of the default fallback faces).
     "Ubuntu-font-1.0",
+    # CDLA-Permissive-2.0 — Community Data License Agreement (permissive).
+    # Required by webpki-roots (the Mozilla CA trust-anchor bundle) pulled in
+    # transitively by ureq/rustls for the in-app updater's HTTPS version check.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 
