@@ -10,8 +10,15 @@
 //! index stays consistent with the rendered surface.
 
 use eframe::egui;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Max directory-recursion depth for the explorer. A self-referential symlink
+/// cycle (or a pathologically deep real tree) would otherwise drive
+/// `dir_children`'s native recursion into a stack overflow / OOM. 64 levels is
+/// far deeper than any real project hierarchy yet bounds the worst case.
+const MAX_TREE_DEPTH: usize = 64;
 
 /// Persistent state for the sidebar across frames.
 #[derive(Default, Debug, Clone)]
@@ -38,6 +45,13 @@ impl FileTreeState {
         // can land on it.
         self.visible.push(root.to_path_buf());
         let focused = self.focused.clone();
+        // Track canonicalized directories already entered this frame so a
+        // symlink cycle can't re-enter one (cheap second line of defense
+        // alongside the no-symlink-traversal check and the depth cap).
+        let mut visited: HashSet<PathBuf> = HashSet::new();
+        if let Ok(real) = root.canonicalize() {
+            visited.insert(real);
+        }
         egui::CollapsingHeader::new(root_name)
             .default_open(true)
             .show(ui, |ui| {
@@ -47,6 +61,8 @@ impl FileTreeState {
                     &mut clicked,
                     &mut self.visible,
                     focused.as_deref(),
+                    0,
+                    &mut visited,
                 )
             });
         clicked
@@ -104,22 +120,38 @@ impl FileTreeState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dir_children(
     ui: &mut egui::Ui,
     dir: &Path,
     clicked: &mut Option<PathBuf>,
     visible: &mut Vec<PathBuf>,
     focused: Option<&Path>,
+    depth: usize,
+    visited: &mut HashSet<PathBuf>,
 ) {
+    // Bound recursion so a deep tree (or a symlink cycle that slipped past the
+    // checks below) can never blow the stack.
+    if depth >= MAX_TREE_DEPTH {
+        ui.label(egui::RichText::new("(max depth reached)").weak().small());
+        return;
+    }
     let Ok(read) = fs::read_dir(dir) else {
         ui.label(egui::RichText::new("(unreadable)").weak().small());
         return;
     };
     let mut entries: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
     // Dirs first, then files; each group alphabetical (case-insensitive).
+    // `symlink_metadata` does NOT follow links, so a symlinked dir sorts as a
+    // non-dir and is never recursed into.
+    let is_real_dir = |p: &Path| {
+        fs::symlink_metadata(p)
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false)
+    };
     entries.sort_by(|a, b| {
-        let ad = a.is_dir();
-        let bd = b.is_dir();
+        let ad = is_real_dir(a);
+        let bd = is_real_dir(b);
         bd.cmp(&ad).then_with(|| {
             a.file_name()
                 .unwrap_or_default()
@@ -137,10 +169,30 @@ fn dir_children(
             continue;
         }
         visible.push(path.clone());
-        if path.is_dir() {
+        // Only recurse into a REAL directory (not a symlink-to-dir) we have not
+        // already entered this frame. `symlink_metadata` here means a symlinked
+        // directory is rendered as a leaf — its cycle is never followed.
+        if is_real_dir(&path) {
+            // Dedupe by canonical path so even a hard-to-detect alias cycle is
+            // entered at most once. If canonicalization fails, fall through and
+            // rely on the depth cap.
+            let already_seen = path
+                .canonicalize()
+                .map(|real| !visited.insert(real))
+                .unwrap_or(false);
+            if already_seen {
+                ui.label(
+                    egui::RichText::new(format!("{name} (cycle)"))
+                        .weak()
+                        .small(),
+                );
+                continue;
+            }
             egui::CollapsingHeader::new(name)
                 .id_salt(&path)
-                .show(ui, |ui| dir_children(ui, &path, clicked, visible, focused));
+                .show(ui, |ui| {
+                    dir_children(ui, &path, clicked, visible, focused, depth + 1, visited)
+                });
         } else {
             let selected = focused.is_some_and(|f| f == path.as_path());
             let resp = ui.selectable_label(selected, name);
@@ -180,9 +232,10 @@ mod tests {
 
         let mut visible = Vec::<PathBuf>::new();
         let mut clicked: Option<PathBuf> = None;
+        let mut visited = HashSet::new();
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
-            dir_children(ui, root, &mut clicked, &mut visible, None);
+            dir_children(ui, root, &mut clicked, &mut visible, None, 0, &mut visited);
         });
 
         // dir comes first per the sort, then the file; hidden is excluded.
@@ -193,5 +246,77 @@ mod tests {
             "alpha.txt"
         );
         assert!(clicked.is_none());
+    }
+
+    #[cfg(unix)]
+    fn try_symlink_dir(src: &Path, dst: &Path) -> bool {
+        std::os::unix::fs::symlink(src, dst).is_ok()
+    }
+    #[cfg(windows)]
+    fn try_symlink_dir(src: &Path, dst: &Path) -> bool {
+        std::os::windows::fs::symlink_dir(src, dst).is_ok()
+    }
+
+    /// A self-referential symlink cycle must NOT drive `dir_children` into
+    /// unbounded recursion. The walk renders the symlink as a leaf (never
+    /// recurses into it) and terminates; without the fix this recursed until a
+    /// stack overflow. Gated: symlink creation may be unavailable on Windows
+    /// without Developer Mode — skip gracefully when it is.
+    #[test]
+    fn dir_children_does_not_recurse_symlink_cycle() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        File::create(root.join("file.txt")).unwrap();
+        let sub = root.join("sub");
+        create_dir(&sub).unwrap();
+        if !try_symlink_dir(root, &sub.join("loop")) {
+            eprintln!("skipping: symlink creation unavailable");
+            return;
+        }
+        let mut visible = Vec::<PathBuf>::new();
+        let mut clicked: Option<PathBuf> = None;
+        let mut visited = HashSet::new();
+        if let Ok(real) = root.canonicalize() {
+            visited.insert(real);
+        }
+        let ctx = egui::Context::default();
+        // The key assertion is simply that this RETURNS (no stack overflow /
+        // hang). The symlinked `loop` is rendered as a leaf, never entered.
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            dir_children(ui, root, &mut clicked, &mut visible, None, 0, &mut visited);
+        });
+        assert!(
+            visible.iter().any(|p| p.ends_with("file.txt")),
+            "real file rendered: {visible:?}"
+        );
+    }
+
+    /// The depth cap halts recursion on a pathologically deep REAL tree even
+    /// when no symlink is involved (covers platforms where symlink creation is
+    /// unavailable).
+    #[test]
+    fn dir_children_respects_depth_cap() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        // Build a real chain deeper than MAX_TREE_DEPTH.
+        let mut p = root.to_path_buf();
+        for i in 0..(MAX_TREE_DEPTH + 5) {
+            p = p.join(format!("d{i}"));
+            create_dir(&p).unwrap();
+        }
+        File::create(p.join("deep.txt")).unwrap();
+        let mut visible = Vec::<PathBuf>::new();
+        let mut clicked: Option<PathBuf> = None;
+        let mut visited = HashSet::new();
+        let ctx = egui::Context::default();
+        // Must return without overflow; the deepest file is below the cap and
+        // therefore never reached, proving the recursion was bounded.
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            dir_children(ui, root, &mut clicked, &mut visible, None, 0, &mut visited);
+        });
+        assert!(
+            !visible.iter().any(|p| p.ends_with("deep.txt")),
+            "recursion must stop at the depth cap before reaching the deepest file"
+        );
     }
 }

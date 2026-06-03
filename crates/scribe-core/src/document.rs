@@ -91,8 +91,11 @@ impl Document {
     }
 
     /// Save back to the document's path using its original encoding + EOL.
-    /// Atomic: writes to a temp file then renames over the target.
-    pub fn save(&mut self) -> Result<()> {
+    /// Atomic: writes to a temp file then renames over the target. Returns
+    /// `Ok(true)` when one or more characters could not be represented in the
+    /// file's encoding (they were replaced — i.e. data was lost — so the caller
+    /// MUST warn the user).
+    pub fn save(&mut self) -> Result<bool> {
         let Some(path) = self.path.clone() else {
             return Err(crate::error::CoreError::Other(
                 "no path set; use save_as".into(),
@@ -101,12 +104,13 @@ impl Document {
         self.save_as(&path)
     }
 
-    /// Save to an explicit path (also used for "Save As").
-    pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<()> {
+    /// Save to an explicit path (also used for "Save As"). Returns `Ok(true)`
+    /// when characters were lost to the target encoding (see [`Self::save`]).
+    pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<bool> {
         let path = path.as_ref();
         let lf_text = self.rope.to_string();
         let styled = eol::apply(&lf_text, self.eol);
-        let bytes = encoding::encode(&styled, &self.encoding);
+        let (bytes, lossy) = encoding::encode_checked(&styled, &self.encoding);
 
         // Atomic write: temp file in the same dir, then rename.
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -120,7 +124,7 @@ impl Document {
 
         self.path = Some(path.to_path_buf());
         self.dirty = false;
-        Ok(())
+        Ok(lossy)
     }
 
     pub fn text(&self) -> String {

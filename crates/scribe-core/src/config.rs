@@ -174,6 +174,13 @@ pub struct EditorConfig {
     /// opt in.
     #[serde(default)]
     pub grid_enabled: bool,
+    /// #R6 — persisted multi-note grid layout (a JSON-serialised
+    /// `egui_tiles::Tree<Pane>` from `grid::to_json`). Restored on launch when
+    /// the grid is enabled and the persisted panes match the reopened doc set,
+    /// so a split arrangement survives a restart. `None` until a grid layout has
+    /// been used.
+    #[serde(default)]
+    pub grid_layout: Option<String>,
     /// F-012 from docs/audits/overlooked-surfaces-2026-05-29.md: MRU
     /// list of recently-opened file paths. Capped at
     /// [`RECENT_FILES_MAX`]; freshly opened paths push to the front and
@@ -302,6 +309,7 @@ impl Default for EditorConfig {
             side_tabs_rotated: false,
             note_theme: default_note_theme(),
             grid_enabled: false,
+            grid_layout: None,
             recent_files: Vec::new(),
             first_run_completed: false,
             scroll_positions: std::collections::HashMap::new(),
@@ -485,6 +493,18 @@ pub struct PluginConfig {
     pub enabled: bool,
     /// Plugin ids the user has explicitly disabled.
     pub disabled: Vec<String>,
+    /// Trust-on-first-use approvals: plugin id -> the SHA-256 of the entry
+    /// script the user approved. A discovered plugin is only ever RUN when its
+    /// current entry-script hash matches the approved one — so dropping a new
+    /// (or silently-modified) plugin folder into the plugins dir does NOT
+    /// auto-execute it; the user must approve it first. This is the real
+    /// consent gate the security docs describe.
+    pub trusted: std::collections::BTreeMap<String, String>,
+    /// Strict mode: when true, a plugin must additionally carry a valid minisign
+    /// signature over its manifest from a pinned author key (the manifest's
+    /// `signature` + `author_pubkey`). Default off so existing unsigned local
+    /// script plugins keep working under the TOFU gate above.
+    pub require_signed: bool,
 }
 
 impl Default for PluginConfig {
@@ -492,6 +512,8 @@ impl Default for PluginConfig {
         Self {
             enabled: true,
             disabled: Vec::new(),
+            trusted: std::collections::BTreeMap::new(),
+            require_signed: false,
         }
     }
 }

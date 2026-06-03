@@ -46,6 +46,30 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libxkbcommon-dev libssl-dev
+      # Embed the REAL release public key (a PUBLIC value, safe in a repo var)
+      # so the shipped binary's in-app updater can verify signed releases.
+      # Without the var set, the fail-closed placeholder in verify.rs stays and
+      # auto-update verification rejects every artifact (never accepts an
+      # unsigned/forged update) — see packaging/signing.md.
+      - name: Embed release public key (when provisioned)
+        if: vars.SCR1B3_MINISIGN_PUBLIC_KEY != ''
+        shell: bash
+        env:
+          PUBKEY: ${{ vars.SCR1B3_MINISIGN_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          python - "$PUBKEY" <<'PY'
+          import re, sys, pathlib
+          # The pubkey box form is two lines; keep the newline as a Rust \n escape.
+          pk = sys.argv[1].replace("\r\n", "\n").replace("\n", "\\n").replace('"', '\\"')
+          p = pathlib.Path("crates/scribe-core/src/update/verify.rs")
+          s = p.read_text(encoding="utf-8")
+          pat = re.compile(r'pub const EMBEDDED_PUBLIC_KEY: &str = "[^"]*";')
+          new = pat.sub(lambda _m: f'pub const EMBEDDED_PUBLIC_KEY: &str = "{pk}";', s, count=1)
+          assert new != s and "RWQ0000" not in new, "pubkey placeholder was not replaced"
+          p.write_text(new, encoding="utf-8")
+          print("embedded release public key")
+          PY
       # No dependency cache in the release build: a poisoned cache could taint
       # published, signed artifacts (zizmor cache-poisoning). Release builds are
       # clean + reproducible by design.
@@ -187,6 +211,31 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
+      # Sign every release asset with minisign so the in-app updater (which
+      # verifies against the embedded public key) accepts the download. The
+      # secret key is a repo secret, NEVER committed. When it is absent the step
+      # is a no-op (artifacts ship checksummed but unsigned) — the in-script
+      # guard avoids the secrets-in-`if` evaluation gotcha and fails safe.
+      - name: Sign release artifacts (minisign, when key provisioned)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "::warning::MINISIGN_SECRET_KEY not set — shipping checksummed but UNSIGNED artifacts (auto-update will reject them). See packaging/signing.md."
+            exit 0
+          fi
+          sudo apt-get update && sudo apt-get install -y minisign
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > sk.key
+          count=0
+          while IFS= read -r f; do
+            printf '%s\n' "${MINISIGN_PASSWORD:-}" | minisign -S -s sk.key -m "$f" -x "$f.minisig"
+            count=$((count + 1))
+          done < <(find dist -type f ! -name '*.minisig')
+          shred -u sk.key 2>/dev/null || rm -f sk.key
+          echo "signed $count release artifact(s) with minisign"
       - name: Create GitHub Release
         # `gh release` ships on every GitHub-hosted runner, so no third-party
         # action is needed (zizmor superfluous-actions). The default GITHUB_TOKEN

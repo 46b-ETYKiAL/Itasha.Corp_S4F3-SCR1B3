@@ -33,7 +33,7 @@
 
 SCR1B3 (pronounced "scribe") is a code and text editor built in Rust for people who want a fast, native editor that respects them. It opens multi-gigabyte files without freezing, themes all the way down, and never phones home.
 
-The text engine is a rope buffer, so edits on huge documents stay in the single-digit-microsecond range, and memory-mapped read-only browsing means files far larger than RAM open instantly. Syntax highlighting comes from syntect with 100+ bundled languages and no per-language build step. Tree-sitter handles structural awareness on top. Everything — appearance, fonts, effects, behavior, themes — is driven by a single live-reloading TOML config. No webview, no account, no bloat.
+The text engine is a rope buffer, and memory-mapped read-only browsing means files far larger than RAM open instantly and stay smooth to scroll. Syntax highlighting comes from syntect with 100+ bundled languages and no per-language build step, with a native tree-sitter grammar (Rust today) starting to layer structural awareness on top. Everything — appearance, fonts, behavior, themes — is driven by a single live-reloading TOML config. No webview, no account, no bloat.
 
 The name is a nod to *Serial Experiments Lain*. Good tools don't call attention to themselves. They just work when you reach for them — present day, present text.
 
@@ -96,13 +96,13 @@ Or launch SCR1B3 and open files from the editor. On first run it writes nothing 
 ## Capabilities
 
 - **Large files without the freeze** — a rope buffer plus `mmap` read-only browse open multi-GB logs and files that defeat the 2 GB cap and 4×-RAM blowups of legacy editors, and stay responsive while you scroll.
-- **GPU-rendered** — smooth scrolling and an optional CRT / scanline / phosphor post-process shader (off by default, toggleable, respects reduced-motion).
-- **100+ languages** — syntect-backed syntax highlighting out of the box; standard TextMate / Sublime syntaxes work unchanged, with a native tree-sitter grammar (Rust today) for structure-aware highlighting and folding.
+- **GPU-rendered** — smooth scrolling on a hardware-accelerated egui surface, with no system webview in the loop.
+- **100+ languages** — syntect-backed syntax highlighting out of the box; standard TextMate / Sublime syntaxes work unchanged, with a native tree-sitter grammar (Rust today) beginning to add structure-aware highlighting; broader tree-sitter coverage and folding are in progress.
 - **Power editing surfaces** — split view over a shared buffer, a document minimap with click-to-jump, brace-aware code folding, and an identifier completion popup (Ctrl/Cmd+Space) — all toggleable from the View menu.
 - **Telemetry-free by default** — no account, no analytics, no usage beacons. Your file contents never leave your device.
 - **Deep theming** — live-reload Helix-style `[palette]` / `[ui]` / `[syntax]` TOML themes, including glass / transparency effects; ship your own without recompiling. Broken themes fall back to the compiled-in default, so the editor never blanks.
 - **LSP diagnostics** — language-server integration surfaces errors, warnings, and hints inline.
-- **Modern editing** — multi-tab, find / replace with full regex and capture-group replacement, per-line syntax spans, and encoding + EOL detection that round-trips files unmodified.
+- **Modern editing** — multi-tab, find / replace with full regex and capture-group replacement, memoized syntax-highlight layout, and encoding + EOL detection that round-trips files unmodified.
 - **Plugins** — a capability-consent user plugin system scripted in [Rhai](https://rhai.rs) (pure-Rust, sandboxed by construction — no filesystem or network access, bounded by an operation count and a wall-clock deadline so a runaway script can't hang the editor), with minisign-signed tarballs verified against a TOFU-pinned key store.
 - **Offline spellcheck** — fully offline, code-aware (comments / strings), off by default.
 - **Signed auto-update** — telemetry-free version check against the public GitHub Releases API only, cryptographically verified before swap, fully opt-out.
@@ -111,9 +111,9 @@ Or launch SCR1B3 and open files from the editor. On first run it writes nothing 
 <details>
 <summary><strong>Technical Context</strong></summary>
 
-SCR1B3 is a Cargo workspace: `scribe-core` holds the rope-backed text engine, encoding / EOL detection, syntect + tree-sitter highlighting, and the offline spellchecker; `scribe-render` maps themes and the CRT post-process shader to the GPU surface; `scribe-app` is the binary that wires them into a frameless, native-feel window.
+SCR1B3 is a Cargo workspace: `scribe-core` holds the rope-backed text engine, encoding / EOL detection, syntect + tree-sitter highlighting, and the offline spellchecker; `scribe-render` maps themes to the GPU surface and hosts the large-file rope viewport widget; `scribe-app` is the binary that wires them into a frameless, native-feel window.
 
-The text engine uses a rope so insertions and deletions cost O(log n) regardless of document size. Read-only browsing of very large files is backed by `mmap`, so the OS pages content on demand rather than loading the whole file into memory. Highlighting layers syntect (TextMate / Sublime grammars, 100+ languages bundled) with tree-sitter for structure-aware features.
+The text engine uses a rope (`ropey`), whose insertions and deletions are O(log n) at the buffer level. Read-only browsing of very large files is backed by `mmap` with a viewport-culled rope widget, so the OS pages content on demand rather than loading the whole file into memory, and only the visible rows are laid out per frame. The editable path currently uses egui's `TextEdit::multiline`, so the rope-viewport huge-file speed applies to read-only browsing today; threading the owned editing layer through the rope widget is in progress. Highlighting layers syntect (TextMate / Sublime grammars, 100+ languages bundled) with tree-sitter (Rust grammar today) for structure-aware features.
 
 Configuration is a single TOML file that live-reloads on change. Themes use a three-namespace schema (`[palette]` / `[ui]` / `[syntax]`) with palette-name references and `#RRGGBB` / `#RRGGBBAA` literals; the default theme is `wired-noir` — cool near-black layers, off-white text, one teal accent (the system voice), Akira-red reserved for alarms. Five themes ship in the binary (`wired-noir`, `phosphor-amber`, `lain-mauve`, `ghost-paper`, `a11y-high-contrast`); user themes drop in `<config_dir>/themes/` and override built-ins of the same name. The plugin system is capability-consented: plugins declare the capabilities they need and you approve them. Scripts run in an embedded [Rhai](https://rhai.rs) interpreter that is sandboxed by construction (no ambient filesystem or network access) and bounded by both an operation-count ceiling and a wall-clock deadline, so a misbehaving or runaway plugin cannot hang or compromise the editor.
 
@@ -121,11 +121,11 @@ Configuration is a single TOML file that live-reloads on change. Themes use a th
 
 ## Configuration
 
-SCR1B3 reads a single live-reloading TOML file from your OS config directory. A missing file uses built-in defaults; a malformed file falls back to defaults and surfaces the error in-app. Every key — `[editor]`, `[appearance]`, `[fonts]`, `[effects]`, `[updates]`, `[spellcheck]`, `[plugins]` — is documented with types, defaults, and a full example in **[CONFIG.md](CONFIG.md)**.
+SCR1B3 reads a single live-reloading TOML file from your OS config directory. A missing file uses built-in defaults; a malformed file falls back to defaults and surfaces the error in-app. Every key — `[editor]`, `[appearance]`, `[fonts]`, `[updates]`, `[spellcheck]`, `[plugins]` — is documented with types, defaults, and a full example in **[CONFIG.md](CONFIG.md)**.
 
 ## Theming
 
-Themes use a Helix-style three-namespace TOML schema (`[palette]` / `[ui]` / `[syntax]`) with palette-name references and `#RRGGBB` / `#RRGGBBAA` literals. SCR1B3 ships **five built-in themes** — `wired-noir` (default, brand canon), `phosphor-amber` (BBS heritage), `lain-mauve` (Wired violet), `ghost-paper` (light, WCAG AA), and `a11y-high-contrast` (WCAG AAA-target for low-vision users). Pick one from **Settings → Appearance → Theme**, drop a user theme in `<config_dir>/themes/` to override, or click **Export to user theme** to fork the active theme to disk and edit it by hand (the live-reload watcher applies your changes immediately). Broken themes fall back to `wired-noir` so the editor never blanks. CRT effect toggles + intensities live in `[effects]`; the optional motion catalog (hover / focus-ring / panel-slide / cursor blink / etc.) lives in `[motion]`, all OFF by default. Full guide: **[THEMING.md](THEMING.md)**.
+Themes use a Helix-style three-namespace TOML schema (`[palette]` / `[ui]` / `[syntax]`) with palette-name references and `#RRGGBB` / `#RRGGBBAA` literals. SCR1B3 ships **five built-in themes** — `wired-noir` (default, brand canon), `phosphor-amber` (BBS heritage), `lain-mauve` (Wired violet), `ghost-paper` (light, WCAG AA), and `a11y-high-contrast` (WCAG AAA-target for low-vision users). Pick one from **Settings → Appearance → Theme**, drop a user theme in `<config_dir>/themes/` to override, or click **Export to user theme** to fork the active theme to disk and edit it by hand (the live-reload watcher applies your changes immediately). Broken themes fall back to `wired-noir` so the editor never blanks. The optional motion settings (master switch, intensity, cursor blink) live in `[motion]` and are OFF by default. (A CRT / scanline post-process pass was scaffolded but not shipped — see THEMING.md.) Full guide: **[THEMING.md](THEMING.md)**.
 
 ## Plugins
 
@@ -137,7 +137,7 @@ SCR1B3 supports a user plugin system with a **capability-consent model**: plugin
 |-------|------------|
 | Core engine | Rust, ropey |
 | Highlighting | syntect, tree-sitter |
-| Rendering | GPU surface + WGSL CRT shader |
+| Rendering | egui on a GPU surface |
 | Config / themes | TOML (live-reload) |
 | Plugins | Rhai (sandboxed, capability-consented, minisign-signed) |
 | License | MIT OR Apache-2.0 |

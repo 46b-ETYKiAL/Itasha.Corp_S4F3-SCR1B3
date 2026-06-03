@@ -124,7 +124,14 @@ pub fn scan_project(root: &Path, cap: usize) -> Vec<PathBuf> {
             if basename.starts_with('.') {
                 continue;
             }
-            let Ok(meta) = entry.metadata() else { continue };
+            // `symlink_metadata` does NOT follow symlinks, so a symlinked dir
+            // reports `is_symlink()` (not `is_dir()`) and is never re-enqueued.
+            // This prevents a self-referential symlink from looping the walk
+            // until the cap (and never indexes content reachable only through a
+            // symlink, which would also duplicate entries).
+            let Ok(meta) = entry.path().symlink_metadata() else {
+                continue;
+            };
             if meta.is_dir() {
                 // Skip a small set of universal "don't index" dirs.
                 if matches!(
@@ -223,6 +230,48 @@ mod tests {
         let r = scan_project(dir.path(), 100);
         assert!(!r.iter().any(|p| p.display().to_string().contains(".git")));
         assert_eq!(r.len(), 2);
+    }
+
+    /// Create a directory symlink, returning `false` (so the caller can skip
+    /// gracefully) when the OS refuses — Windows needs Developer Mode or admin
+    /// for `symlink_dir`.
+    #[cfg(unix)]
+    fn try_symlink_dir(src: &Path, dst: &Path) -> bool {
+        std::os::unix::fs::symlink(src, dst).is_ok()
+    }
+    #[cfg(windows)]
+    fn try_symlink_dir(src: &Path, dst: &Path) -> bool {
+        std::os::windows::fs::symlink_dir(src, dst).is_ok()
+    }
+
+    #[test]
+    fn scan_project_does_not_follow_symlink_cycle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        std::fs::write(root.join("real.rs"), "x").expect("write real");
+        let sub = root.join("sub");
+        std::fs::create_dir(&sub).expect("mk sub");
+        // `sub/loop` → root: a self-referential cycle. Without symlink_metadata
+        // the walk would recurse root → sub → loop → root → … until the cap.
+        if !try_symlink_dir(root, &sub.join("loop")) {
+            eprintln!("skipping: symlink creation unavailable on this platform/config");
+            return;
+        }
+        // A tiny cap: if the cycle were followed, the walk would still fill the
+        // cap with duplicate paths reached through the symlink. With
+        // symlink_metadata the symlink is never entered, so only the real files
+        // are returned and the walk terminates well under the cap.
+        let r = scan_project(root, 64);
+        assert!(
+            r.iter()
+                .any(|p| p.display().to_string().ends_with("real.rs")),
+            "real file must be found"
+        );
+        // The symlinked `loop` dir is never traversed → no path passes through it.
+        assert!(
+            !r.iter().any(|p| p.display().to_string().contains("loop")),
+            "symlinked cycle must not be entered: {r:?}"
+        );
     }
 
     #[test]

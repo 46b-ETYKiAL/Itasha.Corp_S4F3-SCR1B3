@@ -31,6 +31,18 @@ Upload `.tar.gz`, `.minisig`, and `.sha256` to the GitHub Release. The updater
 downloads all three, verifies checksum + signature (`update::verify::verify_artifact`),
 and only then applies (`update::apply`).
 
+### Now wired in CI (`.github/workflows/release.yml`)
+
+The signing flow above is **automated**, gated on the secrets/vars being set:
+
+| Secret / var | Kind | Purpose |
+|---|---|---|
+| `MINISIGN_SECRET_KEY` | secret | The ed25519 secret key. Present → the release job installs minisign and signs every asset (`*.minisig`). Absent → the job logs a `::warning::` and ships checksummed-but-**unsigned** artifacts (the in-app updater then rejects them — fail-closed). |
+| `MINISIGN_PASSWORD` | secret | Password for the secret key (empty for a `-W` no-password key). |
+| `SCR1B3_MINISIGN_PUBLIC_KEY` | var (optional) | The PUBLIC key box-form. When set, the build job swaps it into `EMBEDDED_PUBLIC_KEY` at build time — an alternative to committing the key into `verify.rs` by hand. When unset, whatever is committed in `verify.rs` is used (the all-zeros placeholder rejects everything until you commit the real key or set this var). |
+
+So a maintainer activates signed auto-updates by: (1) generating the keypair once (above), (2) committing the public key into `verify.rs` **or** setting the `SCR1B3_MINISIGN_PUBLIC_KEY` var, and (3) adding the `MINISIGN_SECRET_KEY` (+ `MINISIGN_PASSWORD`) secret. Until then releases are unsigned and the updater is inert by design — never insecure.
+
 ## Windows code signing (separate concern)
 
 Authenticode-sign the `.exe`/`.msi` so SmartScreen/AV trust the self-replace

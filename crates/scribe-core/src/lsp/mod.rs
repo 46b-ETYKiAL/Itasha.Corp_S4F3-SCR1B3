@@ -158,8 +158,23 @@ impl LspClient {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Request shutdown + exit, then reap the child.
-    pub fn shutdown(mut self) {
+    /// Explicitly shut the server down now. Consuming `self` runs the same
+    /// graceful-shutdown-then-reap path that [`Drop`] guarantees — so callers
+    /// may use this for an eager shutdown, but a client that is simply dropped
+    /// (language switch, app exit) is reaped just the same.
+    pub fn shutdown(self) {
+        // Drop does the work.
+    }
+}
+
+impl Drop for LspClient {
+    /// Reap the language server so we never leak an orphaned process. The
+    /// default `Child` drop only *detaches* — a large server (rust-analyzer,
+    /// clangd) would linger for the OS session. We send the LSP graceful
+    /// `shutdown`+`exit`, then `kill`+`wait` to guarantee termination even if
+    /// the server ignores the request. All steps are best-effort; a child that
+    /// has already exited makes `kill`/`wait` return harmless errors.
+    fn drop(&mut self) {
         let id = self.id();
         let _ = protocol::write_message(
             &mut self.stdin,
@@ -169,6 +184,7 @@ impl LspClient {
             &mut self.stdin,
             &protocol::notification("exit", Value::Null),
         );
+        let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
@@ -226,5 +242,38 @@ mod tests {
         };
         // No crash — just an Err the caller can ignore.
         assert!(LspClient::spawn(&cfg, "file:///x").is_err());
+    }
+
+    #[test]
+    fn message_round_trips_through_content_length_framing() {
+        // The Content-Length framing is the fragile part of the LSP transport;
+        // exercise write_message -> read_message end-to-end in memory (the
+        // real-process path was previously untested).
+        let msg = protocol::request(7, "textDocument/hover", json!({ "x": 1 }));
+        let mut buf: Vec<u8> = Vec::new();
+        protocol::write_message(&mut buf, &msg).unwrap();
+        assert!(
+            buf.starts_with(b"Content-Length: "),
+            "wire format must lead with a Content-Length header"
+        );
+        let mut reader = BufReader::new(&buf[..]);
+        let back = protocol::read_message(&mut reader)
+            .unwrap()
+            .expect("one framed message");
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn read_message_decodes_a_stream_of_two_then_eof() {
+        let a = protocol::notification("initialized", json!({}));
+        let b = protocol::request(2, "shutdown", Value::Null);
+        let mut buf: Vec<u8> = Vec::new();
+        protocol::write_message(&mut buf, &a).unwrap();
+        protocol::write_message(&mut buf, &b).unwrap();
+        let mut reader = BufReader::new(&buf[..]);
+        assert_eq!(protocol::read_message(&mut reader).unwrap().unwrap(), a);
+        assert_eq!(protocol::read_message(&mut reader).unwrap().unwrap(), b);
+        // Clean EOF -> Ok(None), never an error.
+        assert!(protocol::read_message(&mut reader).unwrap().is_none());
     }
 }

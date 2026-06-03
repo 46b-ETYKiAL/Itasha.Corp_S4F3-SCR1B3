@@ -108,11 +108,13 @@ pub struct PluginManifest {
     #[serde(default)]
     pub author_pubkey: Option<String>,
 
-    /// Minisign detached signature of THIS manifest (signed over the
-    /// canonical TOML bytes, NOT including the signature field itself).
-    /// Host verifies against `author_pubkey` before granting any
-    /// privileged capability or persisting the install. `None` for the
-    /// unsigned local-development path.
+    /// Minisign detached signature over the plugin's **entry script** (the
+    /// exact bytes that execute), verified against `author_pubkey`. With
+    /// `plugins.require_signed` on, the host runs a plugin only when this
+    /// signature verifies under a pinned author key — authenticating the code
+    /// that runs, not just the manifest. `None` for the unsigned
+    /// local-development path (which instead goes through the trust-on-first-use
+    /// entry-checksum approval gate).
     #[serde(default)]
     pub signature: Option<String>,
 }
@@ -174,6 +176,19 @@ impl DiscoveredPlugin {
 /// Discover plugins under `plugins_dir`: each subdirectory containing a
 /// `plugin.toml` is a candidate. Malformed manifests are skipped (reported via
 /// the returned error list) — one bad plugin never blocks the others.
+/// Trust-on-first-use decision: a discovered plugin's entry script may run in
+/// the default (unsigned) path only when the user has approved THIS EXACT
+/// script — i.e. `trusted[id]` equals the script's current SHA-256. A brand-new
+/// plugin (absent id) or a silently-modified one (changed hash) returns `false`
+/// so it is held back rather than auto-executed.
+pub fn entry_is_trusted(
+    id: &str,
+    entry_sha256: &str,
+    trusted: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    trusted.get(id).map(|s| s == entry_sha256).unwrap_or(false)
+}
+
 pub fn discover(plugins_dir: &Path) -> (Vec<DiscoveredPlugin>, Vec<String>) {
     let mut found = Vec::new();
     let mut errors = Vec::new();
@@ -239,6 +254,22 @@ description = "Uppercases the buffer"
         )
         .unwrap();
         assert_eq!(m.privileged(), vec![Capability::Network]);
+    }
+
+    #[test]
+    fn entry_is_trusted_only_on_exact_hash_match() {
+        use std::collections::BTreeMap;
+        let mut trusted = BTreeMap::new();
+        trusted.insert("uppercase".to_string(), "abc123".to_string());
+
+        // Approved id + matching current hash -> may run.
+        assert!(entry_is_trusted("uppercase", "abc123", &trusted));
+        // Approved id but the script CHANGED (different hash) -> held back.
+        assert!(!entry_is_trusted("uppercase", "deadbeef", &trusted));
+        // Brand-new, never-approved plugin -> held back (no auto-run).
+        assert!(!entry_is_trusted("totally-new", "abc123", &trusted));
+        // Empty trust set -> nothing runs.
+        assert!(!entry_is_trusted("uppercase", "abc123", &BTreeMap::new()));
     }
 
     #[test]

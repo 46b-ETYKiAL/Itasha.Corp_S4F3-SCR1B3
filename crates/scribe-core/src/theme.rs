@@ -24,14 +24,33 @@ impl Rgba {
     }
 
     /// Parse `#RGB`, `#RRGGBB`, or `#RRGGBBAA`.
+    ///
+    /// Robust against non-ASCII input: theme colours come from user-editable
+    /// TOML, so a multibyte char (e.g. `#a€00`) must return `None` rather than
+    /// panic on a non-char-boundary byte slice. We slice on `as_bytes()` via
+    /// `get(..)` (which yields `None` instead of panicking on a bad range) and
+    /// re-validate the window is ASCII before hex-parsing it.
     pub fn parse_hex(s: &str) -> Option<Rgba> {
         let h = s.strip_prefix('#')?;
-        let v = |i: usize, n: usize| u8::from_str_radix(&h[i..i + n], 16).ok();
+        // Each component is a fixed byte window; `get` returns None for any
+        // out-of-range slice, and `from_utf8` rejects a window that split a
+        // multibyte char — so a non-ASCII value can never reach `from_str_radix`.
+        let v = |i: usize, n: usize| {
+            let bytes = h.as_bytes().get(i..i + n)?;
+            let s = std::str::from_utf8(bytes).ok()?;
+            u8::from_str_radix(s, 16).ok()
+        };
+        // `len()` is the BYTE length; only branch on it once the value is ASCII
+        // so byte-length and char-length agree (a multibyte char would make a
+        // 3-char value report len 6+ and mis-dispatch).
+        if !h.is_ascii() {
+            return None;
+        }
         match h.len() {
             3 => {
-                let r = u8::from_str_radix(&h[0..1], 16).ok()? * 17;
-                let g = u8::from_str_radix(&h[1..2], 16).ok()? * 17;
-                let b = u8::from_str_radix(&h[2..3], 16).ok()? * 17;
+                let r = v(0, 1)? * 17;
+                let g = v(1, 1)? * 17;
+                let b = v(2, 1)? * 17;
                 Some(Rgba::new(r, g, b, 255))
             }
             6 => Some(Rgba::new(v(0, 2)?, v(2, 2)?, v(4, 2)?, 255)),
@@ -1266,6 +1285,21 @@ mod tests {
             Some(Rgba::new(0, 255, 254, 128))
         );
         assert_eq!(Rgba::parse_hex("nope"), None);
+    }
+
+    #[test]
+    fn parse_hex_rejects_non_ascii_without_panicking() {
+        // Theme colours come from user-editable TOML. A multibyte UTF-8 char
+        // positioned so a char boundary falls inside a byte-slice window used
+        // to panic (`&h[i..i+n]` on a non-char-boundary). These must return
+        // `None`, never abort the app.
+        // `€` is 3 bytes: `#a€00` strips to `a€00` = 6 bytes → the old code
+        // took the `6` arm and sliced `&h[0..2]` straight through `€`.
+        assert_eq!(Rgba::parse_hex("#a\u{20ac}00"), None);
+        // A 3-byte char alone, and other boundary-crossing windows.
+        assert_eq!(Rgba::parse_hex("#\u{20ac}f"), None); // 4 bytes
+        assert_eq!(Rgba::parse_hex("#ff\u{20ac}ff0"), None); // 8 bytes, splits the 8-arm windows
+        assert_eq!(Rgba::parse_hex("#\u{20ac}\u{20ac}"), None); // 6 bytes, all non-ascii
     }
 
     #[test]

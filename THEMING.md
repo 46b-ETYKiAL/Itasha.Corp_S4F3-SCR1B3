@@ -187,20 +187,6 @@ variable = "text"
 
 A light theme is as simple as setting `appearance = "light"` and choosing lighter `background` / darker `foreground` values.
 
-## CRT effects
+## CRT effects (not implemented)
 
-The retro CRT look is **not** part of the theme — it is a separate GPU post-process pass configured in `[effects]` (see [CONFIG.md](CONFIG.md)). It is **off by default**. Enable and tune it independently of your color theme:
-
-```toml
-[effects]
-crt_enabled = true
-scanline = 0.30
-phosphor_glow = 0.20
-bloom = 0.15
-vignette = 0.25
-curvature = 0.0
-chromatic_aberration = 0.05
-respect_reduced_motion = true   # auto-disable animation under OS reduced-motion
-```
-
-Because effects and themes are orthogonal, you can run the CRT shader over any theme — or run any theme flat with effects off.
+A CRT / retro post-process pass (scanline, phosphor glow, bloom, vignette, curvature, chromatic aberration) was scaffolded early but **not shipped** — there is no GPU shader behind it, so it carries no `[effects]` config table. The aesthetic is expressed through the color themes themselves (e.g. `phosphor-amber`, `terminal-lock`) rather than a screen-space filter. If a post-process pass lands later it will be a separate, opt-in feature documented here and in [CONFIG.md](CONFIG.md).
