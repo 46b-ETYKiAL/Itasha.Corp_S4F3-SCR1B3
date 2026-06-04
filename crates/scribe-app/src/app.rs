@@ -220,6 +220,13 @@ fn apply_window_effect(cc: &eframe::CreationContext<'_>, mode: WindowMode, tint_
                     None,
                 );
             }
+            // Vibrancy is a macOS material; on Windows there is no direct
+            // equivalent, so map it to Mica (the closest system backdrop) rather
+            // than leaving the option a silent no-op.
+            #[cfg(windows)]
+            {
+                let _ = window_vibrancy::apply_mica(cc, Some(true));
+            }
         }
         WindowMode::Transparent | WindowMode::Opaque => {}
     }
@@ -456,15 +463,6 @@ pub struct ScribeApp {
     /// `config.fonts.editor_family` diverges from this, the font set is rebuilt
     /// and re-applied — a restart-free font-theme switch.
     applied_font_family: String,
-    /// Countdown of frames over which we keep re-asserting OS window decorations
-    /// OFF in frameless mode (#79). On Windows, applying a vibrancy/transparent
-    /// surface makes the DWM re-add the native caption buttons even though the
-    /// window was created decoration-less — a SECOND, slightly-offset set of
-    /// minimize/maximize/close buttons over the custom titlebar. A single
-    /// one-shot lost the race (DWM re-adds them a few frames AFTER the surface
-    /// composites), so we re-assert for a short window after launch and again
-    /// after any settings change (e.g. toggling transparency on).
-    decoration_reassert_frames: u32,
     /// Set when the user asks to close (custom titlebar ✕). Funnels into the
     /// same two-phase close path as an OS-initiated close.
     want_close: bool,
@@ -736,7 +734,9 @@ impl ScribeApp {
         // `new_test` (watch_config = false) so a parallel test never inherits
         // another test's restored tabs (which would break tabs.len() asserts).
         if watch_config && tabs.is_empty() && config.editor.session_backup {
-            if let Some((restored, active_idx)) = Self::restore_tabs_from_manifest() {
+            if let Some((restored, active_idx)) =
+                Self::restore_tabs_from_manifest(config.editor.restore_session)
+            {
                 tabs = restored;
                 restored_active = active_idx;
             }
@@ -866,7 +866,6 @@ impl ScribeApp {
             visuals_applied: false,
             applied_font_family: String::new(),
             applied_note_theme: String::new(),
-            decoration_reassert_frames: 30,
             want_close: false,
             closing: false,
             find_open: false,
@@ -1013,30 +1012,21 @@ impl ScribeApp {
                         chip.show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 4.0;
-                                // Drag handle — greyed + non-interactive on pinned notes.
+                                // Drag handle — a neutral `muted` grip so it stays
+                                // visible on BOTH the active (accent-tinted) and
+                                // inactive chip backgrounds (an accent-coloured grip
+                                // vanished against the active chip's accent fill).
+                                let grip_color = muted;
                                 if pinned {
-                                    ui.add_enabled(
-                                        false,
-                                        egui::Button::new(egui_phosphor::thin::DOTS_SIX_VERTICAL)
-                                            .frame(false)
-                                            .small(),
-                                    )
-                                    .on_hover_text("Pinned — drag disabled");
+                                    grip_handle(ui, false, grip_color)
+                                        .on_hover_text("Pinned — drag disabled");
                                 } else {
                                     // `drag_started()` fires ONCE on drag start (egui_tiles
                                     // expects a single `DragStarted`); a held-button check
                                     // would re-fire every frame and wedge the tile drag.
-                                    let handle = ui
-                                        .add(
-                                            egui::Button::new(
-                                                egui_phosphor::thin::DOTS_SIX_VERTICAL,
-                                            )
-                                            .frame(false)
-                                            .small(),
-                                        )
+                                    let handle = grip_handle(ui, true, grip_color)
                                         .on_hover_text("Drag to rearrange")
                                         .on_hover_cursor(egui::CursorIcon::Grab);
-                                    let handle = handle.interact(egui::Sense::click_and_drag());
                                     if handle.drag_started() {
                                         drag_started = true;
                                     }
@@ -2230,7 +2220,18 @@ impl ScribeApp {
     /// Returns `(tabs, active_index)` or `None` when there is no usable
     /// manifest. A tab with a backup restores its unsaved content (marked
     /// dirty); a clean tab opens from disk.
-    fn restore_tabs_from_manifest() -> Option<(Vec<EditorTab>, usize)> {
+    /// Restore tabs from the hot-exit manifest. The two session features are
+    /// distinct and gated separately:
+    ///   • unsaved CONTENT (a tab with a `backup`) is always restored here —
+    ///     that is the "Restore unsaved notes" / `session_backup` feature.
+    ///   • a clean, file-backed tab (a `path` with no `backup`) is reopened ONLY
+    ///     when `restore_session` is on — that is the "Restore session" /
+    ///     reopen-previous-tabs feature.
+    /// So with "Restore session" UNCHECKED, previously-open clean files are NOT
+    /// reopened, while unsaved scratch content is still recovered (if its own
+    /// toggle is on). This is what makes the "Restore session" toggle authoritative
+    /// instead of a no-op (the backup path used to reopen every clean file too).
+    fn restore_tabs_from_manifest(restore_session: bool) -> Option<(Vec<EditorTab>, usize)> {
         use scribe_core::session;
         let dir = Config::config_dir()?;
         let manifest = session::load_manifest(&dir)?;
@@ -2243,6 +2244,11 @@ impl ScribeApp {
                     tabs.push(EditorTab::from_backup(path, content));
                     continue;
                 }
+            }
+            // Clean file-backed tab: only reopen when the user opted into session
+            // restore. Otherwise it is dropped (unchecking the toggle takes effect).
+            if !restore_session {
+                continue;
             }
             if let Some(p) = path {
                 if let Ok(tab) = EditorTab::from_path(p) {
@@ -4215,11 +4221,43 @@ fn panel_fill(
         None => ui_color(theme, "panel", Rgba::new(0x0d, 0x0b, 0x14, 255)),
     };
     if window.effective_translucent() {
-        let a = (window.opacity.clamp(0.30, 1.0) * 255.0).round() as u8;
+        // 0.05 floor matches the settings slider min + scribe_render::apply_window_opacity
+        // so the full slider travel is live (the old 0.30 floor was a dead band).
+        let a = (window.opacity.clamp(0.05, 1.0) * 255.0).round() as u8;
         Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a)
     } else {
         base
     }
+}
+
+/// Paint a 2×3 dot drag-grip and return its response. We paint the dots instead
+/// of drawing the phosphor `DOTS_SIX_VERTICAL` glyph because that PUA codepoint
+/// renders as a tofu square in this build's font atlas (the glyph IS in the
+/// font and phosphor IS registered in both families, yet egui's atlas resolves
+/// it to .notdef here — a known egui-phosphor footgun). Painted dots are
+/// font-independent and always render as a clean, recognizable grip. `enabled`
+/// = false dims it and drops the drag sense (used for pinned panes).
+pub(crate) fn grip_handle(ui: &mut egui::Ui, enabled: bool, color: Color32) -> egui::Response {
+    let h = ui.text_style_height(&egui::TextStyle::Body);
+    let sense = if enabled {
+        egui::Sense::click_and_drag()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(11.0, h), sense);
+    let dim = if enabled {
+        color
+    } else {
+        color.gamma_multiply(0.5)
+    };
+    let c = rect.center();
+    let painter = ui.painter();
+    for &x in &[c.x - 2.5, c.x + 2.5] {
+        for &y in &[c.y - 4.5, c.y, c.y + 4.5] {
+            painter.circle_filled(egui::pos2(x, y), 1.5, dim);
+        }
+    }
+    resp
 }
 
 /// Build a syntect-colored `LayoutJob` for the editor surface. Free function so
@@ -4680,16 +4718,21 @@ impl ScribeApp {
         // on battery), and — crucially — its non-zero repaint delay lets the
         // egui_kittest harness settle instead of panicking on "exceeded max_steps"
         // from a UI that never goes idle.
-        // Compiled out of test builds: the re-assert needs a real OS window with
-        // a DWM to fight; the headless `egui_kittest` harness has none, so the
-        // 30-frame countdown there would do nothing useful EXCEPT keep the UI
-        // requesting repaints past the harness's max_steps settle check. There is
-        // no headless way to exercise this real-window behaviour, so gating it on
-        // `!cfg!(test)` removes a false test failure without losing real coverage.
-        if !cfg!(test) && self.config.appearance.frameless && self.decoration_reassert_frames > 0 {
+        // #79/#40 — in frameless mode, re-assert OS-decorations-OFF on EVERY
+        // frame. A bounded countdown was NOT enough: applying a vibrancy/mica
+        // surface makes the Windows DWM re-add the native caption buttons
+        // PERSISTENTLY (not just once at launch), producing a SECOND, offset set
+        // of minimize/maximize/close over our custom titlebar. Re-sending
+        // `Decorations(false)` each frame keeps them suppressed; winit no-ops the
+        // call when the state is already unchanged, so there is no flicker or
+        // busy-work, and we do NOT request a repaint (so the headless
+        // egui_kittest harness still settles instead of looping forever).
+        // `!cfg!(test)`: a real OS window with a DWM is required for this to be
+        // meaningful; the headless egui_kittest harness has none, and sending a
+        // viewport command every frame there keeps the harness from settling
+        // (it trips the max_steps guard). Compiled out of test builds only.
+        if !cfg!(test) && self.config.appearance.frameless {
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
-            self.decoration_reassert_frames -= 1;
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
 
         // #87/#103 — restart-free font switch: rebuild + re-apply the font set
@@ -5357,10 +5400,6 @@ impl ScribeApp {
             }
             if changed {
                 self.reapply_theme(ctx);
-                // A settings change may have toggled transparency / window mode,
-                // which can make the DWM re-add native caption buttons; re-arm the
-                // decorations-off re-assertion to clear any duplicate set.
-                self.decoration_reassert_frames = 30;
                 // Spellcheck language / custom-dict edits take effect live.
                 self.reload_spell_engine();
                 // F-035 — push the always-on-top flag to the viewport
