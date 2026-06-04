@@ -19,6 +19,7 @@ mod fuzzy;
 mod grid;
 mod plugin_manager;
 mod settings;
+mod theme_editor;
 mod updater;
 
 use std::process::ExitCode;
