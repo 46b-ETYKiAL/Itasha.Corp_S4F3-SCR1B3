@@ -29,7 +29,6 @@ toml = "1"                    # 1.x — major rewrite of toml-rs with improved n
 semver = "1"                  # plugin manifest min_app_version SemVer compare (Phase 20 T20.2)
 directories = "5"             # per-OS config paths
 notify = "8"                  # config/theme live-reload
-notify-debouncer-mini = "0.4"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
