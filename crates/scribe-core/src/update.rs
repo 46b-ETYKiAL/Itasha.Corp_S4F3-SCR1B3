@@ -97,7 +97,7 @@ fn parse_version(s: &str) -> Option<semver::Version> {
 
 /// True if `candidate` is strictly newer than `current` under SemVer 2.0
 /// ordering. Malformed input on either side yields `false` (fail-safe: an
-/// unparseable version never triggers an update prompt).
+/// unparsable version never triggers an update prompt).
 pub fn is_newer(current: &str, candidate: &str) -> bool {
     match (parse_version(current), parse_version(candidate)) {
         (Some(c), Some(n)) => n > c,
