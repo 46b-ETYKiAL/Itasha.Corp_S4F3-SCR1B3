@@ -106,13 +106,6 @@ pub struct WindowConfig {
     pub tint: String,
     /// Tint overlay strength (0.0 = none .. 1.0 = strong).
     pub tint_strength: f32,
-    /// F-020 from docs/audits/overlooked-surfaces-2026-05-29.md: last
-    /// window position + size. Persisted on save_config and restored on
-    /// next launch. `None` means "use the hard-coded default size" — the
-    /// pre-audit behaviour. Tuple is `(x, y, width, height)` in logical
-    /// pixels (eframe's surface unit).
-    #[serde(default)]
-    pub last_geometry: Option<(f32, f32, f32, f32)>,
     /// F-035 from docs/audits/overlooked-surfaces-2026-05-29.md: keep the
     /// SCR1B3 window on top of other windows. Default OFF.
     #[serde(default)]
@@ -137,7 +130,6 @@ impl Default for WindowConfig {
             opacity: 0.92,
             tint: "#08060d".to_string(),
             tint_strength: 0.0,
-            last_geometry: None,
             always_on_top: false,
         }
     }
@@ -431,8 +423,10 @@ impl Default for FontConfig {
 #[serde(rename_all = "lowercase")]
 pub enum UpdateMode {
     Off,
-    #[default]
     Notify,
+    /// Default: SCR1B3 makes NO automatic network connection — the user checks
+    /// for updates on demand from Settings (on-brand for a telemetry-free app).
+    #[default]
     Manual,
     Auto,
 }
@@ -455,7 +449,9 @@ pub struct UpdateConfig {
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            mode: UpdateMode::Notify,
+            // Manual by default: no automatic/background network. Notify and Auto
+            // are explicit opt-ins to an on-launch GitHub-Releases version check.
+            mode: UpdateMode::Manual,
             check_interval_hours: 24,
             last_check_unix: None,
         }
@@ -767,21 +763,6 @@ mod tests {
             ..Default::default()
         };
         assert!(!w.effective_translucent());
-    }
-
-    /// F-020: default `last_geometry` is None (first-launch falls back to
-    /// hard-coded size) and the field round-trips through TOML.
-    #[test]
-    fn window_last_geometry_default_none_and_round_trips() {
-        let mut c = Config::default();
-        assert_eq!(c.window.last_geometry, None);
-        c.window.last_geometry = Some((100.0, 200.0, 1280.0, 720.0));
-        let s = c.to_toml_string();
-        let back: Config = toml::from_str(&s).expect("config TOML round-trip");
-        assert_eq!(
-            back.window.last_geometry,
-            Some((100.0, 200.0, 1280.0, 720.0))
-        );
     }
 
     /// F-035: always_on_top defaults OFF and round-trips through TOML.

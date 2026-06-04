@@ -11,10 +11,10 @@ where state is stored, and how to clear it.
 |---|---|
 | Does SCR1B3 ship telemetry? | **No.** Not analytics, not usage counters, not crash beacons. |
 | Does SCR1B3 have an account system? | **No.** There is no account, no sign-in, no profile. |
-| Does SCR1B3 phone home? | **One opt-out network call only** — the update version-check (described below). |
+| Does SCR1B3 phone home? | **One optional network call only** — the update version-check (described below). The default mode makes **no** call at startup. |
 | Does SCR1B3 collect a unique identifier? | **No** install-id, no fingerprint, no per-session ID. |
 | Where is my data stored? | **Locally only.** On your machine. Nothing leaves the device. |
-| Can I run fully offline? | **Yes.** Disable the update check (`[updates] mode = "off"`) and SCR1B3 makes zero network calls. |
+| Can I run fully offline? | **Yes.** The default mode (`manual`) makes no network call until you click *Check for updates*; `[updates] mode = "off"` removes the check entirely. |
 
 ## The single network surface
 
@@ -31,17 +31,19 @@ update version-check. It:
   | Mode | Behavior |
   |---|---|
   | `off` | No update check ever. Zero network calls. |
-  | `notify` | Check at startup; if a newer version exists, show a discreet banner. Never auto-download. |
-  | `manual` | Check only when you click "Check for updates" in Settings. |
-  | `auto` | Check at startup; download + verify the signed update if newer; prompt before applying. |
+  | `manual` | **Default.** No automatic check; SCR1B3 checks only when you click *Check for updates* in Settings. |
+  | `notify` | Check once at startup; if a newer version exists, show a passive notification. Never auto-download. |
+  | `auto` | Check once at startup; if newer, ask yes/no before downloading + verifying + installing. |
 
-  Default: `notify`. Change in [`CONFIG.md`](CONFIG.md) and the change
-  takes effect on next start (or instantly via live-reload).
+  Default: `manual` — no network at startup. Change in
+  [`CONFIG.md`](CONFIG.md); the change takes effect on next start (or
+  instantly via live-reload).
 
-- When a signed update is fetched (modes `auto` only), it is
-  **cryptographically verified** via minisign / ed25519 against the
-  TOFU-pinned signing key before any file is touched on disk. A
-  failed verification aborts the update; no partial state is left.
+- When a signed update is fetched (in `auto` mode, or when you click
+  *Update now*), it is **cryptographically verified** via minisign /
+  ed25519 against the pinned signing key embedded in the binary before
+  any file is touched on disk. A failed verification aborts the update;
+  the staging area is wiped and no partial state is left.
 
 That's it. There is no other outbound surface.
 
@@ -52,7 +54,7 @@ That's it. There is no other outbound surface.
 - ❌ No telemetry payload (usage counters, command-frequency, error pings)
 - ❌ No filesystem path or file-content
 - ❌ No referrer / locale / timezone (beyond what the OS HTTPS stack
-  itself signals — User-Agent is set to `scr1b3/<version>` only)
+  itself signals — User-Agent is set to `scr1b3-updater/<version>` only)
 - ❌ No crash reports
 
 ## Local state

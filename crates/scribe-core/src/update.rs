@@ -9,12 +9,26 @@
 //! the network.
 
 pub mod apply;
+pub mod net;
 pub mod verify;
 
 pub use crate::config::UpdateMode;
 
+// The network half of the self-updater. The UI worker (in `scribe-app`) drives
+// the updater through these re-exports: discover a newer release, then
+// download + verify + extract its binary. `net::ReleaseInfo` is the rich,
+// download-ready descriptor (versioned + asset/sig/sha/html urls) used by that
+// flow; it is distinct from [`LatestRelease`] below, which is the minimal
+// descriptor the pure offline [`evaluate`] decision path operates on.
+pub use net::{
+    check_for_update, download_verify_extract, fetch_latest_release, select_update, ReleaseInfo,
+};
+
+/// Minimal latest-release descriptor for the pure, offline [`evaluate`]
+/// decision path (version-string + asset URL only). The richer, download-ready
+/// [`net::ReleaseInfo`] is what the network half resolves and the UI acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReleaseInfo {
+pub struct LatestRelease {
     /// Tag like `v0.2.0` or `0.2.0`.
     pub version: String,
     /// Public asset URL for this platform.
@@ -28,7 +42,7 @@ pub enum UpdateStatus {
     /// Up to date.
     UpToDate,
     /// A newer release is available.
-    Available(ReleaseInfo),
+    Available(LatestRelease),
     /// Network unavailable / check failed — never an error, just skipped.
     Offline,
 }
@@ -128,7 +142,7 @@ pub fn is_check_due(last_check_unix: Option<u64>, interval_hours: u64, now_unix:
 /// This is the testable core — no network, no I/O.
 pub fn evaluate<F>(current: &str, mode: UpdateMode, fetch_latest: F) -> UpdateStatus
 where
-    F: FnOnce() -> Option<ReleaseInfo>,
+    F: FnOnce() -> Option<LatestRelease>,
 {
     if mode == UpdateMode::Off {
         return UpdateStatus::Disabled;
@@ -276,7 +290,7 @@ mod tests {
 
     #[test]
     fn detects_available() {
-        let rel = ReleaseInfo {
+        let rel = LatestRelease {
             version: "0.2.0".into(),
             asset_url: "https://x/y".into(),
         };
@@ -286,7 +300,7 @@ mod tests {
 
     #[test]
     fn up_to_date() {
-        let rel = ReleaseInfo {
+        let rel = LatestRelease {
             version: "0.1.0".into(),
             asset_url: "https://x/y".into(),
         };
