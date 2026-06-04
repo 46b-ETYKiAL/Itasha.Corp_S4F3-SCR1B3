@@ -155,30 +155,18 @@ pub fn show(
         .data_mut(|d| d.get_temp::<String>(q_id))
         .unwrap_or_default();
 
+    // Non-resizable => egui auto-sizes the window to its CONTENT each frame. The
+    // content width is hard-capped by the inner ScrollArea's `max_width` (the one
+    // constraint egui honours), so every page is the same width — and because the
+    // window is non-resizable there is no user resize for eframe `persistence` to
+    // save and later restore at a stale-wide size (the bug that defeated
+    // fixed_size/fixed_rect). `_v3` discards any wide rect persisted under the old
+    // ids. The close (✕) is exercised by `settings_close_button_actually_closes`.
     egui::Window::new("settings")
-        // Stable, section-independent Id so the window's persisted size+position
-        // (eframe `persistence` feature) survive restart and never shift with the
-        // selected category. The visible title never changes, but pin the Id
-        // explicitly so persistence can't break if it ever does.
-        // `_v2` discards any size persisted by the OLD resizable settings window
-        // (eframe `persistence` saves window size by id); a stale wide size would
-        // otherwise override `fixed_size` and reintroduce the per-page width drift.
-        .id(egui::Id::new("scr1b3_settings_v2"))
+        .id(egui::Id::new("scr1b3_settings_v3"))
         .open(&mut keep_open)
         .collapsible(false)
-        // FIXED size — the ONLY egui mechanism that guarantees the window is the
-        // EXACT same size on every settings page. We tried `resizable + min==max
-        // width` and per-axis `resizable([false,true])`, but egui auto-sizes a
-        // resizable window's width to content's desired width (a sizing pass where
-        // set_width / set_max_width / max_width are all bypassed), so a width-
-        // greedy section — the Toolbar page — blew the window out to ~1069px and
-        // it never shrank back. `fixed_size` removes width auto-sizing entirely.
-        // The tall-content concern is handled by the internal vertical ScrollArea
-        // (auto_shrink([false,false]) below), so a fixed height just scrolls. The
-        // close (✕) + titlebar drag are exercised by `settings_close_button_
-        // actually_closes` so a `fixed_size` regression of either can't ship.
         .resizable(false)
-        .fixed_size([860.0, 640.0])
         // #77 — force the Settings window OPAQUE. The app-window transparency /
         // glass setting drives a translucent `window_fill`; without this the
         // Settings panel itself went see-through, which is not what the
@@ -246,29 +234,21 @@ pub fn show(
 
                     let q = query.trim().to_lowercase();
                     let sel = category.as_str();
+                    // `max_width` is the load-bearing pin for "the Settings window
+                    // must not change width between pages". It is a REAL viewport
+                    // cap (unlike set_width / set_max_width / fixed_size / fixed_rect,
+                    // which egui all overrode here — content auto-size measures a
+                    // width-greedy page at its full desired width, and eframe
+                    // persistence restores a stale window rect): the ScrollArea
+                    // viewport can never exceed `max_width`, so `available_width`
+                    // inside is a hard 640 on EVERY page, content wraps within it,
+                    // and the window settles to the same width regardless of page.
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
+                        .max_width(600.0)
                         .show(ui, |ui| {
-                            // HARD-bound the section content to a FIXED width. This
-                            // is the load-bearing pin for "the Settings window must
-                            // not change width between pages": an auto-sized egui
-                            // Window measures content's desired width in a sizing
-                            // pass where available_width is unbounded, so width-
-                            // greedy widgets (Sliders fill available width; a
-                            // `horizontal_wrapped` palette measures its UN-wrapped
-                            // one-row width) report a huge desired width and blow
-                            // the window out — and `set_width`/`max_width` are all
-                            // bypassed in that pass. `allocate_ui_with_layout` with
-                            // a fixed cross-axis width makes available_width a hard
-                            // 600 even during sizing, so every page is identical.
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(600.0, 0.0),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    ui.set_width(600.0);
-                                    changed |= render_sections(ui, config, updater, sel, &q);
-                                },
-                            );
+                            ui.set_width(600.0);
+                            changed |= render_sections(ui, config, updater, sel, &q);
                         });
                 });
             });
@@ -1828,24 +1808,24 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
             .strong()
             .small(),
     );
-    // Wrap the palette chips at a FIXED width (not available_width). `ui.
-    // horizontal_wrapped` wraps at available_width, but during an auto-sized
-    // egui Window's sizing pass available_width is effectively unbounded, so the
-    // chips measure as ONE un-wrapped row (~all 12 actions side by side) and that
-    // becomes the window's desired width — which is exactly what blew the Toolbar
-    // page out to ~1069px. A fixed-width wrapping allocation makes them wrap at
-    // 560 even in the sizing pass, so the palette can never widen the window.
-    ui.allocate_ui_with_layout(
-        egui::vec2(560.0, 0.0),
-        egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
-        |ui| {
-            ui.set_max_width(560.0);
-            for (id, label) in crate::app::TOOLBAR_ACTIONS {
+    // Lay the palette chips out in a fixed 3-column GRID rather than a
+    // `horizontal_wrapped` row. Wrapping depends on `available_width`, which an
+    // auto-sized egui Window leaves UNBOUNDED during its sizing pass, so the
+    // chips measured as one un-wrapped row (~all 12 actions side by side) and
+    // THAT desired width blew the window out to ~1034px on the Toolbar page
+    // (set_width / max_width / ScrollArea::max_width / fixed_rect were all
+    // bypassed in that pass). A Grid sizes from its column count + content, never
+    // from available_width, so its width is bounded and the window stays the same
+    // size as every other settings page.
+    egui::Grid::new("scr1b3-toolbar-palette")
+        .num_columns(3)
+        .spacing([6.0, 6.0])
+        .show(ui, |ui| {
+            for (i, (id, label)) in crate::app::TOOLBAR_ACTIONS.iter().enumerate() {
                 let drag_id = egui::Id::new(("scr1b3-toolbar-palette-drag", *id));
                 ui.dnd_drag_source(drag_id, ToolbarDrag::AddAction((*id).to_string()), |ui| {
-                    // #90 — chips read as grabbable: a faint grip glyph + a filled
-                    // chip background, and a grab cursor on hover. They wrap into
-                    // 2-3 rows because the editor width is pinned (#80 above).
+                    // #90 — chips read as grabbable: a faint grip + a filled chip
+                    // background, and a grab cursor on hover.
                     let chip = egui::Frame::default()
                         .inner_margin(egui::Margin::symmetric(6, 3))
                         .fill(ui.visuals().widgets.inactive.bg_fill)
@@ -1865,9 +1845,11 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
                 .response
                 .on_hover_text("Drag onto the list above to add")
                 .on_hover_cursor(egui::CursorIcon::Grab);
+                if (i + 1) % 3 == 0 {
+                    ui.end_row();
+                }
             }
-        },
-    );
+        });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("add:").on_hover_text(
