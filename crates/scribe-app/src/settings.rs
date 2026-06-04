@@ -170,7 +170,7 @@ pub fn show(
         // cause of "only the left half drags", the dead close button, and the
         // un-resizable window.
         .resizable(true)
-        .default_size([760.0, 560.0])
+        .default_size([840.0, 560.0])
         .min_width(420.0)
         .min_height(320.0)
         // Cap the window so a wide section (e.g. the full-width search field or a
@@ -191,6 +191,14 @@ pub fn show(
             egui::Frame::window(&style).fill(egui::Color32::from_rgb(f.r(), f.g(), f.b()))
         })
         .show(ctx, |ui| {
+            // FORCE a definite content width so the window is exactly the SAME
+            // size on every page. `set_max_width` is only a soft cap that the
+            // full-width search field (desired_width = INFINITY) overrides — it
+            // drove the auto-sizing window out to the whole screen. `set_width`
+            // pins it: every page lays out at this width, so switching category
+            // (e.g. to Toolbar) never changes the window size. The user can still
+            // drag the window larger; the content stays this width.
+            ui.set_width(800.0);
             ui.horizontal_top(|ui| {
                 // ---- Left category nav ----
                 ui.vertical(|ui| {
@@ -502,12 +510,15 @@ fn render_sections(
                 &def.appearance.jp_glyph_labels,
             );
         });
-        // Theme export + live colour picker — full-width editors below the grid.
-        if row_visible(q, "export theme tom user customize edit") {
-            changed |= render_theme_export(ui, config);
-        }
-        if row_visible(q, "live color picker edit theme customize palette") {
-            changed |= render_live_color_picker(ui, config);
+        // Full in-app theme creator/editor: seeds from the active theme, live
+        // colour pickers grouped by UI/Syntax with a live preview, then Save
+        // writes an editable user theme TOML and switches to it. Supersedes the
+        // old export-button + hidden colour-list flow.
+        if row_visible(
+            q,
+            "theme create edit customize export palette colour color user editor",
+        ) {
+            changed |= crate::theme_editor::show(ui, config);
         }
         space(ui);
     }
@@ -1036,6 +1047,15 @@ fn render_sections(
             "Window translucency and the OS glass / blur effect.",
         );
         ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(
+                "The window surface (transparency + Mode glass/mica/vibrancy) is set when the \
+                 window is created — changes here take effect after you restart SCR1B3.",
+            )
+            .weak()
+            .small(),
+        );
+        ui.add_space(2.0);
         settings_grid(ui, "settings-window-glass", |ui| {
             // Master on/off switch — off by default (opaque is fast, no DWM ghost).
             changed |= grid_bool(
@@ -1096,7 +1116,9 @@ fn render_sections(
                 changed |= ui
                     .add_enabled(
                         translucent,
-                        egui::Slider::new(&mut config.window.opacity, 0.30..=1.0),
+                        // Floor at 0.05 (not 0.0) so the window can get very
+                        // see-through without becoming fully invisible + lost.
+                        egui::Slider::new(&mut config.window.opacity, 0.05..=1.0),
                     )
                     .changed();
                 changed |= reset_to_default(ui, &mut config.window.opacity, &def.window.opacity);
@@ -1543,10 +1565,13 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
 fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     use egui_phosphor::thin as ph;
     let mut changed = false;
-    // #80 — pin the editor to the available width so its wide children (the
-    // palette's wrapped row of chips) WRAP instead of forcing the resizable
-    // Settings window to balloon to fit them.
-    ui.set_max_width(ui.available_width());
+    // Cap the editor to a FIXED width bound (not the raw available width) so the
+    // palette's wrapped chip row + the item rows wrap WITHIN the settings window
+    // instead of ballooning it. `available_width()` alone created a feedback loop
+    // (wide window -> wide available_width -> chips don't wrap -> window stays
+    // wide); the .min() floor breaks it so the Toolbar page is the same width as
+    // every other settings page.
+    ui.set_max_width(ui.available_width().min(680.0));
     ui.heading("Quick-access toolbar");
     ui.label(
         egui::RichText::new(
@@ -1814,194 +1839,6 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         }
     });
     changed
-}
-
-/// Phase 17 T17.6 — export the current built-in theme to a user TOML file
-/// the user can edit by hand. The watcher reloads on change so saved edits
-/// land live. Foundation for the in-app live-color-picker editor.
-fn render_theme_export(ui: &mut egui::Ui, config: &mut Config) -> bool {
-    use scribe_core::theme::Theme;
-    let mut changed = false;
-    let name_id = egui::Id::new("scr1b3-theme-export-name");
-    let mut new_name: String = ui
-        .ctx()
-        .data(|d| d.get_temp::<String>(name_id))
-        .unwrap_or_else(|| "my-theme".to_string());
-    let status_id = egui::Id::new("scr1b3-theme-export-status");
-    let mut status: String = ui
-        .ctx()
-        .data(|d| d.get_temp::<String>(status_id))
-        .unwrap_or_default();
-    ui.horizontal(|ui| {
-        ui.label("Export to user theme");
-        ui.text_edit_singleline(&mut new_name).on_hover_text(
-            "Writes the current theme's colours to \
-                 <config_dir>/themes/<name>.toml. Edit the TOML by hand to \
-                 customise; live-reload will apply changes immediately.",
-        );
-        if ui
-            .button("Export")
-            .on_hover_text("Write the current theme's colours to an editable user TOML file.")
-            .clicked()
-        {
-            let safe = new_name.trim().to_lowercase().replace([' ', '_'], "-");
-            if safe.is_empty() {
-                status = "Export: name is empty".to_string();
-            } else if let Some(dir) = Config::config_dir() {
-                let theme_dir = dir.join("themes");
-                let path = theme_dir.join(format!("{safe}.toml"));
-                let theme =
-                    Theme::builtin(&config.appearance.theme).unwrap_or_else(Theme::itasha_corp);
-                status = match std::fs::create_dir_all(&theme_dir)
-                    .and_then(|()| std::fs::write(&path, theme.to_toml_string()))
-                {
-                    Ok(()) => {
-                        config.appearance.theme = safe.clone();
-                        changed = true;
-                        format!("Saved to {} — now editable", path.display())
-                    }
-                    Err(e) => format!("Export failed: {e}"),
-                };
-            } else {
-                status = "Export: no config dir on this OS".to_string();
-            }
-        }
-    });
-    if !status.is_empty() {
-        ui.label(egui::RichText::new(&status).weak().small());
-    }
-    ui.ctx().data_mut(|d| {
-        d.insert_temp(name_id, new_name);
-        d.insert_temp(status_id, status);
-    });
-    changed
-}
-
-/// Phase 17 T17.6b — in-app live color editor. Renders one egui color
-/// picker per `[palette]` / `[ui]` / `[syntax]` key of the active user
-/// theme. Every change writes the modified theme TOML back to disk; the
-/// existing watcher reloads it and the editor reflects the change live.
-///
-/// Only renders when a user theme TOML exists at
-/// `<config_dir>/themes/<active>.toml`. For built-in themes the user
-/// is directed to the **Export to user theme** action above — built-ins
-/// stay immutable so a switch-back is always possible.
-///
-/// Returns true when the user mutated a color (so the caller can request
-/// a config save for any other changed fields in the same frame).
-fn render_live_color_picker(ui: &mut egui::Ui, config: &Config) -> bool {
-    use scribe_core::theme::{Rgba, Theme};
-    let Some(dir) = Config::config_dir() else {
-        return false;
-    };
-    let theme_dir = dir.join("themes");
-    let theme_name = &config.appearance.theme;
-    let path = theme_dir.join(format!("{theme_name}.toml"));
-    if !path.exists() {
-        // Quiet hint — the export-to-user-theme button right above is the
-        // forward path; no need to show the picker UI when there's nothing
-        // editable.
-        ui.label(
-            egui::RichText::new("Live color editor: available after Export to user theme above.")
-                .weak()
-                .small(),
-        );
-        return false;
-    }
-    // Read + parse the user TOML. On a parse error, fall back to the
-    // built-in by the same name (the watcher already surfaces the parse
-    // error elsewhere; we don't double-report here).
-    let toml_src = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let mut theme = match Theme::from_toml_str(&toml_src) {
-        Ok(t) => t,
-        Err(_) => Theme::builtin(theme_name).unwrap_or_else(Theme::itasha_corp),
-    };
-    let mut any_changed = false;
-    egui::CollapsingHeader::new("Edit colors live")
-        .id_salt("scr1b3-live-color-picker")
-        .default_open(false)
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(
-                    "Changes save to the user theme TOML; the watcher \
-                     applies them live. Switch theme to revert.",
-                )
-                .weak()
-                .small(),
-            );
-            // Render every key in palette / ui / syntax. The sections
-            // collapse independently so users editing only `[ui]` aren't
-            // overwhelmed by `[syntax]` rows.
-            for (section_name, owner_kind) in [
-                ("palette", PickerSection::Palette),
-                ("ui", PickerSection::Ui),
-                ("syntax", PickerSection::Syntax),
-            ] {
-                let entry_count = match owner_kind {
-                    PickerSection::Palette => theme.palette.len(),
-                    PickerSection::Ui => theme.ui.len(),
-                    PickerSection::Syntax => theme.syntax.len(),
-                };
-                egui::CollapsingHeader::new(format!("{section_name}  [{entry_count}]"))
-                    .id_salt(format!("scr1b3-live-color-picker-{section_name}"))
-                    .default_open(matches!(owner_kind, PickerSection::Palette))
-                    .show(ui, |ui| {
-                        let map = match owner_kind {
-                            PickerSection::Palette => &mut theme.palette,
-                            PickerSection::Ui => &mut theme.ui,
-                            PickerSection::Syntax => &mut theme.syntax,
-                        };
-                        // Stable iteration order — BTreeMap walks sorted.
-                        let keys: Vec<String> = map.keys().cloned().collect();
-                        for k in keys {
-                            let r = match map.get_mut(&k) {
-                                Some(r) => r,
-                                None => continue,
-                            };
-                            let mut srgba =
-                                egui::Color32::from_rgba_unmultiplied(r.r, r.g, r.b, r.a);
-                            let row_changed = ui
-                                .horizontal(|ui| {
-                                    let resp = egui::color_picker::color_edit_button_srgba(
-                                        ui,
-                                        &mut srgba,
-                                        egui::color_picker::Alpha::OnlyBlend,
-                                    );
-                                    ui.label(&k);
-                                    resp.changed()
-                                })
-                                .inner;
-                            if row_changed {
-                                let [rr, gg, bb, aa] = srgba.to_array();
-                                *r = Rgba {
-                                    r: rr,
-                                    g: gg,
-                                    b: bb,
-                                    a: aa,
-                                };
-                                any_changed = true;
-                            }
-                        }
-                    });
-            }
-        });
-    if any_changed {
-        // Persist immediately; the watcher will pick it up on its next
-        // scan tick and apply the change live. Write errors stay quiet
-        // here — surface a status string if this ever needs operator UX.
-        let _ = std::fs::write(&path, theme.to_toml_string());
-    }
-    any_changed
-}
-
-#[derive(Clone, Copy)]
-enum PickerSection {
-    Palette,
-    Ui,
-    Syntax,
 }
 
 #[cfg(test)]
