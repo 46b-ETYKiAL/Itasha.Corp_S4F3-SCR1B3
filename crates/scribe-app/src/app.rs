@@ -8003,6 +8003,35 @@ mod e2e {
         );
     }
 
+    /// Regression guard (e2e, no GPU): the Settings window width MUST NOT change
+    /// between pages. Reproduces the user's "the Toolbar page gets a lot wider"
+    /// report (was ~829px on Appearance vs ~1069px on Toolbar). The close (✕) is
+    /// pinned to the window's top-right, so a constant window width means a
+    /// constant ✕ x-position; we assert the ✕ right-edge is identical on the
+    /// Appearance and Toolbar pages. Fixed by the inner ScrollArea::max_width cap.
+    #[test]
+    fn settings_window_width_constant_across_pages() {
+        let mut cfg = Config::default();
+        cfg.appearance.frameless = false; // the settings ✕ is the only "Close window"
+        cfg.editor.first_run_completed = true;
+        let app = ScribeApp::new_test(cfg);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(1280.0, 940.0))
+            .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+        h.state_mut().settings_open = true;
+        h.run();
+        let close_appearance = h.get_by_label("Close window").rect().right();
+        h.get_by_label("Toolbar").click();
+        h.run();
+        h.run();
+        let close_toolbar = h.get_by_label("Close window").rect().right();
+        assert!(
+            (close_appearance - close_toolbar).abs() < 1.0,
+            "settings window width changed between pages: close (✕) right edge \
+             {close_appearance} on Appearance vs {close_toolbar} on Toolbar"
+        );
+    }
+
     /// Same, but in the DEFAULT frameless mode (custom titlebar) — the config
     /// the user actually runs. Two "Close window" buttons exist (app titlebar +
     /// settings window); we click the settings one (lower on screen) and assert

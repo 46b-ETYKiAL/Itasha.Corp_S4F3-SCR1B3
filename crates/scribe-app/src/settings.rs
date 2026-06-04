@@ -1808,24 +1808,24 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
             .strong()
             .small(),
     );
-    // Wrap the palette chips at a FIXED width (not available_width). `ui.
-    // horizontal_wrapped` wraps at available_width, but during an auto-sized
-    // egui Window's sizing pass available_width is effectively unbounded, so the
-    // chips measure as ONE un-wrapped row (~all 12 actions side by side) and that
-    // becomes the window's desired width — which is exactly what blew the Toolbar
-    // page out to ~1069px. A fixed-width wrapping allocation makes them wrap at
-    // 560 even in the sizing pass, so the palette can never widen the window.
-    ui.allocate_ui_with_layout(
-        egui::vec2(560.0, 0.0),
-        egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true),
-        |ui| {
-            ui.set_max_width(560.0);
-            for (id, label) in crate::app::TOOLBAR_ACTIONS {
+    // Lay the palette chips out in a fixed 3-column GRID rather than a
+    // `horizontal_wrapped` row. Wrapping depends on `available_width`, which an
+    // auto-sized egui Window leaves UNBOUNDED during its sizing pass, so the
+    // chips measured as one un-wrapped row (~all 12 actions side by side) and
+    // THAT desired width blew the window out to ~1034px on the Toolbar page
+    // (set_width / max_width / ScrollArea::max_width / fixed_rect were all
+    // bypassed in that pass). A Grid sizes from its column count + content, never
+    // from available_width, so its width is bounded and the window stays the same
+    // size as every other settings page.
+    egui::Grid::new("scr1b3-toolbar-palette")
+        .num_columns(3)
+        .spacing([6.0, 6.0])
+        .show(ui, |ui| {
+            for (i, (id, label)) in crate::app::TOOLBAR_ACTIONS.iter().enumerate() {
                 let drag_id = egui::Id::new(("scr1b3-toolbar-palette-drag", *id));
                 ui.dnd_drag_source(drag_id, ToolbarDrag::AddAction((*id).to_string()), |ui| {
-                    // #90 — chips read as grabbable: a faint grip glyph + a filled
-                    // chip background, and a grab cursor on hover. They wrap into
-                    // 2-3 rows because the editor width is pinned (#80 above).
+                    // #90 — chips read as grabbable: a faint grip + a filled chip
+                    // background, and a grab cursor on hover.
                     let chip = egui::Frame::default()
                         .inner_margin(egui::Margin::symmetric(6, 3))
                         .fill(ui.visuals().widgets.inactive.bg_fill)
@@ -1845,9 +1845,11 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
                 .response
                 .on_hover_text("Drag onto the list above to add")
                 .on_hover_cursor(egui::CursorIcon::Grab);
+                if (i + 1) % 3 == 0 {
+                    ui.end_row();
+                }
             }
-        },
-    );
+        });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("add:").on_hover_text(
