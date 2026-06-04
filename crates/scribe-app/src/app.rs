@@ -7977,6 +7977,53 @@ mod e2e {
         assert_eq!(app.tabs.len(), 1, "expected one scratch tab");
     }
 
+    /// Regression guard (e2e, no GPU): a NARROW pane lays its header out as a
+    /// vertical COLUMN — name on top, pin below, close below, all centered and
+    /// stacked (the user's Image #2) — NOT a horizontal row. We tile 4 panes in
+    /// a wide+short window so each is < 220px (the narrow threshold), and pin all
+    /// but one so exactly ONE pane shows a PUSH_PIN + close (✕) — making both
+    /// uniquely queryable. We then assert the ✕ sits BELOW the pin and in the
+    /// SAME column (x-aligned); a regression to the row layout would put them
+    /// side-by-side (≈equal y, different x) and fail.
+    #[test]
+    fn narrow_pane_header_stacks_vertically() {
+        let mut cfg = Config::default();
+        cfg.appearance.frameless = false;
+        cfg.editor.first_run_completed = true;
+        cfg.editor.grid_enabled = true;
+        let mut app = ScribeApp::new_test(cfg);
+        for _ in 0..3 {
+            app.tabs.push(EditorTab::scratch());
+        }
+        // Pin all but the LAST pane: pinned panes show PUSH_PIN_SLASH and hide
+        // their close, so the one unpinned pane is the sole source of a PUSH_PIN
+        // glyph and an X glyph — both unambiguously queryable.
+        app.tabs[0].pinned = true;
+        app.tabs[1].pinned = true;
+        app.tabs[2].pinned = true;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(820.0, 250.0)) // wide+short => 4 panes < 220px each
+            .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+        h.run();
+        h.run();
+        let pin = h.get_by_label(egui_phosphor::thin::PUSH_PIN).rect();
+        let close = h.get_by_label(egui_phosphor::thin::X).rect();
+        assert!(
+            close.center().y > pin.center().y + 2.0,
+            "narrow pane header must STACK: close (✕) must be BELOW the pin \
+             (pin.y={:.1}, close.y={:.1})",
+            pin.center().y,
+            close.center().y
+        );
+        assert!(
+            (close.center().x - pin.center().x).abs() < 24.0,
+            "narrow pane header must be a single COLUMN: close (✕) and pin must \
+             share an x (pin.x={:.1}, close.x={:.1}) — not sit side-by-side",
+            pin.center().x,
+            close.center().x
+        );
+    }
+
     /// REAL interaction test (egui_kittest): open Settings, then click its close
     /// (✕) the way a user does, and assert the window actually closes. This is
     /// the kind of test that would have caught "the ✕ doesn't close".
