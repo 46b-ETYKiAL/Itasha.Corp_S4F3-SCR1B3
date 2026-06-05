@@ -55,6 +55,21 @@ pub struct RawRelease {
     pub assets: Vec<RawAsset>,
 }
 
+/// A verifiable platform installer asset (Windows `*-x86_64-setup.exe`) + its
+/// signature/checksum sidecars. Present only when the release ships one for
+/// this platform. Used for the in-place-update path when the app lives in a
+/// protected, admin-owned location (e.g. `C:\Program Files`): the installer
+/// self-elevates, so running it updates in place where a direct exe swap can't.
+#[derive(Clone, Debug)]
+pub struct InstallerAsset {
+    /// The `setup.exe` browser_download_url.
+    pub url: String,
+    /// The `setup.exe.minisig` url.
+    pub sig_url: String,
+    /// The `setup.exe.sha256` url.
+    pub sha_url: String,
+}
+
 /// One resolved, newer-than-current release ready to download.
 #[derive(Clone, Debug)]
 pub struct ReleaseInfo {
@@ -69,6 +84,11 @@ pub struct ReleaseInfo {
     pub sha_url: String,
     /// The release page (for "view changelog" in a browser).
     pub html_url: String,
+    /// The self-elevating Windows installer for this release, when present —
+    /// the apply path for a Program-Files install. `None` on platforms/releases
+    /// without a `setup.exe`. Boxed so the (common) `None` case keeps
+    /// `ReleaseInfo` small — it rides inside several UI-state enum variants.
+    pub installer: Option<Box<InstallerAsset>>,
 }
 
 /// The result of a successful update check. A tri-state so the UI can ALWAYS
@@ -127,6 +147,34 @@ fn build_release_info(
         sig_url: find(&sig_name)?.to_string(),
         sha_url: find(&sha_name)?.to_string(),
         html_url: raw.html_url.clone(),
+        installer: find_installer(raw, target).map(Box::new),
+    })
+}
+
+/// Find the self-elevating Windows installer asset for this release, if any.
+/// The installer is named `scr1b3-<tag>-x86_64-setup.exe` (tag-keyed, NOT
+/// target-keyed), so we match by the `-x86_64-setup.exe` suffix and require
+/// both verifiable sidecars (`.minisig` + `.sha256`). Windows targets only.
+fn find_installer(raw: &RawRelease, target: &str) -> Option<InstallerAsset> {
+    if !target.contains("windows") {
+        return None;
+    }
+    let exe = raw
+        .assets
+        .iter()
+        .find(|a| a.name.ends_with("-x86_64-setup.exe"))?;
+    let sig_name = format!("{}.minisig", exe.name);
+    let sha_name = format!("{}.sha256", exe.name);
+    let url_of = |name: &str| {
+        raw.assets
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.browser_download_url.clone())
+    };
+    Some(InstallerAsset {
+        url: exe.browser_download_url.clone(),
+        sig_url: url_of(&sig_name)?,
+        sha_url: url_of(&sha_name)?,
     })
 }
 
@@ -380,6 +428,55 @@ pub fn download_verify_extract(
     }
 }
 
+/// Download the self-elevating installer (`setup.exe`), verify it (SHA-256 THEN
+/// minisign against the embedded key — IDENTICAL gate to the tar.gz path), and
+/// write it into `staging_dir`, returning the path to the verified `.exe`. The
+/// caller launches it to update in place (the installer requests UAC). ANY
+/// verify failure wipes `staging_dir` and returns `Err` — an unverified
+/// installer is NEVER written for launch.
+pub fn download_verify_installer(
+    installer: &InstallerAsset,
+    staging_dir: &Path,
+    progress: impl FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    match download_verify_installer_inner(installer, staging_dir, progress) {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            let _ = fs::remove_dir_all(staging_dir);
+            Err(e)
+        }
+    }
+}
+
+fn download_verify_installer_inner(
+    installer: &InstallerAsset,
+    staging_dir: &Path,
+    progress: impl FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(staging_dir).map_err(|e| format!("failed to create staging dir: {e}"))?;
+
+    let exe_bytes = download_asset(&installer.url, progress)?;
+    let sig_bytes = download_small(&installer.sig_url)?;
+    let sha_text = download_small(&installer.sha_url)?;
+
+    let sha_str = String::from_utf8(sha_text)
+        .map_err(|e| format!("sha256 sidecar is not valid UTF-8: {e}"))?;
+    let expected_sha = sha_str
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "sha256 sidecar was empty".to_string())?;
+    let sig_str =
+        String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
+
+    // SHA-256 THEN minisign against the embedded public key. Fails closed.
+    verify_artifact(&exe_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEY)?;
+
+    // Only reached when verification passed — write the verified installer out.
+    let out = staging_dir.join("scr1b3-setup.exe");
+    fs::write(&out, &exe_bytes).map_err(|e| format!("failed to write installer: {e}"))?;
+    Ok(out)
+}
+
 fn download_verify_extract_inner(
     info: &ReleaseInfo,
     staging_dir: &Path,
@@ -552,6 +649,62 @@ mod tests {
             UpdateOutcome::UpToDate { latest } => assert_eq!(latest, current),
             other => panic!("expected UpToDate, got {other:?}"),
         }
+    }
+
+    /// Add the self-elevating Windows installer triple to a fixture release.
+    fn with_installer(mut raw: RawRelease) -> RawRelease {
+        let exe = format!("scr1b3-{}-x86_64-setup.exe", raw.tag_name);
+        raw.assets.push(asset(&exe, &format!("https://dl/{exe}")));
+        raw.assets.push(asset(
+            &format!("{exe}.minisig"),
+            &format!("https://dl/{exe}.minisig"),
+        ));
+        raw.assets.push(asset(
+            &format!("{exe}.sha256"),
+            &format!("https://dl/{exe}.sha256"),
+        ));
+        raw
+    }
+
+    #[test]
+    fn release_info_captures_windows_installer() {
+        let target = "x86_64-pc-windows-msvc";
+        let raw = with_installer(release_with_triple("v0.4.3", target));
+        let current = semver::Version::parse("0.4.0").unwrap();
+        let info = select_update(&raw, &current, target).expect("update");
+        let inst = info.installer.expect("installer present for windows");
+        assert_eq!(inst.url, "https://dl/scr1b3-v0.4.3-x86_64-setup.exe");
+        assert_eq!(
+            inst.sig_url,
+            "https://dl/scr1b3-v0.4.3-x86_64-setup.exe.minisig"
+        );
+        assert_eq!(
+            inst.sha_url,
+            "https://dl/scr1b3-v0.4.3-x86_64-setup.exe.sha256"
+        );
+    }
+
+    #[test]
+    fn release_info_no_installer_for_non_windows() {
+        let target = "x86_64-unknown-linux-gnu";
+        // Even if a setup.exe is in the release, a linux build never offers it.
+        let raw = with_installer(release_with_triple("v0.4.3", target));
+        let current = semver::Version::parse("0.4.0").unwrap();
+        let info = select_update(&raw, &current, target).expect("update");
+        assert!(info.installer.is_none());
+    }
+
+    #[test]
+    fn release_info_no_installer_when_sidecar_missing() {
+        let target = "x86_64-pc-windows-msvc";
+        let mut raw = with_installer(release_with_triple("v0.4.3", target));
+        // Drop the installer's .sha256 — without a full verifiable triple the
+        // installer must NOT be offered (fail closed).
+        raw.assets
+            .retain(|a| !a.name.ends_with("-x86_64-setup.exe.sha256"));
+        let current = semver::Version::parse("0.4.0").unwrap();
+        let info = select_update(&raw, &current, target).expect("update");
+        assert!(info.installer.is_none());
     }
 
     #[test]

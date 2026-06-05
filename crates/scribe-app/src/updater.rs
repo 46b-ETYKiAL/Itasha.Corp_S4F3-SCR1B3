@@ -100,8 +100,13 @@ pub enum UpdateState {
     },
     /// The asset is downloading (`received`/`total` bytes).
     Downloading { received: u64, total: u64 },
-    /// A verified new binary has been staged; restart to finish.
+    /// A verified new binary has been staged; restart to finish (in-place swap;
+    /// the writable-install path).
     ReadyToApply { staged: PathBuf, version: String },
+    /// The install dir is admin-owned (Program Files) so an in-place swap can't
+    /// write it — a verified self-elevating installer has been staged instead;
+    /// running it updates in place (prompts for admin).
+    ReadyToRunInstaller { installer: PathBuf, version: String },
     /// The verified binary was swapped in; restart to run it.
     Applied { version: String },
     /// The last operation failed; `String` is a human-readable reason.
@@ -113,6 +118,7 @@ enum UpdateMsg {
     CheckResult(Result<update::UpdateOutcome, String>),
     Progress { received: u64, total: u64 },
     Downloaded(Result<(PathBuf, String), String>),
+    InstallerReady(Result<(PathBuf, String), String>),
 }
 
 /// UI-thread updater model: a polled [`UpdateState`] plus the channel to the
@@ -180,10 +186,53 @@ impl Updater {
         let (tx, rx) = std::sync::mpsc::channel();
         self.rx = Some(rx);
         let ctx = ctx.clone();
+
+        // Pick the apply strategy by whether the install dir is writable:
+        //  • writable (portable / per-user) → download the tar.gz, swap in place.
+        //  • admin-owned (Program Files) WITH a self-elevating installer →
+        //    download the verified setup.exe and run it (prompts for admin).
+        //  • admin-owned WITHOUT an installer → an actionable failure.
+        let use_installer = !running_exe_dir_writable();
+        let installer = info.installer.clone();
+
         std::thread::spawn(move || {
             let staging = std::env::temp_dir().join("scr1b3-update");
             let _ = std::fs::remove_dir_all(&staging);
             let version = info.version.to_string();
+
+            if use_installer {
+                match installer {
+                    Some(inst) => {
+                        let ptx = tx.clone();
+                        let pctx = ctx.clone();
+                        let result = std::fs::create_dir_all(&staging)
+                            .map_err(|e| format!("cannot create staging dir: {e}"))
+                            .and_then(|()| {
+                                update::download_verify_installer(
+                                    &inst,
+                                    &staging,
+                                    move |received, total| {
+                                        let _ = ptx.send(UpdateMsg::Progress { received, total });
+                                        pctx.request_repaint();
+                                    },
+                                )
+                            })
+                            .map(|path| (path, version));
+                        let _ = tx.send(UpdateMsg::InstallerReady(result));
+                    }
+                    None => {
+                        let _ = tx.send(UpdateMsg::InstallerReady(Err(format!(
+                            "v{version} can't be installed in place — SCR1B3 is in a \
+                             protected location (e.g. Program Files) and this release \
+                             has no installer for your platform. Download it from the \
+                             releases page and run it as administrator."
+                        ))));
+                    }
+                }
+                ctx.request_repaint();
+                return;
+            }
+
             let result = match std::fs::create_dir_all(&staging) {
                 Ok(()) => {
                     let ptx = tx.clone();
@@ -201,6 +250,24 @@ impl Updater {
         });
     }
 
+    /// Launch the staged, verified self-elevating installer and close the app so
+    /// it can replace the files in place (the installer requests UAC).
+    pub fn run_installer(&mut self, ctx: &egui::Context) {
+        let UpdateState::ReadyToRunInstaller { installer, version } = &self.state else {
+            return;
+        };
+        let (installer, version) = (installer.clone(), version.clone());
+        match std::process::Command::new(&installer).spawn() {
+            Ok(_) => {
+                self.state = UpdateState::Applied { version };
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => {
+                self.state = UpdateState::Failed(format!("couldn't launch the installer: {e}"));
+            }
+        }
+    }
+
     /// Swap the running executable for the staged, verified binary and best-
     /// effort relaunch. On success the caller should close the window.
     pub fn apply_and_restart(&mut self, ctx: &egui::Context) {
@@ -208,18 +275,9 @@ impl Updater {
             return;
         };
         let (staged, version) = (staged.clone(), version.clone());
-        // An in-place self-replace can't write a Program-Files install without
-        // admin. Detect that up front and tell the user to run the (self-
-        // elevating) installer, instead of failing with a cryptic OS error.
-        if !running_exe_dir_writable() {
-            self.state = UpdateState::Failed(format!(
-                "v{version} is downloaded + verified, but SCR1B3 is installed in a \
-                 protected location (e.g. Program Files) that needs administrator \
-                 rights to update in place. Download and run the latest installer \
-                 from the releases page — it updates in place and prompts for admin."
-            ));
-            return;
-        }
+        // ReadyToApply is only ever reached on a WRITABLE install (start_download
+        // routes an admin-owned install to the installer path instead), so an
+        // in-place swap is the right action here.
         match update::apply::replace_running_executable(&staged) {
             Ok(()) => {
                 // current_exe() now resolves to the freshly-swapped binary.
@@ -283,6 +341,12 @@ impl Updater {
                     self.state = UpdateState::ReadyToApply { staged, version };
                 }
                 Ok(UpdateMsg::Downloaded(Err(e))) => {
+                    self.state = UpdateState::Failed(e);
+                }
+                Ok(UpdateMsg::InstallerReady(Ok((installer, version)))) => {
+                    self.state = UpdateState::ReadyToRunInstaller { installer, version };
+                }
+                Ok(UpdateMsg::InstallerReady(Err(e))) => {
                     self.state = UpdateState::Failed(e);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,

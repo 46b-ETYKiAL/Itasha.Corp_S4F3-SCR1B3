@@ -1496,6 +1496,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
     enum Act {
         Download(scribe_core::update::ReleaseInfo),
         Apply,
+        RunInstaller,
         Recheck,
     }
     let mut act: Option<Act> = None;
@@ -1575,6 +1576,20 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
                 act = Some(Act::Apply);
             }
         }
+        UpdateState::ReadyToRunInstaller { version, .. } => {
+            ui.label(format!("v{version} downloaded + verified."));
+            if ui
+                .button("Install update (asks for admin)")
+                .on_hover_text(
+                    "SCR1B3 is installed in a protected location, so the verified \
+                     installer runs to update it in place. Windows will prompt for \
+                     administrator rights; SCR1B3 will close and relaunch.",
+                )
+                .clicked()
+            {
+                act = Some(Act::RunInstaller);
+            }
+        }
         UpdateState::Applied { version } => {
             ui.label(format!("Updated to v{version} — restarting…"));
         }
@@ -1589,6 +1604,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
     match act {
         Some(Act::Download(info)) => updater.start_download(ui.ctx(), info),
         Some(Act::Apply) => updater.apply_and_restart(ui.ctx()),
+        Some(Act::RunInstaller) => updater.run_installer(ui.ctx()),
         Some(Act::Recheck) => updater.start_check(ui.ctx(), crate::updater::LaunchKind::Manual),
         None => {}
     }
