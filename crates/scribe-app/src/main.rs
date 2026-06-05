@@ -104,6 +104,13 @@ fn main() -> ExitCode {
         // eframe `persistence` feature + the stable `with_app_id` above). eframe
         // also fires `App::save()` on exit/interval once persistence is on.
         persist_window: true,
+        // NOTE: egui-memory persistence (which carries the Settings WINDOW's
+        // position/size — an egui `Window`/`Area` keyed by its stable id) is
+        // implicit with eframe's `persistence` feature in this version (there is
+        // no `persist_egui_memory` field to set). The custom caption-✕ funnels
+        // through a GRACEFUL ViewportCommand::Close (the two-phase close), so
+        // eframe's save runs on exit and both the app-window geometry and the
+        // settings-window position survive a restart.
         ..Default::default()
     };
 

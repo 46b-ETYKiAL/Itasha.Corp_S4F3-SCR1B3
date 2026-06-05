@@ -1169,8 +1169,13 @@ fn render_sections(
                             changed = true;
                         }
                         changed |= ui
-                            .add(egui::TextEdit::singleline(&mut config.window.tint).desired_width(96.0))
-                            .on_hover_text("Hex colour (e.g. #1a1a2e), or click the swatch to pick.")
+                            .add(
+                                egui::TextEdit::singleline(&mut config.window.tint)
+                                    .desired_width(96.0),
+                            )
+                            .on_hover_text(
+                                "Hex colour (e.g. #1a1a2e), or click the swatch to pick.",
+                            )
                             .changed();
                     });
                 });
