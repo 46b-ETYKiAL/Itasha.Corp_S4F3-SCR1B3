@@ -55,6 +55,21 @@ pub struct RawRelease {
     pub assets: Vec<RawAsset>,
 }
 
+/// A verifiable platform installer asset (Windows `*-x86_64-setup.exe`) + its
+/// signature/checksum sidecars. Present only when the release ships one for
+/// this platform. Used for the in-place-update path when the app lives in a
+/// protected, admin-owned location (e.g. `C:\Program Files`): the installer
+/// self-elevates, so running it updates in place where a direct exe swap can't.
+#[derive(Clone, Debug)]
+pub struct InstallerAsset {
+    /// The `setup.exe` browser_download_url.
+    pub url: String,
+    /// The `setup.exe.minisig` url.
+    pub sig_url: String,
+    /// The `setup.exe.sha256` url.
+    pub sha_url: String,
+}
+
 /// One resolved, newer-than-current release ready to download.
 #[derive(Clone, Debug)]
 pub struct ReleaseInfo {
@@ -69,6 +84,34 @@ pub struct ReleaseInfo {
     pub sha_url: String,
     /// The release page (for "view changelog" in a browser).
     pub html_url: String,
+    /// The self-elevating Windows installer for this release, when present —
+    /// the apply path for a Program-Files install. `None` on platforms/releases
+    /// without a `setup.exe`. Boxed so the (common) `None` case keeps
+    /// `ReleaseInfo` small — it rides inside several UI-state enum variants.
+    pub installer: Option<Box<InstallerAsset>>,
+}
+
+/// The result of a successful update check. A tri-state so the UI can ALWAYS
+/// distinguish "you're current" from "a newer release exists but has no build
+/// for your platform" — the latter must never read as "up to date" (the
+/// classic self-updater false-negative). Network/parse/rate-limit failures are
+/// a separate `Err` from [`check_for_update`], never folded into this enum.
+#[derive(Clone, Debug)]
+pub enum UpdateOutcome {
+    /// A newer release WITH a downloadable asset matching this build's target.
+    Available(ReleaseInfo),
+    /// Already on (or ahead of) the newest published release. `latest` is the
+    /// highest semver seen — shown next to the current version so "up to date"
+    /// is never ambiguous.
+    UpToDate { latest: semver::Version },
+    /// A newer release exists but ships no asset matching this build's target
+    /// triple (e.g. a platform that release skipped). The user is pointed at
+    /// the release page to download manually rather than told "up to date".
+    NewerButNoAsset {
+        latest: semver::Version,
+        target: String,
+        html_url: String,
+    },
 }
 
 /// Parse a release `tag_name` into a [`semver::Version`], tolerating a single
@@ -78,6 +121,99 @@ fn parse_tag(tag: &str) -> Option<semver::Version> {
     let s = tag.trim();
     let s = s.strip_prefix('v').unwrap_or(s);
     semver::Version::parse(s).ok()
+}
+
+/// Build a [`ReleaseInfo`] from a raw release IF it carries the three assets
+/// (`scr1b3-<target>.tar.gz` + `.minisig` + `.sha256`) for this build's target.
+/// Pure; no version/prerelease gating (callers do that).
+fn build_release_info(
+    raw: &RawRelease,
+    version: semver::Version,
+    target: &str,
+) -> Option<ReleaseInfo> {
+    let asset_name = format!("scr1b3-{target}.tar.gz");
+    let sig_name = format!("{asset_name}.minisig");
+    let sha_name = format!("{asset_name}.sha256");
+    let find = |name: &str| -> Option<&str> {
+        raw.assets
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.browser_download_url.as_str())
+    };
+    Some(ReleaseInfo {
+        version,
+        tag: raw.tag_name.clone(),
+        asset_url: find(&asset_name)?.to_string(),
+        sig_url: find(&sig_name)?.to_string(),
+        sha_url: find(&sha_name)?.to_string(),
+        html_url: raw.html_url.clone(),
+        installer: find_installer(raw, target).map(Box::new),
+    })
+}
+
+/// Find the self-elevating Windows installer asset for this release, if any.
+/// The installer is named `scr1b3-<tag>-x86_64-setup.exe` (tag-keyed, NOT
+/// target-keyed), so we match by the `-x86_64-setup.exe` suffix and require
+/// both verifiable sidecars (`.minisig` + `.sha256`). Windows targets only.
+fn find_installer(raw: &RawRelease, target: &str) -> Option<InstallerAsset> {
+    if !target.contains("windows") {
+        return None;
+    }
+    let exe = raw
+        .assets
+        .iter()
+        .find(|a| a.name.ends_with("-x86_64-setup.exe"))?;
+    let sig_name = format!("{}.minisig", exe.name);
+    let sha_name = format!("{}.sha256", exe.name);
+    let url_of = |name: &str| {
+        raw.assets
+            .iter()
+            .find(|a| a.name == name)
+            .map(|a| a.browser_download_url.clone())
+    };
+    Some(InstallerAsset {
+        url: exe.browser_download_url.clone(),
+        sig_url: url_of(&sig_name)?,
+        sha_url: url_of(&sha_name)?,
+    })
+}
+
+/// PURE (no network) decision over the FULL release list: pick the highest
+/// **semver** among non-draft/non-prerelease releases (NOT GitHub's
+/// `/releases/latest`, which sorts by commit date + honors a mutable, cacheable
+/// "latest" flag and can therefore skip a newer tag), then classify against the
+/// running version. This is the discovery strategy mature updaters use
+/// (electron-updater / WinSparkle / self_update all pick highest-semver
+/// themselves rather than trust feed order).
+pub fn select_best(
+    releases: &[RawRelease],
+    current: &semver::Version,
+    target: &str,
+) -> UpdateOutcome {
+    let best = releases
+        .iter()
+        .filter(|r| !r.draft && !r.prerelease)
+        .filter_map(|r| parse_tag(&r.tag_name).map(|v| (v, r)))
+        .max_by(|a, b| a.0.cmp(&b.0));
+
+    let Some((latest, raw)) = best else {
+        // No parseable stable release at all — treat as "current" (nothing to
+        // offer), never an error.
+        return UpdateOutcome::UpToDate {
+            latest: current.clone(),
+        };
+    };
+    if latest <= *current {
+        return UpdateOutcome::UpToDate { latest };
+    }
+    match build_release_info(raw, latest.clone(), target) {
+        Some(info) => UpdateOutcome::Available(info),
+        None => UpdateOutcome::NewerButNoAsset {
+            latest,
+            target: target.to_string(),
+            html_url: raw.html_url.clone(),
+        },
+    }
 }
 
 /// Blocking GET of `/repos/{owner}/{repo}/releases/latest`. Any network/HTTP/
@@ -113,43 +249,56 @@ pub fn select_update(
     if latest <= *current {
         return None;
     }
-
-    let asset_name = format!("scr1b3-{target}.tar.gz");
-    let sig_name = format!("{asset_name}.minisig");
-    let sha_name = format!("{asset_name}.sha256");
-
-    let find = |name: &str| -> Option<&str> {
-        raw.assets
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.browser_download_url.as_str())
-    };
-
-    let asset_url = find(&asset_name)?;
-    let sig_url = find(&sig_name)?;
-    let sha_url = find(&sha_name)?;
-
-    Some(ReleaseInfo {
-        version: latest,
-        tag: raw.tag_name.clone(),
-        asset_url: asset_url.to_string(),
-        sig_url: sig_url.to_string(),
-        sha_url: sha_url.to_string(),
-        html_url: raw.html_url.clone(),
-    })
+    build_release_info(raw, latest, target)
 }
 
-/// Convenience: fetch + select in one blocking call (the worker thread calls
-/// this). `Ok(None)` means "up to date / no matching asset"; `Err` means the
-/// network fetch itself failed.
+/// Blocking GET of `/repos/{owner}/{repo}/releases` (the FULL list, one page).
+/// Sends `Cache-Control: no-cache` + a cache-busting query so a CDN-cached
+/// response can't hide a fresh release, and maps a 403/429 to an explicit
+/// rate-limit message (unauthenticated GitHub allows 60 req/hr/IP). Never
+/// panics.
+pub fn fetch_releases(owner: &str, repo: &str) -> Result<Vec<RawRelease>, String> {
+    // per_page=100 returns every release in one page for a project this size;
+    // the `t` cache-buster defeats any intermediary caching of the list.
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=100");
+    let releases = ureq::get(&url)
+        .header("User-Agent", USER_AGENT)
+        .header("Accept", GITHUB_ACCEPT)
+        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+        .header("Cache-Control", "no-cache")
+        .call()
+        .map_err(map_github_error)?
+        .body_mut()
+        .read_json::<Vec<RawRelease>>()
+        .map_err(|e| format!("failed to parse releases JSON: {e}"))?;
+    Ok(releases)
+}
+
+/// Friendly mapping for a GitHub API transport/status error. A 403/429 on the
+/// unauthenticated API is almost always the 60 req/hr/IP rate limit — surface
+/// that distinctly so the UI shows "check failed (rate limited)", never the
+/// false-negative "up to date".
+fn map_github_error(e: ureq::Error) -> String {
+    let s = e.to_string();
+    if s.contains("403") || s.contains("429") || s.to_lowercase().contains("rate limit") {
+        format!("GitHub rate limit reached (unauthenticated: 60 checks/hour) — try again in a few minutes. [{s}]")
+    } else {
+        format!("update check failed: {s}")
+    }
+}
+
+/// Convenience: fetch the full release list + classify in one blocking call
+/// (the worker thread calls this). `Ok(UpdateOutcome::…)` always distinguishes
+/// up-to-date / available / newer-but-no-asset; `Err` means the network fetch
+/// itself failed (and is shown as a check failure, never as "up to date").
 pub fn check_for_update(
     owner: &str,
     repo: &str,
     current: &semver::Version,
     target: &str,
-) -> Result<Option<ReleaseInfo>, String> {
-    let raw = fetch_latest_release(owner, repo)?;
-    Ok(select_update(&raw, current, target))
+) -> Result<UpdateOutcome, String> {
+    let releases = fetch_releases(owner, repo)?;
+    Ok(select_best(&releases, current, target))
 }
 
 /// Blocking GET of a small file (sig / sha), returning its raw bytes.
@@ -279,6 +428,55 @@ pub fn download_verify_extract(
     }
 }
 
+/// Download the self-elevating installer (`setup.exe`), verify it (SHA-256 THEN
+/// minisign against the embedded key — IDENTICAL gate to the tar.gz path), and
+/// write it into `staging_dir`, returning the path to the verified `.exe`. The
+/// caller launches it to update in place (the installer requests UAC). ANY
+/// verify failure wipes `staging_dir` and returns `Err` — an unverified
+/// installer is NEVER written for launch.
+pub fn download_verify_installer(
+    installer: &InstallerAsset,
+    staging_dir: &Path,
+    progress: impl FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    match download_verify_installer_inner(installer, staging_dir, progress) {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            let _ = fs::remove_dir_all(staging_dir);
+            Err(e)
+        }
+    }
+}
+
+fn download_verify_installer_inner(
+    installer: &InstallerAsset,
+    staging_dir: &Path,
+    progress: impl FnMut(u64, u64),
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(staging_dir).map_err(|e| format!("failed to create staging dir: {e}"))?;
+
+    let exe_bytes = download_asset(&installer.url, progress)?;
+    let sig_bytes = download_small(&installer.sig_url)?;
+    let sha_text = download_small(&installer.sha_url)?;
+
+    let sha_str = String::from_utf8(sha_text)
+        .map_err(|e| format!("sha256 sidecar is not valid UTF-8: {e}"))?;
+    let expected_sha = sha_str
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "sha256 sidecar was empty".to_string())?;
+    let sig_str =
+        String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
+
+    // SHA-256 THEN minisign against the embedded public key. Fails closed.
+    verify_artifact(&exe_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEY)?;
+
+    // Only reached when verification passed — write the verified installer out.
+    let out = staging_dir.join("scr1b3-setup.exe");
+    fs::write(&out, &exe_bytes).map_err(|e| format!("failed to write installer: {e}"))?;
+    Ok(out)
+}
+
 fn download_verify_extract_inner(
     info: &ReleaseInfo,
     staging_dir: &Path,
@@ -371,6 +569,142 @@ mod tests {
         let raw = release_with_triple("v0.3.2", target);
         let current = semver::Version::parse("0.3.2").unwrap();
         assert!(select_update(&raw, &current, target).is_none());
+    }
+
+    // --- select_best (the FULL-list, highest-semver discovery path) ---
+
+    #[test]
+    fn select_best_picks_highest_semver_not_list_order() {
+        // List order is deliberately NOT newest-first, and a 0.4.10 is present to
+        // catch lexical-vs-semver bugs ("0.4.2" > "0.4.10" lexically).
+        let target = "x86_64-pc-windows-msvc";
+        let releases = vec![
+            release_with_triple("v0.4.2", target),
+            release_with_triple("v0.4.10", target),
+            release_with_triple("v0.4.1", target),
+        ];
+        let current = semver::Version::parse("0.4.0").unwrap();
+        match select_best(&releases, &current, target) {
+            UpdateOutcome::Available(info) => {
+                assert_eq!(info.version, semver::Version::parse("0.4.10").unwrap());
+            }
+            other => panic!("expected Available(0.4.10), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_best_up_to_date_reports_latest_seen() {
+        let target = "x86_64-pc-windows-msvc";
+        let releases = vec![
+            release_with_triple("v0.4.0", target),
+            release_with_triple("v0.4.2", target),
+        ];
+        let current = semver::Version::parse("0.4.2").unwrap();
+        match select_best(&releases, &current, target) {
+            UpdateOutcome::UpToDate { latest } => {
+                assert_eq!(latest, semver::Version::parse("0.4.2").unwrap());
+            }
+            other => panic!("expected UpToDate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_best_newer_but_no_asset_for_platform() {
+        // Newest release ships ONLY a linux asset; a windows build sees a newer
+        // version with no matching asset — must NOT read as "up to date".
+        let newest = release_with_triple("v0.5.0", "x86_64-unknown-linux-gnu");
+        let releases = vec![newest];
+        let current = semver::Version::parse("0.4.0").unwrap();
+        match select_best(&releases, &current, "x86_64-pc-windows-msvc") {
+            UpdateOutcome::NewerButNoAsset { latest, target, .. } => {
+                assert_eq!(latest, semver::Version::parse("0.5.0").unwrap());
+                assert_eq!(target, "x86_64-pc-windows-msvc");
+            }
+            other => panic!("expected NewerButNoAsset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_best_ignores_prerelease_and_draft() {
+        let target = "x86_64-pc-windows-msvc";
+        let mut pre = release_with_triple("v0.9.0", target);
+        pre.prerelease = true;
+        let mut draft = release_with_triple("v0.8.0", target);
+        draft.draft = true;
+        let releases = vec![pre, draft, release_with_triple("v0.4.2", target)];
+        let current = semver::Version::parse("0.4.0").unwrap();
+        match select_best(&releases, &current, target) {
+            // 0.9.0 (prerelease) + 0.8.0 (draft) are skipped → 0.4.2 wins.
+            UpdateOutcome::Available(info) => {
+                assert_eq!(info.version, semver::Version::parse("0.4.2").unwrap());
+            }
+            other => panic!("expected Available(0.4.2), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_best_empty_list_is_up_to_date_not_error() {
+        let current = semver::Version::parse("0.4.0").unwrap();
+        match select_best(&[], &current, "x86_64-pc-windows-msvc") {
+            UpdateOutcome::UpToDate { latest } => assert_eq!(latest, current),
+            other => panic!("expected UpToDate, got {other:?}"),
+        }
+    }
+
+    /// Add the self-elevating Windows installer triple to a fixture release.
+    fn with_installer(mut raw: RawRelease) -> RawRelease {
+        let exe = format!("scr1b3-{}-x86_64-setup.exe", raw.tag_name);
+        raw.assets.push(asset(&exe, &format!("https://dl/{exe}")));
+        raw.assets.push(asset(
+            &format!("{exe}.minisig"),
+            &format!("https://dl/{exe}.minisig"),
+        ));
+        raw.assets.push(asset(
+            &format!("{exe}.sha256"),
+            &format!("https://dl/{exe}.sha256"),
+        ));
+        raw
+    }
+
+    #[test]
+    fn release_info_captures_windows_installer() {
+        let target = "x86_64-pc-windows-msvc";
+        let raw = with_installer(release_with_triple("v0.4.3", target));
+        let current = semver::Version::parse("0.4.0").unwrap();
+        let info = select_update(&raw, &current, target).expect("update");
+        let inst = info.installer.expect("installer present for windows");
+        assert_eq!(inst.url, "https://dl/scr1b3-v0.4.3-x86_64-setup.exe");
+        assert_eq!(
+            inst.sig_url,
+            "https://dl/scr1b3-v0.4.3-x86_64-setup.exe.minisig"
+        );
+        assert_eq!(
+            inst.sha_url,
+            "https://dl/scr1b3-v0.4.3-x86_64-setup.exe.sha256"
+        );
+    }
+
+    #[test]
+    fn release_info_no_installer_for_non_windows() {
+        let target = "x86_64-unknown-linux-gnu";
+        // Even if a setup.exe is in the release, a linux build never offers it.
+        let raw = with_installer(release_with_triple("v0.4.3", target));
+        let current = semver::Version::parse("0.4.0").unwrap();
+        let info = select_update(&raw, &current, target).expect("update");
+        assert!(info.installer.is_none());
+    }
+
+    #[test]
+    fn release_info_no_installer_when_sidecar_missing() {
+        let target = "x86_64-pc-windows-msvc";
+        let mut raw = with_installer(release_with_triple("v0.4.3", target));
+        // Drop the installer's .sha256 — without a full verifiable triple the
+        // installer must NOT be offered (fail closed).
+        raw.assets
+            .retain(|a| !a.name.ends_with("-x86_64-setup.exe.sha256"));
+        let current = semver::Version::parse("0.4.0").unwrap();
+        let info = select_update(&raw, &current, target).expect("update");
+        assert!(info.installer.is_none());
     }
 
     #[test]

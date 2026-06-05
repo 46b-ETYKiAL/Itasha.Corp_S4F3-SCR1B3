@@ -1496,6 +1496,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
     enum Act {
         Download(scribe_core::update::ReleaseInfo),
         Apply,
+        RunInstaller,
         Recheck,
     }
     let mut act: Option<Act> = None;
@@ -1505,14 +1506,39 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
             ui.spinner();
             ui.label("Checking…");
         }
-        UpdateState::UpToDate => {
+        UpdateState::UpToDate { latest } => {
+            // Show BOTH the running version AND the newest release found, so
+            // "up to date" is never ambiguous (the user can see the check
+            // actually reached GitHub and what the latest release is).
             ui.label(
                 egui::RichText::new(format!(
-                    "You're on the latest version (v{}).",
+                    "Up to date — you're on v{} (latest release: v{latest}).",
                     crate::updater::current_version()
                 ))
                 .weak(),
             );
+        }
+        UpdateState::NoAssetForPlatform {
+            latest,
+            target,
+            html_url,
+        } => {
+            // A newer release exists but has no build for this platform — NEVER
+            // silently report "up to date"; point the user at the release page.
+            let warn = ui.visuals().warn_fg_color;
+            ui.colored_label(
+                warn,
+                format!(
+                    "v{latest} is available, but it has no build for your platform ({target})."
+                ),
+            );
+            if ui
+                .link("Open the releases page")
+                .on_hover_text("Download the latest release manually from your browser.")
+                .clicked()
+            {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(html_url.clone()));
+            }
         }
         UpdateState::Available(info) => {
             ui.label(format!("v{} is available.", info.version));
@@ -1550,6 +1576,20 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
                 act = Some(Act::Apply);
             }
         }
+        UpdateState::ReadyToRunInstaller { version, .. } => {
+            ui.label(format!("v{version} downloaded + verified."));
+            if ui
+                .button("Install update (asks for admin)")
+                .on_hover_text(
+                    "SCR1B3 is installed in a protected location, so the verified \
+                     installer runs to update it in place. Windows will prompt for \
+                     administrator rights; SCR1B3 will close and relaunch.",
+                )
+                .clicked()
+            {
+                act = Some(Act::RunInstaller);
+            }
+        }
         UpdateState::Applied { version } => {
             ui.label(format!("Updated to v{version} — restarting…"));
         }
@@ -1564,6 +1604,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
     match act {
         Some(Act::Download(info)) => updater.start_download(ui.ctx(), info),
         Some(Act::Apply) => updater.apply_and_restart(ui.ctx()),
+        Some(Act::RunInstaller) => updater.run_installer(ui.ctx()),
         Some(Act::Recheck) => updater.start_check(ui.ctx(), crate::updater::LaunchKind::Manual),
         None => {}
     }

@@ -1790,6 +1790,7 @@ impl ScribeApp {
         enum Act {
             Download(scribe_core::update::ReleaseInfo),
             Apply,
+            RunInstaller,
             Skip(String),
             Close,
         }
@@ -1837,6 +1838,18 @@ impl ScribeApp {
                         }
                     });
                 }
+                UpdateState::ReadyToRunInstaller { version, .. } => {
+                    ui.label(format!("v{version} downloaded and verified."));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Install (asks for admin)").clicked() {
+                            act = Some(Act::RunInstaller);
+                        }
+                        if ui.button("Later").clicked() {
+                            act = Some(Act::Close);
+                        }
+                    });
+                }
                 UpdateState::Applied { version } => {
                     ui.label(format!("Updated to v{version} — restarting…"));
                 }
@@ -1848,8 +1861,13 @@ impl ScribeApp {
                         act = Some(Act::Close);
                     }
                 }
-                // Nothing to prompt about — close the modal.
-                UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate => {
+                // Nothing to prompt about in the on-launch modal — close it.
+                // (NoAssetForPlatform is surfaced only in the Settings pane,
+                // not the auto modal.)
+                UpdateState::Idle
+                | UpdateState::Checking
+                | UpdateState::UpToDate { .. }
+                | UpdateState::NoAssetForPlatform { .. } => {
                     act = Some(Act::Close);
                 }
             }
@@ -1857,6 +1875,7 @@ impl ScribeApp {
         match act {
             Some(Act::Download(info)) => self.updater.start_download(ctx, info),
             Some(Act::Apply) => self.updater.apply_and_restart(ctx),
+            Some(Act::RunInstaller) => self.updater.run_installer(ctx),
             Some(Act::Skip(v)) => {
                 self.updater.skipped_version = Some(v);
                 self.updater.show_prompt = false;

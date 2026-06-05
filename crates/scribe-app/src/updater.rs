@@ -35,6 +35,36 @@ pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// Can we write into `dir`? Probes by creating + deleting a temp file. Used to
+/// decide whether an in-place self-replace is even possible: an install under
+/// `C:\Program Files` (the default installer location) is owned by admin, so
+/// the swap would fail with a cryptic "Access is denied" — we detect that up
+/// front and give an actionable message (run the self-elevating installer)
+/// instead.
+fn dir_writable(dir: &std::path::Path) -> bool {
+    let probe = dir.join(".scr1b3-write-probe");
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Is the directory holding the running executable writable (so an in-place
+/// self-replace can succeed)? Unknown (`current_exe()` fails) → assume yes and
+/// let the swap attempt surface any real error.
+fn running_exe_dir_writable() -> bool {
+    match std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|p| p.to_path_buf()))
+    {
+        Some(dir) => dir_writable(&dir),
+        None => true,
+    }
+}
+
 /// Why a check was started — decides what a found update does on completion.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LaunchKind {
@@ -55,14 +85,28 @@ pub enum UpdateState {
     Idle,
     /// A version check is running.
     Checking,
-    /// The latest release is the running version (or older).
-    UpToDate,
+    /// The newest published release is the running version (or older). `latest`
+    /// is the highest semver seen, shown next to the current version so "up to
+    /// date" is never ambiguous.
+    UpToDate { latest: String },
     /// A newer release is available and ready to download.
     Available(ReleaseInfo),
+    /// A newer release exists but ships no asset for this build's platform —
+    /// the user is pointed at the release page rather than told "up to date".
+    NoAssetForPlatform {
+        latest: String,
+        target: String,
+        html_url: String,
+    },
     /// The asset is downloading (`received`/`total` bytes).
     Downloading { received: u64, total: u64 },
-    /// A verified new binary has been staged; restart to finish.
+    /// A verified new binary has been staged; restart to finish (in-place swap;
+    /// the writable-install path).
     ReadyToApply { staged: PathBuf, version: String },
+    /// The install dir is admin-owned (Program Files) so an in-place swap can't
+    /// write it — a verified self-elevating installer has been staged instead;
+    /// running it updates in place (prompts for admin).
+    ReadyToRunInstaller { installer: PathBuf, version: String },
     /// The verified binary was swapped in; restart to run it.
     Applied { version: String },
     /// The last operation failed; `String` is a human-readable reason.
@@ -71,9 +115,10 @@ pub enum UpdateState {
 
 /// Cross-thread messages from a worker back to the UI thread.
 enum UpdateMsg {
-    CheckResult(Result<Option<ReleaseInfo>, String>),
+    CheckResult(Result<update::UpdateOutcome, String>),
     Progress { received: u64, total: u64 },
     Downloaded(Result<(PathBuf, String), String>),
+    InstallerReady(Result<(PathBuf, String), String>),
 }
 
 /// UI-thread updater model: a polled [`UpdateState`] plus the channel to the
@@ -141,10 +186,53 @@ impl Updater {
         let (tx, rx) = std::sync::mpsc::channel();
         self.rx = Some(rx);
         let ctx = ctx.clone();
+
+        // Pick the apply strategy by whether the install dir is writable:
+        //  • writable (portable / per-user) → download the tar.gz, swap in place.
+        //  • admin-owned (Program Files) WITH a self-elevating installer →
+        //    download the verified setup.exe and run it (prompts for admin).
+        //  • admin-owned WITHOUT an installer → an actionable failure.
+        let use_installer = !running_exe_dir_writable();
+        let installer = info.installer.clone();
+
         std::thread::spawn(move || {
             let staging = std::env::temp_dir().join("scr1b3-update");
             let _ = std::fs::remove_dir_all(&staging);
             let version = info.version.to_string();
+
+            if use_installer {
+                match installer {
+                    Some(inst) => {
+                        let ptx = tx.clone();
+                        let pctx = ctx.clone();
+                        let result = std::fs::create_dir_all(&staging)
+                            .map_err(|e| format!("cannot create staging dir: {e}"))
+                            .and_then(|()| {
+                                update::download_verify_installer(
+                                    &inst,
+                                    &staging,
+                                    move |received, total| {
+                                        let _ = ptx.send(UpdateMsg::Progress { received, total });
+                                        pctx.request_repaint();
+                                    },
+                                )
+                            })
+                            .map(|path| (path, version));
+                        let _ = tx.send(UpdateMsg::InstallerReady(result));
+                    }
+                    None => {
+                        let _ = tx.send(UpdateMsg::InstallerReady(Err(format!(
+                            "v{version} can't be installed in place — SCR1B3 is in a \
+                             protected location (e.g. Program Files) and this release \
+                             has no installer for your platform. Download it from the \
+                             releases page and run it as administrator."
+                        ))));
+                    }
+                }
+                ctx.request_repaint();
+                return;
+            }
+
             let result = match std::fs::create_dir_all(&staging) {
                 Ok(()) => {
                     let ptx = tx.clone();
@@ -162,6 +250,24 @@ impl Updater {
         });
     }
 
+    /// Launch the staged, verified self-elevating installer and close the app so
+    /// it can replace the files in place (the installer requests UAC).
+    pub fn run_installer(&mut self, ctx: &egui::Context) {
+        let UpdateState::ReadyToRunInstaller { installer, version } = &self.state else {
+            return;
+        };
+        let (installer, version) = (installer.clone(), version.clone());
+        match std::process::Command::new(&installer).spawn() {
+            Ok(_) => {
+                self.state = UpdateState::Applied { version };
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(e) => {
+                self.state = UpdateState::Failed(format!("couldn't launch the installer: {e}"));
+            }
+        }
+    }
+
     /// Swap the running executable for the staged, verified binary and best-
     /// effort relaunch. On success the caller should close the window.
     pub fn apply_and_restart(&mut self, ctx: &egui::Context) {
@@ -169,6 +275,9 @@ impl Updater {
             return;
         };
         let (staged, version) = (staged.clone(), version.clone());
+        // ReadyToApply is only ever reached on a WRITABLE install (start_download
+        // routes an admin-owned install to the installer path instead), so an
+        // in-place swap is the right action here.
         match update::apply::replace_running_executable(&staged) {
             Ok(()) => {
                 // current_exe() now resolves to the freshly-swapped binary.
@@ -190,7 +299,7 @@ impl Updater {
         let mut disconnect = false;
         loop {
             match rx.try_recv() {
-                Ok(UpdateMsg::CheckResult(Ok(Some(info)))) => {
+                Ok(UpdateMsg::CheckResult(Ok(update::UpdateOutcome::Available(info)))) => {
                     let v = info.version.to_string();
                     let already_skipped = self.skipped_version.as_deref() == Some(v.as_str());
                     if !already_skipped {
@@ -203,9 +312,23 @@ impl Updater {
                     self.launch_kind = LaunchKind::Manual;
                     self.state = UpdateState::Available(info);
                 }
-                Ok(UpdateMsg::CheckResult(Ok(None))) => {
+                Ok(UpdateMsg::CheckResult(Ok(update::UpdateOutcome::UpToDate { latest }))) => {
                     self.launch_kind = LaunchKind::Manual;
-                    self.state = UpdateState::UpToDate;
+                    self.state = UpdateState::UpToDate {
+                        latest: latest.to_string(),
+                    };
+                }
+                Ok(UpdateMsg::CheckResult(Ok(update::UpdateOutcome::NewerButNoAsset {
+                    latest,
+                    target,
+                    html_url,
+                }))) => {
+                    self.launch_kind = LaunchKind::Manual;
+                    self.state = UpdateState::NoAssetForPlatform {
+                        latest: latest.to_string(),
+                        target,
+                        html_url,
+                    };
                 }
                 Ok(UpdateMsg::CheckResult(Err(e))) => {
                     self.launch_kind = LaunchKind::Manual;
@@ -218,6 +341,12 @@ impl Updater {
                     self.state = UpdateState::ReadyToApply { staged, version };
                 }
                 Ok(UpdateMsg::Downloaded(Err(e))) => {
+                    self.state = UpdateState::Failed(e);
+                }
+                Ok(UpdateMsg::InstallerReady(Ok((installer, version)))) => {
+                    self.state = UpdateState::ReadyToRunInstaller { installer, version };
+                }
+                Ok(UpdateMsg::InstallerReady(Err(e))) => {
                     self.state = UpdateState::Failed(e);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -242,6 +371,19 @@ mod tests {
         // build.rs bakes SCR1B3_TARGET; under `cargo test` it is present. Either
         // way the constant resolves (never panics) — that is the contract.
         let _ = BUILD_TARGET;
+    }
+
+    #[test]
+    fn dir_writable_true_for_tempdir_false_for_missing() {
+        let tmp = std::env::temp_dir();
+        assert!(dir_writable(&tmp), "the OS temp dir must be writable");
+        let missing = tmp
+            .join("scr1b3-definitely-not-a-real-dir-xyzzy")
+            .join("nested");
+        assert!(
+            !dir_writable(&missing),
+            "a non-existent nested dir must probe as not-writable"
+        );
     }
 
     #[test]
