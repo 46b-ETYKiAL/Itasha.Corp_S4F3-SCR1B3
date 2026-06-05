@@ -14,18 +14,34 @@ use eframe::egui;
 use scribe_core::config::{ToolbarConfig, UpdateMode, WindowMode};
 use scribe_core::Config;
 
-/// Left-nav categories, in display order.
+/// Left-nav categories, in display order. Look-and-feel groups first
+/// (Appearance, Fonts, Window, Toolbar, Motion), then editing behaviour
+/// (Editor, Spellcheck), then system (Plugins, Updates) — with Updates pinned
+/// last and Plugins just above it.
 const CATEGORIES: &[&str] = &[
     "Appearance",
     "Fonts",
-    "Editor",
-    "Motion",
     "Window",
-    "Spellcheck",
-    "Updates",
-    "Plugins",
     "Toolbar",
+    "Motion",
+    "Editor",
+    "Spellcheck",
+    "Plugins",
+    "Updates",
 ];
+
+/// Parse a `#RRGGBB` (or `RRGGBB`) hex string into a `Color32`. Returns `None`
+/// on malformed input so the caller can fall back to a default swatch.
+fn parse_hex_rgb(s: &str) -> Option<egui::Color32> {
+    let s = s.trim().trim_start_matches('#');
+    if s.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+    Some(egui::Color32::from_rgb(r, g, b))
+}
 
 /// egui temp-data key the Plugins section sets when "Manage plugins…" is
 /// clicked. The host reads + clears it after [`show`] returns and opens its
@@ -155,18 +171,26 @@ pub fn show(
         .data_mut(|d| d.get_temp::<String>(q_id))
         .unwrap_or_default();
 
-    // Non-resizable => egui auto-sizes the window to its CONTENT each frame. The
-    // content width is hard-capped by the inner ScrollArea's `max_width` (the one
-    // constraint egui honours), so every page is the same width — and because the
-    // window is non-resizable there is no user resize for eframe `persistence` to
-    // save and later restore at a stale-wide size (the bug that defeated
-    // fixed_size/fixed_rect). `_v3` discards any wide rect persisted under the old
-    // ids. The close (✕) is exercised by `settings_close_button_actually_closes`.
+    // A FIXED-default-size, RESIZABLE window. The old per-page width jump (an
+    // auto-sized window whose width was driven by a width-greedy page) is gone
+    // now that the Toolbar palette uses a bounded Grid — so the window no longer
+    // auto-sizes to content; it opens at `default_size` and the user can resize.
+    // Because the size is explicit (not content-driven), the content can fill the
+    // available width responsively without re-introducing the jump. egui
+    // constrains the window to the app window (screen_rect), so it always fits.
+    // A tall default + bigger inner editors mean the UI/Syntax colour lists are
+    // visible without forced scrolling. `_v4` discards the old fixed-size rect.
+    let screen = ctx.content_rect();
+    let def_w = 920.0_f32.min(screen.width() - 24.0);
+    let def_h = 760.0_f32.min(screen.height() - 24.0);
     egui::Window::new("settings")
-        .id(egui::Id::new("scr1b3_settings_v3"))
+        .id(egui::Id::new("scr1b3_settings_v4"))
         .open(&mut keep_open)
         .collapsible(false)
-        .resizable(false)
+        .resizable(true)
+        .default_size([def_w, def_h])
+        .min_size([560.0, 380.0])
+        .max_height(screen.height() - 16.0)
         // #77 — force the Settings window OPAQUE. The app-window transparency /
         // glass setting drives a translucent `window_fill`; without this the
         // Settings panel itself went see-through, which is not what the
@@ -178,14 +202,9 @@ pub fn show(
             egui::Frame::window(&style).fill(egui::Color32::from_rgb(f.r(), f.g(), f.b()))
         })
         .show(ctx, |ui| {
-            // FORCE a definite content width so the window is exactly the SAME
-            // size on every page. `set_max_width` is only a soft cap that the
-            // full-width search field (desired_width = INFINITY) overrides — it
-            // drove the auto-sizing window out to the whole screen. `set_width`
-            // pins it: every page lays out at this width, so switching category
-            // (e.g. to Toolbar) never changes the window size. The user can still
-            // drag the window larger; the content stays this width.
-            ui.set_width(800.0);
+            // The window size is explicit (default_size, user-resizable), so the
+            // content fills the available width responsively — no fixed pin is
+            // needed and none of the old per-page width jump can occur.
             ui.horizontal_top(|ui| {
                 // ---- Left category nav ----
                 ui.vertical(|ui| {
@@ -203,19 +222,13 @@ pub fn show(
                     ui.horizontal(|ui| {
                         // Phosphor (loaded) — the 🔍 emoji rendered as tofu (#R5).
                         ui.label(egui_phosphor::thin::MAGNIFYING_GLASS);
-                        // FIXED width — NOT available_width and NOT INFINITY. Both
-                        // of those make the field grab whatever width is going,
-                        // which (with the dnd drop-zones on the Toolbar page that
-                        // also fill available width) forms a feedback loop that
-                        // settles the auto-sized window at an over-wide equilibrium
-                        // — that is why the Toolbar page's window was wider than its
-                        // own visible content. A fixed width removes the amplifier
-                        // so the window width is content-determined and identical
-                        // across pages.
+                        // Fill the content pane — safe now that the window is a
+                        // fixed/user-controlled size (the field can't drive the
+                        // window width any more). Leave room for the clear (✕).
                         ui.add(
                             egui::TextEdit::singleline(&mut query)
                                 .hint_text("search settings")
-                                .desired_width(560.0),
+                                .desired_width(ui.available_width() - 28.0),
                         )
                         .on_hover_text(
                             "Filter settings by name across every category. Clear to return to \
@@ -234,20 +247,12 @@ pub fn show(
 
                     let q = query.trim().to_lowercase();
                     let sel = category.as_str();
-                    // `max_width` is the load-bearing pin for "the Settings window
-                    // must not change width between pages". It is a REAL viewport
-                    // cap (unlike set_width / set_max_width / fixed_size / fixed_rect,
-                    // which egui all overrode here — content auto-size measures a
-                    // width-greedy page at its full desired width, and eframe
-                    // persistence restores a stale window rect): the ScrollArea
-                    // viewport can never exceed `max_width`, so `available_width`
-                    // inside is a hard 640 on EVERY page, content wraps within it,
-                    // and the window settles to the same width regardless of page.
+                    // Fill the remaining content area (the window size is explicit,
+                    // so this can't drive the window). Vertical scroll handles any
+                    // overflow taller than the (now tall) window.
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .max_width(600.0)
                         .show(ui, |ui| {
-                            ui.set_width(600.0);
                             changed |= render_sections(ui, config, updater, sel, &q);
                         });
                 });
@@ -814,11 +819,19 @@ fn render_sections(
                     )
                     .show_ui(ui, |ui| {
                         for (pos, label) in positions {
+                            let prev = config.editor.tab_bar_position;
                             if ui
                                 .selectable_value(&mut config.editor.tab_bar_position, pos, label)
                                 .changed()
                             {
                                 changed = true;
+                                // Switching TO a Left/Right bar from a non-side one
+                                // defaults "rotate side tabs" ON (the requested
+                                // default for vertical bars); the user can turn it
+                                // back off. No effect Top/Bottom.
+                                if pos.is_vertical() && !prev.is_vertical() {
+                                    config.editor.side_tabs_rotated = true;
+                                }
                             }
                         }
                     })
@@ -895,9 +908,11 @@ fn render_sections(
             changed |= grid_bool(
                 ui,
                 q,
-                "restore session",
-                "Restore session",
-                "Reopen the files and tabs you had open when you last closed SCR1B3.",
+                "restore session reopen saved files tabs",
+                "Reopen saved files from last session",
+                "Reopens the SAVED files/tabs you had open when you last closed SCR1B3. \
+                 (Distinct from 'Restore unsaved notes' below, which recovers never-saved \
+                 buffers — the two are independent and you can use either, both, or neither.)",
                 &mut config.editor.restore_session,
                 &def.editor.restore_session,
             );
@@ -906,9 +921,10 @@ fn render_sections(
                 q,
                 "session backup hot exit unsaved restore crash recovery",
                 "Restore unsaved notes after restart",
-                "Keeps a backup of unsaved buffers (including never-saved scratch notes) so \
+                "Keeps a backup of UNSAVED buffers (including never-saved scratch notes) so \
                  they come back after a restart or crash — no save needed. Backups live in \
-                 the config 'backup' folder and are deleted once you save. On by default.",
+                 the config 'backup' folder and are deleted once you save. (Distinct from \
+                 'Reopen saved files' above.) On by default.",
                 &mut config.editor.session_backup,
                 &def.editor.session_backup,
             );
@@ -1137,13 +1153,26 @@ fn render_sections(
                      (e.g. #1a1a2e).",
                 );
                 ui.add_enabled_ui(tos, |ui| {
-                    changed |= ui
-                        .text_edit_singleline(&mut config.window.tint)
-                        .on_hover_text(
-                            "Hex colour (e.g. #1a1a2e) blended over the translucent window \
-                             surface.",
-                        )
-                        .changed();
+                    ui.horizontal(|ui| {
+                        // Click the swatch → egui colour picker pop-out; the hex
+                        // field stays for exact/paste entry. The two are kept in
+                        // sync (picker writes the hex back).
+                        let mut col = parse_hex_rgb(&config.window.tint)
+                            .unwrap_or(egui::Color32::from_rgb(0x08, 0x06, 0x0d));
+                        if ui
+                            .color_edit_button_srgba(&mut col)
+                            .on_hover_text("Pick the tint colour.")
+                            .changed()
+                        {
+                            config.window.tint =
+                                format!("#{:02x}{:02x}{:02x}", col.r(), col.g(), col.b());
+                            changed = true;
+                        }
+                        changed |= ui
+                            .add(egui::TextEdit::singleline(&mut config.window.tint).desired_width(96.0))
+                            .on_hover_text("Hex colour (e.g. #1a1a2e), or click the swatch to pick.")
+                            .changed();
+                    });
                 });
                 changed |= reset_to_default(ui, &mut config.window.tint, &def.window.tint);
                 ui.end_row();

@@ -434,10 +434,14 @@ pub fn show(ui: &mut egui::Ui, config: &mut Config) -> bool {
     live_preview(ui, &state.working);
     ui.add_space(8.0);
 
-    // ── Token pickers (scrollable) ────────────────────────────────────────
+    // ── Token pickers ─────────────────────────────────────────────────────
+    // No inner height cap: the (now tall, resizable) Settings window + its outer
+    // ScrollArea handle overflow, so the UI/Syntax colour lists show in full
+    // instead of being trapped in a short nested scroll. The CollapsingHeaders
+    // let the user fold sections they aren't editing.
     egui::ScrollArea::vertical()
         .auto_shrink([false, true])
-        .max_height(360.0)
+        .max_height(f32::INFINITY)
         .show(ui, |ui| {
             egui::CollapsingHeader::new(egui::RichText::new("UI").strong())
                 .default_open(true)

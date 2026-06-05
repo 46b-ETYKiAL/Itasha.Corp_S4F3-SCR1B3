@@ -66,6 +66,12 @@ fn main() -> ExitCode {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1100.0, 720.0])
         .with_min_inner_size([520.0, 360.0])
+        // Explicitly resizable: with decorations OFF the OS resize borders are
+        // gone, so the in-app `ViewportCommand::BeginResize` handler is the ONLY
+        // way to resize — and that command is a no-op unless the window is
+        // resizable. (egui defaults this true, but a frameless window makes it
+        // load-bearing, so we pin it.)
+        .with_resizable(true)
         .with_app_id("com.itashacorp.scr1b3")
         .with_title(scribe_core::PRODUCT_NAME);
     // Runtime window + taskbar icon. The embedded .exe resource (build.rs +

@@ -5069,18 +5069,17 @@ impl ScribeApp {
                     }
                     ui.horizontal_centered(|ui| {
                         ui.add_space(10.0);
-                        ui.label(
-                            RichText::new("S C R 1 B 3")
-                                .color(accent)
-                                .strong()
-                                .monospace(),
-                        );
-                        ui.label(RichText::new("//").color(muted).monospace());
+                        // Chrome text follows the APP UI font (Proportional family),
+                        // NOT the note/editor font. egui's default family for
+                        // RichText is Proportional, so simply NOT calling
+                        // `.monospace()` (which selects the Monospace family that the
+                        // note font leads) binds the titlebar to `ui_family`.
+                        ui.label(RichText::new("S C R 1 B 3").color(accent).strong());
+                        ui.label(RichText::new("//").color(muted));
                         ui.label(
                             RichText::new(scribe_core::PRODUCT_TAGLINE)
                                 .color(muted)
-                                .small()
-                                .monospace(),
+                                .small(),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let is_max = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
@@ -7054,9 +7053,17 @@ fn handle_frameless_resize(ctx: &egui::Context) {
         D::SouthWest => C::ResizeSouthWest,
         D::SouthEast => C::ResizeSouthEast,
     });
-    // Start the OS resize only if egui isn't consuming the press for a widget
-    // (so a button/tab sitting at the very edge still gets its click).
-    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.wants_pointer_input() {
+    // Start the OS resize on a FRESH press anywhere in the (thin) edge/corner
+    // band. The previous `&& !ctx.wants_pointer_input()` guard is why resize
+    // silently did nothing: the editor TextEdit + the status/side panels cover
+    // every window edge, so `wants_pointer_input()` is true at the edges and the
+    // BeginResize was always skipped (the cursor still changed — that part is
+    // unconditional — which is exactly the "cursor changes but it doesn't
+    // resize" report). The band is only 8px (12px at corners), so a press that
+    // lands in it is an intentional resize; handing the drag to the OS is the
+    // right call even if a widget also sits under the very edge. `primary_pressed`
+    // is the rising edge, so no widget drag is in progress yet.
+    if ctx.input(|i| i.pointer.primary_pressed()) {
         ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
         // The OS now owns the drag. winit's modal resize loop swallows the
         // button-up, so egui can be left believing a drag is still in progress —
