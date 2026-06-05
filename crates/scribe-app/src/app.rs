@@ -220,14 +220,20 @@ fn apply_window_effect(cc: &eframe::CreationContext<'_>, mode: WindowMode, tint_
                     None,
                 );
             }
-            // Vibrancy is a macOS material; on Windows there is no direct
-            // equivalent, so map it to Mica (the closest system backdrop) rather
-            // than leaving the option a silent no-op.
+            // Vibrancy is a macOS material; on Windows the closest DISTINCT
+            // backdrop is "Mica Alt" (tabbed) — a stronger, more saturated
+            // wallpaper tint than plain Mica. Using `apply_tabbed` (not
+            // `apply_mica`) makes Vibrancy visibly different from the Mica mode
+            // instead of an identical alias.
             #[cfg(windows)]
             {
-                let _ = window_vibrancy::apply_mica(cc, Some(true));
+                let _ = window_vibrancy::apply_tabbed(cc, Some(true));
             }
         }
+        // Transparent: NO DWM backdrop at all — at a low opacity the raw desktop
+        // shows through SHARP (no blur), the visual opposite of the blurred
+        // Glass/Mica/Vibrancy backdrops. Translucency comes entirely from the
+        // transparent surface + low panel-fill alpha. Opaque: nothing to apply.
         WindowMode::Transparent | WindowMode::Opaque => {}
     }
 }
@@ -2619,7 +2625,7 @@ impl ScribeApp {
                 } else {
                     Color32::TRANSPARENT
                 });
-            chip.show(ui, |ui| {
+            let chip_resp = chip.show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let label =
                     RichText::new(shown.clone()).color(if selected { accent } else { muted });
@@ -2670,7 +2676,6 @@ impl ScribeApp {
                         drop_pos = Some(pos);
                     }
                 }
-                rects.push((i, resp.rect));
                 // Pin TOGGLE — only on the active tab (the pin GLYPH in the label
                 // still marks any pinned tab, so non-active pins stay visible).
                 if selected {
@@ -2703,6 +2708,10 @@ impl ScribeApp {
                     close = Some(i);
                 }
             });
+            // Hit-test the FULL chip rect (label + pin + close + margins), not the
+            // bare name-label — that was why a drop in the gap, or over the
+            // pin/close area, or past the last tab silently did nothing.
+            rects.push((i, chip_resp.response.rect));
         }
 
         // "+" — add a new tab at the end of the strip (same as Ctrl+N).
@@ -2778,12 +2787,58 @@ impl ScribeApp {
             let _ = src;
         }
 
-        // Drag-reorder: the dragged tab was released over another tab's rect.
+        // Drag-reorder drop resolution. Use the SAME model as the live indicator:
+        // a direct hit on a chip wins; otherwise snap to the NEAREST chip centre
+        // along the strip's main axis. This means a release in an inter-tab gap,
+        // over the pin/close area, or past either end still reorders (the old
+        // name-label-`contains` test silently no-op'd in all those cases).
         if let (Some(src), Some(pos)) = (drag_src, drop_pos) {
-            for (j, rect) in &rects {
-                if *j != src && rect.contains(pos) {
-                    reorder = Some((src, *j));
-                    break;
+            let horizontal = rects.len() < 2
+                || (rects[1].1.center().x - rects[0].1.center().x).abs()
+                    >= (rects[1].1.center().y - rects[0].1.center().y).abs();
+            let mut target: Option<usize> = rects
+                .iter()
+                .find(|(_, rect)| rect.contains(pos))
+                .map(|(j, _)| *j);
+            if target.is_none() {
+                let mut best: Option<(usize, f32)> = None;
+                for (j, rect) in &rects {
+                    let d = if horizontal {
+                        (pos.x - rect.center().x).abs()
+                    } else {
+                        (pos.y - rect.center().y).abs()
+                    };
+                    if best.map_or(true, |(_, bd)| d < bd) {
+                        best = Some((*j, d));
+                    }
+                }
+                target = best.map(|(j, _)| j);
+            }
+            if let Some(t) = target {
+                if t != src {
+                    reorder = Some((src, t));
+                }
+            }
+        }
+
+        // Subtle dividers between tabs — a faint hairline in each inter-chip gap
+        // so the tabs read as distinct without heavy separators. Painted after
+        // the strip is laid out, using the same horizontal/vertical inference.
+        if rects.len() > 1 {
+            let horizontal = (rects[1].1.center().x - rects[0].1.center().x).abs()
+                >= (rects[1].1.center().y - rects[0].1.center().y).abs();
+            let painter = ui.painter();
+            let hairline = egui::Stroke::new(1.0, muted.linear_multiply(0.30));
+            for pair in rects.windows(2) {
+                let (a, b) = (pair[0].1, pair[1].1);
+                if horizontal {
+                    let x = (a.right() + b.left()) * 0.5;
+                    let y = egui::Rangef::new(a.top() + 3.0, a.bottom() - 3.0);
+                    painter.vline(x, y, hairline);
+                } else {
+                    let y = (a.bottom() + b.top()) * 0.5;
+                    let x = egui::Rangef::new(a.left() + 3.0, a.right() - 3.0);
+                    painter.hline(x, y, hairline);
                 }
             }
         }
@@ -5069,18 +5124,17 @@ impl ScribeApp {
                     }
                     ui.horizontal_centered(|ui| {
                         ui.add_space(10.0);
-                        ui.label(
-                            RichText::new("S C R 1 B 3")
-                                .color(accent)
-                                .strong()
-                                .monospace(),
-                        );
-                        ui.label(RichText::new("//").color(muted).monospace());
+                        // Chrome text follows the APP UI font (Proportional family),
+                        // NOT the note/editor font. egui's default family for
+                        // RichText is Proportional, so simply NOT calling
+                        // `.monospace()` (which selects the Monospace family that the
+                        // note font leads) binds the titlebar to `ui_family`.
+                        ui.label(RichText::new("S C R 1 B 3").color(accent).strong());
+                        ui.label(RichText::new("//").color(muted));
                         ui.label(
                             RichText::new(scribe_core::PRODUCT_TAGLINE)
                                 .color(muted)
-                                .small()
-                                .monospace(),
+                                .small(),
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let is_max = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
@@ -7054,9 +7108,17 @@ fn handle_frameless_resize(ctx: &egui::Context) {
         D::SouthWest => C::ResizeSouthWest,
         D::SouthEast => C::ResizeSouthEast,
     });
-    // Start the OS resize only if egui isn't consuming the press for a widget
-    // (so a button/tab sitting at the very edge still gets its click).
-    if ctx.input(|i| i.pointer.primary_pressed()) && !ctx.wants_pointer_input() {
+    // Start the OS resize on a FRESH press anywhere in the (thin) edge/corner
+    // band. The previous `&& !ctx.wants_pointer_input()` guard is why resize
+    // silently did nothing: the editor TextEdit + the status/side panels cover
+    // every window edge, so `wants_pointer_input()` is true at the edges and the
+    // BeginResize was always skipped (the cursor still changed — that part is
+    // unconditional — which is exactly the "cursor changes but it doesn't
+    // resize" report). The band is only 8px (12px at corners), so a press that
+    // lands in it is an intentional resize; handing the drag to the OS is the
+    // right call even if a widget also sits under the very edge. `primary_pressed`
+    // is the rising edge, so no widget drag is in progress yet.
+    if ctx.input(|i| i.pointer.primary_pressed()) {
         ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
         // The OS now owns the drag. winit's modal resize loop swallows the
         // button-up, so egui can be left believing a drag is still in progress —

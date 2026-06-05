@@ -60,9 +60,10 @@ impl MotionConfig {
 
 impl Default for MotionConfig {
     fn default() -> Self {
-        // Master OFF by default — animation is opt-in (calm-surface principle).
+        // Animations ON by default (subtle motion is part of the intended feel);
+        // users who prefer a fully static surface can toggle it off.
         Self {
-            enabled: false,
+            enabled: true,
             intensity: 0.6,
             cursor_blink: true,
         }
@@ -100,7 +101,8 @@ pub struct WindowConfig {
     /// Default OFF — translucency is opt-in.
     pub transparency_enabled: bool,
     pub mode: WindowMode,
-    /// Surface opacity for translucent modes (0.30..=1.0).
+    /// Surface opacity for translucent modes (0.05..=1.0; the 0.05 floor keeps
+    /// the window from becoming fully invisible).
     pub opacity: f32,
     /// Tint color (`#RRGGBB`) painted over the window at `tint_strength`.
     pub tint: String,
@@ -294,7 +296,7 @@ impl Default for EditorConfig {
             insert_spaces: true,
             show_line_numbers: true,
             show_minimap: true,
-            word_wrap: false,
+            word_wrap: true,
             auto_save: false,
             restore_session: true,
             tab_bar_position: TabBarPosition::Top,
@@ -395,7 +397,7 @@ pub struct FontConfig {
 }
 
 fn default_editor_family() -> String {
-    "JetBrains Mono".to_string()
+    "IBM Plex Mono".to_string()
 }
 
 fn default_ui_family() -> String {
@@ -473,7 +475,7 @@ pub struct SpellcheckConfig {
 impl Default for SpellcheckConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             language: "en_US".to_string(),
             check_comments: true,
             check_strings: true,
@@ -652,14 +654,25 @@ mod tests {
     }
 
     #[test]
-    fn spellcheck_off_by_default() {
-        assert!(!Config::default().spellcheck.enabled);
+    fn spellcheck_on_by_default() {
+        assert!(Config::default().spellcheck.enabled);
     }
 
     #[test]
-    fn motion_master_off_by_default() {
-        // Calm-surface principle: animation is opt-in.
-        assert!(!MotionConfig::default().enabled, "master defaults OFF");
+    fn word_wrap_and_animations_on_by_default() {
+        assert!(Config::default().editor.word_wrap);
+        assert!(Config::default().motion.enabled);
+    }
+
+    #[test]
+    fn default_note_font_is_ibm_plex_mono() {
+        assert_eq!(Config::default().fonts.editor_family, "IBM Plex Mono");
+    }
+
+    #[test]
+    fn motion_master_on_by_default() {
+        // Animations are part of the intended feel; users can opt out.
+        assert!(MotionConfig::default().enabled, "master defaults ON");
     }
 
     #[test]
