@@ -1848,8 +1848,13 @@ impl ScribeApp {
                         act = Some(Act::Close);
                     }
                 }
-                // Nothing to prompt about — close the modal.
-                UpdateState::Idle | UpdateState::Checking | UpdateState::UpToDate => {
+                // Nothing to prompt about in the on-launch modal — close it.
+                // (NoAssetForPlatform is surfaced only in the Settings pane,
+                // not the auto modal.)
+                UpdateState::Idle
+                | UpdateState::Checking
+                | UpdateState::UpToDate { .. }
+                | UpdateState::NoAssetForPlatform { .. } => {
                     act = Some(Act::Close);
                 }
             }

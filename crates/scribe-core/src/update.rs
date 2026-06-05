@@ -21,7 +21,8 @@ pub use crate::config::UpdateMode;
 // flow; it is distinct from [`LatestRelease`] below, which is the minimal
 // descriptor the pure offline [`evaluate`] decision path operates on.
 pub use net::{
-    check_for_update, download_verify_extract, fetch_latest_release, select_update, ReleaseInfo,
+    check_for_update, download_verify_extract, fetch_latest_release, fetch_releases, select_best,
+    select_update, ReleaseInfo, UpdateOutcome,
 };
 
 /// Minimal latest-release descriptor for the pure, offline [`evaluate`]

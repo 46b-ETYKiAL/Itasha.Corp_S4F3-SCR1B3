@@ -1505,14 +1505,39 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
             ui.spinner();
             ui.label("Checking…");
         }
-        UpdateState::UpToDate => {
+        UpdateState::UpToDate { latest } => {
+            // Show BOTH the running version AND the newest release found, so
+            // "up to date" is never ambiguous (the user can see the check
+            // actually reached GitHub and what the latest release is).
             ui.label(
                 egui::RichText::new(format!(
-                    "You're on the latest version (v{}).",
+                    "Up to date — you're on v{} (latest release: v{latest}).",
                     crate::updater::current_version()
                 ))
                 .weak(),
             );
+        }
+        UpdateState::NoAssetForPlatform {
+            latest,
+            target,
+            html_url,
+        } => {
+            // A newer release exists but has no build for this platform — NEVER
+            // silently report "up to date"; point the user at the release page.
+            let warn = ui.visuals().warn_fg_color;
+            ui.colored_label(
+                warn,
+                format!(
+                    "v{latest} is available, but it has no build for your platform ({target})."
+                ),
+            );
+            if ui
+                .link("Open the releases page")
+                .on_hover_text("Download the latest release manually from your browser.")
+                .clicked()
+            {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(html_url.clone()));
+            }
         }
         UpdateState::Available(info) => {
             ui.label(format!("v{} is available.", info.version));
