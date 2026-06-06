@@ -190,34 +190,34 @@ fn save_theme(theme: &Theme, slug: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A single colour-picker row: swatch + label, mutating the working theme's
-/// `map` entry in place. Returns `true` if the colour changed this frame.
-fn token_row(
+/// One colour-picker row inside a two-column [`egui::Grid`]: `label | swatch`,
+/// mutating the working theme's `map` entry in place. Keys absent from the
+/// working theme render nothing (no ragged half-row). The Grid keeps every
+/// swatch aligned in a column — a calmer layout than the old ragged horizontal
+/// rows — and, crucially, carries NO inner scroll of its own (#11): the Settings
+/// page owns the only ScrollArea, so the mouse wheel always scrolls the page.
+fn token_grid_row(
     ui: &mut egui::Ui,
     map: &mut std::collections::BTreeMap<String, Rgba>,
     key: &str,
     label: &str,
     allow_alpha: bool,
-) -> bool {
+) {
     // Only render keys that actually exist in the working theme.
     let Some(current) = map.get(key).copied() else {
-        return false;
+        return;
     };
+    ui.label(egui::RichText::new(label).monospace());
     let mut color = rgba_to_color32(current);
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        let alpha = if allow_alpha {
-            egui::color_picker::Alpha::OnlyBlend
-        } else {
-            egui::color_picker::Alpha::Opaque
-        };
-        if egui::color_picker::color_edit_button_srgba(ui, &mut color, alpha).changed() {
-            map.insert(key.to_string(), color32_to_rgba(color));
-            changed = true;
-        }
-        ui.label(egui::RichText::new(label).monospace());
-    });
-    changed
+    let alpha = if allow_alpha {
+        egui::color_picker::Alpha::OnlyBlend
+    } else {
+        egui::color_picker::Alpha::Opaque
+    };
+    if egui::color_picker::color_edit_button_srgba(ui, &mut color, alpha).changed() {
+        map.insert(key.to_string(), color32_to_rgba(color));
+    }
+    ui.end_row();
 }
 
 /// Paint a small framed live preview: a few lines of fake code coloured by the
@@ -435,38 +435,46 @@ pub fn show(ui: &mut egui::Ui, config: &mut Config) -> bool {
     ui.add_space(8.0);
 
     // ── Token pickers ─────────────────────────────────────────────────────
-    // No inner height cap: the (now tall, resizable) Settings window + its outer
-    // ScrollArea handle overflow, so the UI/Syntax colour lists show in full
-    // instead of being trapped in a short nested scroll. The CollapsingHeaders
-    // let the user fold sections they aren't editing.
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, true])
-        .max_height(f32::INFINITY)
+    // NO nested ScrollArea here (#11). A scroll area inside the Settings page's
+    // own scroll stole the mouse wheel whenever the pointer sat over the colour
+    // list — the page wouldn't scroll and the pickers felt "trapped" and
+    // individually scrollable. The Settings page (settings.rs) owns the single
+    // outer ScrollArea; this block just lays the swatches out in aligned
+    // two-column Grids under foldable headers, so the wheel always scrolls the
+    // page and the layout reads cleanly.
+    egui::CollapsingHeader::new(egui::RichText::new("UI").strong())
+        .default_open(true)
         .show(ui, |ui| {
-            egui::CollapsingHeader::new(egui::RichText::new("UI").strong())
-                .default_open(true)
+            ui.label(
+                egui::RichText::new("chrome: window, panels, text, accent, cursor")
+                    .weak()
+                    .small(),
+            );
+            egui::Grid::new("scr1b3_theme_editor_ui_tokens")
+                .num_columns(2)
+                .spacing([14.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("chrome: window, panels, text, accent, cursor")
-                            .weak()
-                            .small(),
-                    );
                     for (key, label) in UI_TOKENS {
                         let allow_alpha = ALPHA_TOKENS.contains(key);
-                        token_row(ui, &mut state.working.ui, key, label, allow_alpha);
+                        token_grid_row(ui, &mut state.working.ui, key, label, allow_alpha);
                     }
                 });
+        });
 
-            egui::CollapsingHeader::new(egui::RichText::new("Syntax").strong())
-                .default_open(true)
+    egui::CollapsingHeader::new(egui::RichText::new("Syntax").strong())
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("token colours for highlighted code")
+                    .weak()
+                    .small(),
+            );
+            egui::Grid::new("scr1b3_theme_editor_syntax_tokens")
+                .num_columns(2)
+                .spacing([14.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("token colours for highlighted code")
-                            .weak()
-                            .small(),
-                    );
                     for (key, label) in SYNTAX_TOKENS {
-                        token_row(ui, &mut state.working.syntax, key, label, false);
+                        token_grid_row(ui, &mut state.working.syntax, key, label, false);
                     }
                 });
         });

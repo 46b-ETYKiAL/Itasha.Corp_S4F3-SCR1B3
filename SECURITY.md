@@ -74,10 +74,27 @@ Every SCR1B3 crate carries a crate-root attribute that gates `unsafe` usage:
 
 `forbid` is preferred where it is reachable because it **cannot be locally overridden** — a new `unsafe` block cannot land via `#[allow]`. `deny` is used only where a documented exception exists; the `#[allow(unsafe_code)]` is then visible per call-site so the unsafe budget is explicit, not implicit.
 
+## Binary hardening (Windows)
+
+The release binary is built with **Control Flow Guard** (`/guard:cf`) via
+[`.cargo/config.toml`](.cargo/config.toml) (`-C control-flow-guard` under the
+`cfg(windows)` target). CFG hardens indirect calls and returns against
+ROP/JOP control-flow-hijack chains — the residual exploit class that
+memory-safety does not, on its own, fully close in the presence of `unsafe` in
+transitive GPU/windowing dependencies (`wgpu`, `winit`). It carries ~0.1% size
+and ~3% runtime overhead and has been stable since Rust 1.47.
+
+ASLR (`/DYNAMICBASE`), DEP (`/NXCOMPAT`) and High-Entropy VA are already MSVC
+linker defaults for 64-bit Rust executables; CFG is the high-value mitigation
+that is *not* on by default, so it is opted in for every Windows build. There
+is no `RUSTFLAGS` override in CI, so the `.cargo/config.toml` entry is
+authoritative.
+
 ## Supply chain
 
 - All dependencies are pinned via `Cargo.lock`.
 - `cargo-audit` (advisory database) and `cargo-deny` (license + advisory policy) gate the build in CI.
+- **The telemetry-free posture is enforced at the dependency-graph level.** [`deny.toml`](deny.toml) `[bans]` denies every alternative HTTP client / async runtime (`reqwest`, `hyper`, `isahc`, `curl`, `surf`, `tokio`) and every analytics / crash-reporting crate (`sentry`, `opentelemetry`, `posthog-rs`, `mixpanel`, …). The *only* sanctioned network stack is the synchronous, runtime-free `ureq` + `rustls` used by the opt-out update check; the `cargo-deny bans` gate (a required status check) fails the build if a second egress path or any telemetry crate ever enters the tree.
 - A CycloneDX 1.6 SBOM is produced at release.
 - Dependency names are checked against slopsquatting before any addition.
 
