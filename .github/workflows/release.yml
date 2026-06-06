@@ -73,8 +73,31 @@ jobs:
       # No dependency cache in the release build: a poisoned cache could taint
       # published, signed artifacts (zizmor cache-poisoning). Release builds are
       # clean + reproducible by design.
-      - name: Build release
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Install cargo-auditable
+        run: cargo install cargo-auditable --locked
+      - name: Build release (cargo-auditable + hardened RUSTFLAGS)
+        shell: bash
+        env:
+          MATRIX_OS: ${{ runner.os }}
+        run: |
+          set -euo pipefail
+          # `cargo auditable build` embeds a scannable SBOM (the exact dependency
+          # list + versions) into a section of the shipped binary, so the EXACT
+          # artifact users run can be vuln-scanned offline with `cargo audit bin`,
+          # trivy, grype, or osv-scanner — closing the gap that the release-time
+          # CycloneDX SBOM is a detached file.
+          #
+          # An env RUSTFLAGS REPLACES `.cargo/config.toml`'s rustflags wholesale,
+          # so we re-state Control Flow Guard here (Windows) and additionally strip
+          # the build-machine absolute paths (workspace + cargo home) from the
+          # binary via `--remap-path-prefix` (cleaner, more deterministic output;
+          # the residual paths are the public CI runner's, not a user's).
+          flags="--remap-path-prefix=${GITHUB_WORKSPACE}=/scr1b3 --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+          if [ "$MATRIX_OS" = "Windows" ]; then
+            flags="-C control-flow-guard $flags"
+          fi
+          export RUSTFLAGS="$flags"
+          cargo auditable build --release --locked --target ${{ matrix.target }}
       - name: Generate third-party license inventory (cargo-about)
         if: runner.os == 'Linux'
         shell: bash
@@ -204,13 +227,27 @@ jobs:
     needs: [build, windows-installer]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    # Only this job writes to the repo (creates the Release + uploads assets).
     permissions:
+      # Only this job writes to the repo (creates the Release + uploads assets).
       contents: write
+      # SLSA build-provenance attestation via GitHub's OIDC + Sigstore: `id-token`
+      # mints the OIDC token, `attestations` writes the signed provenance. This is
+      # ADDITIVE to the minisign signatures — minisign attests AUTHOR identity
+      # (the embedded key), provenance attests BUILD integrity (which workflow/
+      # commit/runner produced each artifact), verifiable with `gh attestation
+      # verify <file> --repo <repo>`.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
+      # Attest the BUILT artifacts (binaries, tarballs, installer) before signing
+      # the sidecars — provenance covers the build outputs themselves.
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: "dist/**/*.tar.gz, dist/**/*.exe"
       # Sign every release asset with minisign (via rsign2 — the same tool the
       # key was generated with; its signatures verify against the embedded key
       # through the app's `minisign-verify` crate). The passwordless secret key

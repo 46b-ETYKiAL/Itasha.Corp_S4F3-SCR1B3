@@ -86,16 +86,27 @@ and ~3% runtime overhead and has been stable since Rust 1.47.
 
 ASLR (`/DYNAMICBASE`), DEP (`/NXCOMPAT`) and High-Entropy VA are already MSVC
 linker defaults for 64-bit Rust executables; CFG is the high-value mitigation
-that is *not* on by default, so it is opted in for every Windows build. There
-is no `RUSTFLAGS` override in CI, so the `.cargo/config.toml` entry is
-authoritative.
+that is *not* on by default, so it is opted in for every Windows build.
+
+**The mitigations are CI-verified, so they cannot silently regress.** The
+`binary hardening (winchecksec)` CI job builds the release binary and runs
+[winchecksec](https://github.com/trailofbits/winchecksec) (SHA-256-pinned
+download) over it, failing the build unless the shipped exe actually carries
+**CFG + ASLR (`/DYNAMICBASE`) + High-Entropy VA + DEP (`/NXCOMPAT`)**. A change
+that ever dropped a mitigation fails here instead of shipping a weaker binary.
+
+The release binary is also built with `--remap-path-prefix`, stripping the
+build-machine absolute paths (workspace + cargo home) from the artifact for
+cleaner, more deterministic output.
 
 ## Supply chain
 
 - All dependencies are pinned via `Cargo.lock`.
 - `cargo-audit` (advisory database) and `cargo-deny` (license + advisory policy) gate the build in CI.
 - **The telemetry-free posture is enforced at the dependency-graph level.** [`deny.toml`](deny.toml) `[bans]` denies every alternative HTTP client / async runtime (`reqwest`, `hyper`, `isahc`, `curl`, `surf`, `tokio`) and every analytics / crash-reporting crate (`sentry`, `opentelemetry`, `posthog-rs`, `mixpanel`, …). The *only* sanctioned network stack is the synchronous, runtime-free `ureq` + `rustls` used by the opt-out update check; the `cargo-deny bans` gate (a required status check) fails the build if a second egress path or any telemetry crate ever enters the tree.
-- A CycloneDX 1.6 SBOM is produced at release.
+- **An unused dependency fails CI.** `cargo-machete` runs in CI and blocks any dependency that is declared but unused — keeping the dependency graph (and the attack surface) minimal.
+- A CycloneDX 1.6 SBOM is produced at release, **and the shipped binary embeds its own scannable SBOM** via `cargo-auditable`: the exact released artifact can be vuln-scanned offline with `cargo audit bin scr1b3.exe`, trivy, grype, or osv-scanner — not just a detached side-file.
+- **SLSA build-provenance.** Every release artifact carries a signed [build-provenance attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations) (GitHub OIDC + Sigstore), verifiable with `gh attestation verify <file> --repo <repo>`. This is *additive* to the minisign signatures: minisign attests **author** identity (the embedded key); provenance attests **build** integrity (which workflow, commit, and runner produced the artifact).
 - Dependency names are checked against slopsquatting before any addition.
 
 ## Continuous security gates
