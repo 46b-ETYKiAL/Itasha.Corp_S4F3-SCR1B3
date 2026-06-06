@@ -958,6 +958,11 @@ impl ScribeApp {
         };
         let line_height = self.config.fonts.line_height;
         let word_wrap = self.config.editor.word_wrap;
+        // #28 — render-whitespace toggle + editor font size captured as locals so
+        // the per-pane body closure (which can't re-borrow `self.config`) can
+        // paint the `·`/`→` whitespace overlay on each pane's galley too.
+        let render_whitespace = self.config.editor.render_whitespace;
+        let editor_font_size = self.config.fonts.editor_size;
         // Disjoint-field borrows captured as locals BEFORE the central-panel
         // closure (which mutably borrows `self.tabs`). The highlighter + its
         // cache are different fields than `tabs`, so the immutable borrows here
@@ -1141,7 +1146,34 @@ impl ScribeApp {
                             .desired_width(f32::INFINITY)
                             .desired_rows(20)
                             .layouter(&mut layouter);
-                        editor.show(ui);
+                        let out = editor.show(ui);
+                        // #28 — same render-whitespace overlay as the single-pane
+                        // editor, so the markers appear in split/grid view too.
+                        if render_whitespace {
+                            let painter = ui.painter();
+                            let ws_font = egui::FontId::monospace(editor_font_size);
+                            let ws_color = muted.gamma_multiply(0.7);
+                            let origin = out.galley_pos.to_vec2();
+                            for row in &out.galley.rows {
+                                let row_off = origin + row.pos.to_vec2();
+                                let cy = row_off.y + row.size.y * 0.5;
+                                for g in &row.glyphs {
+                                    let marker = match g.chr {
+                                        ' ' => "·",
+                                        '\t' => "→",
+                                        _ => continue,
+                                    };
+                                    let cx = row_off.x + g.pos.x + g.advance_width * 0.5;
+                                    painter.text(
+                                        egui::pos2(cx, cy),
+                                        egui::Align2::CENTER_CENTER,
+                                        marker,
+                                        ws_font.clone(),
+                                        ws_color,
+                                    );
+                                }
+                            }
+                        }
                     });
                 drag_started
             };
@@ -1496,13 +1528,19 @@ impl ScribeApp {
         let jp = self.config.appearance.jp_glyph_labels;
         // Phase 18 T18.5: the icon-size slider drives every toolbar glyph/label.
         let size = self.config.toolbar.clamped_icon_size();
+        // #22 — a SELECTED toggle's label is pinned to the theme accent (so it
+        // reads as "on" in both kanji-on and kanji-off states). Plain buttons and
+        // unselected toggles pass `Color32::PLACEHOLDER` to follow the widget's
+        // own fg (preserving hover/active brightening). `sel(on)` is the helper.
+        let accent = ui_color(&self.theme, "accent", Rgba::new(0, 255, 254, 255));
+        let sel = |on: bool| if on { accent } else { Color32::PLACEHOLDER };
         match id {
             "sep" => {
                 ui.separator();
             }
             "new" => {
                 if ui
-                    .button(toolbar_widget("new", icons, jp, size))
+                    .button(toolbar_widget("new", icons, jp, size, Color32::PLACEHOLDER))
                     .on_hover_text("New file (Ctrl+N)")
                     .clicked()
                 {
@@ -1511,7 +1549,13 @@ impl ScribeApp {
             }
             "open" => {
                 if ui
-                    .button(toolbar_widget("open", icons, jp, size))
+                    .button(toolbar_widget(
+                        "open",
+                        icons,
+                        jp,
+                        size,
+                        Color32::PLACEHOLDER,
+                    ))
                     .on_hover_text("Open file (Ctrl+O)")
                     .clicked()
                 {
@@ -1520,7 +1564,13 @@ impl ScribeApp {
             }
             "openfolder" => {
                 if ui
-                    .button(toolbar_widget("openfolder", icons, jp, size))
+                    .button(toolbar_widget(
+                        "openfolder",
+                        icons,
+                        jp,
+                        size,
+                        Color32::PLACEHOLDER,
+                    ))
                     .on_hover_text("Open folder")
                     .clicked()
                 {
@@ -1529,7 +1579,13 @@ impl ScribeApp {
             }
             "save" => {
                 if ui
-                    .button(toolbar_widget("save", icons, jp, size))
+                    .button(toolbar_widget(
+                        "save",
+                        icons,
+                        jp,
+                        size,
+                        Color32::PLACEHOLDER,
+                    ))
                     .on_hover_text("Save (Ctrl+S)")
                     .clicked()
                 {
@@ -1538,7 +1594,13 @@ impl ScribeApp {
             }
             "saveas" => {
                 if ui
-                    .button(toolbar_widget("saveas", icons, jp, size))
+                    .button(toolbar_widget(
+                        "saveas",
+                        icons,
+                        jp,
+                        size,
+                        Color32::PLACEHOLDER,
+                    ))
                     .on_hover_text("Save As…")
                     .clicked()
                 {
@@ -1547,7 +1609,13 @@ impl ScribeApp {
             }
             "find" => {
                 if ui
-                    .button(toolbar_widget("find", icons, jp, size))
+                    .button(toolbar_widget(
+                        "find",
+                        icons,
+                        jp,
+                        size,
+                        Color32::PLACEHOLDER,
+                    ))
                     .on_hover_text("Find (Ctrl+F)")
                     .clicked()
                 {
@@ -1557,7 +1625,13 @@ impl ScribeApp {
             }
             "palette" => {
                 if ui
-                    .button(toolbar_widget("palette", icons, jp, size))
+                    .button(toolbar_widget(
+                        "palette",
+                        icons,
+                        jp,
+                        size,
+                        Color32::PLACEHOLDER,
+                    ))
                     .on_hover_text("Command palette")
                     .clicked()
                 {
@@ -1574,7 +1648,13 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.editor.grid_enabled,
-                        toolbar_widget("split", icons, jp, size),
+                        toolbar_widget(
+                            "split",
+                            icons,
+                            jp,
+                            size,
+                            sel(self.config.editor.grid_enabled),
+                        ),
                     )
                     .on_hover_text(
                         "Split / grid view — show the open notes side by side. \
@@ -1590,7 +1670,13 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.editor.show_minimap,
-                        toolbar_widget("minimap", icons, jp, size),
+                        toolbar_widget(
+                            "minimap",
+                            icons,
+                            jp,
+                            size,
+                            sel(self.config.editor.show_minimap),
+                        ),
                     )
                     .on_hover_text("Minimap")
                     .clicked()
@@ -1603,7 +1689,7 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.editor.word_wrap,
-                        toolbar_widget("wrap", icons, jp, size),
+                        toolbar_widget("wrap", icons, jp, size, sel(self.config.editor.word_wrap)),
                     )
                     .on_hover_text("Word wrap")
                     .clicked()
@@ -1614,7 +1700,10 @@ impl ScribeApp {
             }
             "fold" => {
                 if ui
-                    .selectable_label(self.fold_view, toolbar_widget("fold", icons, jp, size))
+                    .selectable_label(
+                        self.fold_view,
+                        toolbar_widget("fold", icons, jp, size, sel(self.fold_view)),
+                    )
                     .on_hover_text("Folded view")
                     .clicked()
                 {
@@ -1625,7 +1714,13 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.editor.show_line_numbers,
-                        toolbar_widget("linenumbers", icons, jp, size),
+                        toolbar_widget(
+                            "linenumbers",
+                            icons,
+                            jp,
+                            size,
+                            sel(self.config.editor.show_line_numbers),
+                        ),
                     )
                     .on_hover_text("Line numbers")
                     .clicked()
@@ -1638,7 +1733,13 @@ impl ScribeApp {
                 if ui
                     .selectable_label(
                         self.config.spellcheck.enabled,
-                        toolbar_widget("spellcheck", icons, jp, size),
+                        toolbar_widget(
+                            "spellcheck",
+                            icons,
+                            jp,
+                            size,
+                            sel(self.config.spellcheck.enabled),
+                        ),
                     )
                     .on_hover_text("Spellcheck (offline)")
                     .clicked()
@@ -1649,7 +1750,7 @@ impl ScribeApp {
             }
             "lsp" => {
                 if ui
-                    .button(toolbar_widget("lsp", icons, jp, size))
+                    .button(toolbar_widget("lsp", icons, jp, size, Color32::PLACEHOLDER))
                     .on_hover_text("Start language server")
                     .clicked()
                 {
@@ -2396,7 +2497,7 @@ impl ScribeApp {
                 if _rotated {
                     ui.vertical(|ui| self.draw_rotated_side_tabs(ui, accent, muted));
                 } else {
-                    ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
+                    ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted, true));
                 }
             });
     }
@@ -2417,6 +2518,9 @@ impl ScribeApp {
         let mut reorder: Option<(usize, usize)> = None;
         let mut drag_src: Option<usize> = None;
         let mut drop_pos: Option<egui::Pos2> = None;
+        // #59-parity live drag feedback for the rotated column: the in-flight
+        // pointer position so an insertion hairline can be painted at the drop gap.
+        let mut dragging: Option<egui::Pos2> = None;
         let mut rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(self.tabs.len());
         let mut add_tab = false;
         let pad = egui::vec2(8.0, 10.0);
@@ -2438,36 +2542,30 @@ impl ScribeApp {
                     Color32::TRANSPARENT
                 });
             chip.show(ui, |ui| {
-                ui.vertical(|ui| {
-                    // Close (always) + pin toggle (active only) ABOVE the tab.
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        if ui
-                            .add(
-                                egui::Button::new(egui_phosphor::thin::X)
-                                    .frame(false)
-                                    .small(),
-                            )
-                            .on_hover_text("Close tab (or middle-click)")
-                            .clicked()
-                        {
-                            close = Some(i);
-                        }
-                        if selected {
-                            let glyph = if pinned {
-                                egui_phosphor::thin::PUSH_PIN_SLASH
-                            } else {
-                                egui_phosphor::thin::PUSH_PIN
-                            };
-                            if ui
-                                .add(egui::Button::new(glyph).frame(false).small())
-                                .on_hover_text(pin_label)
-                                .clicked()
-                            {
-                                toggle_pin = Some(i);
+                ui.vertical_centered(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    // #30 column order: grip · rotated-name · pin · close (top→bottom).
+                    // Drag GRIP at the head — painted dots (`grip_handle`), never a
+                    // phosphor glyph, so the handle can't tofu. Pinned tabs show a
+                    // dimmed, drag-disabled grip.
+                    if pinned {
+                        grip_handle(ui, false, muted).on_hover_text("Pinned — drag disabled");
+                    } else {
+                        let g = grip_handle(ui, true, muted)
+                            .on_hover_text("Drag to reorder")
+                            .on_hover_cursor(egui::CursorIcon::Grab);
+                        if g.dragged() {
+                            if let Some(p) = g.interact_pointer_pos() {
+                                dragging = Some(p);
                             }
                         }
-                    });
+                        if g.drag_stopped() {
+                            if let Some(p) = g.interact_pointer_pos() {
+                                drag_src = Some(i);
+                                drop_pos = Some(p);
+                            }
+                        }
+                    }
                     let color = if selected { accent } else { muted };
                     let galley = ui
                         .painter()
@@ -2483,7 +2581,7 @@ impl ScribeApp {
                     if resp.clicked() {
                         switch_to = Some(i);
                     }
-                    if resp.clicked_by(egui::PointerButton::Middle) {
+                    if resp.clicked_by(egui::PointerButton::Middle) && !pinned {
                         close = Some(i);
                     }
                     resp.context_menu(|ui| {
@@ -2509,13 +2607,47 @@ impl ScribeApp {
                             ui.close_menu();
                         }
                     });
-                    if resp.drag_stopped() {
+                    // The rotated name is also a drag target (in addition to the
+                    // grip) so either reorders; pinned tabs never initiate a drag.
+                    if resp.dragged() && !pinned {
+                        if let Some(p) = resp.interact_pointer_pos() {
+                            dragging = Some(p);
+                        }
+                    }
+                    if resp.drag_stopped() && !pinned {
                         if let Some(p) = resp.interact_pointer_pos() {
                             drag_src = Some(i);
                             drop_pos = Some(p);
                         }
                     }
                     rects.push((i, rect));
+                    // Pin toggle (active only), then close (unpinned), BELOW the name.
+                    if selected {
+                        let glyph = if pinned {
+                            egui_phosphor::thin::PUSH_PIN_SLASH
+                        } else {
+                            egui_phosphor::thin::PUSH_PIN
+                        };
+                        if ui
+                            .add(egui::Button::new(glyph).frame(false).small())
+                            .on_hover_text(pin_label)
+                            .clicked()
+                        {
+                            toggle_pin = Some(i);
+                        }
+                    }
+                    if !pinned
+                        && ui
+                            .add(
+                                egui::Button::new(egui_phosphor::thin::X)
+                                    .frame(false)
+                                    .small(),
+                            )
+                            .on_hover_text("Close tab (or middle-click)")
+                            .clicked()
+                    {
+                        close = Some(i);
+                    }
                 });
             });
             ui.add_space(2.0);
@@ -2527,12 +2659,50 @@ impl ScribeApp {
         {
             add_tab = true;
         }
-        // Drag-reorder: dropped over another tab's rect.
+        // #59-parity insertion indicator: while a tab is in flight, paint an
+        // accent hairline at the gap the drop will land in. The rotated column is
+        // always vertical, so the boundary is a horizontal line.
+        if let Some(pointer) = dragging {
+            if let Some((_, last_rect)) = rects.last().copied() {
+                let painter = ui.painter();
+                let accent_line = egui::Stroke::new(2.0, accent);
+                let mut drawn = false;
+                for (_, rect) in &rects {
+                    if pointer.y < rect.center().y {
+                        painter.hline(rect.x_range(), rect.top(), accent_line);
+                        drawn = true;
+                        break;
+                    }
+                }
+                if !drawn {
+                    painter.hline(last_rect.x_range(), last_rect.bottom(), accent_line);
+                }
+            }
+        }
+        // Drag-reorder drop resolution — the SAME nearest-chip model as the
+        // horizontal strip: a direct hit wins; otherwise snap to the NEAREST chip
+        // centre along the column's vertical axis, so a release in an inter-tab
+        // gap, over the pin/close glyphs, or past either end still reorders. (The
+        // old `contains`-only test silently no-op'd in all those cases — the
+        // batch-1 fix only covered `draw_tab_strip`.)
         if let (Some(src), Some(pos)) = (drag_src, drop_pos) {
-            for (j, rect) in &rects {
-                if *j != src && rect.contains(pos) {
-                    reorder = Some((src, *j));
-                    break;
+            let mut target: Option<usize> = rects
+                .iter()
+                .find(|(_, rect)| rect.contains(pos))
+                .map(|(j, _)| *j);
+            if target.is_none() {
+                let mut best: Option<(usize, f32)> = None;
+                for (j, rect) in &rects {
+                    let d = (pos.y - rect.center().y).abs();
+                    if best.map_or(true, |(_, bd)| d < bd) {
+                        best = Some((*j, d));
+                    }
+                }
+                target = best.map(|(j, _)| j);
+            }
+            if let Some(t) = target {
+                if t != src {
+                    reorder = Some((src, t));
                 }
             }
         }
@@ -2580,7 +2750,7 @@ impl ScribeApp {
     ///   the extra `dnd_drop_zone` interaction that used to swallow the click is
     ///   gone. The index arithmetic lives in [`tab_index_after_move`] (unit-tested).
     ///   Closes F-001 / F-043 from `docs/audits/overlooked-surfaces-2026-05-29.md`.
-    fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
+    fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32, side: bool) {
         let active = self.active;
         let mut switch_to = None;
         let mut close = None;
@@ -2626,87 +2796,120 @@ impl ScribeApp {
                     Color32::TRANSPARENT
                 });
             let chip_resp = chip.show(ui, |ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                let label =
-                    RichText::new(shown.clone()).color(if selected { accent } else { muted });
-                let resp = ui.add(
-                    egui::Label::new(label)
-                        .selectable(false)
-                        .sense(egui::Sense::click_and_drag()),
-                );
-                if resp.clicked() {
-                    switch_to = Some(i);
-                }
-                if resp.clicked_by(egui::PointerButton::Middle) && !pinned {
-                    close = Some(i);
-                }
-                resp.context_menu(|ui| {
-                    if ui.button("Close").clicked() {
+                // Force a single horizontal ROW for the chip contents (grip ·
+                // name · pin · close). Top/bottom strips are already in a
+                // horizontal parent so this is a no-op there; a SIDE strip's
+                // parent is vertical, where without this wrap the name/pin/close
+                // would stack into a ragged column per tab (#30).
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    // Side strips lead each tab with an explicit drag GRIP so the
+                    // row reads grip · name · pin · close, mirroring the split-pane
+                    // header. Painted dots (`grip_handle`), never a phosphor glyph,
+                    // so the handle can't tofu. Top/bottom strips have no room for a
+                    // grip column, so the name stays the drag target there.
+                    if side {
+                        if pinned {
+                            grip_handle(ui, false, muted).on_hover_text("Pinned — drag disabled");
+                        } else {
+                            let g = grip_handle(ui, true, muted)
+                                .on_hover_text("Drag to reorder")
+                                .on_hover_cursor(egui::CursorIcon::Grab);
+                            if g.dragged() {
+                                if let Some(p) = g.interact_pointer_pos() {
+                                    dragging = Some((i, shown.clone(), p));
+                                }
+                            }
+                            if g.drag_stopped() {
+                                if let Some(p) = g.interact_pointer_pos() {
+                                    drag_src = Some(i);
+                                    drop_pos = Some(p);
+                                }
+                            }
+                        }
+                    }
+                    let label =
+                        RichText::new(shown.clone()).color(if selected { accent } else { muted });
+                    let resp = ui.add(
+                        egui::Label::new(label)
+                            .selectable(false)
+                            .sense(egui::Sense::click_and_drag()),
+                    );
+                    if resp.clicked() {
+                        switch_to = Some(i);
+                    }
+                    if resp.clicked_by(egui::PointerButton::Middle) && !pinned {
                         close = Some(i);
-                        ui.close_menu();
                     }
-                    if ui.button("Close Others").clicked() {
-                        close_others = Some(i);
-                        ui.close_menu();
+                    resp.context_menu(|ui| {
+                        if ui.button("Close").clicked() {
+                            close = Some(i);
+                            ui.close_menu();
+                        }
+                        if ui.button("Close Others").clicked() {
+                            close_others = Some(i);
+                            ui.close_menu();
+                        }
+                        if ui.button("Close All to the Right").clicked() {
+                            close_to_right = Some(i);
+                            ui.close_menu();
+                        }
+                        if ui.button("Close All").clicked() {
+                            close_all = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button(pin_label).clicked() {
+                            toggle_pin = Some(i);
+                            ui.close_menu();
+                        }
+                    });
+                    // #R5: pinned notes are anchored — they switch on click but
+                    // never initiate a drag-reorder (no ghost, no drop resolution).
+                    if resp.dragged() && !pinned {
+                        if let Some(p) = resp.interact_pointer_pos() {
+                            dragging = Some((i, shown.clone(), p));
+                        }
                     }
-                    if ui.button("Close All to the Right").clicked() {
-                        close_to_right = Some(i);
-                        ui.close_menu();
+                    if resp.drag_stopped() && !pinned {
+                        if let Some(pos) = resp.interact_pointer_pos() {
+                            drag_src = Some(i);
+                            drop_pos = Some(pos);
+                        }
                     }
-                    if ui.button("Close All").clicked() {
-                        close_all = true;
-                        ui.close_menu();
+                    // Pin TOGGLE — only on the active tab (the pin GLYPH in the
+                    // label still marks any pinned tab, so non-active pins stay
+                    // visible).
+                    if selected {
+                        let glyph = if pinned {
+                            egui_phosphor::thin::PUSH_PIN_SLASH
+                        } else {
+                            egui_phosphor::thin::PUSH_PIN
+                        };
+                        if ui
+                            .add(egui::Button::new(glyph).frame(false).small())
+                            .on_hover_text(pin_label)
+                            .clicked()
+                        {
+                            toggle_pin = Some(i);
+                        }
                     }
-                    ui.separator();
-                    if ui.button(pin_label).clicked() {
-                        toggle_pin = Some(i);
-                        ui.close_menu();
+                    // Close — on every UNPINNED tab. A pinned note hides the ✕ (and
+                    // refuses middle-click / context Close) so it can't be closed by
+                    // accident; unpin first (#R5).
+                    if !pinned
+                        && ui
+                            .add(
+                                egui::Button::new(egui_phosphor::thin::X)
+                                    .frame(false)
+                                    .small(),
+                            )
+                            .on_hover_text("Close tab (or middle-click)")
+                            .clicked()
+                    {
+                        close = Some(i);
                     }
                 });
-                // #R5: pinned notes are anchored — they switch on click but
-                // never initiate a drag-reorder (no ghost, no drop resolution).
-                if resp.dragged() && !pinned {
-                    if let Some(p) = resp.interact_pointer_pos() {
-                        dragging = Some((i, shown.clone(), p));
-                    }
-                }
-                if resp.drag_stopped() && !pinned {
-                    if let Some(pos) = resp.interact_pointer_pos() {
-                        drag_src = Some(i);
-                        drop_pos = Some(pos);
-                    }
-                }
-                // Pin TOGGLE — only on the active tab (the pin GLYPH in the label
-                // still marks any pinned tab, so non-active pins stay visible).
-                if selected {
-                    let glyph = if pinned {
-                        egui_phosphor::thin::PUSH_PIN_SLASH
-                    } else {
-                        egui_phosphor::thin::PUSH_PIN
-                    };
-                    if ui
-                        .add(egui::Button::new(glyph).frame(false).small())
-                        .on_hover_text(pin_label)
-                        .clicked()
-                    {
-                        toggle_pin = Some(i);
-                    }
-                }
-                // Close — on every UNPINNED tab. A pinned note hides the ✕ (and
-                // refuses middle-click / context Close) so it can't be closed by
-                // accident; unpin first (#R5).
-                if !pinned
-                    && ui
-                        .add(
-                            egui::Button::new(egui_phosphor::thin::X)
-                                .frame(false)
-                                .small(),
-                        )
-                        .on_hover_text("Close tab (or middle-click)")
-                        .clicked()
-                {
-                    close = Some(i);
-                }
             });
             // Hit-test the FULL chip rect (label + pin + close + margins), not the
             // bare name-label — that was why a drop in the gap, or over the
@@ -4043,13 +4246,20 @@ pub(crate) fn toolbar_widget(
     icons: bool,
     jp_glyphs: bool,
     size: f32,
+    primary_color: Color32,
 ) -> egui::WidgetText {
     let primary = toolbar_label(id, icons);
     let kanji = if jp_glyphs { jp_glyph(id) } else { None };
     let Some(kanji) = kanji else {
         // Size the primary glyph/label by `toolbar.icon_size_px` so the slider
-        // is live for the common (no-kanji) case too.
-        return egui::RichText::new(primary).size(size).into();
+        // is live for the common (no-kanji) case too. `primary_color` is
+        // `Color32::PLACEHOLDER` for plain buttons (follow the widget's own fg,
+        // which keeps the hover/active brightening) and a concrete accent for a
+        // SELECTED toggle (see below).
+        return egui::RichText::new(primary)
+            .size(size)
+            .color(primary_color)
+            .into();
     };
     use egui::text::LayoutJob;
     // The kanji "instrument plate" keeps the original 10:14 size ratio relative
@@ -4061,11 +4271,16 @@ pub(crate) fn toolbar_widget(
         0.0,
         egui::TextFormat {
             font_id: egui::FontId::proportional(size),
-            // #105 — PLACEHOLDER makes the widget substitute its normal text
-            // colour, so the ENGLISH label is the SAME colour whether kanji
-            // labels are on or off. (TextFormat::default's colour is gray, which
-            // is what made the English text change colour when kanji turned on.)
-            color: egui::Color32::PLACEHOLDER,
+            // #22/#105 — the primary colour is supplied by the caller. PLACEHOLDER
+            // makes the widget substitute its normal text colour, so an unselected
+            // English label is the SAME colour whether kanji labels are on or off.
+            // A SELECTED toolbar TOGGLE passes a CONCRETE accent here so the label
+            // stays theme-accent in BOTH kanji-on and kanji-off states — egui's
+            // `selectable_label` only recolours PLACEHOLDER text to its strong
+            // contrast colour, so a concrete accent survives the selected state
+            // (kanji-on previously rendered white because the LayoutJob's
+            // PLACEHOLDER primary was recoloured by the selected widget).
+            color: primary_color,
             ..Default::default()
         },
     );
@@ -4172,6 +4387,10 @@ pub(crate) const FONT_FAMILIES: &[(&str, &str)] = &[
     ("Fira Mono", "FiraMono"),
     ("Space Mono", "SpaceMono"),
     ("Cousine", "Cousine"),
+    ("Source Code Pro", "SourceCodePro"),
+    ("B612 Mono", "B612Mono"),
+    ("Share Tech Mono", "ShareTechMono"),
+    ("VT323", "VT323"),
 ];
 
 /// Selectable note (editor) colour themes (#104) — the syntect bundled set
@@ -4186,6 +4405,10 @@ pub(crate) const NOTE_THEMES: &[&str] = &[
     "InspiredGitHub",
     "Solarized (dark)",
     "Solarized (light)",
+    // #26 — bundled brand note themes (see `Highlighter::add_bundled_themes`).
+    "Wired Noir",
+    "Phosphor Amber",
+    "Operator Violet",
 ];
 
 /// Change-detection key for the live font set (#103): note family + UI family.
@@ -4244,6 +4467,19 @@ fn build_fonts(editor_family: &str, ui_family: &str) -> egui::FontDefinitions {
         "../../../assets/fonts/Cousine/Cousine-Regular.ttf"
     );
     embed!(
+        "SourceCodePro",
+        "../../../assets/fonts/SourceCodePro/SourceCodePro-Regular.ttf"
+    );
+    embed!(
+        "B612Mono",
+        "../../../assets/fonts/B612Mono/B612Mono-Regular.ttf"
+    );
+    embed!(
+        "ShareTechMono",
+        "../../../assets/fonts/ShareTechMono/ShareTechMono-Regular.ttf"
+    );
+    embed!("VT323", "../../../assets/fonts/VT323/VT323-Regular.ttf");
+    embed!(
         "NotoSansJP-Subset",
         "../../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf"
     );
@@ -4295,9 +4531,10 @@ fn panel_fill(
         None => ui_color(theme, "panel", Rgba::new(0x0d, 0x0b, 0x14, 255)),
     };
     if window.effective_translucent() {
-        // 0.05 floor matches the settings slider min + scribe_render::apply_window_opacity
-        // so the full slider travel is live (the old 0.30 floor was a dead band).
-        let a = (window.opacity.clamp(0.05, 1.0) * 255.0).round() as u8;
+        // 0.02 floor matches the settings slider min + scribe_render::apply_window_opacity
+        // so the full slider travel is live (the old 0.30 floor was a dead band;
+        // #24 dropped 0.05 → 0.02 for a more see-through lowest setting).
+        let a = (window.opacity.clamp(0.02, 1.0) * 255.0).round() as u8;
         Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a)
     } else {
         base
@@ -4805,6 +5042,21 @@ impl ScribeApp {
         // meaningful; the headless egui_kittest harness has none, and sending a
         // viewport command every frame there keeps the harness from settling
         // (it trips the max_steps guard). Compiled out of test builds only.
+        //
+        // #24 KNOWN LIMITATION (documented, not silently ignored): in SOME glass/
+        // mica/vibrancy backdrop modes the DWM re-adds the native caption buttons
+        // *persistently* faster than this per-frame re-assert can suppress them,
+        // producing a doubled caption over the custom title bar. A guaranteed fix
+        // requires Win32 caption removal via raw FFI (SetWindowLongPtrW /
+        // DwmSetWindowAttribute), which is `unsafe` — and BOTH `scribe-app` and
+        // `scribe-render` are `#![forbid(unsafe_code)]` by deliberate architecture
+        // (scribe-core's single mmap exception is the only `unsafe` in the tree).
+        // Rather than relax that guarantee or pull in an FFI helper crate, the
+        // chosen resolution is the documented non-frameless fallback: the Settings
+        // "Frameless window" tooltip tells the user to turn frameless OFF if they
+        // hit the doubled caption — the native frame composes cleanly with every
+        // backdrop. This per-frame re-assert remains the best in-process
+        // mitigation for the common case.
         if !cfg!(test) && self.config.appearance.frameless {
             ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
         }
@@ -5220,14 +5472,14 @@ impl ScribeApp {
                     egui::TopBottomPanel::top("tabs-top")
                         .frame(egui::Frame::default().fill(panel))
                         .show(ctx, |ui| {
-                            ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
+                            ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted, false));
                         });
                 }
                 scribe_core::config::TabBarPosition::Bottom => {
                     egui::TopBottomPanel::bottom("tabs-bottom")
                         .frame(egui::Frame::default().fill(panel))
                         .show(ctx, |ui| {
-                            ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
+                            ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted, false));
                         });
                 }
                 scribe_core::config::TabBarPosition::Left => {
@@ -6522,6 +6774,39 @@ impl ScribeApp {
                                 paint_squiggle(painter, x0, x1, y, red);
                             }
                         }
+                        // #28 — render-whitespace overlay for the DEFAULT egui
+                        // TextEdit path. Previously the `·`/`→` markers only drew
+                        // in the experimental rope editor, so the toggle did
+                        // nothing in the default editor. Walk the laid-out galley
+                        // glyphs (so the markers follow wrapping AND the chosen
+                        // monospace face) and paint a faint `·` centred in each
+                        // space cell, `→` in each tab cell. Pure overlay — the
+                        // buffer text and the syntax spans are untouched.
+                        if self.config.editor.render_whitespace {
+                            let painter = ui.painter();
+                            let ws_font = FontId::monospace(self.config.fonts.editor_size);
+                            let ws_color = muted.gamma_multiply(0.7);
+                            let origin = out.galley_pos.to_vec2();
+                            for row in &out.galley.rows {
+                                let row_off = origin + row.pos.to_vec2();
+                                let cy = row_off.y + row.size.y * 0.5;
+                                for g in &row.glyphs {
+                                    let marker = match g.chr {
+                                        ' ' => "·",
+                                        '\t' => "→",
+                                        _ => continue,
+                                    };
+                                    let cx = row_off.x + g.pos.x + g.advance_width * 0.5;
+                                    painter.text(
+                                        egui::pos2(cx, cy),
+                                        egui::Align2::CENTER_CENTER,
+                                        marker,
+                                        ws_font.clone(),
+                                        ws_color,
+                                    );
+                                }
+                            }
+                        }
                         if let Some(range) = out.cursor_range {
                             // egui 0.34: CursorRange.primary is a CCursor directly
                             // (no nested .ccursor); Galley::pos_from_ccursor was
@@ -7731,11 +8016,12 @@ mod jp_glyph_tests {
     #[test]
     fn widget_falls_back_to_label_when_disabled_or_unknown() {
         // jp_glyph_labels=false → primary label only, regardless of action.
-        let off = toolbar_widget("new", false, false, 14.0);
+        let off = toolbar_widget("new", false, false, 14.0, egui::Color32::PLACEHOLDER);
         assert_eq!(off.text(), "new");
         // Even with the flag on, an action without verified kanji returns
         // only the primary label — no kanji is invented.
-        let on_unknown = toolbar_widget("openfolder", false, true, 14.0);
+        let on_unknown =
+            toolbar_widget("openfolder", false, true, 14.0, egui::Color32::PLACEHOLDER);
         assert_eq!(on_unknown.text(), "folder");
     }
 
@@ -7743,7 +8029,7 @@ mod jp_glyph_tests {
     fn widget_appends_kanji_when_enabled_for_verified_action() {
         // jp_glyph_labels=true + verified action → primary then kanji.
         // The LayoutJob's flattened text contains both pieces.
-        let on = toolbar_widget("save", false, true, 14.0);
+        let on = toolbar_widget("save", false, true, 14.0, egui::Color32::PLACEHOLDER);
         let text = on.text();
         assert!(text.starts_with("save"), "got {text:?}");
         assert!(text.contains("保"), "got {text:?}");
@@ -7754,7 +8040,7 @@ mod jp_glyph_tests {
         // #105 — with kanji ON, the ENGLISH (primary) section must use
         // PLACEHOLDER so the widget substitutes its normal text colour, i.e.
         // identical to kanji-OFF. Only the kanji section is explicitly tinted.
-        let on = toolbar_widget("save", false, true, 14.0);
+        let on = toolbar_widget("save", false, true, 14.0, egui::Color32::PLACEHOLDER);
         match on {
             egui::WidgetText::LayoutJob(job) => {
                 assert_eq!(
@@ -7766,6 +8052,36 @@ mod jp_glyph_tests {
                     job.sections[1].format.color,
                     egui::Color32::PLACEHOLDER,
                     "the kanji section is the one that is tinted"
+                );
+            }
+            other => panic!("expected a LayoutJob with a kanji section, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selected_toggle_pins_primary_to_accent_with_kanji_on() {
+        // #22 — a SELECTED toolbar toggle passes a CONCRETE accent as the primary
+        // colour, so with kanji ON the LayoutJob's primary (english) section must
+        // carry that exact accent — NOT PLACEHOLDER, which `selectable_label`
+        // would recolour to its strong-contrast (white) selected colour. The
+        // kanji section keeps its own dim tint. This is the regression guard for
+        // the "kanji-on selected toggle renders white instead of accent" bug.
+        let accent = egui::Color32::from_rgb(0, 255, 254);
+        let on = toolbar_widget("save", false, true, 14.0, accent);
+        match on {
+            egui::WidgetText::LayoutJob(job) => {
+                assert_eq!(
+                    job.sections[0].format.color, accent,
+                    "selected english label must be accent even with kanji on"
+                );
+                assert_ne!(
+                    job.sections[0].format.color,
+                    egui::Color32::PLACEHOLDER,
+                    "a selected toggle must NOT leave the primary as PLACEHOLDER"
+                );
+                assert_ne!(
+                    job.sections[1].format.color, accent,
+                    "the kanji section keeps its own dim tint"
                 );
             }
             other => panic!("expected a LayoutJob with a kanji section, got {other:?}"),
@@ -8269,6 +8585,106 @@ mod e2e {
         cfg.editor.tab_bar_position = scribe_core::config::TabBarPosition::Right;
         cfg.editor.side_tabs_rotated = false;
         let mut app = ScribeApp::new_test(cfg);
+        app.new_tab();
+        run_frames(&mut app, 3);
+        assert!(app.tabs.len() >= 2);
+    }
+
+    /// #30 node.rect verification — a ROTATE-OFF side tab lays its controls out
+    /// as a horizontal ROW (grip · name · pin · close): the close (✕) shares the
+    /// pin's row (≈ same y) and sits to its RIGHT. Before the fix the side strip
+    /// inherited the vertical parent layout and stacked name/pin/close per tab.
+    #[test]
+    fn rotate_off_side_tab_is_a_horizontal_row() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.appearance.frameless = false; // no custom-titlebar ✕ to disambiguate
+        cfg.editor.tab_bar_position = scribe_core::config::TabBarPosition::Left;
+        cfg.editor.side_tabs_rotated = false;
+        let app = ScribeApp::new_test(cfg); // single active, unpinned tab
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 600.0))
+            .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+        h.run();
+        h.run();
+        let pin = h.get_by_label(egui_phosphor::thin::PUSH_PIN).rect();
+        let close = h.get_by_label(egui_phosphor::thin::X).rect();
+        assert!(
+            (close.center().y - pin.center().y).abs() < 6.0,
+            "rotate-off side tab must be a ROW: pin and close share a row \
+             (pin.y={:.1}, close.y={:.1})",
+            pin.center().y,
+            close.center().y
+        );
+        assert!(
+            close.center().x > pin.center().x + 2.0,
+            "rotate-off row order is grip·name·pin·close: close (✕) is RIGHT of \
+             the pin (pin.x={:.1}, close.x={:.1})",
+            pin.center().x,
+            close.center().x
+        );
+    }
+
+    /// #30 node.rect verification — a ROTATE-ON side tab is a vertical COLUMN
+    /// (grip · rotated-name · pin · close): the close sits BELOW the pin and they
+    /// share an x. Also exercises the rotated drag-grip render path.
+    #[test]
+    fn rotate_on_side_tab_is_a_vertical_column() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.appearance.frameless = false;
+        cfg.editor.tab_bar_position = scribe_core::config::TabBarPosition::Left;
+        cfg.editor.side_tabs_rotated = true;
+        let app = ScribeApp::new_test(cfg);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 600.0))
+            .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+        h.run();
+        h.run();
+        let pin = h.get_by_label(egui_phosphor::thin::PUSH_PIN).rect();
+        let close = h.get_by_label(egui_phosphor::thin::X).rect();
+        assert!(
+            close.center().y > pin.center().y + 2.0,
+            "rotate-on column order is grip·name·pin·close: close (✕) is BELOW \
+             the pin (pin.y={:.1}, close.y={:.1})",
+            pin.center().y,
+            close.center().y
+        );
+        assert!(
+            (close.center().x - pin.center().x).abs() < 24.0,
+            "rotate-on side tab is a single COLUMN: pin and close share an x \
+             (pin.x={:.1}, close.x={:.1})",
+            pin.center().x,
+            close.center().x
+        );
+    }
+
+    /// #28 render-coverage — the render-whitespace overlay now runs in the
+    /// DEFAULT egui TextEdit path (previously the `·`/`→` markers only drew in
+    /// the experimental rope editor). We can't read painted glyphs back, so this
+    /// guards that the galley-walk overlay executes without panicking over a
+    /// buffer that has both spaces and tabs.
+    #[test]
+    fn render_whitespace_overlay_default_editor_runs() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.editor.render_whitespace = true;
+        cfg.editor.experimental_rope_editor = false; // exercise the TextEdit path
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "fn  main() {\n\tlet x = 1;\n}\n".into();
+        run_frames(&mut app, 3);
+        assert!(app.config.editor.render_whitespace);
+    }
+
+    /// #28 render-coverage — the same overlay also runs in split/grid view.
+    #[test]
+    fn render_whitespace_overlay_grid_path_runs() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.editor.render_whitespace = true;
+        cfg.editor.grid_enabled = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs[0].text = "a  b\tc\n".into();
         app.new_tab();
         run_frames(&mut app, 3);
         assert!(app.tabs.len() >= 2);

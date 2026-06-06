@@ -64,12 +64,15 @@ pub fn syntax_color32(rgb: [u8; 3]) -> Color32 {
 }
 
 /// Lower the alpha of the surface fills so a translucent/glass window reveals
-/// what is behind it. `opacity` is clamped to [0.05, 1.0] — the 0.05 floor
+/// what is behind it. `opacity` is clamped to [0.02, 1.0] — the 0.02 floor
 /// matches the settings slider minimum so the whole slider travel is live
-/// (a previous 0.30 floor made the bottom quarter of the slider a no-op), while
-/// staying just above fully-invisible so the window can never be lost.
+/// (a previous 0.30 floor made the bottom quarter of the slider a no-op; #24
+/// dropped 0.05 → 0.02 so the lowest setting is genuinely near-glass), while
+/// staying just above fully-invisible so the window can never be lost (the
+/// editor text itself is painted opaque on top, so it stays legible even at the
+/// floor — only the chrome/background fills go translucent).
 pub fn apply_window_opacity(v: &mut Visuals, opacity: f32) {
-    let a = (opacity.clamp(0.05, 1.0) * 255.0).round() as u8;
+    let a = (opacity.clamp(0.02, 1.0) * 255.0).round() as u8;
     let with_a = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
     v.panel_fill = with_a(v.panel_fill);
     v.window_fill = with_a(v.window_fill);

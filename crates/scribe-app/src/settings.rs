@@ -496,7 +496,11 @@ fn render_sections(
                 q,
                 "frameless window",
                 "Frameless window (restart to apply)",
-                "Draw the window without the OS title bar (a custom in-app title bar is used).",
+                "Draw the window without the OS title bar (a custom in-app title bar is used). \
+                 Known Windows limitation: with a glass/mica/vibrancy backdrop the DWM can re-add \
+                 the native min/max/close buttons over the custom title bar (a doubled caption). \
+                 If you see that, turn frameless OFF — the native frame composes cleanly with the \
+                 backdrop.",
                 &mut config.appearance.frameless,
                 &def.appearance.frameless,
             );
@@ -1139,9 +1143,10 @@ fn render_sections(
                 changed |= ui
                     .add_enabled(
                         translucent,
-                        // Floor at 0.05 (not 0.0) so the window can get very
-                        // see-through without becoming fully invisible + lost.
-                        egui::Slider::new(&mut config.window.opacity, 0.05..=1.0),
+                        // Floor at 0.02 (not 0.0) so the window can get very
+                        // see-through (#24 lowered it from 0.05) without becoming
+                        // fully invisible + lost. The editor text stays opaque.
+                        egui::Slider::new(&mut config.window.opacity, 0.02..=1.0),
                     )
                     .changed();
                 changed |= reset_to_default(ui, &mut config.window.opacity, &def.window.opacity);
