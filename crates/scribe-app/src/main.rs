@@ -98,8 +98,20 @@ fn main() -> ExitCode {
         viewport = viewport.with_transparent(true);
     }
 
+    // Power preference: a 2D text editor should render on the INTEGRATED GPU.
+    // `LowPower` avoids spinning up a discrete GPU (saves battery + thermals and
+    // wakes faster from idle); on a single-GPU machine it simply selects the only
+    // adapter, so it is never wrong. Present mode stays the default `AutoVsync`
+    // (frame-capped, low-power) — never Immediate/Mailbox, which would uncap the
+    // frame rate and burn power for no benefit on a mostly-static document.
+    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
+    if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
+        setup.power_preference = eframe::wgpu::PowerPreference::LowPower;
+    }
+
     let native_options = eframe::NativeOptions {
         viewport,
+        wgpu_options,
         // Persist native window position + size across restarts (pairs with the
         // eframe `persistence` feature + the stable `with_app_id` above). eframe
         // also fires `App::save()` on exit/interval once persistence is on.

@@ -129,3 +129,79 @@ jobs:
       - name: Build fuzz targets (compile-only)
         working-directory: fuzz
         run: cargo +nightly fuzz build
+
+  unused-deps:
+    # cargo-machete fails the build on an UNUSED dependency. An unused dep is
+    # unaudited code sitting in the lockfile + attack surface for no benefit;
+    # keeping the graph minimal is a supply-chain control. Verified clean at
+    # the time this job landed.
+    name: cargo-machete (unused deps)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+      - name: Check for unused dependencies
+        run: cargo machete
+
+  binary-hardening:
+    # Non-regressing guard for the binary mitigations: build the RELEASE exe
+    # (Control Flow Guard is applied via .cargo/config.toml's cfg(windows)
+    # rustflags) and assert with winchecksec that the shipped binary actually
+    # carries CFG + ASLR (/DYNAMICBASE) + High-Entropy VA + DEP (/NXCOMPAT). If a
+    # future change ever drops a mitigation, this fails instead of silently
+    # shipping a weaker binary.
+    name: binary hardening (winchecksec)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Build release binary (CFG via .cargo/config.toml)
+        run: cargo build --release --locked --bin scr1b3
+      - name: Download + verify winchecksec
+        shell: bash
+        run: |
+          set -euo pipefail
+          # SHA-256-pinned download — never run an unverified binary in CI.
+          url="https://github.com/trailofbits/winchecksec/releases/download/v3.1.0/windows.x64.Release.zip"
+          want="487c14d941f94d8c1098f0da85144f1ecb40fc3e7f39dbaad16c8eab909fff25"
+          curl -fSL -o wcs.zip "$url"
+          got="$(sha256sum wcs.zip | awk '{print $1}')"
+          [ "$got" = "$want" ] || { echo "::error::winchecksec sha256 mismatch: $got"; exit 1; }
+          7z x -y wcs.zip -owcs >/dev/null
+      - name: Assert binary mitigations (CFG + ASLR + High-Entropy VA + DEP)
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe="target/release/scr1b3.exe"
+          wcs="$(find wcs -name 'winchecksec.exe' | head -1)"
+          [ -n "$wcs" ] || { echo "::error::winchecksec.exe not found"; exit 1; }
+          "$wcs" -j "$exe" > report.json 2>wcs.err || { cat wcs.err; exit 1; }
+          cat report.json
+          python - <<'PY'
+          import json
+          data = json.load(open("report.json"))
+          mit = data[0]["mitigations"]
+          required = {
+              "cfg": "Control Flow Guard (/guard:cf)",
+              "dynamicBase": "ASLR (/DYNAMICBASE)",
+              "highEntropyVA": "High-Entropy VA",
+              "nx": "DEP (/NXCOMPAT)",
+          }
+          missing = [d for k, d in required.items() if mit.get(k, {}).get("presence") != "Present"]
+          if missing:
+              raise SystemExit("::error::shipped binary is missing mitigations: " + "; ".join(missing))
+          print("binary hardening OK:", "; ".join(required.values()))
+          PY

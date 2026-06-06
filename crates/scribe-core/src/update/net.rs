@@ -351,6 +351,12 @@ fn download_asset(url: &str, mut progress: impl FnMut(u64, u64)) -> Result<Vec<u
     Ok(buf)
 }
 
+/// Hard cap on the bytes written for a single extracted binary — a
+/// decompression-bomb / disk-fill guard. The real binary is tens of MB; 512 MiB
+/// is generous headroom while bounding what a corrupt or hostile (yet somehow
+/// signature-valid) archive could write.
+const MAX_EXTRACTED_BINARY_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Extract the single `scr1b3` / `scr1b3.exe` binary entry from a `.tar.gz`
 /// archive's bytes into `dir`, returning the path to the extracted file. On
 /// unix the extracted file is made executable (`0o755`). This is split out from
@@ -366,7 +372,7 @@ fn extract_binary(archive_bytes: &[u8], dir: &Path) -> Result<PathBuf, String> {
         .map_err(|e| format!("failed to read tar entries: {e}"))?;
 
     for entry in entries {
-        let mut entry = entry.map_err(|e| format!("failed to read tar entry: {e}"))?;
+        let entry = entry.map_err(|e| format!("failed to read tar entry: {e}"))?;
         let path = entry
             .path()
             .map_err(|e| format!("bad tar entry path: {e}"))?;
@@ -375,12 +381,38 @@ fn extract_binary(archive_bytes: &[u8], dir: &Path) -> Result<PathBuf, String> {
             None => continue,
         };
         if file_name == "scr1b3" || file_name == "scr1b3.exe" {
+            // Defense-in-depth. The archive is already minisign-verified before we
+            // ever reach here, so this is belt-and-suspenders, but archive
+            // extraction is the canonical Rust-CVE class (TARmageddon /
+            // CVE-2025-59825, zip-slip), so we harden it anyway:
+            //  * Path traversal is already neutralised — `out_path` joins only the
+            //    BASENAME (`path.file_name()`) to `dir`, so a `../../evil` entry
+            //    path can never escape `dir`.
+            //  * Reject any NON-REGULAR entry (symlink / hardlink / dir / device):
+            //    a link entry named `scr1b3` must never be honoured (we would
+            //    otherwise write an empty file, but rejecting is clearer + safer).
+            //  * Cap the bytes written so a malformed or hostile archive cannot
+            //    fill the disk (decompression-bomb guard).
+            if entry.header().entry_type() != tar::EntryType::Regular {
+                return Err(format!(
+                    "refusing non-regular tar entry for {file_name} (type {:?})",
+                    entry.header().entry_type()
+                ));
+            }
             let out_path = dir.join(&file_name);
             let mut out = fs::File::create(&out_path)
                 .map_err(|e| format!("failed to create {}: {e}", out_path.display()))?;
-            std::io::copy(&mut entry, &mut out)
+            let mut limited = std::io::Read::take(entry, MAX_EXTRACTED_BINARY_BYTES);
+            let written = std::io::copy(&mut limited, &mut out)
                 .map_err(|e| format!("failed to write extracted binary: {e}"))?;
             drop(out);
+            if written >= MAX_EXTRACTED_BINARY_BYTES {
+                let _ = fs::remove_file(&out_path);
+                return Err(format!(
+                    "extracted binary exceeded the {MAX_EXTRACTED_BINARY_BYTES}-byte safety cap \
+                     (corrupt or hostile archive)"
+                ));
+            }
             set_executable(&out_path)?;
             return Ok(out_path);
         }
@@ -822,6 +854,39 @@ mod tests {
             let mode = fs::metadata(&extracted).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o755);
         }
+    }
+
+    /// Defense-in-depth: a tarball whose `scr1b3` entry is a SYMLINK (not a
+    /// regular file) is REJECTED — the updater must never honour a link entry
+    /// (the TARmageddon / CVE-2025-59825 class), and nothing is written.
+    #[test]
+    fn extract_binary_rejects_symlink_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_name = if cfg!(windows) {
+            "scr1b3.exe"
+        } else {
+            "scr1b3"
+        };
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Symlink);
+            header.set_size(0);
+            header.set_mode(0o777);
+            builder
+                .append_link(&mut header, bin_name, "/etc/passwd")
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let archive_bytes = gz.finish().unwrap();
+
+        let err = extract_binary(&archive_bytes, dir.path()).unwrap_err();
+        assert!(err.contains("non-regular"), "got: {err}");
+        assert!(
+            !dir.path().join(bin_name).exists(),
+            "a symlink entry must not produce any output file"
+        );
     }
 
     #[test]
