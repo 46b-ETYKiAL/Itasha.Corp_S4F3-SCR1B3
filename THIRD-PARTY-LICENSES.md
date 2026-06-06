@@ -13,6 +13,34 @@ index.
 - **Text**: [`licenses/OFL-1.1-JetBrainsMono.txt`](licenses/OFL-1.1-JetBrainsMono.txt)
 - **Copyright**: Copyright 2020 The JetBrains Mono Project Authors
 
+### Source Code Pro
+
+- **Source**: https://github.com/adobe-fonts/source-code-pro
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`crates/scribe-app/assets/fonts/SourceCodePro/OFL.txt`](crates/scribe-app/assets/fonts/SourceCodePro/OFL.txt)
+- **Copyright**: © 2023 Adobe, with Reserved Font Name 'Source'
+
+### B612 Mono
+
+- **Source**: https://github.com/polarsys/b612
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`crates/scribe-app/assets/fonts/B612Mono/OFL.txt`](crates/scribe-app/assets/fonts/B612Mono/OFL.txt)
+- **Copyright**: Copyright 2012 The B612 Project Authors
+
+### Share Tech Mono
+
+- **Source**: https://github.com/google/fonts/tree/main/ofl/sharetechmono
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`crates/scribe-app/assets/fonts/ShareTechMono/OFL.txt`](crates/scribe-app/assets/fonts/ShareTechMono/OFL.txt)
+- **Copyright**: Copyright 2012 Carrois Type Design, Ralph du Carrois, with Reserved Font Name 'Share'
+
+### VT323
+
+- **Source**: https://github.com/google/fonts/tree/main/ofl/vt323
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`crates/scribe-app/assets/fonts/VT323/OFL.txt`](crates/scribe-app/assets/fonts/VT323/OFL.txt)
+- **Copyright**: Copyright 2011 The VT323 Project Authors
+
 ### Hack (via `epaint_default_fonts`)
 
 - **Source**: https://github.com/source-foundry/Hack

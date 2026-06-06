@@ -192,14 +192,157 @@ impl Default for Highlighter {
 
 impl Highlighter {
     pub fn new() -> Self {
+        let mut themes = ThemeSet::load_defaults();
+        Self::add_bundled_themes(&mut themes);
         Self {
             syntaxes: SyntaxSet::load_defaults_newlines(),
-            themes: ThemeSet::load_defaults(),
+            themes,
             // A dark base theme; the app re-tints via its own Theme for chrome.
             theme_name: "base16-eighties.dark".to_string(),
             ts_rust: build_rust_config(),
             ts_colors: HL_NAMES.iter().map(|n| color_for(n)).collect(),
         }
+    }
+
+    /// Merge the bundled BRAND note (syntax) colour themes (#26) into `themes`,
+    /// alongside the syntect defaults. Each is an ORIGINAL SCR1B3 theme (no
+    /// third-party licence) built PROGRAMMATICALLY via syntect's public `Theme`
+    /// API — this avoids enabling syntect's `plist-load` feature (and pulling in
+    /// the `plist` dependency) just to parse a `.tmTheme` at runtime.
+    fn add_bundled_themes(themes: &mut ThemeSet) {
+        use std::str::FromStr;
+        use syntect::highlighting::{
+            Color as SynColor, ScopeSelectors, StyleModifier, Theme as SynTheme, ThemeItem,
+            ThemeSettings,
+        };
+
+        fn col(r: u8, g: u8, b: u8) -> SynColor {
+            SynColor { r, g, b, a: 0xFF }
+        }
+        // One scope→colour rule. An unparsable selector falls back to the empty
+        // selector (matches nothing) rather than panicking — the global
+        // foreground still covers that token.
+        fn item(scope: &str, c: SynColor) -> ThemeItem {
+            ThemeItem {
+                scope: ScopeSelectors::from_str(scope).unwrap_or_default(),
+                style: StyleModifier {
+                    foreground: Some(c),
+                    background: None,
+                    font_style: None,
+                },
+            }
+        }
+        // (background, foreground, caret, selection, line_highlight) + the 8
+        // syntax rules in a fixed order: comment, keyword, string, constant,
+        // function, type, variable, punctuation.
+        #[allow(clippy::too_many_arguments)]
+        fn theme(
+            name: &str,
+            bg: SynColor,
+            fg: SynColor,
+            caret: SynColor,
+            sel: SynColor,
+            line: SynColor,
+            rules: [SynColor; 8],
+        ) -> SynTheme {
+            let settings = ThemeSettings {
+                foreground: Some(fg),
+                background: Some(bg),
+                caret: Some(caret),
+                selection: Some(sel),
+                line_highlight: Some(line),
+                ..Default::default()
+            };
+            let scopes = vec![
+                item("comment", rules[0]),
+                item("keyword, storage, keyword.control", rules[1]),
+                item("string, string.quoted", rules[2]),
+                item(
+                    "constant.numeric, constant.language, constant.character",
+                    rules[3],
+                ),
+                item("entity.name.function, support.function", rules[4]),
+                item(
+                    "entity.name.type, storage.type, support.type, support.class",
+                    rules[5],
+                ),
+                item("variable, variable.parameter", rules[6]),
+                item("keyword.operator, punctuation", rules[7]),
+            ];
+            SynTheme {
+                name: Some(name.to_string()),
+                author: Some("SCR1B3".to_string()),
+                settings,
+                scopes,
+            }
+        }
+
+        // Wired Noir — cyan-on-near-black (mirrors the wired-noir chrome theme).
+        themes.themes.insert(
+            "Wired Noir".to_string(),
+            theme(
+                "Wired Noir",
+                col(0x0A, 0x0E, 0x14),
+                col(0xC8, 0xD6, 0xDC),
+                col(0x00, 0xFF, 0xFE),
+                col(0x13, 0x35, 0x4A),
+                col(0x10, 0x16, 0x1F),
+                [
+                    col(0x5A, 0x68, 0x73),
+                    col(0x00, 0xFF, 0xFE),
+                    col(0x6F, 0xD7, 0xC1),
+                    col(0xF9, 0x91, 0x57),
+                    col(0x66, 0x99, 0xCC),
+                    col(0xFF, 0xCC, 0x66),
+                    col(0xC8, 0xD6, 0xDC),
+                    col(0xA0, 0x9F, 0x93),
+                ],
+            ),
+        );
+        // Phosphor Amber — amber/green CRT phosphor on black.
+        themes.themes.insert(
+            "Phosphor Amber".to_string(),
+            theme(
+                "Phosphor Amber",
+                col(0x0B, 0x0A, 0x06),
+                col(0xE8, 0xC1, 0x70),
+                col(0xFF, 0xB0, 0x00),
+                col(0x3A, 0x2E, 0x10),
+                col(0x15, 0x12, 0x0A),
+                [
+                    col(0x6B, 0x5A, 0x36),
+                    col(0xFF, 0xB0, 0x00),
+                    col(0x9F, 0xE0, 0x8F),
+                    col(0xFF, 0x7A, 0x3C),
+                    col(0xFF, 0xD4, 0x79),
+                    col(0xFF, 0xE6, 0xA8),
+                    col(0xE8, 0xC1, 0x70),
+                    col(0x9C, 0x8A, 0x55),
+                ],
+            ),
+        );
+        // Operator Violet — the brand OPERATOR VIOLET (#A020FF) on deep plum.
+        themes.themes.insert(
+            "Operator Violet".to_string(),
+            theme(
+                "Operator Violet",
+                col(0x0E, 0x0A, 0x14),
+                col(0xD6, 0xC8, 0xE6),
+                col(0xA0, 0x20, 0xFF),
+                col(0x2A, 0x18, 0x40),
+                col(0x15, 0x10, 0x1F),
+                [
+                    col(0x6A, 0x5A, 0x80),
+                    col(0xA0, 0x20, 0xFF),
+                    col(0xC7, 0xA6, 0xFF),
+                    col(0xFF, 0x77, 0xC8),
+                    col(0x9D, 0x7B, 0xFF),
+                    col(0xE0, 0xB3, 0xFF),
+                    col(0xD6, 0xC8, 0xE6),
+                    col(0x8C, 0x7A, 0xA0),
+                ],
+            ),
+        );
     }
 
     /// Number of bundled syntect languages (sanity / about-box).
@@ -530,6 +673,30 @@ mod tests {
         assert_eq!(hl.theme_name(), "Solarized (dark)");
         hl.set_theme("no-such-theme");
         assert_eq!(hl.theme_name(), "Solarized (dark)", "unknown theme ignored");
+    }
+
+    #[test]
+    fn bundled_brand_themes_load_and_apply() {
+        // #26 — the 3 bundled brand note themes parse, register, and are
+        // selectable (set_theme accepts them, unlike an unknown name). This also
+        // guards `add_bundled_themes` against a malformed .tmTheme asset.
+        let mut hl = Highlighter::new();
+        let names = hl.theme_names();
+        for brand in ["Wired Noir", "Phosphor Amber", "Operator Violet"] {
+            assert!(names.contains(&brand.to_string()), "{brand} registered");
+            hl.set_theme(brand);
+            assert_eq!(hl.theme_name(), brand, "{brand} is selectable");
+        }
+        // The brand themes genuinely recolour vs a default theme.
+        let mut a = Highlighter::new();
+        a.set_theme("Operator Violet");
+        let mut b = Highlighter::new();
+        b.set_theme("InspiredGitHub");
+        assert_ne!(
+            a.highlight_document("let x = 1;\n", Some("rs")),
+            b.highlight_document("let x = 1;\n", Some("rs")),
+            "a brand note theme must recolour the text"
+        );
     }
 
     #[test]
