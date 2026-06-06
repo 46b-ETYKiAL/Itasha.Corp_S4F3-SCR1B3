@@ -1,0 +1,15 @@
+# Build configuration for SCR1B3.
+#
+# Windows binary hardening — Control Flow Guard (`/guard:cf`). Stabilised in
+# Rust 1.47; ~0.1% size / ~3% runtime overhead. CFG hardens indirect calls and
+# returns against ROP/JOP control-flow-hijack chains — the residual exploit
+# class that memory-safety (`#![forbid(unsafe_code)]`) does not, by itself,
+# fully close in the presence of `unsafe` in transitive deps (wgpu / winit).
+#
+# ASLR (`/DYNAMICBASE`), DEP (`/NXCOMPAT`) and High-Entropy VA are already MSVC
+# linker defaults for 64-bit Rust EXEs; CFG is the high-value mitigation that is
+# NOT on by default, so we opt in here for every Windows build. Non-Windows
+# targets are untouched by the `cfg(windows)` gate. There is no `RUSTFLAGS` set
+# in CI, so this `target.cfg` rustflags entry is authoritative for every build.
+[target.'cfg(windows)']
+rustflags = ["-C", "control-flow-guard"]

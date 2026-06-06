@@ -52,6 +52,30 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "warn"
+# Privacy + attack-surface enforcement — "telemetry-free by construction"
+# (see SECURITY.md / PRIVACY.md). The ONLY sanctioned network path is the
+# opt-out auto-update version check over `ureq` + `rustls` (a synchronous,
+# runtime-free HTTPS client). These crates must never enter the dependency
+# graph: a second HTTP client / async runtime would be a new egress + attack
+# surface, and any analytics / crash-reporting crate would silently break the
+# no-telemetry guarantee. All confirmed absent from the full tree (incl.
+# dev-deps) when this list landed, so each entry is a forward guard.
+deny = [
+    # Alternative HTTP clients / async runtimes — `ureq` is the one stack.
+    { name = "reqwest" },
+    { name = "hyper" },
+    { name = "isahc" },
+    { name = "curl" },
+    { name = "surf" },
+    { name = "tokio" },
+    # Telemetry / analytics / crash-reporting — forbidden outright.
+    { name = "sentry" },
+    { name = "sentry-core" },
+    { name = "opentelemetry" },
+    { name = "tracing-opentelemetry" },
+    { name = "posthog-rs" },
+    { name = "mixpanel" },
+]
 
 [sources]
 unknown-registry = "deny"

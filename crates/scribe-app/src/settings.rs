@@ -534,6 +534,12 @@ fn render_sections(
             q,
             "theme create edit customize export palette colour color user editor",
         ) {
+            // #10 — a separator + heading delimits the toolbar toggles above from
+            // the theme-creator section below, so the colour editor reads as its
+            // own distinct block rather than running on from the toggle list.
+            ui.separator();
+            ui.label(egui::RichText::new("Create / edit a theme").strong());
+            ui.add_space(4.0);
             changed |= crate::theme_editor::show(ui, config);
         }
         space(ui);
