@@ -31,6 +31,19 @@ const GITHUB_API_VERSION: &str = "2026-03-10";
 /// GitHub Releases API `Accept` header value.
 const GITHUB_ACCEPT: &str = "application/vnd.github+json";
 
+/// Overall per-request network timeout. Bounds a slow or stalled connection (a
+/// hostile or just-bad network) so an update check / download can never hang the
+/// worker thread indefinitely.
+const NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Hard cap on the bytes of a single downloaded response held in memory
+/// (tarball / installer / sig / sha). The real artifacts are tens of MB; this
+/// bounds what a hostile or misdirected response can make the app allocate —
+/// the body is minisign-verified AFTER download, so this is the *pre-verify*
+/// memory-safety guard (and the reason `Content-Length` is never trusted for a
+/// raw `with_capacity`).
+const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
+
 /// A single release asset as returned by the GitHub Releases API. Only the
 /// fields the updater needs are deserialized.
 #[derive(Clone, Debug, Deserialize)]
@@ -221,6 +234,16 @@ pub fn select_best(
 pub fn fetch_latest_release(owner: &str, repo: &str) -> Result<RawRelease, String> {
     let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
     let release = ureq::get(&url)
+        // The GitHub API returns the JSON directly (200, no redirect); FORBID
+        // redirects on it so a MITM/DNS-hijack can't bounce the call to an
+        // attacker host serving forged release JSON (which would steer the asset
+        // URLs the updater then trusts up to the minisign check). A redirect now
+        // errors out instead of being followed. Plus a timeout (anti-hang).
+        .config()
+        .max_redirects(0)
+        .max_redirects_will_error(true)
+        .timeout_global(Some(NETWORK_TIMEOUT))
+        .build()
         .header("User-Agent", USER_AGENT)
         .header("Accept", GITHUB_ACCEPT)
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
@@ -262,6 +285,13 @@ pub fn fetch_releases(owner: &str, repo: &str) -> Result<Vec<RawRelease>, String
     // the `t` cache-buster defeats any intermediary caching of the list.
     let url = format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=100");
     let releases = ureq::get(&url)
+        // Same hardening as `fetch_latest_release`: the API answers 200 directly,
+        // so forbid redirects (no off-GitHub bounce to forged JSON) + timeout.
+        .config()
+        .max_redirects(0)
+        .max_redirects_will_error(true)
+        .timeout_global(Some(NETWORK_TIMEOUT))
+        .build()
         .header("User-Agent", USER_AGENT)
         .header("Accept", GITHUB_ACCEPT)
         .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
@@ -304,14 +334,27 @@ pub fn check_for_update(
 /// Blocking GET of a small file (sig / sha), returning its raw bytes.
 fn download_small(url: &str) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
-    ureq::get(url)
+    // Redirects ARE allowed here: an asset URL legitimately 302s from
+    // github.com to the `*.githubusercontent.com` CDN. The content is
+    // minisign+SHA-256 verified after download, so a misdirected body is caught
+    // at verify time; the size cap below + the timeout are the pre-verify
+    // memory/hang guards.
+    let mut resp = ureq::get(url)
+        .config()
+        .timeout_global(Some(NETWORK_TIMEOUT))
+        .build()
         .header("User-Agent", USER_AGENT)
         .call()
-        .map_err(|e| format!("download failed for {url}: {e}"))?
-        .body_mut()
-        .as_reader()
+        .map_err(|e| format!("download failed for {url}: {e}"))?;
+    let reader = resp.body_mut().as_reader();
+    std::io::Read::take(reader, MAX_DOWNLOAD_BYTES + 1)
         .read_to_end(&mut buf)
         .map_err(|e| format!("read failed for {url}: {e}"))?;
+    if buf.len() as u64 > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "download for {url} exceeded the {MAX_DOWNLOAD_BYTES}-byte safety cap"
+        ));
+    }
     Ok(buf)
 }
 
@@ -320,7 +363,11 @@ fn download_small(url: &str) -> Result<Vec<u8>, String> {
 /// is reported as `0` (the UI shows an indeterminate bar). Returns the full
 /// asset bytes.
 fn download_asset(url: &str, mut progress: impl FnMut(u64, u64)) -> Result<Vec<u8>, String> {
+    // Redirects allowed (CDN 302, as in `download_small`); verified post-download.
     let mut resp = ureq::get(url)
+        .config()
+        .timeout_global(Some(NETWORK_TIMEOUT))
+        .build()
         .header("User-Agent", USER_AGENT)
         .call()
         .map_err(|e| format!("download failed for {url}: {e}"))?;
@@ -333,7 +380,10 @@ fn download_asset(url: &str, mut progress: impl FnMut(u64, u64)) -> Result<Vec<u
         .unwrap_or(0);
 
     let mut reader = resp.body_mut().as_reader();
-    let mut buf: Vec<u8> = Vec::with_capacity(total as usize);
+    // NEVER pre-allocate `Content-Length` blindly — it is attacker-controllable,
+    // so a forged `Content-Length: 100GB` would OOM us before a byte is read.
+    // Reserve at most the cap.
+    let mut buf: Vec<u8> = Vec::with_capacity(total.min(MAX_DOWNLOAD_BYTES) as usize);
     let mut chunk = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
     progress(0, total);
@@ -346,6 +396,13 @@ fn download_asset(url: &str, mut progress: impl FnMut(u64, u64)) -> Result<Vec<u
         }
         buf.extend_from_slice(&chunk[..n]);
         downloaded += n as u64;
+        // Bound the in-memory body so a hostile/misdirected response (or a body
+        // with no honest `Content-Length`) can't exhaust memory before verify.
+        if downloaded > MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "download for {url} exceeded the {MAX_DOWNLOAD_BYTES}-byte safety cap"
+            ));
+        }
         progress(downloaded, total);
     }
     Ok(buf)

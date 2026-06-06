@@ -123,6 +123,30 @@ pub fn delete_backup(dir: &Path, name: &str) {
     let _ = fs::remove_file(dir.join(name));
 }
 
+/// Remove ALL on-disk session state that can hold buffer CONTENT or file paths:
+/// the restore manifest (`session.json`) and every backup file under `backup/`
+/// (each is a snapshot of an unsaved buffer's text). Best-effort — a missing
+/// file is not an error — returning the number of files removed. Does NOT touch
+/// the user's config, themes, or any saved document. Used by the app's
+/// "Clear local data" action (privacy).
+pub fn clear_session_state(config_dir: &Path) -> usize {
+    let mut removed = 0usize;
+    if fs::remove_file(manifest_path(config_dir)).is_ok() {
+        removed += 1;
+    }
+    let bdir = backup_dir(config_dir);
+    if let Ok(entries) = fs::read_dir(&bdir) {
+        for entry in entries.flatten() {
+            if entry.path().is_file() && fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    // Drop the (now-empty) backup directory too; ignored if non-empty/absent.
+    let _ = fs::remove_dir(&bdir);
+    removed
+}
+
 /// Atomically persist the manifest as pretty JSON.
 pub fn save_manifest(config_dir: &Path, manifest: &SessionManifest) -> io::Result<()> {
     fs::create_dir_all(config_dir)?;
@@ -205,6 +229,34 @@ mod tests {
     fn write_backup_rejects_path_separator() {
         let dir = tempdir().unwrap();
         assert!(write_backup(dir.path(), "../escape.bak", "x").is_err());
+    }
+
+    #[test]
+    fn clear_session_state_removes_manifest_and_backups() {
+        let dir = tempdir().unwrap();
+        // Lay down a manifest + two backups (unsaved-buffer content).
+        let bdir = backup_dir(dir.path());
+        write_backup(&bdir, "f0.bak", "secret one").unwrap();
+        write_backup(&bdir, "f1.bak", "secret two").unwrap();
+        let m = SessionManifest::new(
+            vec![TabSnapshot {
+                path: Some("/secret/path.txt".into()),
+                dirty: true,
+                backup: Some("f0.bak".into()),
+                cursor: 0,
+            }],
+            0,
+        );
+        save_manifest(dir.path(), &m).unwrap();
+        assert!(manifest_path(dir.path()).exists());
+
+        let removed = clear_session_state(dir.path());
+        assert!(removed >= 3, "manifest + 2 backups removed, got {removed}");
+        assert!(!manifest_path(dir.path()).exists(), "manifest gone");
+        assert!(read_backup(&bdir, "f0.bak").is_err(), "backup content gone");
+        assert!(read_backup(&bdir, "f1.bak").is_err(), "backup content gone");
+        // Idempotent: a second clear on an already-clean dir is a no-op, no panic.
+        assert_eq!(clear_session_state(dir.path()), 0);
     }
 
     #[test]

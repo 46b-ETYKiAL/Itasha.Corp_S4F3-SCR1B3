@@ -177,9 +177,13 @@ pub struct Highlighter {
     syntaxes: SyntaxSet,
     themes: ThemeSet,
     theme_name: String,
-    /// tree-sitter Rust grammar + highlight query, compiled once. `None` if the
-    /// grammar/query failed to build (we then fall back to syntect for Rust).
-    ts_rust: Option<HighlightConfiguration>,
+    /// tree-sitter Rust grammar + highlight query, compiled LAZILY on the first
+    /// Rust-file highlight (not at construction) so cold start never pays the
+    /// grammar+query compile when the user opens a non-Rust file or an empty
+    /// buffer. Inner `None` = the build failed (we then fall back to syntect for
+    /// Rust). `OnceLock` (not `cell::OnceCell`) preserves the field's original
+    /// `Send`/`Sync` so `Highlighter`'s thread-safety is unchanged.
+    ts_rust: std::sync::OnceLock<Option<HighlightConfiguration>>,
     /// Color per `HL_NAMES` index, used to resolve `Highlight(idx)` events.
     ts_colors: Vec<[u8; 3]>,
 }
@@ -199,9 +203,19 @@ impl Highlighter {
             themes,
             // A dark base theme; the app re-tints via its own Theme for chrome.
             theme_name: "base16-eighties.dark".to_string(),
-            ts_rust: build_rust_config(),
+            // Deferred: the Rust grammar+query is compiled on first use, not here
+            // (see `ts_rust()` + the field doc). Keeps cold start off the
+            // grammar-compile path.
+            ts_rust: std::sync::OnceLock::new(),
             ts_colors: HL_NAMES.iter().map(|n| color_for(n)).collect(),
         }
+    }
+
+    /// The lazily-built tree-sitter Rust config. Compiles the grammar+query on
+    /// the FIRST call (then caches it), so opening a non-Rust file or an empty
+    /// buffer never pays the compile at startup. `None` if the build failed.
+    fn ts_rust(&self) -> Option<&HighlightConfiguration> {
+        self.ts_rust.get_or_init(build_rust_config).as_ref()
     }
 
     /// Merge the bundled BRAND note (syntax) colour themes (#26) into `themes`,
@@ -350,9 +364,12 @@ impl Highlighter {
         self.syntaxes.syntaxes().len()
     }
 
-    /// Number of languages served by a native tree-sitter grammar.
+    /// Number of languages served by a native tree-sitter grammar. Does NOT
+    /// force the lazy grammar build: if it hasn't been built yet, report the
+    /// expected 1 (the embedded Rust grammar), so an about-box query never pays
+    /// the compile; once built, report the real result.
     pub fn tree_sitter_language_count(&self) -> usize {
-        self.ts_rust.is_some() as usize
+        self.ts_rust.get().map_or(1, |o| o.is_some() as usize)
     }
 
     /// The bundled note (syntax) colour themes, sorted for a stable picker order
@@ -408,7 +425,7 @@ impl Highlighter {
     /// tree-sitter highlight pass → per-line spans. `None` if the grammar is
     /// unavailable or the pass errors (caller falls back to syntect).
     fn highlight_tree_sitter(&self, text: &str) -> Option<Vec<Vec<HlSpan>>> {
-        let cfg = self.ts_rust.as_ref()?;
+        let cfg = self.ts_rust()?;
         let mut ts = TsHighlighter::new();
         let src = text.as_bytes();
         let events = ts.highlight(cfg, src, None, |_| None).ok()?;
@@ -483,7 +500,7 @@ impl Highlighter {
     /// syntect). Mirrors [`highlight_tree_sitter`](Self::highlight_tree_sitter)
     /// but maps each capture's `HL_NAMES` entry to a [`SpanClass`].
     fn classify_tree_sitter(&self, text: &str) -> Option<Vec<ClassifiedSpan>> {
-        let cfg = self.ts_rust.as_ref()?;
+        let cfg = self.ts_rust()?;
         let mut ts = TsHighlighter::new();
         let src = text.as_bytes();
         let events = ts.highlight(cfg, src, None, |_| None).ok()?;
