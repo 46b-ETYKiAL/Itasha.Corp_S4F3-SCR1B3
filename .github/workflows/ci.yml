@@ -150,6 +150,26 @@ jobs:
       - name: Check for unused dependencies
         run: cargo machete
 
+  supply-chain-audit:
+    # cargo-vet: human supply-chain review on top of cargo-deny's advisory/license
+    # gate. Every dependency is either audited (incl. imported Mozilla/Google/
+    # Bytecode-Alliance audits) or exempted in supply-chain/; a NEW or bumped dep
+    # that is neither fails here, forcing a review decision before it ships.
+    name: cargo-vet (supply chain)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cargo-vet
+        run: cargo install cargo-vet --locked
+      - name: Vet dependencies
+        run: cargo vet --locked
+
   binary-hardening:
     # Non-regressing guard for the binary mitigations: build the RELEASE exe
     # (Control Flow Guard is applied via .cargo/config.toml's cfg(windows)

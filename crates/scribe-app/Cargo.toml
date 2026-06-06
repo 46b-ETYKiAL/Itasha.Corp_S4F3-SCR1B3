@@ -28,6 +28,7 @@ rfd = "0.15"          # native OS file dialogs (native-feel)
 arboard = "3"         # OS clipboard read for palette-driven Paste (egui exposes no read API; already in tree via eframe)
 notify = { workspace = true }                 # config/theme live-reload
 window-vibrancy = "0.7"                        # OS glass/acrylic/mica/vibrancy
+mimalloc = "0.1"                               # global allocator — ~20% faster on egui/editor alloc churn (egui docs); unsafe is in-crate, app stays #![forbid(unsafe_code)]
 
 [dev-dependencies]
 tempfile = "3"

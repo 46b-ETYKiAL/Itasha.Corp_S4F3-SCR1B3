@@ -1,6 +1,6 @@
 # Security Policy
 
-SCR1B3 is built privacy-first and minimal-attack-surface by construction. This document describes that posture and how to report vulnerabilities.
+SCR1B3 is built privacy-first and minimal-attack-surface by construction. This document describes that posture and how to report vulnerabilities. A per-trust-boundary STRIDE analysis (auto-update / plugins / LSP / opened files / local state) lives in [`docs/threat-model.md`](docs/threat-model.md).
 
 ## Telemetry-free posture
 

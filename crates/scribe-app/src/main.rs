@@ -25,6 +25,16 @@ mod updater;
 use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
 
+/// Use mimalloc as the global allocator. An immediate-mode GUI over a rope +
+/// syntax editor churns many small allocations every frame (galleys, layout
+/// strings, highlight spans); mimalloc measurably cuts that overhead (egui's own
+/// docs cite ~20% on GUI workloads) and is strongest on Windows (Microsoft-
+/// authored). `#[global_allocator]` on a static is SAFE code — the
+/// `unsafe impl GlobalAlloc` lives inside the `mimalloc` crate — so this is fully
+/// compatible with this crate's `#![forbid(unsafe_code)]`.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     // F-007 fix from docs/audits/overlooked-surfaces-2026-05-29.md: parse
     // --help / --version / PATH[:LINE[:COLUMN]] BEFORE we spin up eframe so
@@ -56,6 +66,27 @@ fn main() -> ExitCode {
         )
         .with_writer(std::io::stderr)
         .try_init();
+
+    // Content-free panic hook (privacy). A panic must never leak document text
+    // or a user's file path to stderr. We surface ONLY a static `&str` payload
+    // (a source-code literal — e.g. an `expect("…")` message, never runtime
+    // content) plus the panic SITE (our own `file:line`). A `String` payload may
+    // embed buffer text or a path, so it is deliberately suppressed.
+    std::panic::set_hook(Box::new(|info| {
+        let loc = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let msg = info
+            .payload()
+            .downcast_ref::<&'static str>()
+            .copied()
+            .unwrap_or("internal error");
+        eprintln!(
+            "scr1b3: {msg} (at {loc}) — the app will now close. \
+             No document contents are included in this message."
+        );
+    }));
 
     let (config, config_err) = scribe_core::Config::load_or_default();
 
@@ -108,6 +139,11 @@ fn main() -> ExitCode {
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut wgpu_options.wgpu_setup {
         setup.power_preference = eframe::wgpu::PowerPreference::LowPower;
     }
+    // Lower keystroke→pixel latency: a frame-latency of 1 (vs the default 2,
+    // which is tuned for throughput) shaves up to one refresh off the time from
+    // a keypress to it appearing — what a text editor cares about. This composes
+    // with AutoVsync (still frame-capped/low-power), so it costs no extra power.
+    wgpu_options.desired_maximum_frame_latency = Some(1);
 
     let native_options = eframe::NativeOptions {
         viewport,

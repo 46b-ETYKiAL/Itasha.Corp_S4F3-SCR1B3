@@ -28,6 +28,7 @@ const CATEGORIES: &[&str] = &[
     "Spellcheck",
     "Plugins",
     "Updates",
+    "Privacy",
 ];
 
 /// Parse a `#RRGGBB` (or `RRGGBB`) hex string into a `Color32`. Returns `None`
@@ -1457,6 +1458,67 @@ fn render_sections(
             {
                 ui.ctx()
                     .open_url(egui::OpenUrl::new_tab(crate::app::RELEASES_URL));
+            }
+        }
+        space(ui);
+    }
+
+    // ---- Privacy ----
+    if section_visible(
+        sel,
+        q,
+        "Privacy",
+        &["privacy", "clear", "data", "recent", "session", "forget"],
+    ) {
+        head(
+            ui,
+            "Privacy",
+            "SCR1B3 is telemetry-free — everything stays on your device and nothing about you \
+             is sent. The only local state that records what you've worked on is the \
+             recent-files list and the session-restore snapshot (which keeps unsaved buffers on \
+             disk so they survive a restart). You can erase both here.",
+        );
+        if row_visible(
+            q,
+            "clear local data recent files session restore forget unsaved",
+        ) {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Recent files remembered: {}. Session restore keeps on-disk copies of \
+                     unsaved buffers.",
+                    config.editor.recent_files.len()
+                ))
+                .weak()
+                .small(),
+            );
+            ui.add_space(4.0);
+            let cleared_id = egui::Id::new("scr1b3_privacy_cleared");
+            if ui
+                .button("Clear local data")
+                .on_hover_text(
+                    "Erase the recent-files (MRU) list AND the session-restore snapshot, \
+                     including the on-disk copies of any unsaved buffers. Open documents and \
+                     SAVED files are NOT touched; your settings and themes are kept.",
+                )
+                .clicked()
+            {
+                config.editor.recent_files.clear();
+                let removed = scribe_core::Config::config_dir()
+                    .map(|dir| scribe_core::session::clear_session_state(&dir))
+                    .unwrap_or(0);
+                changed = true; // persist the emptied recent-files list
+                ui.ctx().data_mut(|d| d.insert_temp(cleared_id, removed));
+            }
+            if let Some(removed) = ui.ctx().data(|d| d.get_temp::<usize>(cleared_id)) {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Cleared — removed {removed} session file(s) and emptied the recent-files \
+                         list."
+                    ))
+                    .small()
+                    .weak(),
+                );
             }
         }
         space(ui);
