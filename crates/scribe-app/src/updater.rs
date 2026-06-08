@@ -35,6 +35,75 @@ pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// The temp directory the updater downloads + stages release artifacts into
+/// (`%TEMP%/scr1b3-update`). Centralized so the download, the post-install
+/// cleanup, and the startup sweep all agree on the path.
+fn staging_dir() -> PathBuf {
+    std::env::temp_dir().join("scr1b3-update")
+}
+
+/// Delete the staging directory and everything in it — the downloaded archive /
+/// installer plus its `.minisig` / `.sha256` sidecars and any extracted binary.
+/// Best-effort: a missing dir or a locked file is not an error.
+fn clean_staging_dir() {
+    let _ = std::fs::remove_dir_all(staging_dir());
+}
+
+/// Startup housekeeping: remove update artifacts that are no longer needed once
+/// the new version is running. Removes (1) the staging download directory — this
+/// is where a completed installer's `setup.exe` lived, which could not be
+/// deleted while it was executing, so it is reaped here on the next launch — and
+/// (2) the `<exe>.bak` keep-one-prior backup beside the running executable: the
+/// fact that THIS binary is running is proof the update succeeded, so the
+/// rollback copy is no longer needed. Best-effort throughout (e.g. a
+/// Program-Files backup the unelevated app can't delete is silently skipped).
+/// Call once per launch.
+pub fn cleanup_after_update() {
+    clean_staging_dir();
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(update::apply::backup_path_for(&exe));
+    }
+}
+
+/// Build the PowerShell `Start-Process -Verb RunAs` script that launches the
+/// installer with a UAC elevation prompt. Pure (so it is unit-testable): the
+/// path is single-quoted for PowerShell with any embedded single quote escaped
+/// by doubling.
+#[cfg(windows)]
+fn powershell_runas_script(installer: &std::path::Path) -> String {
+    let p = installer.to_string_lossy().replace('\'', "''");
+    format!("Start-Process -FilePath '{p}' -Verb RunAs")
+}
+
+/// Launch the verified self-elevating installer WITH a UAC elevation prompt.
+///
+/// The `setup.exe` carries a `requireAdministrator` manifest. A plain
+/// `Command::spawn` (CreateProcess) CANNOT start such a binary — Windows returns
+/// ERROR_ELEVATION_REQUIRED (os error 740), i.e. "The requested operation
+/// requires elevation". Elevation needs ShellExecute semantics, reached here
+/// WITHOUT any `unsafe` (the app is `#![forbid(unsafe_code)]`) via PowerShell's
+/// `Start-Process -Verb RunAs`, which raises the standard UAC prompt and runs
+/// the installer elevated. `CREATE_NO_WINDOW` keeps the helper PowerShell from
+/// flashing a console.
+#[cfg(windows)]
+fn launch_installer_elevated(installer: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let script = powershell_runas_script(installer);
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map(|_| ())
+}
+
+/// Non-Windows fallback: installers are a Windows-only path, but keep the
+/// updater buildable everywhere — a plain spawn is correct off Windows.
+#[cfg(not(windows))]
+fn launch_installer_elevated(installer: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new(installer).spawn().map(|_| ())
+}
+
 /// Can we write into `dir`? Probes by creating + deleting a temp file. Used to
 /// decide whether an in-place self-replace is even possible: an install under
 /// `C:\Program Files` (the default installer location) is owned by admin, so
@@ -196,7 +265,7 @@ impl Updater {
         let installer = info.installer.clone();
 
         std::thread::spawn(move || {
-            let staging = std::env::temp_dir().join("scr1b3-update");
+            let staging = staging_dir();
             let _ = std::fs::remove_dir_all(&staging);
             let version = info.version.to_string();
 
@@ -257,13 +326,20 @@ impl Updater {
             return;
         };
         let (installer, version) = (installer.clone(), version.clone());
-        match std::process::Command::new(&installer).spawn() {
-            Ok(_) => {
+        // Launch with a UAC elevation prompt — the setup.exe is
+        // requireAdministrator, so a plain CreateProcess fails with os error 740.
+        // The staging dir is NOT cleaned here: the installer is running FROM it;
+        // it is reaped by `cleanup_after_update()` on the next launch.
+        match launch_installer_elevated(&installer) {
+            Ok(()) => {
                 self.state = UpdateState::Applied { version };
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Err(e) => {
-                self.state = UpdateState::Failed(format!("couldn't launch the installer: {e}"));
+                self.state = UpdateState::Failed(format!(
+                    "couldn't launch the installer ({e}). You can run it manually: {}",
+                    installer.display()
+                ));
             }
         }
     }
@@ -296,6 +372,12 @@ impl Updater {
                     .and_then(|exe| std::process::Command::new(exe).spawn())
                 {
                     Ok(_) => {
+                        // The new binary is in place and relaunching — the
+                        // downloaded archive + sidecars in the staging dir are no
+                        // longer needed, so reap them now (the `.bak` is kept for
+                        // rollback and is reaped by the relaunched build's
+                        // startup cleanup once it confirms it runs).
+                        clean_staging_dir();
                         self.state = UpdateState::Applied { version };
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
@@ -323,72 +405,93 @@ impl Updater {
     }
 
     /// Drain worker messages and advance the state. Call once per frame.
-    pub fn poll(&mut self) {
-        let Some(rx) = &self.rx else {
-            return;
-        };
+    ///
+    /// Messages are drained into a buffer FIRST (which releases the borrow on
+    /// `rx`), then handled — so a handler can take `&mut self` to chain straight
+    /// from a completed download into applying the update (the one-click flow).
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        let mut msgs = Vec::new();
         let mut disconnect = false;
-        loop {
-            match rx.try_recv() {
-                Ok(UpdateMsg::CheckResult(Ok(update::UpdateOutcome::Available(info)))) => {
-                    let v = info.version.to_string();
-                    let already_skipped = self.skipped_version.as_deref() == Some(v.as_str());
-                    if !already_skipped {
-                        match self.launch_kind {
-                            LaunchKind::Auto => self.show_prompt = true,
-                            LaunchKind::Notify => self.toast_pending = Some(v),
-                            LaunchKind::Manual => {}
-                        }
+        if let Some(rx) = &self.rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(msg) => msgs.push(msg),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        disconnect = true;
+                        break;
                     }
-                    self.launch_kind = LaunchKind::Manual;
-                    self.state = UpdateState::Available(info);
-                }
-                Ok(UpdateMsg::CheckResult(Ok(update::UpdateOutcome::UpToDate { latest }))) => {
-                    self.launch_kind = LaunchKind::Manual;
-                    self.state = UpdateState::UpToDate {
-                        latest: latest.to_string(),
-                    };
-                }
-                Ok(UpdateMsg::CheckResult(Ok(update::UpdateOutcome::NewerButNoAsset {
-                    latest,
-                    target,
-                    html_url,
-                }))) => {
-                    self.launch_kind = LaunchKind::Manual;
-                    self.state = UpdateState::NoAssetForPlatform {
-                        latest: latest.to_string(),
-                        target,
-                        html_url,
-                    };
-                }
-                Ok(UpdateMsg::CheckResult(Err(e))) => {
-                    self.launch_kind = LaunchKind::Manual;
-                    self.state = UpdateState::Failed(e);
-                }
-                Ok(UpdateMsg::Progress { received, total }) => {
-                    self.state = UpdateState::Downloading { received, total };
-                }
-                Ok(UpdateMsg::Downloaded(Ok((staged, version)))) => {
-                    self.state = UpdateState::ReadyToApply { staged, version };
-                }
-                Ok(UpdateMsg::Downloaded(Err(e))) => {
-                    self.state = UpdateState::Failed(e);
-                }
-                Ok(UpdateMsg::InstallerReady(Ok((installer, version)))) => {
-                    self.state = UpdateState::ReadyToRunInstaller { installer, version };
-                }
-                Ok(UpdateMsg::InstallerReady(Err(e))) => {
-                    self.state = UpdateState::Failed(e);
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    disconnect = true;
-                    break;
                 }
             }
         }
         if disconnect {
             self.rx = None;
+        }
+        for msg in msgs {
+            self.handle_update_msg(msg, ctx);
+        }
+    }
+
+    /// Apply one drained worker message to the state. A completed download chains
+    /// straight into applying — ONE click ("Update now") downloads AND installs;
+    /// the user never needs a second click. The intermediate `ReadyToApply` /
+    /// `ReadyToRunInstaller` states are set then immediately consumed within the
+    /// same `poll`, before the frame renders, so the UI advances seamlessly from
+    /// the progress bar to the relaunch (or the installer's UAC prompt).
+    fn handle_update_msg(&mut self, msg: UpdateMsg, ctx: &egui::Context) {
+        match msg {
+            UpdateMsg::CheckResult(Ok(update::UpdateOutcome::Available(info))) => {
+                let v = info.version.to_string();
+                let already_skipped = self.skipped_version.as_deref() == Some(v.as_str());
+                if !already_skipped {
+                    match self.launch_kind {
+                        LaunchKind::Auto => self.show_prompt = true,
+                        LaunchKind::Notify => self.toast_pending = Some(v),
+                        LaunchKind::Manual => {}
+                    }
+                }
+                self.launch_kind = LaunchKind::Manual;
+                self.state = UpdateState::Available(info);
+            }
+            UpdateMsg::CheckResult(Ok(update::UpdateOutcome::UpToDate { latest })) => {
+                self.launch_kind = LaunchKind::Manual;
+                self.state = UpdateState::UpToDate {
+                    latest: latest.to_string(),
+                };
+            }
+            UpdateMsg::CheckResult(Ok(update::UpdateOutcome::NewerButNoAsset {
+                latest,
+                target,
+                html_url,
+            })) => {
+                self.launch_kind = LaunchKind::Manual;
+                self.state = UpdateState::NoAssetForPlatform {
+                    latest: latest.to_string(),
+                    target,
+                    html_url,
+                };
+            }
+            UpdateMsg::CheckResult(Err(e)) => {
+                self.launch_kind = LaunchKind::Manual;
+                self.state = UpdateState::Failed(e);
+            }
+            UpdateMsg::Progress { received, total } => {
+                self.state = UpdateState::Downloading { received, total };
+            }
+            UpdateMsg::Downloaded(Ok((staged, version))) => {
+                self.state = UpdateState::ReadyToApply { staged, version };
+                self.apply_and_restart(ctx);
+            }
+            UpdateMsg::Downloaded(Err(e)) => {
+                self.state = UpdateState::Failed(e);
+            }
+            UpdateMsg::InstallerReady(Ok((installer, version))) => {
+                self.state = UpdateState::ReadyToRunInstaller { installer, version };
+                self.run_installer(ctx);
+            }
+            UpdateMsg::InstallerReady(Err(e)) => {
+                self.state = UpdateState::Failed(e);
+            }
         }
     }
 }
@@ -428,5 +531,29 @@ mod tests {
         assert!(!u.is_busy());
         assert!(matches!(u.state, UpdateState::Idle));
         assert!(!u.show_prompt);
+    }
+
+    #[test]
+    fn staging_dir_is_under_temp_and_named() {
+        let d = staging_dir();
+        assert!(d.ends_with("scr1b3-update"), "got {d:?}");
+        assert!(d.starts_with(std::env::temp_dir()), "got {d:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_runas_script_quotes_and_escapes_path() {
+        use std::path::Path;
+        // A plain path is single-quoted into a Start-Process -Verb RunAs command.
+        assert_eq!(
+            powershell_runas_script(Path::new(r"C:\tmp\scr1b3-setup.exe")),
+            r"Start-Process -FilePath 'C:\tmp\scr1b3-setup.exe' -Verb RunAs"
+        );
+        // An embedded single quote is escaped by doubling (the PowerShell rule),
+        // so a crafted path can never break out of the quoted string.
+        assert_eq!(
+            powershell_runas_script(Path::new(r"C:\o'brien\scr1b3-setup.exe")),
+            r"Start-Process -FilePath 'C:\o''brien\scr1b3-setup.exe' -Verb RunAs"
+        );
     }
 }
