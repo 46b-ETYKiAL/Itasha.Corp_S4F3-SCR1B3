@@ -5,7 +5,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Copy `target` to `backup` (keep-one-prior for rollback), then move `new`
 /// into `target`. Caller MUST have verified `new` (checksum + signature) first.
@@ -36,11 +36,43 @@ pub fn rollback(backup: &Path, target: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Replace the *currently running* executable with `new` (already verified).
-/// Uses `self-replace` so it works while the binary is running, including the
-/// Windows locked-file case. Returns the path to the backup of the old binary.
-pub fn replace_running_executable(new: &Path) -> io::Result<()> {
-    self_replace::self_replace(new)
+/// The sibling backup path for a binary at `exe` (`scr1b3.exe` → `scr1b3.bak`,
+/// `scr1b3` → `scr1b3.bak`). Same directory ⇒ same volume, so restoring it is an
+/// atomic rename and the keep-one-prior copy never crosses a filesystem
+/// boundary (the property `self-replace` relies on).
+pub fn backup_path_for(exe: &Path) -> PathBuf {
+    exe.with_extension("bak")
+}
+
+/// Replace the *currently running* executable with `new` (already verified),
+/// FIRST snapshotting the current binary to a sibling `.bak` so a failed
+/// post-swap relaunch can [`rollback_running_executable`] to a known-good prior
+/// version. Uses `self-replace` so the swap works while the binary is running
+/// (the Windows locked-file case). Returns the backup path on success.
+///
+/// Before this kept-one-prior backup, an update obliterated the old binary with
+/// no recovery path; the backup is what makes the relaunch-failure rollback in
+/// the UI possible.
+pub fn replace_running_executable(new: &Path) -> io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    let backup = backup_path_for(&exe);
+    fs::copy(&exe, &backup)?;
+    self_replace::self_replace(new)?;
+    Ok(backup)
+}
+
+/// Roll the *currently running* executable back to a `backup` produced by
+/// [`replace_running_executable`] — used when a just-installed update fails to
+/// relaunch, so the on-disk binary returns to the known-good prior version.
+/// Uses `self-replace` (the same atomic, locked-file-safe swap).
+pub fn rollback_running_executable(backup: &Path) -> io::Result<()> {
+    if !backup.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no backup to roll back to",
+        ));
+    }
+    self_replace::self_replace(backup)
 }
 
 #[cfg(test)]
@@ -90,5 +122,26 @@ mod tests {
         let backup = dir.path().join("nope.bak");
         write(&target, b"x");
         assert!(rollback(&backup, &target).is_err());
+    }
+
+    #[test]
+    fn backup_path_is_sibling_with_bak_extension() {
+        // Windows .exe and bare-name (Unix) both map to a sibling `.bak`.
+        assert_eq!(
+            backup_path_for(Path::new("/opt/app/scr1b3.exe")),
+            Path::new("/opt/app/scr1b3.bak")
+        );
+        assert_eq!(
+            backup_path_for(Path::new("/opt/app/scr1b3")),
+            Path::new("/opt/app/scr1b3.bak")
+        );
+    }
+
+    #[test]
+    fn rollback_running_without_backup_errors() {
+        // The running-exe rollback must fail closed when the backup is missing,
+        // rather than handing a non-existent file to self-replace.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(rollback_running_executable(&dir.path().join("nope.bak")).is_err());
     }
 }

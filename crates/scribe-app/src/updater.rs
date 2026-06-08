@@ -275,17 +275,48 @@ impl Updater {
             return;
         };
         let (staged, version) = (staged.clone(), version.clone());
+        // Anti-downgrade (TUF rollback-attack defense): re-check at APPLY time,
+        // not only at selection, that the staged release is strictly newer than
+        // the running build — so a tampered or replayed older-but-validly-signed
+        // artifact can never be installed over us.
+        if let Err(e) = update::ensure_upgrade(&version, current_version()) {
+            self.state = UpdateState::Failed(e);
+            return;
+        }
         // ReadyToApply is only ever reached on a WRITABLE install (start_download
         // routes an admin-owned install to the installer path instead), so an
-        // in-place swap is the right action here.
+        // in-place swap is the right action here. The swap first snapshots the
+        // prior binary to a `.bak` so a failed relaunch can roll back to it.
         match update::apply::replace_running_executable(&staged) {
-            Ok(()) => {
-                // current_exe() now resolves to the freshly-swapped binary.
-                if let Ok(exe) = std::env::current_exe() {
-                    let _ = std::process::Command::new(exe).spawn();
+            Ok(backup) => {
+                // current_exe() now resolves to the freshly-swapped binary;
+                // relaunch it. Do NOT discard the spawn result — if the relaunch
+                // fails we must not close the app into nothing (the prior bug).
+                match std::env::current_exe()
+                    .and_then(|exe| std::process::Command::new(exe).spawn())
+                {
+                    Ok(_) => {
+                        self.state = UpdateState::Applied { version };
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    Err(e) => {
+                        // The verified update was installed but wouldn't start.
+                        // Revert to the known-good prior binary and keep THIS
+                        // process running, so the user is never left windowless.
+                        let reverted = update::apply::rollback_running_executable(&backup).is_ok();
+                        self.state = UpdateState::Failed(if reverted {
+                            format!(
+                                "v{version} was installed but couldn't be started ({e}); \
+                                 reverted to the current version — please restart SCR1B3 to retry."
+                            )
+                        } else {
+                            format!(
+                                "v{version} was installed but couldn't be started ({e}), and the \
+                                 automatic revert also failed — reinstall from the releases page."
+                            )
+                        });
+                    }
                 }
-                self.state = UpdateState::Applied { version };
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Err(e) => self.state = UpdateState::Failed(format!("install failed: {e}")),
         }

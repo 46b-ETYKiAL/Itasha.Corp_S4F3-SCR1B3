@@ -136,7 +136,15 @@ jobs:
           # target-prefixed `scr1b3-<target>.{tar.gz,sha256}` ship from this job;
           # the Windows installer .exe is built by the `windows-installer` job.
           rm -f "$bin"
-          if command -v sha256sum >/dev/null; then sha256sum scr1b3-* > "scr1b3-${{ matrix.target }}.sha256" 2>/dev/null || true; fi
+          # The checksum sidecar MUST be named `<asset>.sha256` —
+          # `scr1b3-<target>.tar.gz.sha256` — to match the in-app updater
+          # (`build_release_info` looks for `{asset}.sha256`) and the signature
+          # convention (`<asset>.tar.gz.minisig`). The old `scr1b3-<target>.sha256`
+          # name (without the `.tar.gz` infix) is why every auto-update wrongly
+          # reported "no build for your platform": the updater found the tarball +
+          # its `.minisig` but never the mis-named sha, so `find()` returned None.
+          tgz="scr1b3-${{ matrix.target }}.tar.gz"
+          if command -v sha256sum >/dev/null; then sha256sum "$tgz" > "$tgz.sha256" 2>/dev/null || true; fi
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

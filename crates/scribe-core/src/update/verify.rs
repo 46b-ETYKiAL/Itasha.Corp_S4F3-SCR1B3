@@ -14,6 +14,23 @@ use sha2::{Digest, Sha256};
 /// an accepted signature.
 pub const EMBEDDED_PUBLIC_KEY: &str = "untrusted comment: minisign public key: BD4ADF9145E13B17\nRWQXO+FFkd9Kvdw2hUrWtt5Eoebj41ckYRPGs7tTH+zym1moqwXT5D7N";
 
+/// The full set of trusted release-signing public keys. An artifact is accepted
+/// when ANY key in this set fully verifies its signature — the mechanism that
+/// makes signing-key ROTATION safe: during a rotation window BOTH the outgoing
+/// and incoming keys are listed here, so clients built before AND after the
+/// rotation accept releases signed by either key. Order is irrelevant (every
+/// key is tried); the slice is authoritative and embedded at build time.
+///
+/// Rotation procedure (zero-downtime, no client left stranded):
+/// 1. Generate the new keypair; add its PUBLIC key to this slice and ship a
+///    release. Clients on that build now trust BOTH keys.
+/// 2. Once that release is widely adopted, switch CI to sign with the NEW
+///    secret key. Old clients still accept it (old key was never removed yet);
+///    new clients accept it via the new key.
+/// 3. After the old key is fully retired, drop it from this slice in a later
+///    release.
+pub const EMBEDDED_PUBLIC_KEYS: &[&str] = &[EMBEDDED_PUBLIC_KEY];
+
 /// Hex-encoded SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -37,18 +54,50 @@ pub fn verify_signature(bytes: &[u8], sig_str: &str, public_key_box: &str) -> Re
         .map_err(|e| format!("signature verification failed: {e}"))
 }
 
+/// Verify a minisign signature against a SET of candidate public keys, accepting
+/// if ANY key verifies. This is the key-rotation-safe form of
+/// [`verify_signature`] (see [`EMBEDDED_PUBLIC_KEYS`]).
+///
+/// SECURITY: acceptance requires a FULL cryptographic verification against at
+/// least one key. minisign embeds an 8-byte key id in both the public key and
+/// the signature; that id is only a routing HINT and is attacker-controllable,
+/// so it is never trusted on its own — `minisign_verify` rejects a key-id
+/// mismatch before the Ed25519 check, and a key-id match still requires the
+/// signature itself to verify. Trying multiple keys cannot upgrade a bad
+/// signature into an accepted one.
+pub fn verify_any_signature(
+    bytes: &[u8],
+    sig_str: &str,
+    public_key_boxes: &[&str],
+) -> Result<(), String> {
+    if public_key_boxes.is_empty() {
+        return Err("no trusted public keys configured".to_string());
+    }
+    let mut last_err = None;
+    for pk in public_key_boxes {
+        match verify_signature(bytes, sig_str, pk) {
+            Ok(()) => return Ok(()),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "signature did not verify against any trusted key".to_string()))
+}
+
 /// Full gate: an artifact is acceptable iff its checksum matches AND its
-/// signature verifies against the embedded key.
+/// signature verifies against AT LEAST ONE of the trusted `public_keys` (pass
+/// [`EMBEDDED_PUBLIC_KEYS`] in production). The multi-key form is what makes
+/// signing-key rotation safe; verification still fails closed when no key
+/// verifies.
 pub fn verify_artifact(
     bytes: &[u8],
     expected_sha256: &str,
     sig_str: &str,
-    public_key_box: &str,
+    public_keys: &[&str],
 ) -> Result<(), String> {
     if !verify_checksum(bytes, expected_sha256) {
         return Err("checksum mismatch".to_string());
     }
-    verify_signature(bytes, sig_str, public_key_box)
+    verify_any_signature(bytes, sig_str, public_keys)
 }
 
 #[cfg(test)]
@@ -113,5 +162,76 @@ mod tests {
         // The committed embedded key must be a well-formed minisign public key
         // (so a real signature CAN verify against it).
         assert!(minisign_verify::PublicKey::decode(EMBEDDED_PUBLIC_KEY).is_ok());
+    }
+
+    #[test]
+    fn embedded_key_set_is_nonempty_and_all_decode() {
+        // The production trust set must be non-empty and every entry must be a
+        // valid minisign public key — a malformed rotation entry would silently
+        // never match.
+        assert!(!EMBEDDED_PUBLIC_KEYS.is_empty());
+        for pk in EMBEDDED_PUBLIC_KEYS {
+            assert!(
+                minisign_verify::PublicKey::decode(pk).is_ok(),
+                "embedded key did not decode: {pk}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_key_accepts_when_any_key_in_the_set_matches() {
+        // Key-rotation contract: a release signed by a key that is NOT the first
+        // entry must still be accepted as long as it is somewhere in the set.
+        let kp = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let pk_box = kp.pk.to_box().unwrap().to_string();
+        let data = b"rotated-key release bytes";
+        let sig = minisign::sign(
+            Some(&kp.pk),
+            &kp.sk,
+            std::io::Cursor::new(&data[..]),
+            Some("scr1b3 v9.9.9"),
+            Some("comment"),
+        )
+        .unwrap()
+        .to_string();
+
+        // Set = [unrelated production key, the key that actually signed].
+        let keys = [EMBEDDED_PUBLIC_KEY, pk_box.as_str()];
+        assert!(verify_any_signature(data, &sig, &keys).is_ok());
+
+        // verify_artifact composes checksum + the multi-key signature check.
+        let sha = sha256_hex(data);
+        assert!(verify_artifact(data, &sha, &sig, &keys).is_ok());
+        // ...and still fails closed on a checksum mismatch even with a good sig.
+        assert!(verify_artifact(data, "deadbeef", &sig, &keys).is_err());
+    }
+
+    #[test]
+    fn multi_key_rejects_when_no_key_in_the_set_matches() {
+        // A signature from a key OUTSIDE the trust set must be rejected — trying
+        // multiple keys never upgrades an untrusted signature into an accepted
+        // one.
+        let signer = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let other = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let other_pk = other.pk.to_box().unwrap().to_string();
+        let data = b"bytes signed by a key not in the trust set";
+        let sig = minisign::sign(
+            Some(&signer.pk),
+            &signer.sk,
+            std::io::Cursor::new(&data[..]),
+            Some("scr1b3 v9.9.9"),
+            Some("comment"),
+        )
+        .unwrap()
+        .to_string();
+
+        let keys = [EMBEDDED_PUBLIC_KEY, other_pk.as_str()];
+        assert!(verify_any_signature(data, &sig, &keys).is_err());
+    }
+
+    #[test]
+    fn multi_key_empty_set_rejects() {
+        // An empty trust set must never accept anything (fail-closed).
+        assert!(verify_any_signature(b"x", "untrusted comment: x\nbogus", &[]).is_err());
     }
 }
