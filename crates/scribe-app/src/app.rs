@@ -1869,6 +1869,11 @@ impl ScribeApp {
             return;
         }
         self.did_update_check = true;
+        // First frame of the launch: reap update artifacts that are no longer
+        // needed now that this (possibly just-updated) build is running — the
+        // staging download dir (incl. a completed installer's setup.exe, which
+        // couldn't be deleted while it ran) and the prior binary's `.bak`.
+        crate::updater::cleanup_after_update();
         let Some(kind) = update_launch_action(
             self.config.updates.mode,
             self.config.updates.last_check_unix,
@@ -4976,7 +4981,7 @@ impl ScribeApp {
         self.maybe_remind_update(ctx);
         // Drain the updater worker each frame. A `notify`-mode launch check that
         // found a release queues a one-shot passive toast (plain text, no glyphs).
-        self.updater.poll();
+        self.updater.poll(ctx);
         if let Some(v) = self.updater.toast_pending.take() {
             self.toast = Some(format!(
                 "SCR1B3 v{v} is available. Open Settings and choose Updates to install."

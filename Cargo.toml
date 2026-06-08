@@ -8,7 +8,7 @@ members = ["crates/scribe-core", "crates/scribe-render", "crates/scribe-app"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.4.9"
+version = "0.4.10"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
