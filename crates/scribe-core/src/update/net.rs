@@ -7,8 +7,9 @@
 //! No analytics, no identifiers, no payload: every request sends only a generic
 //! `User-Agent` (app name + version), and the asset is verified (SHA-256 THEN
 //! minisign against [`super::verify::EMBEDDED_PUBLIC_KEY`]) before the extracted
-//! binary is ever returned. A verify failure deletes the staging area and the
-//! binary is NEVER returned unverified.
+//! binary is ever returned (against the [`super::verify::EMBEDDED_PUBLIC_KEYS`]
+//! trust set). A verify failure deletes the staging area and the binary is
+//! NEVER returned unverified.
 //!
 //! Pure decision logic ([`select_update`]) is split out from the I/O so it can
 //! be unit-tested offline against a fixture [`RawRelease`].
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use super::verify::{verify_artifact, EMBEDDED_PUBLIC_KEY};
+use super::verify::{verify_artifact, EMBEDDED_PUBLIC_KEYS};
 
 /// Mandatory `User-Agent` for every request. App name + version ONLY — no
 /// machine identifier, OS fingerprint, install ID, or any unique token.
@@ -146,19 +147,27 @@ fn build_release_info(
 ) -> Option<ReleaseInfo> {
     let asset_name = format!("scr1b3-{target}.tar.gz");
     let sig_name = format!("{asset_name}.minisig");
+    // Canonical sha name is `<asset>.sha256` (= `scr1b3-<target>.tar.gz.sha256`).
+    // For robustness we ALSO accept the legacy `scr1b3-<target>.sha256` (the
+    // pre-fix release name, dropped the `.tar.gz` infix) so a naming drift can
+    // never again silently classify a real release as "no asset for platform".
     let sha_name = format!("{asset_name}.sha256");
+    let legacy_sha_name = format!("scr1b3-{target}.sha256");
     let find = |name: &str| -> Option<&str> {
         raw.assets
             .iter()
             .find(|a| a.name == name)
             .map(|a| a.browser_download_url.as_str())
     };
+    let sha_url = find(&sha_name)
+        .or_else(|| find(&legacy_sha_name))?
+        .to_string();
     Some(ReleaseInfo {
         version,
         tag: raw.tag_name.clone(),
         asset_url: find(&asset_name)?.to_string(),
         sig_url: find(&sig_name)?.to_string(),
-        sha_url: find(&sha_name)?.to_string(),
+        sha_url,
         html_url: raw.html_url.clone(),
         installer: find_installer(raw, target).map(Box::new),
     })
@@ -229,32 +238,6 @@ pub fn select_best(
     }
 }
 
-/// Blocking GET of `/repos/{owner}/{repo}/releases/latest`. Any network/HTTP/
-/// decode error is mapped to a human `String`; this function never panics.
-pub fn fetch_latest_release(owner: &str, repo: &str) -> Result<RawRelease, String> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
-    let release = ureq::get(&url)
-        // The GitHub API returns the JSON directly (200, no redirect); FORBID
-        // redirects on it so a MITM/DNS-hijack can't bounce the call to an
-        // attacker host serving forged release JSON (which would steer the asset
-        // URLs the updater then trusts up to the minisign check). A redirect now
-        // errors out instead of being followed. Plus a timeout (anti-hang).
-        .config()
-        .max_redirects(0)
-        .max_redirects_will_error(true)
-        .timeout_global(Some(NETWORK_TIMEOUT))
-        .build()
-        .header("User-Agent", USER_AGENT)
-        .header("Accept", GITHUB_ACCEPT)
-        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
-        .call()
-        .map_err(|e| format!("failed to fetch latest release: {e}"))?
-        .body_mut()
-        .read_json::<RawRelease>()
-        .map_err(|e| format!("failed to parse release JSON: {e}"))?;
-    Ok(release)
-}
-
 /// PURE (no network) decision: given the raw release, the current version, and
 /// this build's target triple, return `Some(ReleaseInfo)` when the release is
 /// newer AND a matching `scr1b3-<target>.tar.gz` asset (+ `.minisig` + `.sha256`
@@ -275,18 +258,50 @@ pub fn select_update(
     build_release_info(raw, latest, target)
 }
 
+/// Apply-time anti-downgrade guard (TUF rollback-attack defense). Returns `Ok`
+/// only when `candidate` parses to a STRICTLY newer semver than `running`.
+///
+/// This is enforced at the moment of APPLYING an update — in addition to the
+/// selection-time `latest <= current` skip in [`select_best`] / [`select_update`]
+/// — so a tampered or replayed older-but-validly-signed release can never be
+/// installed over a newer running build. `running` is the compiled-in
+/// `CARGO_PKG_VERSION` (authoritative). `candidate` may carry a leading `v`
+/// (it is parsed with the same [`parse_tag`] normalisation as release tags).
+pub fn ensure_upgrade(candidate: &str, running: &str) -> Result<(), String> {
+    let cand = parse_tag(candidate)
+        .ok_or_else(|| format!("refusing to install: unparseable update version {candidate:?}"))?;
+    let cur = semver::Version::parse(running)
+        .map_err(|e| format!("internal: bad running version {running:?}: {e}"))?;
+    if cand <= cur {
+        return Err(format!(
+            "refusing to install v{cand}: not newer than the running v{cur} (downgrade protection)"
+        ));
+    }
+    Ok(())
+}
+
 /// Blocking GET of `/repos/{owner}/{repo}/releases` (the FULL list, one page).
-/// Sends `Cache-Control: no-cache` + a cache-busting query so a CDN-cached
-/// response can't hide a fresh release, and maps a 403/429 to an explicit
+/// Sends `Cache-Control: no-cache` so an intermediary can't serve a stale list
+/// that hides a freshly-published release, and maps a 403/429 to an explicit
 /// rate-limit message (unauthenticated GitHub allows 60 req/hr/IP). Never
 /// panics.
+///
+/// We deliberately poll the FULL list rather than `/releases/latest`: that
+/// computed resource excludes drafts/prereleases AND lags a just-published tag
+/// (it is the more cache-prone endpoint), whereas the list reflects a new tag
+/// immediately and lets [`select_best`] do its own highest-semver selection.
+/// Freshness is enforced by the `no-cache` request header, NOT a query-string
+/// cache-buster — a `?t=` param is a documented anti-pattern (it pollutes
+/// shared caches and forfeits GitHub's ETag/`If-None-Match` 304 path, which is
+/// the fuller solution but needs cross-check persisted state the updater does
+/// not keep).
 pub fn fetch_releases(owner: &str, repo: &str) -> Result<Vec<RawRelease>, String> {
-    // per_page=100 returns every release in one page for a project this size;
-    // the `t` cache-buster defeats any intermediary caching of the list.
+    // per_page=100 returns every release in one page for a project this size.
     let url = format!("https://api.github.com/repos/{owner}/{repo}/releases?per_page=100");
     let releases = ureq::get(&url)
-        // Same hardening as `fetch_latest_release`: the API answers 200 directly,
-        // so forbid redirects (no off-GitHub bounce to forged JSON) + timeout.
+        // The API answers 200 directly, so forbid redirects (no off-GitHub
+        // bounce to forged JSON that would steer the asset URLs the updater
+        // trusts up to the minisign check) + a timeout (anti-hang).
         .config()
         .max_redirects(0)
         .max_redirects_will_error(true)
@@ -494,7 +509,7 @@ fn set_executable(_path: &Path) -> Result<(), String> {
 }
 
 /// Blocking: download asset + sig + sha into `staging_dir`, run
-/// [`verify_artifact`] (sha256 THEN minisign against [`EMBEDDED_PUBLIC_KEY`]),
+/// [`verify_artifact`] (sha256 THEN minisign against [`EMBEDDED_PUBLIC_KEYS`]),
 /// then extract the single binary from the `.tar.gz` into `staging_dir`,
 /// returning the path to the extracted, verified binary.
 ///
@@ -557,8 +572,8 @@ fn download_verify_installer_inner(
     let sig_str =
         String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
 
-    // SHA-256 THEN minisign against the embedded public key. Fails closed.
-    verify_artifact(&exe_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEY)?;
+    // SHA-256 THEN minisign against the trusted key set. Fails closed.
+    verify_artifact(&exe_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEYS)?;
 
     // Only reached when verification passed — write the verified installer out.
     let out = staging_dir.join("scr1b3-setup.exe");
@@ -590,8 +605,8 @@ fn download_verify_extract_inner(
     let sig_str =
         String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
 
-    // SHA-256 THEN minisign against the embedded public key. Fails closed.
-    verify_artifact(&asset_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEY)?;
+    // SHA-256 THEN minisign against the trusted key set. Fails closed.
+    verify_artifact(&asset_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEYS)?;
 
     // Only reached when verification passed.
     extract_binary(&asset_bytes, staging_dir)
@@ -650,6 +665,61 @@ mod tests {
             format!("https://dl/scr1b3-{target}.tar.gz.sha256")
         );
         assert_eq!(info.html_url, "https://github.com/o/r/releases/tag/x");
+    }
+
+    #[test]
+    fn select_update_accepts_legacy_sha_name() {
+        // Regression for the recurring "no build for your platform" bug: every
+        // release before this fix shipped the checksum as `scr1b3-<target>.sha256`
+        // (no `.tar.gz` infix) while the updater looked for `<asset>.sha256`
+        // (`scr1b3-<target>.tar.gz.sha256`) — so `find()` returned None and a
+        // perfectly-good release was classified NewerButNoAsset. Releases now ship
+        // the canonical name AND the updater accepts the legacy one; this locks
+        // the fallback so a release with EITHER sha name resolves.
+        let target = "x86_64-pc-windows-msvc";
+        let base = format!("scr1b3-{target}.tar.gz");
+        let raw = RawRelease {
+            tag_name: "v0.5.0".to_string(),
+            prerelease: false,
+            draft: false,
+            html_url: "https://github.com/o/r/releases/tag/x".to_string(),
+            assets: vec![
+                asset(&base, &format!("https://dl/{base}")),
+                asset(
+                    &format!("{base}.minisig"),
+                    &format!("https://dl/{base}.minisig"),
+                ),
+                // LEGACY checksum name (no `.tar.gz` infix).
+                asset(
+                    &format!("scr1b3-{target}.sha256"),
+                    &format!("https://dl/scr1b3-{target}.sha256"),
+                ),
+            ],
+        };
+        let current = semver::Version::parse("0.4.0").unwrap();
+        let info =
+            select_update(&raw, &current, target).expect("legacy sha name must still resolve");
+        assert_eq!(info.sha_url, format!("https://dl/scr1b3-{target}.sha256"));
+    }
+
+    #[test]
+    fn ensure_upgrade_enforces_strict_monotonic_version() {
+        // Strictly-newer candidates are allowed (with or without a leading `v`).
+        assert!(ensure_upgrade("v0.5.0", "0.4.9").is_ok());
+        assert!(ensure_upgrade("0.4.10", "0.4.9").is_ok());
+        // Anti-downgrade (TUF rollback attack): equal or older is REFUSED at
+        // apply time even though such a release may be validly signed.
+        assert!(
+            ensure_upgrade("v0.4.9", "0.4.9").is_err(),
+            "equal must be refused"
+        );
+        assert!(
+            ensure_upgrade("v0.4.8", "0.4.9").is_err(),
+            "older must be refused"
+        );
+        assert!(ensure_upgrade("0.3.0", "0.4.9").is_err());
+        // An unparseable candidate fails closed (never installs).
+        assert!(ensure_upgrade("not-a-version", "0.4.9").is_err());
     }
 
     #[test]

@@ -24,8 +24,10 @@ The **only** outbound network call SCR1B3 ever makes is the optional update vers
 When an update is downloaded, SCR1B3 **cryptographically verifies it before applying it**:
 
 - Release artifacts are signed (minisign / ed25519) and checksummed.
-- The updater **refuses** any download whose signature does not verify or whose checksum does not match. An unsigned or tampered artifact is never installed.
-- The previous binary is retained so an update can be rolled back in one step.
+- The updater **refuses** any download whose signature does not verify against the embedded trust set, or whose checksum does not match. An unsigned or tampered artifact is never installed.
+- **Key-rotation-safe trust set.** Verification accepts a release signed by **any** key in an embedded set of trusted keys, so the signing key can be rotated with **zero downtime**: ship a build that trusts both the old and new keys, switch CI to sign with the new key, then retire the old key in a later release — no client is ever stranded. Trying multiple keys never upgrades a bad signature into an accepted one (a full cryptographic verify is still required).
+- **Anti-downgrade (rollback-attack defense).** The updater refuses to install any version that is not **strictly newer** than the running build — enforced again at the moment of applying, not only at selection — so an attacker cannot replay an older, still-validly-signed release to force a downgrade to a known-vulnerable build (the TUF monotonic-version rule).
+- **Automatic rollback.** The previous binary is snapshotted before the in-place swap and is automatically restored if the updated binary fails to relaunch — a failed update never leaves you without a working app.
 - The updater runs with your user permissions and writes only to the install directory — no privilege escalation, no setuid.
 
 To verify a release manually, use the published `minisign` public key against the release's signature file (instructions accompany each release).

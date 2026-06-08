@@ -1598,6 +1598,15 @@ enum ToolbarDrag {
 /// updates" button, driven by the [`crate::updater::UpdateState`] machine.
 /// Mutating calls (start download, apply) are deferred past the immutable
 /// state borrow so the borrow checker is satisfied.
+/// Fixed wrap width for the multi-line update-status messages (no-asset /
+/// error). A cap well under the page width forces them to wrap to ~2-3 lines and
+/// keeps the settings window from GROWING (egui auto-sizes window width to its
+/// UN-wrapped content, so a long one-line message + an inline link would widen
+/// the whole window — the exact bug this caps). The action link/button sits on
+/// its own line beneath the text. Module-level so the layout invariant is
+/// unit-testable.
+const UPDATE_STATUS_MSG_WIDTH: f32 = 340.0;
+
 fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater) {
     use crate::updater::UpdateState;
     enum Act {
@@ -1631,21 +1640,33 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
             html_url,
         } => {
             // A newer release exists but has no build for this platform — NEVER
-            // silently report "up to date"; point the user at the release page.
-            let warn = ui.visuals().warn_fg_color;
-            ui.colored_label(
-                warn,
-                format!(
-                    "v{latest} is available, but it has no build for your platform ({target})."
-                ),
-            );
-            if ui
-                .link("Open the releases page")
-                .on_hover_text("Download the latest release manually from your browser.")
-                .clicked()
-            {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(html_url.clone()));
-            }
+            // silently report "up to date". Render in a FIXED-width column so the
+            // message WRAPS to a few lines and "Open the releases page" sits on its
+            // OWN line BELOW it. egui's Window auto-size measures content
+            // UN-wrapped, so a one-line message + an inline link would force the
+            // whole settings window wider (the trap render_toolbar_editor
+            // documents). Capping the width + wrapping keeps the window stable.
+            ui.vertical(|ui| {
+                ui.set_max_width(UPDATE_STATUS_MSG_WIDTH);
+                let warn = ui.visuals().warn_fg_color;
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "v{latest} is available, but there's no build for your platform \
+                             ({target})."
+                        ))
+                        .color(warn),
+                    )
+                    .wrap(),
+                );
+                if ui
+                    .link("Open the releases page")
+                    .on_hover_text("Download the latest release manually from your browser.")
+                    .clicked()
+                {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(html_url.clone()));
+                }
+            });
         }
         UpdateState::Available(info) => {
             ui.label(format!("v{} is available.", info.version));
@@ -1701,11 +1722,20 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
             ui.label(format!("Updated to v{version} — restarting…"));
         }
         UpdateState::Failed(e) => {
-            let err = ui.visuals().error_fg_color;
-            ui.colored_label(err, format!("Update failed: {e}"));
-            if ui.button("Retry").clicked() {
-                act = Some(Act::Recheck);
-            }
+            // Same fixed-width-wrap treatment as NoAssetForPlatform: a long error
+            // string must wrap to a few lines (with Retry below) rather than widen
+            // the settings window.
+            ui.vertical(|ui| {
+                ui.set_max_width(UPDATE_STATUS_MSG_WIDTH);
+                let err = ui.visuals().error_fg_color;
+                ui.add(
+                    egui::Label::new(egui::RichText::new(format!("Update failed: {e}")).color(err))
+                        .wrap(),
+                );
+                if ui.button("Retry").clicked() {
+                    act = Some(Act::Recheck);
+                }
+            });
         }
     }
     match act {
@@ -2240,5 +2270,108 @@ mod wiring_guard {
                 "`{field}` now has a consumer -- wire-up done; remove it from KNOWN_DEAD and add to WIRED",
             );
         }
+    }
+}
+
+/// Visual-QA for the update-status pane. We cannot "see" the rendered UI, so we
+/// drive it through the `egui_kittest` harness and assert the layout invariants
+/// the user reported against — via AccessKit node *rects* (geometry), never
+/// pixel sampling (unreliable on wgpu). The regression: a long status message
+/// rendered on one line with the action inline to its right, widening the whole
+/// settings window. The fix wraps the message in a width-capped column with the
+/// action on its own line below.
+#[cfg(test)]
+mod update_status_layout {
+    use super::{render_update_status, UPDATE_STATUS_MSG_WIDTH};
+    use crate::updater::{UpdateState, Updater};
+    use egui_kittest::kittest::Queryable as _;
+
+    // A generous margin over the cap for widget padding/frame insets.
+    const MARGIN: f32 = 16.0;
+
+    #[test]
+    fn no_asset_status_wraps_and_keeps_link_below_within_width() {
+        let latest = "0.9.9";
+        let target = "x86_64-pc-windows-msvc";
+        let msg =
+            format!("v{latest} is available, but there's no build for your platform ({target}).");
+        let mut h = egui_kittest::Harness::builder()
+            // Wide canvas on purpose: if the layout did NOT cap its width, the
+            // message would render on one long line and the link would sit far to
+            // the right (the bug). The cap must hold regardless of canvas width.
+            .with_size(egui::Vec2::new(1280.0, 400.0))
+            .build_ui(move |ui| {
+                let mut updater = Updater::default();
+                updater.state = UpdateState::NoAssetForPlatform {
+                    latest: latest.to_string(),
+                    target: target.to_string(),
+                    html_url: "https://github.com/o/r/releases".to_string(),
+                };
+                render_update_status(ui, &mut updater);
+            });
+        h.run();
+
+        let message = h.get_by_label(msg.as_str()).rect();
+        let link = h.get_by_label("Open the releases page").rect();
+
+        // 1. The message wrapped: its right edge stays within the cap (+ margin),
+        //    so this pane cannot force the settings window wider.
+        assert!(
+            message.right() <= UPDATE_STATUS_MSG_WIDTH + MARGIN,
+            "no-asset message not width-capped: right={} cap={UPDATE_STATUS_MSG_WIDTH}",
+            message.right(),
+        );
+        // 2. The link sits on its OWN line BELOW the message (not inline to its
+        //    right — the layout that extended the window before the fix).
+        assert!(
+            link.top() >= message.bottom() - 2.0,
+            "'Open the releases page' is not below the message: link.top={} message.bottom={}",
+            link.top(),
+            message.bottom(),
+        );
+        // 3. The link itself stays within the capped column too.
+        assert!(
+            link.right() <= UPDATE_STATUS_MSG_WIDTH + MARGIN,
+            "link extends past the width cap: right={} cap={UPDATE_STATUS_MSG_WIDTH}",
+            link.right(),
+        );
+    }
+
+    #[test]
+    fn failed_status_wraps_long_error_and_keeps_retry_within_width() {
+        let err = "update check failed: a very long error message that would, without wrapping, \
+                   stretch the settings window far beyond its intended width and push everything \
+                   sideways — which is exactly the regression this guards against";
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(1280.0, 400.0))
+            .build_ui(move |ui| {
+                let mut updater = Updater::default();
+                updater.state = UpdateState::Failed(err.to_string());
+                render_update_status(ui, &mut updater);
+            });
+        h.run();
+
+        let message = h
+            .get_by_label(format!("Update failed: {err}").as_str())
+            .rect();
+        let retry = h.get_by_label("Retry").rect();
+        // The wrapped error stays within the cap, and Retry sits below it inside
+        // the same width-bounded column — an error string can't widen the window.
+        assert!(
+            message.right() <= UPDATE_STATUS_MSG_WIDTH + MARGIN,
+            "failed message not width-capped: right={} cap={UPDATE_STATUS_MSG_WIDTH}",
+            message.right(),
+        );
+        assert!(
+            retry.top() >= message.bottom() - 2.0,
+            "Retry is not below the error message: retry.top={} message.bottom={}",
+            retry.top(),
+            message.bottom(),
+        );
+        assert!(
+            retry.right() <= UPDATE_STATUS_MSG_WIDTH + MARGIN,
+            "Retry extends past the width cap: right={} cap={UPDATE_STATUS_MSG_WIDTH}",
+            retry.right(),
+        );
     }
 }
