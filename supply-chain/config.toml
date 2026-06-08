@@ -270,11 +270,11 @@ version = "0.10.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.directories]]
-version = "5.0.1"
+version = "6.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.dirs-sys]]
-version = "0.4.1"
+version = "0.3.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.dispatch]]
@@ -586,7 +586,7 @@ version = "2.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.inotify]]
-version = "0.11.1"
+version = "0.11.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.inotify-sys]]
@@ -646,7 +646,7 @@ version = "0.4.0"
 criteria = "safe-to-run"
 
 [[exemptions.kqueue]]
-version = "1.1.1"
+version = "1.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.kqueue-sys]]
@@ -702,7 +702,7 @@ version = "0.4.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.log]]
-version = "0.4.30"
+version = "0.4.32"
 criteria = "safe-to-deploy"
 
 [[exemptions.memchr]]
@@ -1034,7 +1034,7 @@ version = "0.8.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.redox_users]]
-version = "0.4.6"
+version = "0.5.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.regex]]
@@ -1610,10 +1610,6 @@ version = "0.5.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-sys]]
-version = "0.48.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows-sys]]
 version = "0.52.0"
 criteria = "safe-to-deploy"
 
@@ -1627,10 +1623,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.windows-sys]]
 version = "0.61.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows-targets]]
-version = "0.48.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows-targets]]
@@ -1650,10 +1642,6 @@ version = "0.1.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_aarch64_gnullvm]]
-version = "0.48.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_aarch64_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
 
@@ -1662,19 +1650,11 @@ version = "0.53.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_aarch64_msvc]]
-version = "0.48.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_aarch64_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_aarch64_msvc]]
 version = "0.53.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_i686_gnu]]
-version = "0.48.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_i686_gnu]]
@@ -1694,10 +1674,6 @@ version = "0.53.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_i686_msvc]]
-version = "0.48.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_i686_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
 
@@ -1706,10 +1682,6 @@ version = "0.53.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_x86_64_gnu]]
-version = "0.48.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_x86_64_gnu]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
 
@@ -1718,19 +1690,11 @@ version = "0.53.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_x86_64_gnullvm]]
-version = "0.48.5"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_x86_64_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_x86_64_gnullvm]]
 version = "0.53.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows_x86_64_msvc]]
-version = "0.48.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_x86_64_msvc]]
@@ -1786,7 +1750,7 @@ version = "0.8.28"
 criteria = "safe-to-deploy"
 
 [[exemptions.yoke]]
-version = "0.8.2"
+version = "0.8.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.yoke-derive]]

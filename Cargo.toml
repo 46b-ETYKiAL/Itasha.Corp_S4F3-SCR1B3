@@ -27,7 +27,7 @@ regex = "1"                   # find/replace
 serde = { version = "1", features = ["derive"] }
 toml = "1"                    # 1.x — major rewrite of toml-rs with improved newtype-tuple serialization
 semver = "1"                  # plugin manifest min_app_version SemVer compare (Phase 20 T20.2)
-directories = "5"             # per-OS config paths
+directories = "6"             # per-OS config paths
 notify = "8"                  # config/theme live-reload
 # Logging
 tracing = "0.1"
