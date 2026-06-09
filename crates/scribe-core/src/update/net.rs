@@ -396,9 +396,12 @@ fn download_asset(url: &str, mut progress: impl FnMut(u64, u64)) -> Result<Vec<u
 
     let mut reader = resp.body_mut().as_reader();
     // NEVER pre-allocate `Content-Length` blindly — it is attacker-controllable,
-    // so a forged `Content-Length: 100GB` would OOM us before a byte is read.
-    // Reserve at most the cap.
-    let mut buf: Vec<u8> = Vec::with_capacity(total.min(MAX_DOWNLOAD_BYTES) as usize);
+    // so reserving `total` up front lets a forged `Content-Length: 512MiB` force
+    // a huge allocation before a single byte (let alone the signature) is checked.
+    // Reserve only a small initial buffer and let the Vec grow as bytes actually
+    // arrive (the streaming loop below enforces the real MAX_DOWNLOAD_BYTES cap).
+    const INITIAL_RESERVE: u64 = 1024 * 1024; // 1 MiB
+    let mut buf: Vec<u8> = Vec::with_capacity(total.min(INITIAL_RESERVE) as usize);
     let mut chunk = [0u8; 64 * 1024];
     let mut downloaded: u64 = 0;
     progress(0, total);

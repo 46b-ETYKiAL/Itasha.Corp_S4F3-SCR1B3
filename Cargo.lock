@@ -3472,7 +3472,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scribe-app"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "arboard",
  "eframe",
@@ -3494,13 +3494,12 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "window-vibrancy",
  "winresource",
 ]
 
 [[package]]
 name = "scribe-core"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "chardetng",
  "directories",
@@ -3531,7 +3530,7 @@ dependencies = [
 
 [[package]]
 name = "scribe-render"
-version = "0.4.10"
+version = "0.4.11"
 dependencies = [
  "egui",
  "ropey",
@@ -4879,21 +4878,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "window-vibrancy"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "010797bd7c40396fbc59d3105089fed0885fe267a0ef4a0a4646df54e28647f6"
-dependencies = [
- "objc2 0.6.4",
- "objc2-app-kit 0.3.2",
- "objc2-core-foundation",
- "objc2-foundation 0.3.2",
- "raw-window-handle",
- "windows-sys 0.60.2",
- "windows-version",
-]
-
-[[package]]
 name = "windows"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5068,15 +5052,6 @@ name = "windows-threading"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
-dependencies = [
- "windows-link",
-]
-
-[[package]]
-name = "windows-version"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4060a1da109b9d0326b7262c8e12c84df67cc0dbc9e33cf49e01ccc2eb63631"
 dependencies = [
  "windows-link",
 ]

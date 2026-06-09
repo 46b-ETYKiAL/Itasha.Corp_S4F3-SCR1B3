@@ -74,10 +74,18 @@ pub fn syntax_color32(rgb: [u8; 3]) -> Color32 {
 pub fn apply_window_opacity(v: &mut Visuals, opacity: f32) {
     let a = (opacity.clamp(0.02, 1.0) * 255.0).round() as u8;
     let with_a = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
+    // Only the PANEL surface goes translucent (it is what sits over the desktop).
     v.panel_fill = with_a(v.panel_fill);
-    v.window_fill = with_a(v.window_fill);
     v.extreme_bg_color = with_a(v.extreme_bg_color);
     v.faint_bg_color = with_a(v.faint_bg_color);
+    // `window_fill` is DELIBERATELY left opaque. egui draws combo-box dropdowns,
+    // context menus, and tooltips with `Frame::menu`/`Frame::popup`, both of which
+    // take their fill from `window_fill` — lowering its alpha makes every dropdown
+    // and tooltip see-through and unreadable, and makes the floating Settings
+    // window darken toward black as opacity drops (it composites over the panels
+    // behind it). Keeping it solid means popups/tooltips/the Settings window stay
+    // legible and hold their colour regardless of the opacity slider; only the
+    // main panels reveal the desktop.
 }
 
 #[cfg(test)]

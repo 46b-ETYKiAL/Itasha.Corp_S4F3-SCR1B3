@@ -435,49 +435,46 @@ pub fn show(ui: &mut egui::Ui, config: &mut Config) -> bool {
     ui.add_space(8.0);
 
     // ── Token pickers ─────────────────────────────────────────────────────
-    // NO nested ScrollArea here (#11). A scroll area inside the Settings page's
-    // own scroll stole the mouse wheel whenever the pointer sat over the colour
-    // list — the page wouldn't scroll and the pickers felt "trapped" and
-    // individually scrollable. The Settings page (settings.rs) owns the single
-    // outer ScrollArea; this block just lays the swatches out in aligned
-    // two-column Grids under foldable headers, so the wheel always scrolls the
-    // page and the layout reads cleanly.
-    egui::CollapsingHeader::new(egui::RichText::new("UI").strong())
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("chrome: window, panels, text, accent, cursor")
-                    .weak()
-                    .small(),
-            );
-            egui::Grid::new("scr1b3_theme_editor_ui_tokens")
-                .num_columns(2)
-                .spacing([14.0, 6.0])
-                .show(ui, |ui| {
-                    for (key, label) in UI_TOKENS {
-                        let allow_alpha = ALPHA_TOKENS.contains(key);
-                        token_grid_row(ui, &mut state.working.ui, key, label, allow_alpha);
-                    }
-                });
-        });
+    // UI tokens and Syntax tokens sit SIDE BY SIDE in two always-open columns
+    // (NOT collapsible "dropdown" headers, and NOT stacked vertically): the user
+    // wants both palettes visible at once with no expand/collapse. NO nested
+    // ScrollArea here (#11) — the Settings page (settings.rs) owns the single
+    // outer ScrollArea, so the mouse wheel always scrolls the page; each column
+    // just lays its swatches out in an aligned two-column `label | swatch` Grid.
+    ui.columns(2, |cols| {
+        // Left column — UI / chrome tokens.
+        cols[0].label(egui::RichText::new("UI").strong());
+        cols[0].label(
+            egui::RichText::new("chrome: window, panels, text, accent, cursor")
+                .weak()
+                .small(),
+        );
+        egui::Grid::new("scr1b3_theme_editor_ui_tokens")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(&mut cols[0], |ui| {
+                for (key, label) in UI_TOKENS {
+                    let allow_alpha = ALPHA_TOKENS.contains(key);
+                    token_grid_row(ui, &mut state.working.ui, key, label, allow_alpha);
+                }
+            });
 
-    egui::CollapsingHeader::new(egui::RichText::new("Syntax").strong())
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("token colours for highlighted code")
-                    .weak()
-                    .small(),
-            );
-            egui::Grid::new("scr1b3_theme_editor_syntax_tokens")
-                .num_columns(2)
-                .spacing([14.0, 6.0])
-                .show(ui, |ui| {
-                    for (key, label) in SYNTAX_TOKENS {
-                        token_grid_row(ui, &mut state.working.syntax, key, label, false);
-                    }
-                });
-        });
+        // Right column — Syntax tokens.
+        cols[1].label(egui::RichText::new("Syntax").strong());
+        cols[1].label(
+            egui::RichText::new("token colours for highlighted code")
+                .weak()
+                .small(),
+        );
+        egui::Grid::new("scr1b3_theme_editor_syntax_tokens")
+            .num_columns(2)
+            .spacing([12.0, 6.0])
+            .show(&mut cols[1], |ui| {
+                for (key, label) in SYNTAX_TOKENS {
+                    token_grid_row(ui, &mut state.working.syntax, key, label, false);
+                }
+            });
+    });
 
     // Persist the (possibly mutated) working state back into temp memory.
     ui.ctx().data_mut(|d| d.insert_temp(id, state));
