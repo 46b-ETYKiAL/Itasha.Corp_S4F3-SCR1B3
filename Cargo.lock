@@ -3472,7 +3472,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scribe-app"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "arboard",
  "eframe",
@@ -3486,6 +3486,7 @@ dependencies = [
  "rfd",
  "scribe-core",
  "scribe-render",
+ "scribe-win32-chrome",
  "semver",
  "serde",
  "serde_json",
@@ -3499,7 +3500,7 @@ dependencies = [
 
 [[package]]
 name = "scribe-core"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "chardetng",
  "directories",
@@ -3530,11 +3531,18 @@ dependencies = [
 
 [[package]]
 name = "scribe-render"
-version = "0.4.12"
+version = "0.4.13"
 dependencies = [
  "egui",
  "ropey",
  "scribe-core",
+]
+
+[[package]]
+name = "scribe-win32-chrome"
+version = "0.0.0"
+dependencies = [
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

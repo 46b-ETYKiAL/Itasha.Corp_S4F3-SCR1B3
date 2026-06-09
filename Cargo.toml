@@ -2,13 +2,18 @@
 # Workspace manifest. A "better Notepad++": fast, telemetry-free, not bloated.
 [workspace]
 resolver = "2"
-members = ["crates/scribe-core", "crates/scribe-render", "crates/scribe-app"]
+members = [
+    "crates/scribe-core",
+    "crates/scribe-render",
+    "crates/scribe-app",
+    "crates/scribe-win32-chrome",
+]
 # `fuzz/` is an independent cargo-fuzz workspace (needs nightly + libFuzzer);
 # exclude it so the main build/test/clippy/deny gates never compile it.
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.4.12"
+version = "0.4.13"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
@@ -46,6 +51,8 @@ egui_tiles = "0.15"           # tiling layout engine — multi-note grid (Phase 
 # Internal
 scribe-core = { path = "crates/scribe-core" }
 scribe-render = { path = "crates/scribe-render" }
+# Isolated Win32 chrome FFI (the only `unsafe` crate besides scribe-core's mmap).
+scribe-win32-chrome = { path = "crates/scribe-win32-chrome" }
 
 [profile.release]
 opt-level = 3

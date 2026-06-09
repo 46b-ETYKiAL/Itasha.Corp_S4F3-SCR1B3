@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 scribe-core.workspace = true
 scribe-render.workspace = true
+scribe-win32-chrome.workspace = true           # isolated Win32 caption-button strip (double-caption fix)
 semver.workspace = true        # parse env!(CARGO_PKG_VERSION) for the self-updater version compare
 eframe.workspace = true
 egui.workspace = true

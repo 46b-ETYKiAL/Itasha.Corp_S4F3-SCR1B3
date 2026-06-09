@@ -72,7 +72,10 @@ pub fn syntax_color32(rgb: [u8; 3]) -> Color32 {
 /// editor text itself is painted opaque on top, so it stays legible even at the
 /// floor — only the chrome/background fills go translucent).
 pub fn apply_window_opacity(v: &mut Visuals, opacity: f32) {
-    let a = (opacity.clamp(0.02, 1.0) * 255.0).round() as u8;
+    // Floor at 0.0 so the window can be made FULLY transparent (max see-through).
+    // The editor text itself is painted opaque on top, so it stays legible even
+    // at zero chrome alpha — only the background/panel fills vanish.
+    let a = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
     let with_a = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
     // Only the PANEL surface goes translucent (it is what sits over the desktop).
     v.panel_fill = with_a(v.panel_fill);
