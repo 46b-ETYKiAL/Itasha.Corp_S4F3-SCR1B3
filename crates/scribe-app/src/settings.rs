@@ -1147,10 +1147,10 @@ fn render_sections(
                 changed |= ui
                     .add_enabled(
                         translucent,
-                        // Floor at 0.02 (not 0.0) so the window can get very
-                        // see-through (#24 lowered it from 0.05) without becoming
-                        // fully invisible + lost. The editor text stays opaque.
-                        egui::Slider::new(&mut config.window.opacity, 0.02..=1.0),
+                        // Floor at 0.0 for MAXIMUM transparency — the chrome/panel
+                        // fills fully vanish; the editor text is painted opaque on
+                        // top so it stays legible even at zero.
+                        egui::Slider::new(&mut config.window.opacity, 0.0..=1.0),
                     )
                     .changed();
                 changed |= reset_to_default(ui, &mut config.window.opacity, &def.window.opacity);

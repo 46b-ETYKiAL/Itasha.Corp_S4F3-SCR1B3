@@ -5003,48 +5003,21 @@ impl ScribeApp {
             self.visuals_applied = true;
         }
 
-        // #79 — in frameless mode, force OS decorations OFF for a short window of
-        // frames after launch (and after a settings change — see below). Creating
-        // the window decoration-less is not enough: applying a vibrancy/
-        // transparent surface makes the Windows DWM re-add the native caption
-        // buttons a few frames LATER, producing a SECOND, slightly-offset set over
-        // the custom titlebar. A single one-shot lost that race; re-asserting for
-        // ~30 frames wins it. We schedule the next tick with `request_repaint_after`
-        // (a ~16ms TIMER) rather than `request_repaint` (an IMMEDIATE repaint): the
-        // timer advances the countdown over ~0.5s with no busy-repaint spin (calmer
-        // on battery), and — crucially — its non-zero repaint delay lets the
-        // egui_kittest harness settle instead of panicking on "exceeded max_steps"
-        // from a UI that never goes idle.
-        // #79/#40 — in frameless mode, re-assert OS-decorations-OFF on EVERY
-        // frame. A bounded countdown was NOT enough: applying a vibrancy/mica
-        // surface makes the Windows DWM re-add the native caption buttons
-        // PERSISTENTLY (not just once at launch), producing a SECOND, offset set
-        // of minimize/maximize/close over our custom titlebar. Re-sending
-        // `Decorations(false)` each frame keeps them suppressed; winit no-ops the
-        // call when the state is already unchanged, so there is no flicker or
-        // busy-work, and we do NOT request a repaint (so the headless
-        // egui_kittest harness still settles instead of looping forever).
-        // `!cfg!(test)`: a real OS window with a DWM is required for this to be
-        // meaningful; the headless egui_kittest harness has none, and sending a
-        // viewport command every frame there keeps the harness from settling
-        // (it trips the max_steps guard). Compiled out of test builds only.
-        //
-        // #24 KNOWN LIMITATION (documented, not silently ignored): in SOME glass/
-        // mica/vibrancy backdrop modes the DWM re-adds the native caption buttons
-        // *persistently* faster than this per-frame re-assert can suppress them,
-        // producing a doubled caption over the custom title bar. A guaranteed fix
-        // requires Win32 caption removal via raw FFI (SetWindowLongPtrW /
-        // DwmSetWindowAttribute), which is `unsafe` — and BOTH `scribe-app` and
-        // `scribe-render` are `#![forbid(unsafe_code)]` by deliberate architecture
-        // (scribe-core's single mmap exception is the only `unsafe` in the tree).
-        // Rather than relax that guarantee or pull in an FFI helper crate, the
-        // chosen resolution is the documented non-frameless fallback: the Settings
-        // "Frameless window" tooltip tells the user to turn frameless OFF if they
-        // hit the doubled caption — the native frame composes cleanly with every
-        // backdrop. This per-frame re-assert remains the best in-process
-        // mitigation for the common case.
+        // #24/#40 — the "doubled caption buttons" fix. ROOT CAUSE: winit keeps
+        // `WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` on undecorated TOP-LEVEL
+        // windows (only the WS_CHILD branch strips caption bits — winit #2754), and
+        // Windows 11 DWM paints the three native caption buttons from those residual
+        // style bits over our custom titlebar. It is NOT the DWM backdrop (removing
+        // window-vibrancy changed nothing) and NOT transparency; the old per-frame
+        // `Decorations(false)` re-assert only toggled winit's decorations marker,
+        // never the style bits, so it was a no-op. The real fix strips those bits
+        // off the HWND — quarantined in the `scribe-win32-chrome` crate (the only
+        // `unsafe` besides scribe-core's mmap). Called every frame because it is
+        // idempotent + cheap (a single GetWindowLongPtrW read once stripped) and a
+        // maximize re-applies winit's styles, which would otherwise re-add them.
+        // `!cfg!(test)`: the headless kittest harness has no real OS window.
         if !cfg!(test) && self.config.appearance.frameless {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(false));
+            scribe_win32_chrome::ensure_caption_stripped();
         }
 
         // #87/#103 — restart-free font switch: rebuild + re-apply the font set

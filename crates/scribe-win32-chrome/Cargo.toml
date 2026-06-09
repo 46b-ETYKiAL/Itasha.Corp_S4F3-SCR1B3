@@ -1,0 +1,16 @@
+# The ONLY crate in the tree permitted `unsafe` (alongside scribe-core's single
+# mmap exception). It quarantines a tiny, audited Win32 FFI: stripping the
+# residual native caption buttons winit leaves on undecorated top-level windows.
+[package]
+name = "scribe-win32-chrome"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Threading",
+] }
