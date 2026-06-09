@@ -96,6 +96,30 @@ fn fnv1a(s: &str) -> u64 {
     h
 }
 
+/// Write `bytes` to `path`, OWNER-ONLY on Unix (mode 0600). Unsaved-buffer
+/// backups and the session manifest hold buffer CONTENT (possibly secrets in a
+/// scratch note), so they must not be world-readable on a shared multi-user
+/// host. On Windows the default ACL is already owner-scoped, so a plain write is
+/// correct there.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes)
+    }
+}
+
 /// Atomically write `content` to `<dir>/<name>` (write temp, then rename).
 /// Creates `dir` if needed. `name` MUST be a bare file name (no separators).
 pub fn write_backup(dir: &Path, name: &str, content: &str) -> io::Result<()> {
@@ -108,7 +132,7 @@ pub fn write_backup(dir: &Path, name: &str, content: &str) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     let tmp = dir.join(format!("{name}.tmp"));
     let dst = dir.join(name);
-    fs::write(&tmp, content)?;
+    write_private(&tmp, content.as_bytes())?;
     // rename is atomic on the same volume; replaces any existing backup.
     fs::rename(&tmp, &dst)
 }
@@ -154,7 +178,7 @@ pub fn save_manifest(config_dir: &Path, manifest: &SessionManifest) -> io::Resul
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let path = manifest_path(config_dir);
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, body)?;
+    write_private(&tmp, body.as_bytes())?;
     fs::rename(&tmp, &path)
 }
 

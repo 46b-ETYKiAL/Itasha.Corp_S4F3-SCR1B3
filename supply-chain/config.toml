@@ -1565,10 +1565,6 @@ criteria = "safe-to-deploy"
 version = "0.1.11"
 criteria = "safe-to-deploy"
 
-[[exemptions.window-vibrancy]]
-version = "0.7.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.windows]]
 version = "0.62.2"
 criteria = "safe-to-deploy"
@@ -1635,10 +1631,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.windows-threading]]
 version = "0.2.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.windows-version]]
-version = "0.1.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.windows_aarch64_gnullvm]]

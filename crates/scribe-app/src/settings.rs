@@ -11,7 +11,7 @@
 //! `.on_hover_text` tooltip.
 
 use eframe::egui;
-use scribe_core::config::{ToolbarConfig, UpdateMode, WindowMode};
+use scribe_core::config::{ToolbarConfig, UpdateMode};
 use scribe_core::Config;
 
 /// Left-nav categories, in display order. Look-and-feel groups first
@@ -1041,6 +1041,41 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+            if row_visible(q, "crt scanlines retro motion effect") {
+                ui.add_enabled_ui(on, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.motion.crt_scanlines, "CRT scanlines")
+                        .on_hover_text(
+                            "Draw subtle drifting horizontal scanlines over the editor for a \
+                             retro CRT look (a calm animated post-effect).",
+                        )
+                        .changed();
+                });
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.crt_scanlines,
+                    &def.motion.crt_scanlines,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "scanline darkness strength") {
+                ui.label("Scanline darkness").on_hover_text(
+                    "How dark the CRT scanlines are — 0 is invisible, 1 is strong dark bands.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.motion.crt_scanlines,
+                        egui::Slider::new(&mut config.motion.scanline_darkness, 0.0..=1.0),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.scanline_darkness,
+                    &def.motion.scanline_darkness,
+                );
+                ui.end_row();
+            }
         });
         space(ui);
     }
@@ -1077,72 +1112,34 @@ fn render_sections(
         // -- Transparency / glass --
         group(
             ui,
-            "Transparency / glass",
-            "Window translucency and the OS glass / blur effect.",
+            "Transparency",
+            "Make the window see-through (the desktop shows behind it).",
         );
         ui.add_space(4.0);
         ui.label(
             egui::RichText::new(
-                "The window surface (transparency + Mode glass/mica/vibrancy) is set when the \
-                 window is created — changes here take effect after you restart SCR1B3.",
+                "Reveal the desktop through the window. Use the opacity slider for how \
+                 see-through it is and the tint to colour it — changes apply immediately.",
             )
             .weak()
             .small(),
         );
         ui.add_space(2.0);
         settings_grid(ui, "settings-window-glass", |ui| {
-            // Master on/off switch — off by default (opaque is fast, no DWM ghost).
+            // Single on/off switch — off by default (opaque is fast).
             changed |= grid_bool(
                 ui,
                 q,
-                "transparency enable master glass",
-                "Enable window transparency (master)",
-                "Master switch. When off, the window is fully opaque regardless of the mode \
-                 below. Turn on to use transparent / glass / mica / vibrancy. Restart to apply \
-                 the surface change.",
+                "transparency enable window see-through desktop",
+                "Enable window transparency",
+                "Make the window see-through so the desktop shows behind it. Use the opacity \
+                 slider for how see-through, and the tint below to colour it. Applies immediately.",
                 &mut config.window.transparency_enabled,
                 &def.window.transparency_enabled,
             );
             let tos = config.window.transparency_enabled;
-            if row_visible(q, "window mode transparent glass mica vibrancy opaque") {
-                let wmodes = [
-                    (WindowMode::Opaque, "opaque"),
-                    (WindowMode::Transparent, "transparent"),
-                    (WindowMode::Glass, "glass / acrylic"),
-                    (WindowMode::Mica, "mica (Win11)"),
-                    (WindowMode::Vibrancy, "vibrancy (macOS)"),
-                ];
-                ui.label("Mode").on_hover_text(
-                    "Pick the window surface style: opaque, transparent, glass / acrylic, mica \
-                     (Windows 11), or vibrancy (macOS). Restart to apply blur.",
-                );
-                ui.add_enabled_ui(tos, |ui| {
-                    egui::ComboBox::from_id_salt("window-mode")
-                        .selected_text(
-                            wmodes
-                                .iter()
-                                .find(|(m, _)| *m == config.window.mode)
-                                .map(|(_, s)| *s)
-                                .unwrap_or("opaque"),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (m, label) in wmodes {
-                                if ui
-                                    .selectable_value(&mut config.window.mode, m, label)
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                            }
-                        })
-                        .response
-                        .on_hover_text("Restart to apply the blur surface change.");
-                });
-                changed |= reset_to_default(ui, &mut config.window.mode, &def.window.mode);
-                ui.end_row();
-            }
             if row_visible(q, "window opacity transparent") {
-                let translucent = tos && config.window.mode.is_translucent();
+                let translucent = tos;
                 ui.label("Opacity").on_hover_text(
                     "How see-through the window is — 1.0 is fully opaque, lower is more \
                      transparent. Only active for translucent modes.",
@@ -2220,7 +2217,6 @@ mod wiring_guard {
         "editor.restore_cursor_position",
         "window.always_on_top",
         "window.transparency_enabled",
-        "window.mode",
         "window.opacity",
         "window.tint",
         "window.tint_strength",
@@ -2240,6 +2236,8 @@ mod wiring_guard {
         "motion.enabled",
         "motion.intensity",
         "motion.cursor_blink",
+        "motion.crt_scanlines",
+        "motion.scanline_darkness",
     ];
 
     /// Controls audited as DEAD (no runtime consumer yet). Shrinks as phases wire

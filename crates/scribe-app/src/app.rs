@@ -15,7 +15,6 @@
 use eframe::egui;
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, FontId, RichText};
-use scribe_core::config::WindowMode;
 use scribe_core::lsp::{Diagnostic, LspClient, LspRegistry};
 use scribe_core::plugin::{self, CommandInfo, HookEvent, PluginContext, PluginHost};
 use scribe_core::spell::{self, HashSetEngine};
@@ -23,18 +22,6 @@ use scribe_core::syntax::Highlighter;
 use scribe_core::theme::{Rgba, Theme};
 use scribe_core::{Config, Document};
 use std::path::{Path, PathBuf};
-
-// Parse a `#RRGGBB` tint to an RGBA quad for native blur tinting.
-//
-// Only consumed by Windows' `window_vibrancy::apply_acrylic`. macOS' vibrancy
-// API takes no tint, and Linux falls back to the portable transparent surface
-// with a tint overlay (neither needs the quad). Gating the fn to Windows keeps
-// `-D warnings` (clippy dead_code) green on Linux and macOS without a blanket
-// `#[allow(dead_code)]` (which would mask real dead code).
-#[cfg(windows)]
-fn tint_rgba(hex: &str, alpha: u8) -> Option<(u8, u8, u8, u8)> {
-    Rgba::parse_hex(hex).map(|c| (c.r, c.g, c.b, alpha))
-}
 
 /// The label shown on a tab: pinned tabs get a leading pin glyph so the pinned
 /// state is visible at a glance (not just in the right-click menu). Pure +
@@ -172,70 +159,6 @@ fn update_launch_action(
         return None;
     }
     Some(kind)
-}
-
-/// Apply the OS window effect for the chosen mode (best-effort, graceful on
-/// unsupported platforms). Windows: acrylic/mica; macOS: vibrancy; elsewhere the
-/// portable transparent surface + tint overlay carry the look.
-fn apply_window_effect(cc: &eframe::CreationContext<'_>, mode: WindowMode, tint_hex: &str) {
-    let _ = (cc, tint_hex);
-    match mode {
-        WindowMode::Glass => {
-            #[cfg(windows)]
-            {
-                let _ = window_vibrancy::apply_acrylic(cc, tint_rgba(tint_hex, 160));
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = window_vibrancy::apply_vibrancy(
-                    cc,
-                    window_vibrancy::NSVisualEffectMaterial::HudWindow,
-                    None,
-                    None,
-                );
-            }
-        }
-        WindowMode::Mica => {
-            #[cfg(windows)]
-            {
-                let _ = window_vibrancy::apply_mica(cc, Some(true));
-            }
-            #[cfg(target_os = "macos")]
-            {
-                let _ = window_vibrancy::apply_vibrancy(
-                    cc,
-                    window_vibrancy::NSVisualEffectMaterial::HudWindow,
-                    None,
-                    None,
-                );
-            }
-        }
-        WindowMode::Vibrancy => {
-            #[cfg(target_os = "macos")]
-            {
-                let _ = window_vibrancy::apply_vibrancy(
-                    cc,
-                    window_vibrancy::NSVisualEffectMaterial::Sidebar,
-                    None,
-                    None,
-                );
-            }
-            // Vibrancy is a macOS material; on Windows the closest DISTINCT
-            // backdrop is "Mica Alt" (tabbed) — a stronger, more saturated
-            // wallpaper tint than plain Mica. Using `apply_tabbed` (not
-            // `apply_mica`) makes Vibrancy visibly different from the Mica mode
-            // instead of an identical alias.
-            #[cfg(windows)]
-            {
-                let _ = window_vibrancy::apply_tabbed(cc, Some(true));
-            }
-        }
-        // Transparent: NO DWM backdrop at all — at a low opacity the raw desktop
-        // shows through SHARP (no blur), the visual opposite of the blurred
-        // Glass/Mica/Vibrancy backdrops. Translucency comes entirely from the
-        // transparent surface + low panel-fill alpha. Opaque: nothing to apply.
-        WindowMode::Transparent | WindowMode::Opaque => {}
-    }
 }
 
 /// A stable signature of the open-file set (sorted paths) for change detection.
@@ -686,12 +609,11 @@ impl ScribeApp {
             .options_mut(|o| o.theme_preference = egui::ThemePreference::System);
         cc.egui_ctx.set_visuals(app.current_visuals());
         app.visuals_applied = true;
-        // Apply the OS glass/acrylic/mica/vibrancy effect — only when the master
-        // transparency toggle is on AND the mode wants it. Otherwise the window is
-        // a normal opaque window (no layered surface => no ghost-on-close risk).
-        if app.config.window.effective_translucent() {
-            apply_window_effect(cc, app.config.window.mode, &app.config.window.tint);
-        }
+        // Transparency is a transparent-surface-only effect now (no OS DWM
+        // backdrop): the frameless window is created transparent, and the
+        // translucent panel fills reveal the desktop. No `apply_*` backdrop is
+        // called — that re-added the native caption over the custom titlebar
+        // (the doubled-caption bug) and the DWM materials were indistinguishable.
         app
     }
 
@@ -2505,6 +2427,46 @@ impl ScribeApp {
                     ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted, true));
                 }
             });
+    }
+
+    /// Natural width for a left/right tab bar so it HUGS the tab content instead
+    /// of a fixed 180px slab. The bar should be only as wide as the widest note
+    /// tab needs — a short tab name must not leave a big empty bar beside it.
+    /// Rotated tabs are a narrow vertical-text strip; horizontal tabs are
+    /// measured from the widest label plus the grip/pin/close affordances, then
+    /// clamped so a very long filename can't make the bar enormous.
+    fn side_tab_bar_width(&self, ctx: &egui::Context, rotated: bool) -> f32 {
+        if rotated {
+            // Vertical-text column + the close/pin buttons stacked above it.
+            return 44.0;
+        }
+        let font = ctx
+            .style()
+            .text_styles
+            .get(&egui::TextStyle::Body)
+            .cloned()
+            .unwrap_or_else(|| egui::FontId::proportional(14.0));
+        // Measure via a Painter (its `layout_no_wrap` is the `&self` form egui
+        // exposes for text measurement; `Fonts::layout_no_wrap` needs `&mut`).
+        // No layer is painted — this only measures galley widths.
+        let painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Background,
+            egui::Id::new("scr1b3_side_tab_width_probe"),
+        ));
+        let mut max_label = 0.0_f32;
+        for tab in &self.tabs {
+            let shown = tab_display_label(&tab.title(), tab.pinned);
+            let w = painter
+                .layout_no_wrap(shown, font.clone(), Color32::WHITE)
+                .size()
+                .x;
+            max_label = max_label.max(w);
+        }
+        // grip(~12) + pin(~18) + close(~18) + inter-item spacing + chip inner
+        // margin(16) + panel inner margin(8): the fixed affordances a tab row
+        // carries beside its label. Clamped: never narrower than a couple of
+        // buttons, never wider than a readable cap.
+        (max_label + 74.0).clamp(96.0, 280.0)
     }
 
     /// Render the side tab bar with each tab's label ROTATED 90° (vertical text,
@@ -5489,12 +5451,13 @@ impl ScribeApp {
                 }
                 scribe_core::config::TabBarPosition::Left => {
                     let rotated = self.config.editor.side_tabs_rotated;
+                    // Fit-to-content width (#16): the bar hugs the widest tab
+                    // rather than a fixed 180px slab, so a short note name doesn't
+                    // leave a big empty bar. `exact_width` auto-tracks the content
+                    // every frame (no manual resize needed — it just fits).
+                    let w = self.side_tab_bar_width(ctx, rotated);
                     egui::SidePanel::left("tabs-left")
-                        .resizable(true)
-                        .default_width(180.0)
-                        // #85 — allow the side tab bar to shrink much smaller than
-                        // egui's default floor (e.g. for a narrow vertical strip).
-                        .width_range(40.0..=400.0)
+                        .exact_width(w)
                         .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                         .show(ctx, |ui| {
                             self.draw_side_tab_strip(ui, accent, muted, rotated);
@@ -5502,10 +5465,9 @@ impl ScribeApp {
                 }
                 scribe_core::config::TabBarPosition::Right => {
                     let rotated = self.config.editor.side_tabs_rotated;
+                    let w = self.side_tab_bar_width(ctx, rotated);
                     egui::SidePanel::right("tabs-right")
-                        .resizable(true)
-                        .default_width(180.0)
-                        .width_range(40.0..=400.0)
+                        .exact_width(w)
                         .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
                         .show(ctx, |ui| {
                             self.draw_side_tab_strip(ui, accent, muted, rotated);
@@ -6951,6 +6913,15 @@ impl ScribeApp {
                 self.config.window.tint_strength,
             );
         }
+        // CRT scanlines post-effect (#14, ported from C0PL4ND). A calm animated
+        // retro overlay; only when motion AND scanlines are both enabled. Drives
+        // a modest ~30 fps repaint while on so the bands drift (no busy-spin), and
+        // never paints in the headless test harness (no real window to overlay).
+        if !cfg!(test) && self.config.motion.enabled && self.config.motion.crt_scanlines {
+            let t = ctx.input(|i| i.time);
+            paint_crt_scanlines(ctx, self.config.motion.scanline_darkness, t);
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
         // Phase 18 T18.1: 8-zone resize overlay for the frameless window. egui
         // doesn't restore OS resize when window decorations are off (winit
         // #4186) so we paint invisible interact rectangles at the edges + four
@@ -7943,6 +7914,40 @@ fn paint_tint_overlay(ctx: &egui::Context, tint_hex: &str, strength: f32) {
         0.0,
         Color32::from_rgba_unmultiplied(c.r, c.g, c.b, a),
     );
+}
+
+/// Paint translucent horizontal CRT scanlines over the window — a calm retro
+/// post-effect ported from C0PL4ND. Dark bands a few points apart at `darkness`
+/// strength, drifting slowly with `t` (seconds) so they shimmer like a live CRT
+/// rather than reading as a static grid. `Order::Foreground` so they sit OVER
+/// the text; the caller gates this behind `motion.enabled && crt_scanlines`.
+fn paint_crt_scanlines(ctx: &egui::Context, darkness: f32, t: f64) {
+    let alpha = (darkness.clamp(0.0, 1.0) * 200.0).round() as u8;
+    if alpha == 0 {
+        return;
+    }
+    let rect = ctx.content_rect();
+    let band = Color32::from_rgba_unmultiplied(0, 0, 0, alpha);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("crt-scanlines"),
+    ));
+    const PERIOD: f32 = 3.0; // points between band tops
+    const BAND_H: f32 = 1.0; // points of dark per band
+                             // Slow vertical drift (~6 pt/s) so the lines visibly shimmer.
+    let drift = (t * 6.0).rem_euclid(PERIOD as f64) as f32;
+    let mut y = rect.top() - PERIOD + drift;
+    while y < rect.bottom() {
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left(), y),
+                egui::pos2(rect.right(), y + BAND_H),
+            ),
+            0.0,
+            band,
+        );
+        y += PERIOD;
+    }
 }
 
 #[cfg(test)]

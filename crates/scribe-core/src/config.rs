@@ -48,6 +48,19 @@ pub struct MotionConfig {
     pub intensity: f32,
     /// Blink the text caret (vs. a steady caret) while motion is enabled.
     pub cursor_blink: bool,
+    /// CRT-style horizontal scanlines drawn over the editor (a calm retro
+    /// post-effect, ported from C0PL4ND). Off by default; gated behind
+    /// [`enabled`](Self::enabled).
+    #[serde(default)]
+    pub crt_scanlines: bool,
+    /// Scanline darkness (0.0 = invisible .. 1.0 = strong dark bands).
+    #[serde(default = "default_scanline_darkness")]
+    pub scanline_darkness: f32,
+}
+
+/// Default CRT scanline darkness — subtle, readable bands.
+fn default_scanline_darkness() -> f32 {
+    0.3
 }
 
 impl MotionConfig {
@@ -66,6 +79,8 @@ impl Default for MotionConfig {
             enabled: true,
             intensity: 0.6,
             cursor_blink: true,
+            crt_scanlines: false,
+            scanline_darkness: default_scanline_darkness(),
         }
     }
 }
@@ -82,13 +97,6 @@ pub enum WindowMode {
     Glass,
     Mica,
     Vibrancy,
-}
-
-impl WindowMode {
-    /// Whether this mode wants a transparent surface (non-opaque).
-    pub fn is_translucent(self) -> bool {
-        !matches!(self, WindowMode::Opaque)
-    }
 }
 
 /// Window appearance: translucency mode, opacity, and a color tint overlay.
@@ -115,12 +123,17 @@ pub struct WindowConfig {
 }
 
 impl WindowConfig {
-    /// Whether translucency should actually be rendered: the master toggle is
-    /// on AND the chosen mode wants a non-opaque surface. This is the single
-    /// predicate every render path consults so the master switch is honoured
-    /// uniformly (chrome fills, surface request, and the opacity pass).
+    /// Whether translucency should actually be rendered. Transparency is now a
+    /// single enable/disable toggle: when on, the frameless transparent surface
+    /// reveals the desktop through the translucent panels. There is no OS
+    /// blur/backdrop mode — applying a DWM material (Mica/Acrylic/Tabbed) re-added
+    /// the native caption buttons over the custom titlebar (the "double caption"
+    /// bug) AND the materials were visually indistinguishable in practice, so the
+    /// modes were collapsed to this toggle. The legacy `mode` field is retained
+    /// only for config back-compat and no longer selects a surface. This is the
+    /// single predicate every render path consults.
     pub fn effective_translucent(&self) -> bool {
-        self.transparency_enabled && self.mode.is_translucent()
+        self.transparency_enabled
     }
 }
 
@@ -752,30 +765,27 @@ mod tests {
     }
 
     #[test]
-    fn effective_translucent_requires_master_toggle_and_mode() {
-        // Translucent mode alone is NOT enough — the master toggle gates it.
+    fn effective_translucent_tracks_the_single_toggle() {
+        // Transparency is a single enable/disable toggle now — the legacy `mode`
+        // field no longer participates (it is back-compat only). Off => opaque.
         let w = WindowConfig {
-            mode: WindowMode::Glass,
+            transparency_enabled: false,
             ..Default::default()
         };
-        assert!(
-            !w.effective_translucent(),
-            "mode without toggle stays opaque"
-        );
-        // Toggle on + translucent mode => translucent.
+        assert!(!w.effective_translucent(), "toggle off stays opaque");
+        // Toggle on => translucent, regardless of the vestigial mode value.
         let w = WindowConfig {
-            mode: WindowMode::Glass,
             transparency_enabled: true,
             ..Default::default()
         };
         assert!(w.effective_translucent());
-        // Toggle on but Opaque mode => still opaque.
+        // The mode field does not change the outcome either way.
         let w = WindowConfig {
             mode: WindowMode::Opaque,
             transparency_enabled: true,
             ..Default::default()
         };
-        assert!(!w.effective_translucent());
+        assert!(w.effective_translucent());
     }
 
     /// F-035: always_on_top defaults OFF and round-trips through TOML.
