@@ -18,7 +18,9 @@
 use crate::spell::{ClassifiedSpan, SpanClass};
 use std::ops::Range;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Style as SynStyle, ThemeSet};
+use syntect::highlighting::{
+    HighlightIterator, HighlightState, Highlighter as SynHighlighter, Style as SynStyle, ThemeSet,
+};
 use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use syntect::util::LinesWithEndings;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter as TsHighlighter};
@@ -35,6 +37,64 @@ pub struct HlSpan {
 /// Default editor foreground (base16-eighties text tone). Used for any byte not
 /// claimed by a more specific highlight capture.
 const DEFAULT_FG: [u8; 3] = [0xd3, 0xd0, 0xc8];
+
+/// Above this buffer size, skip highlighting entirely (the caller paints plain
+/// text). egui itself lays out + tessellates every row regardless of coloring,
+/// so a multi-MB file is heavy no matter what; this is the safety cap so it can
+/// never stall on the highlight pass.
+const MAX_HIGHLIGHT_BYTES: usize = 4 * 1024 * 1024;
+
+/// Re-highlighting resumes from the nearest snapshot at/below the edited line.
+/// We snapshot the syntect parse/highlight state every STRIDE lines (not every
+/// line) so memory stays O(lines/STRIDE) while a single edit replays at most
+/// STRIDE extra lines to rebuild the entering state.
+const HL_SNAPSHOT_STRIDE: usize = 256;
+
+/// One cached line in the incremental highlighter: its content hash (to detect a
+/// change) and its computed spans.
+#[derive(Clone)]
+struct LineHl {
+    text_hash: u64,
+    spans: Vec<HlSpan>,
+}
+
+/// Incremental syntect-highlight cache for ONE editable buffer. Reused across
+/// keystrokes so only the lines from the first edit downward are re-highlighted
+/// (syntect parsing is stateful per line — block comments/strings carry across
+/// lines — so we snapshot the state every [`HL_SNAPSHOT_STRIDE`] lines and
+/// resume from the nearest one). The result is byte-identical to a full pass
+/// (property-tested). The host holds one of these per focused buffer; it resets
+/// when the language or theme changes. The tree-sitter (Rust) path does NOT use
+/// this — it re-parses whole-document (already fast).
+#[derive(Default)]
+pub struct IncrementalHighlightState {
+    /// `(ext, theme_name)` identity; a change resets the cache.
+    key: Option<(Option<String>, String)>,
+    /// One entry per source line, in order.
+    lines: Vec<LineHl>,
+    /// `(line_index, parse_state_entering_line, highlight_state_entering_line)`
+    /// at every `HL_SNAPSHOT_STRIDE`-th line, ascending by line index.
+    snapshots: Vec<(usize, ParseState, HighlightState)>,
+}
+
+impl IncrementalHighlightState {
+    fn spans(&self) -> Vec<Vec<HlSpan>> {
+        self.lines.iter().map(|l| l.spans.clone()).collect()
+    }
+    fn clear(&mut self) {
+        self.lines.clear();
+        self.snapshots.clear();
+        self.key = None;
+    }
+}
+
+#[inline]
+fn hash_line(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
 
 /// Recognised tree-sitter highlight capture names. `configure()` maps each
 /// query capture to the longest matching entry here; unmatched captures fall
@@ -420,6 +480,118 @@ impl Highlighter {
             }
         }
         self.highlight_syntect(text, ext)
+    }
+
+    /// Incremental form of [`highlight_document`](Self::highlight_document): reuses
+    /// `cache` so only the lines from the first change downward are re-highlighted
+    /// (the per-keystroke "re-highlight the whole buffer" cost is removed for the
+    /// syntect path). Output is byte-identical to a full pass — property-tested.
+    /// Rust still uses the fast whole-document tree-sitter path; the cache covers
+    /// the syntect path. Above [`MAX_HIGHLIGHT_BYTES`] highlighting is skipped.
+    pub fn highlight_document_incremental(
+        &self,
+        text: &str,
+        ext: Option<&str>,
+        cache: &mut IncrementalHighlightState,
+    ) -> Vec<Vec<HlSpan>> {
+        if text.len() > MAX_HIGHLIGHT_BYTES {
+            cache.clear();
+            return Vec::new();
+        }
+        if matches!(ext, Some("rs")) {
+            if let Some(spans) = self.highlight_tree_sitter(text) {
+                cache.clear();
+                return spans;
+            }
+        }
+        self.highlight_syntect_incremental(text, ext, cache)
+    }
+
+    /// syntect incremental pass — resumes from the nearest snapshot at/below the
+    /// first changed line and re-highlights downward. See
+    /// [`IncrementalHighlightState`].
+    fn highlight_syntect_incremental(
+        &self,
+        text: &str,
+        ext: Option<&str>,
+        cache: &mut IncrementalHighlightState,
+    ) -> Vec<Vec<HlSpan>> {
+        let syntax = self.syntax_for(ext);
+        let theme = &self.themes.themes[&self.theme_name];
+        let highlighter = SynHighlighter::new(theme);
+
+        // Reset the whole cache when the language or theme changes.
+        let this_key = (ext.map(str::to_string), self.theme_name.clone());
+        if cache.key.as_ref() != Some(&this_key) {
+            cache.lines.clear();
+            cache.snapshots.clear();
+            cache.key = Some(this_key);
+        }
+
+        let new_lines: Vec<&str> = LinesWithEndings::from(text).collect();
+
+        // First line whose content differs from the cache.
+        let mut dirty = 0usize;
+        while dirty < new_lines.len()
+            && dirty < cache.lines.len()
+            && cache.lines[dirty].text_hash == hash_line(new_lines[dirty])
+        {
+            dirty += 1;
+        }
+        // Unchanged (same content AND same line count) → reuse wholesale.
+        if dirty == new_lines.len() && new_lines.len() == cache.lines.len() {
+            return cache.spans();
+        }
+
+        // Resume from the nearest snapshot whose line index is <= the edit line.
+        let (start_line, mut ps, mut hs) =
+            match cache.snapshots.iter().rposition(|(li, _, _)| *li <= dirty) {
+                Some(i) => {
+                    let (li, ps, hs) = &cache.snapshots[i];
+                    (*li, ps.clone(), hs.clone())
+                }
+                None => (
+                    0,
+                    ParseState::new(syntax),
+                    HighlightState::new(&highlighter, ScopeStack::new()),
+                ),
+            };
+
+        // Drop snapshots past the resume point (rebuilt below) and the cached
+        // spans from the edit line onward (the prefix [0, dirty) is reused).
+        cache.snapshots.retain(|(li, _, _)| *li <= start_line);
+        cache.lines.truncate(dirty);
+
+        for (offset, &line) in new_lines[start_line..].iter().enumerate() {
+            let li = start_line + offset;
+            // Snapshot the ENTERING state at stride boundaries.
+            if li % HL_SNAPSHOT_STRIDE == 0 && !cache.snapshots.iter().any(|(x, _, _)| *x == li) {
+                cache.snapshots.push((li, ps.clone(), hs.clone()));
+            }
+            let ops = ps.parse_line(line, &self.syntaxes);
+            if li >= dirty {
+                // Changed / new line → recompute its spans.
+                let mut spans = Vec::new();
+                if let Ok(ops) = ops {
+                    let mut byte = 0usize;
+                    for (style, piece) in HighlightIterator::new(&mut hs, &ops, line, &highlighter)
+                    {
+                        let len = piece.len();
+                        spans.push(span_from(style, byte..byte + len));
+                        byte += len;
+                    }
+                }
+                cache.lines.push(LineHl {
+                    text_hash: hash_line(line),
+                    spans,
+                });
+            } else if let Ok(ops) = ops {
+                // Unchanged line before the edit → advance state only (spans kept).
+                for _ in HighlightIterator::new(&mut hs, &ops, line, &highlighter) {}
+            }
+        }
+
+        cache.spans()
     }
 
     /// tree-sitter highlight pass → per-line spans. `None` if the grammar is
@@ -922,5 +1094,68 @@ mod tests {
         let h = Highlighter::new();
         assert!(h.classify_document("", Some("rs")).is_empty());
         assert!(h.classify_document("", Some("py")).is_empty());
+    }
+
+    #[test]
+    fn incremental_highlight_matches_full_pass() {
+        // The incremental highlighter MUST produce byte-identical spans to a full
+        // syntect pass after any edit — that is the whole correctness contract.
+        // Uses Python (triple-quoted strings span lines) so a mid-file edit
+        // changes the parse state of following lines, exercising state resume.
+        let h = Highlighter::new();
+        let ext = Some("py");
+        let full = |t: &str| h.highlight_syntect(t, ext);
+        let mut cache = IncrementalHighlightState::default();
+
+        // 1. Fresh build.
+        let t0 = "x = 1\ny = '''multi\nline string'''\nz = 2\n";
+        assert_eq!(
+            h.highlight_document_incremental(t0, ext, &mut cache),
+            full(t0)
+        );
+        // 2. Middle edit that changes multi-line string state propagation.
+        let t1 = "x = 1\ny = 'short'\nline string'''\nz = 2\n";
+        assert_eq!(
+            h.highlight_document_incremental(t1, ext, &mut cache),
+            full(t1),
+            "must equal full after a state-changing middle edit"
+        );
+        // 3. Append.
+        let t2 = format!("{t1}w = 3\nv = 4\n");
+        assert_eq!(
+            h.highlight_document_incremental(&t2, ext, &mut cache),
+            full(&t2)
+        );
+        // 4. Edit the FIRST line (resume from line 0).
+        let t3 = t2.replacen("x = 1", "x = 999", 1);
+        assert_eq!(
+            h.highlight_document_incremental(&t3, ext, &mut cache),
+            full(&t3)
+        );
+        // 5. Delete a line.
+        let t4 = t3.replacen("z = 2\n", "", 1);
+        assert_eq!(
+            h.highlight_document_incremental(&t4, ext, &mut cache),
+            full(&t4)
+        );
+
+        // 6. A 600-line file (spans multiple snapshot strides), then a deep edit
+        //    that must resume from the nearest snapshot, not the top.
+        let mut big = String::from("s = '''\n");
+        for i in 0..600 {
+            big.push_str(&format!("body line {i}\n"));
+        }
+        big.push_str("'''\nend = 1\n");
+        let mut cache2 = IncrementalHighlightState::default();
+        assert_eq!(
+            h.highlight_document_incremental(&big, ext, &mut cache2),
+            full(&big)
+        );
+        let big2 = big.replacen("body line 400", "body line 400 EDITED", 1);
+        assert_eq!(
+            h.highlight_document_incremental(&big2, ext, &mut cache2),
+            full(&big2),
+            "must equal full after a deep edit (snapshot-stride resume)"
+        );
     }
 }

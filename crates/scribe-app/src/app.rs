@@ -18,7 +18,7 @@ use egui::{Color32, FontId, RichText};
 use scribe_core::lsp::{Diagnostic, LspClient, LspRegistry};
 use scribe_core::plugin::{self, CommandInfo, HookEvent, PluginContext, PluginHost};
 use scribe_core::spell::{self, HashSetEngine};
-use scribe_core::syntax::Highlighter;
+use scribe_core::syntax::{Highlighter, IncrementalHighlightState};
 use scribe_core::theme::{Rgba, Theme};
 use scribe_core::{Config, Document};
 use std::path::{Path, PathBuf};
@@ -508,6 +508,11 @@ pub struct ScribeApp {
     /// Cached syntax-highlight layout (keyed by text+lang+size) so syntect only
     /// re-runs when the buffer changes, not every frame (perf hotspot fix).
     hl_cache: std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
+    /// Incremental syntect-highlight state for the focused editable buffer, so a
+    /// keystroke re-highlights only from the edited line downward (not the whole
+    /// document). Single-slot like `hl_cache`: it re-seeds when focus moves to a
+    /// different buffer, which is fine (re-seeding is a one-time full pass).
+    hl_inc_cache: std::cell::RefCell<IncrementalHighlightState>,
     /// Memoized misspellings for the active buffer (#78), keyed by a hash of
     /// (text, enabled, scope toggles, language). Drives BOTH the status-bar
     /// count and the red squiggle underlines painted in the editor, so the
@@ -843,6 +848,7 @@ impl ScribeApp {
             last_autosave_at: None,
             last_backup_sig: 0,
             hl_cache: std::cell::RefCell::new(None),
+            hl_inc_cache: std::cell::RefCell::new(IncrementalHighlightState::default()),
             spell_cache: std::cell::RefCell::new(None),
             _cfg_watcher: cfg_watcher,
             cfg_rx: Some(cfg_rx),
@@ -892,6 +898,7 @@ impl ScribeApp {
         // capture.
         let hl = &self.hl;
         let hl_cache = &self.hl_cache;
+        let hl_inc_cache = &self.hl_inc_cache;
         // #R5: theme colours + focused-pane id for the chip-styled pane headers
         // (the per-pane note bar now mirrors the top tab strip's chip look).
         let accent = ui_color(&self.theme, "accent", Rgba::new(0, 255, 254, 255));
@@ -1055,6 +1062,7 @@ impl ScribeApp {
                 let mut layouter = make_layouter(
                     hl,
                     hl_cache,
+                    hl_inc_cache,
                     ext.as_deref(),
                     font.clone(),
                     line_height,
@@ -3659,7 +3667,15 @@ impl ScribeApp {
         let line_height = self.config.fonts.line_height;
         let hl = &self.hl;
         let word_wrap = self.config.editor.word_wrap;
-        let mut layouter = make_layouter(hl, &self.hl_cache, ext, font, line_height, word_wrap);
+        let mut layouter = make_layouter(
+            hl,
+            &self.hl_cache,
+            &self.hl_inc_cache,
+            ext,
+            font,
+            line_height,
+            word_wrap,
+        );
         egui::ScrollArea::both()
             .id_salt("fold-scroll")
             .show(ui, |ui| {
@@ -4546,9 +4562,10 @@ fn highlight_job(
     ext: Option<&str>,
     font: FontId,
     line_height_mult: f32,
+    inc_cache: &mut IncrementalHighlightState,
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
-    let lines = hl.highlight_document(text, ext);
+    let lines = hl.highlight_document_incremental(text, ext, inc_cache);
     // Explicit per-row height honours the `fonts.line_height` setting (epaint
     // TextFormat.line_height; epaint defaults to the font's natural height).
     let lh = Some(font.size * line_height_mult);
@@ -4635,6 +4652,7 @@ fn paint_squiggle(painter: &egui::Painter, x0: f32, x1: f32, y: f32, color: Colo
 fn make_layouter<'a>(
     hl: &'a Highlighter,
     cache: &'a std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
+    inc_cache: &'a std::cell::RefCell<IncrementalHighlightState>,
     ext: Option<&'a str>,
     font: FontId,
     line_height: f32,
@@ -4663,6 +4681,7 @@ fn make_layouter<'a>(
                         ext,
                         font.clone(),
                         line_height,
+                        &mut inc_cache.borrow_mut(),
                     ));
                     *slot = Some((key, arc.clone()));
                     arc
@@ -6688,6 +6707,7 @@ impl ScribeApp {
                     let mut layouter = make_layouter(
                         hl,
                         &self.hl_cache,
+                        &self.hl_inc_cache,
                         ext_ref,
                         font.clone(),
                         line_height,
