@@ -262,6 +262,16 @@ pub struct EditorConfig {
     /// use the rope browse path regardless of this flag.
     #[serde(default)]
     pub experimental_rope_editor: bool,
+    /// Wave-3 perf: byte size above which an *editable* buffer is auto-routed
+    /// through the viewport-culled rope editor even when `experimental_rope_editor`
+    /// is off — so a multi-MiB file does not pay the per-frame O(n) egui `TextEdit`
+    /// cost. The rope path trades away a few large-file niceties (breadcrumb bar,
+    /// sticky-scroll headers — both already disabled past 500 KiB anyway — plus
+    /// spellcheck squiggles and Tab→spaces) for O(viewport) rendering, which is
+    /// the right call at this size. `0` disables auto-promotion entirely. Default
+    /// 16 MiB (aligns with the core mmap threshold).
+    #[serde(default = "default_rope_auto_threshold")]
+    pub rope_editor_auto_threshold_bytes: usize,
     /// Persist UNSAVED buffer content (incl. untitled scratch notes) so it
     /// survives a restart or crash without an explicit save — the Notepad++
     /// "session snapshot" / VS Code "Hot Exit" behaviour. Backups live in
@@ -299,6 +309,13 @@ fn default_note_theme() -> String {
 /// user turns them off, and ON for configs written before the field existed).
 fn default_true() -> bool {
     true
+}
+
+/// Wave-3: default byte threshold (16 MiB) above which an editable buffer is
+/// auto-promoted to the viewport-culled rope editor. Aligns with the core
+/// `Buffer::MMAP_THRESHOLD`. `0` (user-set) disables auto-promotion.
+fn default_rope_auto_threshold() -> usize {
+    16 * 1024 * 1024
 }
 
 /// Cap on the scroll-position memory map (F-021). Older entries are evicted
@@ -371,6 +388,7 @@ impl Default for EditorConfig {
             first_run_completed: false,
             scroll_positions: std::collections::HashMap::new(),
             experimental_rope_editor: false,
+            rope_editor_auto_threshold_bytes: default_rope_auto_threshold(),
             session_backup: true,
             trim_trailing_whitespace_on_save: false,
             final_newline_on_save: false,
