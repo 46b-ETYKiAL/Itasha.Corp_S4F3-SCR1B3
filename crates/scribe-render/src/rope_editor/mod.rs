@@ -496,9 +496,10 @@ impl<'a> RopeEditor<'a> {
             ))
         };
         if let Some(pos) = area.interact_pointer_pos() {
-            let shift = ui.input(|i| i.modifiers.shift);
+            let (shift, alt) = ui.input(|i| (i.modifiers.shift, i.modifiers.alt));
             if area.clicked() {
                 if let Some(off) = pos_to_offset(pos) {
+                    state.block_anchor = None;
                     state.clear_extra_carets();
                     if shift {
                         state.edit.cursor = off; // extend from existing anchor
@@ -507,7 +508,27 @@ impl<'a> RopeEditor<'a> {
                         state.edit = EditState::at(off);
                     }
                 }
+            } else if alt {
+                // Alt-drag = column / block selection: one caret per row across
+                // the dragged column band (Sublime/VS Code semantics). The drag
+                // origin is captured once in (line, col) form so `set_carets`
+                // rewriting `edit` doesn't lose it.
+                if let Some(off) = pos_to_offset(pos) {
+                    if area.drag_started() {
+                        state.block_anchor = Some(editing::line_col(rope, off));
+                        state.clear_extra_carets();
+                        state.edit = EditState::at(off);
+                    }
+                    if let Some(anchor_lc) = state.block_anchor {
+                        let target_lc = editing::line_col(rope, off);
+                        let carets = editing::block_selection(rope, anchor_lc, target_lc);
+                        if !carets.is_empty() {
+                            state.set_carets(carets);
+                        }
+                    }
+                }
             } else if area.drag_started() {
+                state.block_anchor = None;
                 if let Some(off) = pos_to_offset(pos) {
                     state.clear_extra_carets();
                     if !shift {
@@ -522,6 +543,9 @@ impl<'a> RopeEditor<'a> {
                     state.edit.goal_col = None;
                 }
             }
+        }
+        if area.drag_stopped() {
+            state.block_anchor = None;
         }
         if focused {
             // Position the OS IME composition window at the caret so CJK /
@@ -698,6 +722,10 @@ pub struct RopeEditorState {
     /// Mutating + movement edits apply to `edit` AND every `extra` caret.
     pub extra: Vec<EditState>,
     pub history: History,
+    /// Transient origin for an in-progress Alt-drag column/block selection, as
+    /// a (line, col) pair. `None` outside a block drag. Not persisted — it is
+    /// pure interaction state for the duration of one drag gesture.
+    block_anchor: Option<(usize, usize)>,
 }
 
 impl Default for RopeEditorState {
@@ -706,6 +734,7 @@ impl Default for RopeEditorState {
             edit: EditState::at(0),
             extra: Vec::new(),
             history: History::default(),
+            block_anchor: None,
         }
     }
 }
@@ -819,6 +848,19 @@ pub fn apply_event(
 
     match event {
         Event::Text(text) if !text.is_empty() => {
+            // Auto-close SKIP-OVER (single caret): typing a closer that is
+            // already the char under the caret steps over it instead of
+            // duplicating. Runs before `record_before` so a pure skip-over
+            // creates no undo checkpoint and leaves `out.mutated` false.
+            if state.extra.is_empty() && text.chars().count() == 1 {
+                let ch = text.chars().next().unwrap();
+                if editing::should_skip_over(rope, state.edit.cursor, ch) {
+                    state.edit.cursor += 1;
+                    state.edit.anchor = state.edit.cursor;
+                    out.consumed = true;
+                    return out;
+                }
+            }
             record_before!(EditKind::Insert);
             // Auto-close brackets/quotes (single caret): typing an opener
             // inserts the matching closer and keeps the caret between; with a
@@ -910,6 +952,27 @@ pub fn apply_event(
                 }
                 Key::Escape if state.is_multi() => {
                     state.clear_extra_carets();
+                    out.consumed = true;
+                }
+                // Ctrl+D: the first press (no selection) selects the word under
+                // the primary caret; each subsequent press adds a caret on the
+                // next occurrence of the selection (Sublime/VS Code semantics).
+                // Plain Ctrl+D is unbound elsewhere; Ctrl+Shift+D = duplicate
+                // line lives at the app level (distinct chord).
+                Key::D if cmd && !shift && !alt => {
+                    if !state.edit.has_selection() {
+                        let (s, _) = editing::word_bounds(rope, state.edit.cursor);
+                        let e = editing::word_end(rope, state.edit.cursor);
+                        if e > s {
+                            state.edit.anchor = s;
+                            state.edit.cursor = e;
+                        }
+                    } else {
+                        let mut carets = state.all_carets();
+                        if editing::add_next_occurrence(rope, &mut carets) {
+                            state.set_carets(carets);
+                        }
+                    }
                     out.consumed = true;
                 }
                 Key::Backspace => {
@@ -1269,6 +1332,35 @@ mod tests {
         };
         apply_event(&mut r, &mut st, &text_event("["));
         assert_eq!(r.to_string(), "[abc]", "selection wrapped");
+    }
+
+    #[test]
+    fn apply_event_skips_over_matching_closer() {
+        // Type '(' → auto-close gives "()" with caret between; typing ')'
+        // steps over the existing ')' instead of producing "())".
+        let mut r = Rope::from_str("");
+        let mut st = RopeEditorState::new();
+        apply_event(&mut r, &mut st, &text_event("("));
+        let out = apply_event(&mut r, &mut st, &text_event(")"));
+        assert!(out.consumed, "skip-over consumes the keystroke");
+        assert!(!out.mutated, "skip-over does not mutate the buffer");
+        assert_eq!(r.to_string(), "()", "no duplicate closer inserted");
+        assert_eq!(st.edit.cursor, 2, "caret stepped past the closer");
+    }
+
+    #[test]
+    fn apply_event_ctrl_d_selects_word_then_adds_occurrence() {
+        let mut r = Rope::from_str("foo bar foo");
+        let mut st = RopeEditorState::new();
+        st.edit = EditState::at(1); // inside the first "foo"
+                                    // First Ctrl+D selects the word under the caret.
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::D, false, true));
+        assert_eq!(st.edit.selection(), 0..3, "first D selects the word");
+        assert!(!st.is_multi(), "no extra caret yet");
+        // Second Ctrl+D adds a caret on the next occurrence.
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::D, false, true));
+        assert!(st.is_multi(), "second D adds an occurrence caret");
+        assert_eq!(st.extra.len(), 1, "exactly one new caret");
     }
 
     #[test]

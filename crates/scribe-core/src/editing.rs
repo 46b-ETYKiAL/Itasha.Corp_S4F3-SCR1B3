@@ -286,6 +286,137 @@ pub fn closing_for(open: char) -> Option<char> {
     }
 }
 
+/// True when `ch` is a closing bracket/quote that auto-close skip-over applies
+/// to AND the char at the caret in `rope` is exactly that closer. Used so that
+/// typing a closer immediately before an identical auto-inserted closer steps
+/// over it instead of inserting a duplicate (the universal editor behaviour).
+pub fn should_skip_over(rope: &Rope, cursor: usize, ch: char) -> bool {
+    if !matches!(ch, ')' | ']' | '}' | '"' | '\'' | '`') {
+        return false;
+    }
+    cursor < rope.len_chars() && rope.char(cursor) == ch
+}
+
+/// (start, end) char indices of the identifier-like word containing `cursor`.
+/// A word is `[A-Za-z0-9_]+`; returns `(cursor, cursor)` when not on a word.
+pub fn word_bounds(rope: &Rope, cursor: usize) -> (usize, usize) {
+    let is_word = |c: char| c == '_' || c.is_alphanumeric();
+    let n = rope.len_chars();
+    let mut s = cursor.min(n);
+    while s > 0 && is_word(rope.char(s - 1)) {
+        s -= 1;
+    }
+    let mut e = cursor.min(n);
+    while e < n && is_word(rope.char(e)) {
+        e += 1;
+    }
+    (s, e)
+}
+
+/// End char index of the word at `cursor` (companion to `word_bounds`).
+pub fn word_end(rope: &Rope, cursor: usize) -> usize {
+    word_bounds(rope, cursor).1
+}
+
+/// Add a new caret selecting the next occurrence of the PRIMARY caret's
+/// selected text, searching forward from the end of the furthest existing
+/// selection and wrapping once. Returns `true` when a caret was added.
+///
+/// Mirrors Sublime/VS Code "Ctrl+D": the first press (no selection yet) is the
+/// caller's job (select the word under the caret); each subsequent press lands
+/// here and grows the caret set. Literal, case-sensitive match — matching the
+/// "expand to next exact occurrence" semantics users expect from Ctrl+D.
+///
+/// Bounded by a 5M-char cap (it materialises a char vector of the whole buffer
+/// per call); above that, Ctrl+D is a no-op to keep the editor fast.
+pub fn add_next_occurrence(rope: &Rope, carets: &mut Vec<EditState>) -> bool {
+    if rope.len_chars() > 5_000_000 {
+        return false;
+    }
+    // The "seed" is the primary (lowest) caret's selection.
+    let Some(primary) = carets.first().copied() else {
+        return false;
+    };
+    if !primary.has_selection() {
+        return false;
+    }
+    let sel = primary.selection();
+    let needle: String = rope.slice(sel.clone()).chars().collect();
+    if needle.is_empty() {
+        return false;
+    }
+    let nlen = needle.chars().count();
+    // Search starts after the END of the furthest selection so repeated presses
+    // walk forward through the document.
+    let search_from = carets
+        .iter()
+        .map(|c| c.selection().end)
+        .max()
+        .unwrap_or(sel.end);
+    let hay: String = rope.chars().collect();
+    // Char-index search (ropey is char-indexed; build a char vec once — fine for
+    // the typical buffer, and Ctrl+D is an interactive, bounded operation).
+    let chars: Vec<char> = hay.chars().collect();
+    let needle_chars: Vec<char> = needle.chars().collect();
+    let find_at = |start: usize| -> Option<usize> {
+        if chars.len() < nlen {
+            return None;
+        }
+        (start..=chars.len() - nlen).find(|&i| chars[i..i + nlen] == needle_chars[..])
+    };
+    // Forward from search_from, else wrap to start (but never re-add an existing
+    // selection range).
+    let existing: std::collections::HashSet<(usize, usize)> = carets
+        .iter()
+        .map(|c| (c.selection().start, c.selection().end))
+        .collect();
+    let candidate = find_at(search_from)
+        .or_else(|| find_at(0))
+        .filter(|&at| !existing.contains(&(at, at + nlen)));
+    let Some(at) = candidate else {
+        return false;
+    };
+    let mut st = EditState::at(at + nlen); // cursor at end of match
+    st.anchor = at; // anchor at start → the match is selected
+    carets.push(st);
+    dedupe_carets(carets);
+    true
+}
+
+/// Build a block (column) selection: one caret/selection per row from
+/// `anchor` to `target` (inclusive), each spanning columns `[col_a, col_b]`
+/// clamped to that row's length. Rows shorter than `col_a` get a collapsed
+/// caret at end-of-line (Sublime behaviour). Returns carets ordered top→bottom.
+pub fn block_selection(
+    rope: &Rope,
+    anchor: (usize, usize),
+    target: (usize, usize),
+) -> Vec<EditState> {
+    let (l0, l1) = (anchor.0.min(target.0), anchor.0.max(target.0));
+    let (ca, cb) = (anchor.1.min(target.1), anchor.1.max(target.1));
+    let last_line = rope.len_lines().saturating_sub(1);
+    let mut out = Vec::new();
+    for line in l0..=l1.min(last_line) {
+        let line_start = rope.line_to_char(line);
+        let line_len = {
+            let s = rope.line(line);
+            // exclude the trailing '\n' from the selectable width
+            let mut len = s.len_chars();
+            if s.len_chars() > 0 && s.char(s.len_chars() - 1) == '\n' {
+                len -= 1;
+            }
+            len
+        };
+        let a = line_start + ca.min(line_len);
+        let b = line_start + cb.min(line_len);
+        let mut st = EditState::at(b);
+        st.anchor = a;
+        out.push(st);
+    }
+    dedupe_carets(&mut out);
+    out
+}
+
 /// The leading whitespace (spaces/tabs) of the line containing char index `c`.
 pub fn leading_whitespace(rope: &Rope, c: usize) -> String {
     let (line, _) = line_col(rope, c);
@@ -606,6 +737,60 @@ mod tests {
 
     fn rope(s: &str) -> Rope {
         Rope::from_str(s)
+    }
+
+    #[test]
+    fn skip_over_detects_matching_closer_at_caret() {
+        let r = Rope::from_str("()");
+        // caret between the two parens, typing ')' should skip over the ')'.
+        assert!(should_skip_over(&r, 1, ')'));
+        // caret at 0 (over '(') — not a closer position.
+        assert!(!should_skip_over(&r, 0, ')'));
+        // a non-closer char never skips.
+        assert!(!should_skip_over(&r, 1, 'x'));
+        // EOF guard.
+        assert!(!should_skip_over(&r, 2, ')'));
+    }
+
+    #[test]
+    fn word_bounds_spans_identifier() {
+        let r = Rope::from_str("let foo_bar = 1");
+        let (s, e) = word_bounds(&r, 6); // inside foo_bar
+        assert_eq!((s, e), (4, 11));
+    }
+
+    #[test]
+    fn add_next_occurrence_grows_caret_set_and_wraps() {
+        let r = Rope::from_str("foo bar foo baz foo");
+        // primary selects the first "foo" (0..3).
+        let mut p = EditState::at(3);
+        p.anchor = 0;
+        let mut carets = vec![p];
+        assert!(add_next_occurrence(&r, &mut carets)); // second foo @ 8..11
+        assert_eq!(carets.len(), 2);
+        assert!(add_next_occurrence(&r, &mut carets)); // third foo @ 16..19
+        assert_eq!(carets.len(), 3);
+        // Fourth press wraps but every occurrence is taken → no-op.
+        assert!(!add_next_occurrence(&r, &mut carets));
+        assert_eq!(carets.len(), 3);
+    }
+
+    #[test]
+    fn add_next_occurrence_requires_a_selection() {
+        let r = Rope::from_str("foo foo");
+        let mut carets = vec![EditState::at(0)]; // collapsed caret
+        assert!(!add_next_occurrence(&r, &mut carets));
+    }
+
+    #[test]
+    fn block_selection_one_caret_per_row_clamped() {
+        let r = Rope::from_str("hello\nhi\nworld\n");
+        // columns 2..4 across rows 0..2.
+        let carets = block_selection(&r, (0, 2), (2, 4));
+        assert_eq!(carets.len(), 3);
+        // row "hi" (len 2) clamps both ends to 2 → collapsed caret at col 2.
+        let hi = carets[1].selection();
+        assert_eq!(hi.start, hi.end);
     }
 
     #[test]
