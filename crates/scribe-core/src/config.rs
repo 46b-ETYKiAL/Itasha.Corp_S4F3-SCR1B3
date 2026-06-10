@@ -614,7 +614,26 @@ impl Config {
 
     /// Default per-OS config directory: e.g. `%APPDATA%/scr1b3` /
     /// `~/.config/scr1b3` / `~/Library/Application Support/scr1b3`.
+    ///
+    /// `SCR1B3_CONFIG_DIR` overrides the resolved path when set to a non-empty
+    /// value. This enables a portable / "bring your own config dir" mode and is
+    /// the supported way to point the app at an isolated directory (e.g. for QA
+    /// or testing) — the `directories` crate resolves the Windows config root
+    /// via `SHGetKnownFolderPath`, which ignores the `APPDATA` environment
+    /// variable, so an env-redirect of `APPDATA` alone does NOT relocate config.
     pub fn config_dir() -> Option<PathBuf> {
+        Self::config_dir_from(std::env::var_os("SCR1B3_CONFIG_DIR"))
+    }
+
+    /// Resolve the config dir given an explicit override value (pure — no env
+    /// read), so the precedence is unit-testable without mutating process-global
+    /// state. A non-empty override wins; otherwise fall back to the OS default.
+    fn config_dir_from(override_dir: Option<std::ffi::OsString>) -> Option<PathBuf> {
+        if let Some(override_dir) = override_dir {
+            if !override_dir.is_empty() {
+                return Some(PathBuf::from(override_dir));
+            }
+        }
         directories::ProjectDirs::from("com", "ItashaCorp", crate::CONFIG_DIR_NAME)
             .map(|d| d.config_dir().to_path_buf())
     }
@@ -680,6 +699,28 @@ mod tests {
     #[test]
     fn default_note_font_is_ibm_plex_mono() {
         assert_eq!(Config::default().fonts.editor_family, "IBM Plex Mono");
+    }
+
+    #[test]
+    fn config_dir_override_wins_when_non_empty() {
+        // A non-empty SCR1B3_CONFIG_DIR value relocates the config dir verbatim
+        // (portable / isolated-QA mode). Tested via the pure helper so no
+        // process-global env mutation is needed (keeps the parallel test runner
+        // deterministic).
+        let custom = std::ffi::OsString::from(r"C:\tmp\scr1b3-qa");
+        assert_eq!(
+            Config::config_dir_from(Some(custom)),
+            Some(std::path::PathBuf::from(r"C:\tmp\scr1b3-qa"))
+        );
+    }
+
+    #[test]
+    fn config_dir_override_ignored_when_empty() {
+        // An empty override must fall through to the OS default, never resolve to
+        // "" (which would put config at the process CWD).
+        let from_empty = Config::config_dir_from(Some(std::ffi::OsString::new()));
+        let from_none = Config::config_dir_from(None);
+        assert_eq!(from_empty, from_none);
     }
 
     #[test]
