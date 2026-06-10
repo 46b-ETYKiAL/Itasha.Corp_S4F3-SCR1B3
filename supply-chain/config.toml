@@ -1824,3 +1824,15 @@ criteria = "safe-to-deploy"
 [[exemptions.zvariant_utils]]
 version = "3.4.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.pulldown-cmark]]
+version = "0.13.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.similar]]
+version = "2.7.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.unicase]]
+version = "2.9.0"
+criteria = "safe-to-deploy"
