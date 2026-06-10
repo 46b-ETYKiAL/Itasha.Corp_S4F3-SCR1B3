@@ -51,6 +51,19 @@ pub fn theme_to_visuals(theme: &Theme) -> Visuals {
     v.selection.stroke = Stroke::new(1.0, accent);
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, accent);
     v.widgets.active.bg_stroke = Stroke::new(1.0, accent);
+    // Scrollbars follow the active theme. egui paints the scroll HANDLE from the
+    // per-state `WidgetVisuals.bg_fill` (idle→inactive, hover→hovered,
+    // drag→active), whereas buttons fill from `weak_bg_fill` — so tinting
+    // `bg_fill` themes the scrollbar (app + settings) without recolouring button
+    // backgrounds. Idle is a faint foreground tint (visible but quiet); hover and
+    // drag pull toward the accent so grabbing the bar reads as on-brand instead
+    // of egui's default grey.
+    let handle_idle = Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 0x55);
+    let handle_hover = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 0x88);
+    let handle_active = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 0xcc);
+    v.widgets.inactive.bg_fill = handle_idle;
+    v.widgets.hovered.bg_fill = handle_hover;
+    v.widgets.active.bg_fill = handle_active;
     v.error_fg_color = ui(theme, "error", Rgba::new(0xff, 0x00, 0x40, 255));
     v.warn_fg_color = ui(theme, "warning", Rgba::new(0xfb, 0xbf, 0x24, 255));
     v

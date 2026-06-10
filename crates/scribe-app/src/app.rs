@@ -2508,9 +2508,17 @@ impl ScribeApp {
             let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
             // The active tab is a filled chip spanning the whole vertical cell
             // (icon row + rotated label), so it reads as a real tab.
+            // Tighten the coloured chip to the text (like the top bar): a snug
+            // inner margin + a thin accent outline on the active tab so the fill
+            // HUGS the rotated label/grip stack instead of floating in the column.
             let chip = egui::Frame::default()
-                .inner_margin(egui::Margin::symmetric(3, 4))
+                .inner_margin(egui::Margin::symmetric(2, 3))
                 .corner_radius(egui::CornerRadius::same(5))
+                .stroke(if selected {
+                    egui::Stroke::new(1.0, accent.linear_multiply(0.5))
+                } else {
+                    egui::Stroke::NONE
+                })
                 .fill(if selected {
                     accent.linear_multiply(0.20)
                 } else {
@@ -2518,7 +2526,7 @@ impl ScribeApp {
                 });
             chip.show(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.spacing_mut().item_spacing.y = 3.0;
+                    ui.spacing_mut().item_spacing.y = 2.0;
                     // #30 column order: grip · rotated-name · pin · close (top→bottom).
                     // Drag GRIP at the head — painted dots (`grip_handle`), never a
                     // phosphor glyph, so the handle can't tofu. Pinned tabs show a
@@ -2627,30 +2635,45 @@ impl ScribeApp {
             });
             ui.add_space(2.0);
         }
-        if ui
-            .small_button("+")
-            .on_hover_text("New tab (Ctrl+N)")
-            .clicked()
-        {
-            add_tab = true;
-        }
+        // Centre the + add-tab button in the note-tab column (it used to hug the
+        // left edge of the bar). `vertical_centered` centres the single button
+        // horizontally in the column.
+        ui.vertical_centered(|ui| {
+            if ui
+                .small_button("+")
+                .on_hover_text("New tab (Ctrl+N)")
+                .clicked()
+            {
+                add_tab = true;
+            }
+        });
         // #59-parity insertion indicator: while a tab is in flight, paint an
-        // accent hairline at the gap the drop will land in. The rotated column is
-        // always vertical, so the boundary is a horizontal line.
+        // accent hairline in the GAP the drop will land in. The rotated column is
+        // always vertical, so the boundary is a horizontal line — drawn at the
+        // inter-tab gap midpoint and spanning the FULL column width so it reads
+        // as a separator BETWEEN rows, never as a mark inside a chip.
         if let Some(pointer) = dragging {
             if let Some((_, last_rect)) = rects.last().copied() {
+                let x_range = ui.max_rect().x_range();
                 let painter = ui.painter();
                 let accent_line = egui::Stroke::new(2.0, accent);
                 let mut drawn = false;
-                for (_, rect) in &rects {
+                for (idx, (_, rect)) in rects.iter().enumerate() {
                     if pointer.y < rect.center().y {
-                        painter.hline(rect.x_range(), rect.top(), accent_line);
+                        // Drop lands ABOVE this row: paint in the gap above it
+                        // (midpoint between the previous row's bottom and this top).
+                        let y = if idx == 0 {
+                            rect.top() - 1.0
+                        } else {
+                            (rects[idx - 1].1.bottom() + rect.top()) * 0.5
+                        };
+                        painter.hline(x_range, y, accent_line);
                         drawn = true;
                         break;
                     }
                 }
                 if !drawn {
-                    painter.hline(last_rect.x_range(), last_rect.bottom(), accent_line);
+                    painter.hline(x_range, last_rect.bottom() + 1.0, accent_line);
                 }
             }
         }
@@ -5302,6 +5325,12 @@ impl ScribeApp {
         let mut start_lsp = false;
 
         let accent = ui_color(&self.theme, "accent", Rgba::new(0, 255, 254, 255));
+        // Secondary brand colour for the split-tone wordmark (`1 B 3` half). Falls
+        // back to a complementary violet when a theme does not define `accent_alt`,
+        // so existing single-accent themes keep working; the 12 brand themes each
+        // set their own. Chrome stays one-accent everywhere ELSE (the split wordmark
+        // is the single deliberate two-tone mark, per the brand discipline).
+        let accent_alt = ui_color(&self.theme, "accent_alt", Rgba::new(0x9d, 0x7c, 0xff, 255));
         let muted = ui_color(&self.theme, "line_number", Rgba::new(0x5a, 0x58, 0x69, 255));
         // Chrome panels (titlebar/toolbar/status/filetree/split/gutter/minimap) all
         // fill with this color. In a translucent window mode the fill MUST carry the
@@ -5340,10 +5369,22 @@ impl ScribeApp {
                         // RichText is Proportional, so simply NOT calling
                         // `.monospace()` (which selects the Monospace family that the
                         // note font leads) binds the titlebar to `ui_family`.
-                        ui.label(RichText::new("S C R 1 B 3").color(accent).strong());
+                        // Split-tone wordmark: "S C R " in the primary accent, "1 B 3"
+                        // in the secondary brand colour. The two halves are painted with
+                        // zero item-spacing between them so they read as ONE wordmark
+                        // (egui otherwise inserts item_spacing.x between widgets, which
+                        // would split the mark into two words).
+                        let saved_spacing = ui.spacing().item_spacing.x;
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        ui.label(RichText::new("S C R ").color(accent).strong());
+                        ui.label(RichText::new("1 B 3").color(accent_alt).strong());
+                        ui.spacing_mut().item_spacing.x = saved_spacing;
+                        ui.add_space(6.0);
                         ui.label(RichText::new("//").color(muted));
+                        // Japanese brand subtitle (写本 — shahon). Replaces the English
+                        // tagline in the titlebar; the welcome screen keeps the tagline.
                         ui.label(
-                            RichText::new(scribe_core::PRODUCT_TAGLINE)
+                            RichText::new(scribe_core::PRODUCT_SUBTITLE_JP)
                                 .color(muted)
                                 .small(),
                         );
@@ -6232,6 +6273,9 @@ impl ScribeApp {
             .frame(egui::Frame::default().fill(panel))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
+                    // Edge padding so the leftmost status segment isn't flush against
+                    // the window edge (mirrors the titlebar's 10px lead-in).
+                    ui.add_space(8.0);
                     let active = self.active.min(self.tabs.len().saturating_sub(1));
                     if let Some(t) = self.tabs.get(active) {
                         // F-025 — clickable EOL segment cycles LF → CRLF → CR.

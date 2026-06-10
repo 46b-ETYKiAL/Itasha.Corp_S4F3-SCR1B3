@@ -44,4 +44,9 @@ pub use theme::Theme;
 /// Product identity constants (public-repo-safe; no internal references).
 pub const PRODUCT_NAME: &str = "SCR1B3";
 pub const PRODUCT_TAGLINE: &str = "present day, present text";
+/// Japanese brand subtitle rendered in the frameless titlebar as
+/// `SCR1B3 // 写本` (shahon — "manuscript"/"transcription"). The two glyphs
+/// 写 (U+5199) + 本 (U+672C) MUST be present in the bundled NotoSansJP subset
+/// (see `scripts/generate-jp-kanji-subset.py` SUBTITLE_KANJI) or they tofu.
+pub const PRODUCT_SUBTITLE_JP: &str = "写本";
 pub const CONFIG_DIR_NAME: &str = "scr1b3";
