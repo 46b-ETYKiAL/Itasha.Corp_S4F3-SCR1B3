@@ -813,6 +813,111 @@ fn render_sections(
                 &mut config.editor.snippets_enabled,
                 &def.editor.snippets_enabled,
             );
+            changed |= grid_bool(
+                ui,
+                q,
+                "current line highlight caret row band",
+                "Highlight current line",
+                "Draw a faint band across the line the caret is on.",
+                &mut config.editor.current_line_highlight,
+                &def.editor.current_line_highlight,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "indent guides vertical lines",
+                "Indent guides",
+                "Draw faint vertical guide lines at each indent level.",
+                &mut config.editor.indent_guides,
+                &def.editor.indent_guides,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "bracket match highlight pair",
+                "Bracket-match highlight",
+                "Box the bracket next to the caret and its matching partner.",
+                &mut config.editor.bracket_match,
+                &def.editor.bracket_match,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "smooth scroll wheel easing",
+                "Smooth scrolling",
+                "Ease wheel scrolling. Turn off for snappier, discrete-notch scrolling.",
+                &mut config.editor.smooth_scroll,
+                &def.editor.smooth_scroll,
+            );
+            if row_visible(q, "caret style cursor shape bar block underline") {
+                use scribe_core::config::CaretStyle;
+                let styles = [
+                    (CaretStyle::Bar, "bar"),
+                    (CaretStyle::Block, "block"),
+                    (CaretStyle::Underline, "underline"),
+                ];
+                ui.label("Caret style")
+                    .on_hover_text("Shape of the text caret: thin bar, full block, or underline.");
+                egui::ComboBox::from_id_salt("caret-style")
+                    .selected_text(
+                        styles
+                            .iter()
+                            .find(|(s, _)| *s == config.editor.caret_style)
+                            .map(|(_, l)| *l)
+                            .unwrap_or("bar"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (style, label) in styles {
+                            changed |= ui
+                                .selectable_value(&mut config.editor.caret_style, style, label)
+                                .changed();
+                        }
+                    });
+                changed |=
+                    reset_to_default(ui, &mut config.editor.caret_style, &def.editor.caret_style);
+                ui.end_row();
+            }
+            if row_visible(q, "caret width cursor thickness") {
+                ui.label("Caret width")
+                    .on_hover_text("Caret thickness for the bar/underline styles (points).");
+                changed |= ui
+                    .add(egui::Slider::new(&mut config.editor.caret_width, 1.0..=4.0))
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.editor.caret_width, &def.editor.caret_width);
+                ui.end_row();
+            }
+            if row_visible(q, "scrollbar style chrome auto thin hidden") {
+                use scribe_core::config::ScrollbarStyle;
+                let styles = [
+                    (ScrollbarStyle::Auto, "auto"),
+                    (ScrollbarStyle::Thin, "thin"),
+                    (ScrollbarStyle::Hidden, "hidden"),
+                ];
+                ui.label("Scrollbar style")
+                    .on_hover_text("Editor scrollbar chrome: default, a slim bar, or hidden.");
+                egui::ComboBox::from_id_salt("scrollbar-style")
+                    .selected_text(
+                        styles
+                            .iter()
+                            .find(|(s, _)| *s == config.editor.scrollbar_style)
+                            .map(|(_, l)| *l)
+                            .unwrap_or("auto"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (style, label) in styles {
+                            changed |= ui
+                                .selectable_value(&mut config.editor.scrollbar_style, style, label)
+                                .changed();
+                        }
+                    });
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.scrollbar_style,
+                    &def.editor.scrollbar_style,
+                );
+                ui.end_row();
+            }
         });
         ui.add_space(6.0);
 
@@ -2364,6 +2469,7 @@ mod wiring_guard {
             "motion.intensity" => src.contains("clamped_intensity"),
             "motion.flicker_strength" => src.contains("clamped_flicker_strength"),
             "motion.mesh_density" => src.contains("clamped_mesh_density"),
+            "editor.caret_width" => src.contains("clamped_caret_width"),
             _ => false,
         }
     }
@@ -2389,6 +2495,13 @@ mod wiring_guard {
         "editor.show_minimap",
         "editor.render_whitespace",
         "editor.snippets_enabled",
+        "editor.current_line_highlight",
+        "editor.indent_guides",
+        "editor.bracket_match",
+        "editor.smooth_scroll",
+        "editor.caret_style",
+        "editor.caret_width",
+        "editor.scrollbar_style",
         "editor.tab_bar_position",
         "editor.side_tabs_rotated",
         "editor.restore_session",

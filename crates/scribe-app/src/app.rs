@@ -4901,6 +4901,70 @@ fn byte_to_char_index(s: &str, byte: usize) -> usize {
     s.char_indices().take_while(|(i, _)| *i < byte).count()
 }
 
+/// Wave-6 bracket-match: find the bracket pair to highlight given a caret
+/// char-index. Looks at the char just before and just after the caret for an
+/// opener/closer, then scans for its partner respecting nesting. Returns
+/// `(open_char_index, close_char_index)` in ascending order, or `None`. The scan
+/// is bounded by the caller (skipped for very large buffers) to stay cheap.
+fn matching_bracket_char_indices(text: &str, caret_ci: usize) -> Option<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let pairs = [('(', ')'), ('[', ']'), ('{', '}')];
+    let is_open = |c: char| pairs.iter().any(|(o, _)| *o == c);
+    let is_close = |c: char| pairs.iter().any(|(_, cl)| *cl == c);
+    let partner = |c: char| -> Option<(char, bool)> {
+        for (o, cl) in pairs {
+            if c == o {
+                return Some((cl, true)); // need a closer, scan forward
+            }
+            if c == cl {
+                return Some((o, false)); // need an opener, scan backward
+            }
+        }
+        None
+    };
+    // Prefer the char immediately to the LEFT of the caret (editor convention),
+    // else the char to the RIGHT.
+    let candidates = [caret_ci.checked_sub(1), Some(caret_ci)];
+    for ci in candidates.into_iter().flatten() {
+        let Some(&here) = chars.get(ci) else { continue };
+        if !is_open(here) && !is_close(here) {
+            continue;
+        }
+        let (want, forward) = partner(here)?;
+        let mut depth = 0i32;
+        if forward {
+            let mut j = ci;
+            while j < chars.len() {
+                let c = chars[j];
+                if c == here {
+                    depth += 1;
+                } else if c == want {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((ci, j));
+                    }
+                }
+                j += 1;
+            }
+        } else {
+            let mut j = ci as isize;
+            while j >= 0 {
+                let c = chars[j as usize];
+                if c == here {
+                    depth += 1;
+                } else if c == want {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((j as usize, ci));
+                    }
+                }
+                j -= 1;
+            }
+        }
+    }
+    None
+}
+
 /// Paint a red spellcheck squiggle from `x0` to `x1` along baseline `y` (#78).
 /// A small triangle wave reads as the universal "misspelled" underline.
 fn paint_squiggle(painter: &egui::Painter, x0: f32, x1: f32, y: f32, color: Color32) {
@@ -5262,8 +5326,11 @@ impl ScribeApp {
     fn apply_scroll_settings(&self, ctx: &egui::Context) {
         let scroll = self.config.scroll;
         ctx.options_mut(|o| o.input_options.line_scroll_speed = scroll.clamped_speed());
+        // Wave-6 smooth-scroll: when the editor's smooth_scroll is OFF, kill the
+        // jump easing so the wheel moves in discrete notches (snappier).
+        let smooth = scroll.animate_jumps && self.config.editor.smooth_scroll;
         ctx.all_styles_mut(|s| {
-            s.scroll_animation = if scroll.animate_jumps {
+            s.scroll_animation = if smooth {
                 egui::style::ScrollAnimation::new(1500.0, egui::Rangef::new(0.05, 0.20))
             } else {
                 egui::style::ScrollAnimation::none()
@@ -7351,8 +7418,23 @@ impl ScribeApp {
                     if let Some(off) = self.pending_scroll.take() {
                         sa = sa.vertical_scroll_offset(off);
                     }
+                    // Wave-6 scrollbar style.
+                    sa = match self.config.editor.scrollbar_style {
+                        scribe_core::config::ScrollbarStyle::Hidden => sa.scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::AlwaysHidden,
+                        ),
+                        scribe_core::config::ScrollbarStyle::Thin
+                        | scribe_core::config::ScrollbarStyle::Auto => sa.scroll_bar_visibility(
+                            egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                        ),
+                    };
+                    let thin_scrollbar = self.config.editor.scrollbar_style
+                        == scribe_core::config::ScrollbarStyle::Thin;
                     let mut a: Option<(egui::Pos2, usize)> = None;
                     let sa_out = sa.show(ui, |ui| {
+                        if thin_scrollbar {
+                            ui.style_mut().spacing.scroll.bar_width = 6.0;
+                        }
                         let dw = if word_wrap {
                             ui.available_width()
                         } else {
@@ -7463,6 +7545,49 @@ impl ScribeApp {
                                 }
                             }
                         }
+                        // Wave-6 indent guides: faint vertical lines at each
+                        // tab_width column, drawn by walking the laid-out galley so
+                        // they follow the chosen monospace face + wrapping.
+                        if self.config.editor.indent_guides {
+                            let painter = ui.painter();
+                            let origin = out.galley_pos.to_vec2();
+                            let cell_w = out
+                                .galley
+                                .rows
+                                .iter()
+                                .flat_map(|r| r.glyphs.iter())
+                                .map(|g| g.advance_width)
+                                .find(|w| *w > 0.0)
+                                .unwrap_or(self.config.fonts.editor_size * 0.6);
+                            let step = cell_w * self.config.editor.tab_width as f32;
+                            if step > 1.0 {
+                                let guide = Color32::from_rgba_unmultiplied(
+                                    muted.r(),
+                                    muted.g(),
+                                    muted.b(),
+                                    40,
+                                );
+                                for row in &out.galley.rows {
+                                    let row_off = origin + row.pos.to_vec2();
+                                    let lead: f32 = row
+                                        .glyphs
+                                        .iter()
+                                        .take_while(|g| g.chr == ' ' || g.chr == '\t')
+                                        .map(|g| g.advance_width)
+                                        .sum();
+                                    let top = row_off.y;
+                                    let bot = row_off.y + row.size.y;
+                                    let mut x = row_off.x + step;
+                                    while x <= row_off.x + lead + 0.5 {
+                                        painter.line_segment(
+                                            [egui::pos2(x, top), egui::pos2(x, bot)],
+                                            egui::Stroke::new(1.0, guide),
+                                        );
+                                        x += step;
+                                    }
+                                }
+                            }
+                        }
                         if let Some(range) = out.cursor_range {
                             // egui 0.34: CursorRange.primary is a CCursor directly
                             // (no nested .ccursor); Galley::pos_from_ccursor was
@@ -7499,6 +7624,171 @@ impl ScribeApp {
                                         self.caret_trail.pop_front();
                                     }
                                 }
+                            }
+                            let collapsed = range.primary.index == range.secondary.index;
+                            // Wave-6 current-line highlight: a faint full-width band
+                            // across the caret's galley row. Low alpha so it reads as
+                            // a tint behind the (opaque) glyphs. Skipped on selection.
+                            if self.config.editor.current_line_highlight && collapsed {
+                                let painter = ui.painter();
+                                let y0 = out.galley_pos.y + rect.min.y;
+                                let y1 = out.galley_pos.y + rect.max.y;
+                                let band = egui::Rect::from_min_max(
+                                    egui::pos2(out.galley_pos.x, y0),
+                                    egui::pos2(
+                                        out.galley_pos.x
+                                            + out.galley.size().x.max(ui.available_width()),
+                                        y1,
+                                    ),
+                                );
+                                let hl = Color32::from_rgba_unmultiplied(
+                                    accent.r(),
+                                    accent.g(),
+                                    accent.b(),
+                                    22,
+                                );
+                                painter.rect_filled(band, 0.0, hl);
+                            }
+                            // Wave-6 bracket-match: box the bracket next to the caret
+                            // and its partner. The O(n) scan is bounded to a sane
+                            // buffer size to stay cheap on huge files.
+                            if self.config.editor.bracket_match
+                                && collapsed
+                                && self.tabs[active].text.len() <= 500_000
+                            {
+                                let text_ref = &self.tabs[active].text;
+                                if let Some((open_ci, close_ci)) =
+                                    matching_bracket_char_indices(text_ref, cc.index)
+                                {
+                                    let painter = ui.painter();
+                                    let box_col = Color32::from_rgba_unmultiplied(
+                                        accent.r(),
+                                        accent.g(),
+                                        accent.b(),
+                                        60,
+                                    );
+                                    for ci in [open_ci, close_ci] {
+                                        let r0 = out
+                                            .galley
+                                            .pos_from_cursor(egui::text::CCursor::new(ci));
+                                        let r1 = out
+                                            .galley
+                                            .pos_from_cursor(egui::text::CCursor::new(ci + 1));
+                                        if (r0.min.y - r1.min.y).abs() > 0.5 {
+                                            continue; // span wrapped; skip
+                                        }
+                                        let bx = egui::Rect::from_min_max(
+                                            out.galley_pos + egui::vec2(r0.min.x, r0.min.y),
+                                            out.galley_pos + egui::vec2(r1.min.x, r0.max.y),
+                                        );
+                                        painter.rect_stroke(
+                                            bx,
+                                            1.0,
+                                            egui::Stroke::new(1.0, box_col),
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
+                                }
+                            }
+                            // Wave-6 caret style: draw a Block/Underline shape over
+                            // egui's native caret (focus + no selection only). Honour
+                            // blink when motion.cursor_blink is on.
+                            if self.config.editor.caret_style
+                                != scribe_core::config::CaretStyle::Bar
+                                && collapsed
+                                && out.response.has_focus()
+                            {
+                                let now = ui.ctx().input(|i| i.time);
+                                let blink =
+                                    self.config.motion.enabled && self.config.motion.cursor_blink;
+                                let visible = if blink {
+                                    (now / 1.06).rem_euclid(1.0) < 0.6
+                                } else {
+                                    true
+                                };
+                                if blink {
+                                    ui.ctx().request_repaint_after(
+                                        std::time::Duration::from_millis(120),
+                                    );
+                                }
+                                if visible {
+                                    let painter = ui.painter();
+                                    let caret_col = ui_color(
+                                        &self.theme,
+                                        "caret",
+                                        Rgba::new(accent.r(), accent.g(), accent.b(), 255),
+                                    );
+                                    let x = out.galley_pos.x + rect.min.x;
+                                    let y0 = out.galley_pos.y + rect.min.y;
+                                    let y1 = out.galley_pos.y + rect.max.y;
+                                    let w = self.config.editor.clamped_caret_width();
+                                    let cell_w = out
+                                        .galley
+                                        .rows
+                                        .iter()
+                                        .flat_map(|r| r.glyphs.iter())
+                                        .map(|g| g.advance_width)
+                                        .find(|w| *w > 0.0)
+                                        .unwrap_or(self.config.fonts.editor_size * 0.6);
+                                    match self.config.editor.caret_style {
+                                        scribe_core::config::CaretStyle::Block => {
+                                            let blk = Color32::from_rgba_unmultiplied(
+                                                caret_col.r(),
+                                                caret_col.g(),
+                                                caret_col.b(),
+                                                110,
+                                            );
+                                            painter.rect_filled(
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(x, y0),
+                                                    egui::pos2(x + cell_w, y1),
+                                                ),
+                                                0.0,
+                                                blk,
+                                            );
+                                        }
+                                        scribe_core::config::CaretStyle::Underline => {
+                                            painter.rect_filled(
+                                                egui::Rect::from_min_max(
+                                                    egui::pos2(x, y1 - w.max(2.0)),
+                                                    egui::pos2(x + cell_w, y1),
+                                                ),
+                                                0.0,
+                                                caret_col,
+                                            );
+                                        }
+                                        scribe_core::config::CaretStyle::Bar => {}
+                                    }
+                                }
+                            }
+                            // Wider Bar caret (width only): egui's caret is ~1px;
+                            // overpaint a wider bar at the same x when width > 1.5.
+                            if self.config.editor.caret_style
+                                == scribe_core::config::CaretStyle::Bar
+                                && self.config.editor.clamped_caret_width() > 1.5
+                                && collapsed
+                                && out.response.has_focus()
+                            {
+                                let painter = ui.painter();
+                                let caret_col = ui_color(
+                                    &self.theme,
+                                    "caret",
+                                    Rgba::new(accent.r(), accent.g(), accent.b(), 255),
+                                );
+                                let x = out.galley_pos.x + rect.min.x;
+                                let y0 = out.galley_pos.y + rect.min.y;
+                                let y1 = out.galley_pos.y + rect.max.y;
+                                painter.rect_filled(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(x, y0),
+                                        egui::pos2(
+                                            x + self.config.editor.clamped_caret_width(),
+                                            y1,
+                                        ),
+                                    ),
+                                    0.0,
+                                    caret_col,
+                                );
                             }
                         }
                         // Capture each logical line's screen Y for the gutter (a row
