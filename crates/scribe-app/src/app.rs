@@ -2101,6 +2101,10 @@ impl ScribeApp {
             }
             BuiltinCommand::Save => self.save_active(),
             BuiltinCommand::ConvertToMarkdown => self.convert_to_markdown_active(),
+            BuiltinCommand::ExportAsHtml => self.export_html_active(),
+            BuiltinCommand::SetLineEndingsLf => self.set_active_eol(scribe_core::eol::Eol::Lf),
+            BuiltinCommand::SetLineEndingsCrlf => self.set_active_eol(scribe_core::eol::Eol::Crlf),
+            BuiltinCommand::SetLineEndingsCr => self.set_active_eol(scribe_core::eol::Eol::Cr),
             BuiltinCommand::CloseActiveTab => self.close_tab(self.active),
             BuiltinCommand::CloseAllTabs => {
                 self.tabs.clear();
@@ -2525,6 +2529,44 @@ impl ScribeApp {
                 Err(e) => self.toast = Some(format!("convert failed: {e}")),
             }
         }
+    }
+
+    /// Export the active buffer as a standalone HTML document (treating the
+    /// buffer as Markdown). Writes a chosen `.html` file; the source is
+    /// untouched. Pure pulldown-cmark rendering — no webview, no network.
+    fn export_html_active(&mut self) {
+        let active = self.active;
+        if active >= self.tabs.len() {
+            return;
+        }
+        let html = crate::md_preview::to_html(&self.tabs[active].text);
+        let suggested = self.tabs[active]
+            .doc
+            .path()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .map(|stem| format!("{stem}.html"))
+            .unwrap_or_else(|| "untitled.html".to_string());
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("HTML", &["html"])
+            .set_file_name(&suggested)
+            .save_file()
+        {
+            match std::fs::write(&path, html) {
+                Ok(()) => self.status = format!("exported HTML → {}", path.display()),
+                Err(e) => self.toast = Some(format!("export failed: {e}")),
+            }
+        }
+    }
+
+    /// Set the active document's line-ending style. The change applies on the
+    /// next save (the on-disk EOL is written by `Document::save`).
+    fn set_active_eol(&mut self, eol: scribe_core::eol::Eol) {
+        let active = self.active;
+        if active >= self.tabs.len() {
+            return;
+        }
+        self.tabs[active].doc.set_eol(eol);
+        self.status = format!("line endings set to {} — save to apply", eol.label());
     }
 
     /// Render the tab strip inside a Left/Right side panel, honouring the
@@ -4157,6 +4199,10 @@ pub(crate) enum BuiltinCommand {
     CloseActiveTab,
     CloseAllTabs,
     ConvertToMarkdown,
+    ExportAsHtml,
+    SetLineEndingsLf,
+    SetLineEndingsCrlf,
+    SetLineEndingsCr,
     CycleTabNext,
     CycleTabPrev,
     ToggleSplitView,
@@ -4246,6 +4292,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         action: BuiltinCommand::ExpandAll,
     },
     BuiltinEntry {
+        label: "Export as HTML…",
+        shortcut: "",
+        action: BuiltinCommand::ExportAsHtml,
+    },
+    BuiltinEntry {
         label: "Find in buffer",
         shortcut: "Ctrl+F",
         action: BuiltinCommand::OpenFind,
@@ -4254,6 +4305,21 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Fold all regions",
         shortcut: "Ctrl+Shift+[",
         action: BuiltinCommand::FoldAll,
+    },
+    BuiltinEntry {
+        label: "Line endings: CR (classic Mac)",
+        shortcut: "",
+        action: BuiltinCommand::SetLineEndingsCr,
+    },
+    BuiltinEntry {
+        label: "Line endings: CRLF (Windows)",
+        shortcut: "",
+        action: BuiltinCommand::SetLineEndingsCrlf,
+    },
+    BuiltinEntry {
+        label: "Line endings: LF (Unix)",
+        shortcut: "",
+        action: BuiltinCommand::SetLineEndingsLf,
     },
     BuiltinEntry {
         label: "Go to symbol…",
@@ -11060,12 +11126,13 @@ def";
             //     same loop the active tab IS a pathless scratch, so the
             //     fall-through fires. Easier to skip than to keep the
             //     fixture path alive across CloseAllTabs side-effects.
-            //   - ConvertToMarkdown opens an rfd save dialog for the .md target.
+            //   - ConvertToMarkdown / ExportAsHtml open an rfd save dialog.
             match entry.action {
                 BuiltinCommand::OpenFile
                 | BuiltinCommand::OpenFolder
                 | BuiltinCommand::Save
-                | BuiltinCommand::ConvertToMarkdown => continue,
+                | BuiltinCommand::ConvertToMarkdown
+                | BuiltinCommand::ExportAsHtml => continue,
                 _ => app.execute_builtin(entry.action),
             }
         }
