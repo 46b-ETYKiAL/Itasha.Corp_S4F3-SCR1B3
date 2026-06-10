@@ -414,6 +414,15 @@ pub struct ScribeApp {
     /// (the T19.1 root cause). On the first close request we hide + cancel, then
     /// issue the real Close on the next frame.
     closing: bool,
+    /// Wave-5: project-wide find ("find in files") results pane. Opened with
+    /// Ctrl+Shift+F; searches the open folder (`file_tree_root`) via the same
+    /// regex engine as the in-buffer find bar.
+    find_in_files_open: bool,
+    find_in_files_query: String,
+    find_in_files_regex: bool,
+    find_in_files_results: Vec<crate::find_in_files::FileMatch>,
+    find_in_files_error: Option<String>,
+    focus_find_in_files: bool,
     find_open: bool,
     find_query: String,
     /// #R6 — currently-selected match in the find bar (0-based). Drives the
@@ -821,6 +830,12 @@ impl ScribeApp {
             applied_note_theme: String::new(),
             want_close: false,
             closing: false,
+            find_in_files_open: false,
+            find_in_files_query: String::new(),
+            find_in_files_regex: false,
+            find_in_files_results: Vec::new(),
+            find_in_files_error: None,
+            focus_find_in_files: false,
             find_open: false,
             find_query: String::new(),
             find_match_idx: 0,
@@ -3289,6 +3304,39 @@ impl ScribeApp {
         self.tabs[i].edit_gen = self.tabs[i].edit_gen.wrapping_add(1);
     }
 
+    /// Wave-5: run the project-wide search over the open folder into the
+    /// results pane. Reuses the in-buffer find engine + the open file-tree root.
+    fn run_find_in_files(&mut self) {
+        self.find_in_files_error = None;
+        self.find_in_files_results.clear();
+        let Some(root) = self.file_tree_root.clone() else {
+            self.find_in_files_error = Some("open a folder first".into());
+            return;
+        };
+        let query = scribe_core::search::Query {
+            pattern: self.find_in_files_query.clone(),
+            regex: self.find_in_files_regex,
+            case_sensitive: false,
+            whole_word: false,
+        };
+        // Surface a bad regex once (the per-file search swallows it silently).
+        if query.regex {
+            if let Err(e) = scribe_core::search::find_all("", &query) {
+                self.find_in_files_error = Some(format!("bad regex: {e}"));
+                return;
+            }
+        }
+        self.find_in_files_results = crate::find_in_files::search_project(&root, &query);
+        self.status = format!("{} match(es)", self.find_in_files_results.len());
+    }
+
+    /// Wave-5: open `path` in a tab (reusing the normal open path) then scroll to
+    /// 1-based `line` (the click-to-open target from the results pane).
+    fn open_find_in_files_result(&mut self, path: PathBuf, line: usize) {
+        self.open_path(path);
+        self.goto_line(line.max(1));
+    }
+
     /// F-016 — Toggle the line-comment prefix on every line touched by the
     /// active selection (or the cursor line if no selection). The prefix is
     /// picked from `comment_prefix_for_extension` based on the active doc's
@@ -5381,11 +5429,18 @@ impl ScribeApp {
             act.new = cmd && i.key_pressed(egui::Key::N);
             act.open = cmd && i.key_pressed(egui::Key::O);
             act.save = cmd && i.key_pressed(egui::Key::S);
-            if cmd && i.key_pressed(egui::Key::F) {
+            if cmd && !i.modifiers.shift && i.key_pressed(egui::Key::F) {
                 if !self.find_open {
                     self.focus_find = true;
                 }
                 self.find_open = true;
+            }
+            // Wave-5: Ctrl/Cmd+Shift+F opens project-wide find (find in files).
+            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::F) {
+                if !self.find_in_files_open {
+                    self.focus_find_in_files = true;
+                }
+                self.find_in_files_open = true;
             }
             // Ctrl/Cmd+Shift+P opens the command palette (plugin + builtin cmds).
             if cmd && i.modifiers.shift && i.key_pressed(egui::Key::P) {
@@ -5915,6 +5970,57 @@ impl ScribeApp {
                     }
                 });
             });
+        }
+
+        // ---- Wave-5: find in files (project-wide search results pane) ----
+        if self.find_in_files_open {
+            egui::SidePanel::right("find_in_files")
+                .resizable(true)
+                .default_width(360.0)
+                .frame(egui::Frame::default().fill(panel).inner_margin(6.0))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("find in files").color(accent).monospace());
+                        if ui.button("close").clicked() {
+                            self.find_in_files_open = false;
+                        }
+                    });
+                    let r = ui.text_edit_singleline(&mut self.find_in_files_query);
+                    if self.focus_find_in_files {
+                        r.request_focus();
+                        self.focus_find_in_files = false;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.find_in_files_regex, "regex");
+                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if enter || ui.button("search").clicked() {
+                            self.run_find_in_files();
+                        }
+                    });
+                    if let Some(err) = &self.find_in_files_error {
+                        ui.colored_label(Color32::from_rgb(0xe5, 0x3e, 0x3e), err);
+                    }
+                    ui.separator();
+                    let mut open_target: Option<(PathBuf, usize)> = None;
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for m in &self.find_in_files_results {
+                            let name = m.path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+                            let label = format!("{}:{}  {}", name, m.line, m.line_text.trim());
+                            if ui
+                                .add(
+                                    egui::Label::new(RichText::new(label).monospace().small())
+                                        .sense(egui::Sense::click()),
+                                )
+                                .clicked()
+                            {
+                                open_target = Some((m.path.clone(), m.line));
+                            }
+                        }
+                    });
+                    if let Some((path, line)) = open_target {
+                        self.open_find_in_files_result(path, line);
+                    }
+                });
         }
 
         // ---- Command palette (built-in + plugin commands) ----
@@ -7008,6 +7114,15 @@ impl ScribeApp {
                 // BEFORE the partial borrows below so the owned Vec can move into
                 // the editor closure and drive the red underline painter.
                 let misspellings = self.misspellings_for_active();
+                // Wave-5: compute all find matches once (needs &self) so the
+                // highlight-all overlay can paint every match, not just the
+                // navigated one. Empty when the find bar is closed.
+                let find_hits: Vec<scribe_core::search::Match> = if self.find_open {
+                    self.find_matches_active()
+                } else {
+                    Vec::new()
+                };
+                let find_cur = self.find_match_idx;
                 // Scope the layouter (which borrows `self.hl`) so it drops before
                 // the `&mut self` completion calls below.
                 let mut new_gutter: Vec<f32> = Vec::new();
@@ -7083,6 +7198,38 @@ impl ScribeApp {
                                 let x0 = out.galley_pos.x + r0.min.x;
                                 let x1 = out.galley_pos.x + r1.min.x;
                                 paint_squiggle(painter, x0, x1, y, red);
+                            }
+                        }
+                        // Wave-5: incremental highlight-all — paint a translucent
+                        // accent wash behind EVERY live find match (the current
+                        // match stronger). Same galley-rect mapping as the
+                        // squiggle painter; low alpha keeps the glyph legible.
+                        if !find_hits.is_empty() {
+                            let text_ref = &self.tabs[active].text;
+                            let painter = ui.painter();
+                            let hl_fill = accent.gamma_multiply(0.28);
+                            let cur_fill = accent.gamma_multiply(0.5);
+                            for (idx, m) in find_hits.iter().enumerate() {
+                                let c0 = byte_to_char_index(text_ref, m.start);
+                                let c1 = byte_to_char_index(text_ref, m.end);
+                                let r0 = out.galley.pos_from_cursor(egui::text::CCursor::new(c0));
+                                let r1 = out.galley.pos_from_cursor(egui::text::CCursor::new(c1));
+                                if (r0.min.y - r1.min.y).abs() > 0.5 {
+                                    continue;
+                                }
+                                let top = out.galley_pos.y + r0.min.y;
+                                let bot = out.galley_pos.y + r0.max.y;
+                                let x0 = out.galley_pos.x + r0.min.x;
+                                let x1 = out.galley_pos.x + r1.min.x;
+                                let fill = if idx == find_cur { cur_fill } else { hl_fill };
+                                painter.rect_filled(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(x0, top),
+                                        egui::pos2(x1, bot),
+                                    ),
+                                    2.0,
+                                    fill,
+                                );
                             }
                         }
                         // #28 — render-whitespace overlay for the DEFAULT egui

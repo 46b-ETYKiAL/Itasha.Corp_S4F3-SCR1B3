@@ -15,6 +15,7 @@ mod app;
 mod cli;
 mod editor_features;
 mod filetree;
+mod find_in_files;
 mod fuzzy;
 mod grid;
 mod plugin_manager;
