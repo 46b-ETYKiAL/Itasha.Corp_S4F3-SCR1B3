@@ -802,6 +802,17 @@ fn render_sections(
                 &mut config.editor.render_whitespace,
                 &def.editor.render_whitespace,
             );
+            changed |= grid_bool(
+                ui,
+                q,
+                "snippets tab trigger expand prefix",
+                "Tab-trigger snippets",
+                "Expand a snippet when Tab is pressed right after a known prefix \
+                 from snippets.toml in the config folder. Applies to the in-house \
+                 editor.",
+                &mut config.editor.snippets_enabled,
+                &def.editor.snippets_enabled,
+            );
         });
         ui.add_space(6.0);
 
@@ -2268,6 +2279,7 @@ mod wiring_guard {
         "editor.word_wrap",
         "editor.show_minimap",
         "editor.render_whitespace",
+        "editor.snippets_enabled",
         "editor.tab_bar_position",
         "editor.side_tabs_rotated",
         "editor.restore_session",

@@ -298,6 +298,13 @@ pub struct EditorConfig {
     /// untouched whether on or off.
     #[serde(default)]
     pub render_whitespace: bool,
+    /// Enable Tab-trigger snippet expansion in the in-house editor. A Tab
+    /// pressed right after a known prefix from `<config>/snippets.toml` expands
+    /// the snippet instead of indenting. Default ON (the feature is inert when
+    /// no snippets file is present), and ON for configs written before the
+    /// field existed.
+    #[serde(default = "default_true")]
+    pub snippets_enabled: bool,
 }
 
 /// serde default for the note syntax-colour theme (#104).
@@ -395,6 +402,7 @@ impl Default for EditorConfig {
             restore_cursor_position: true,
             cursor_positions: std::collections::HashMap::new(),
             render_whitespace: false,
+            snippets_enabled: true,
         }
     }
 }

@@ -423,6 +423,12 @@ pub struct ScribeApp {
     find_in_files_results: Vec<crate::find_in_files::FileMatch>,
     find_in_files_error: Option<String>,
     focus_find_in_files: bool,
+    /// Wave-5 P1: distraction-free "zen" mode. Hides toolbar, tab strip, status
+    /// bar, minimap, and gutter, centering the editor. Runtime session state
+    /// (not persisted) — toggled with Ctrl+. and exited first by Esc.
+    zen_mode: bool,
+    /// Wave-5 P1: static Tab-trigger snippets loaded from `<config>/snippets.toml`.
+    snippets: scribe_core::snippets::SnippetSet,
     find_open: bool,
     find_query: String,
     /// #R6 — currently-selected match in the find bar (0-based). Drives the
@@ -836,6 +842,8 @@ impl ScribeApp {
             find_in_files_results: Vec::new(),
             find_in_files_error: None,
             focus_find_in_files: false,
+            zen_mode: false,
+            snippets: load_snippets(),
             find_open: false,
             find_query: String::new(),
             find_match_idx: 0,
@@ -2107,6 +2115,14 @@ impl ScribeApp {
             BuiltinCommand::ToggleMinimap => {
                 self.config.editor.show_minimap = !self.config.editor.show_minimap;
                 self.save_config();
+            }
+            BuiltinCommand::ToggleZen => {
+                // Runtime session state — no config write (zen is never persisted).
+                self.zen_mode = !self.zen_mode;
+                if self.zen_mode {
+                    self.find_open = false;
+                    self.find_in_files_open = false;
+                }
             }
             BuiltinCommand::ToggleSpellcheck => {
                 self.config.spellcheck.enabled = !self.config.spellcheck.enabled;
@@ -4051,6 +4067,10 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
         action: "Zoom font in / out / reset (also Ctrl+scroll)",
     },
     ShortcutEntry {
+        chord: "Ctrl+.",
+        action: "Toggle zen / distraction-free mode (Esc exits)",
+    },
+    ShortcutEntry {
         chord: "Ctrl+Shift+R",
         action: "Reopen the most recently closed tab",
     },
@@ -4089,6 +4109,7 @@ pub(crate) enum BuiltinCommand {
     CycleTabPrev,
     ToggleSplitView,
     ToggleMinimap,
+    ToggleZen,
     ToggleSpellcheck,
     ToggleWordWrap,
     ToggleLineNumbers,
@@ -4284,6 +4305,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Toggle word wrap",
         shortcut: "",
         action: BuiltinCommand::ToggleWordWrap,
+    },
+    BuiltinEntry {
+        label: "Toggle zen / distraction-free mode",
+        shortcut: "Ctrl+.",
+        action: BuiltinCommand::ToggleZen,
     },
     BuiltinEntry {
         label: "Undo",
@@ -4815,6 +4841,17 @@ fn highlight_job(
 /// branch-selection logic is unit-testable without driving an egui frame.
 fn use_rope_editor(experimental: bool, text_len: usize, auto_threshold_bytes: usize) -> bool {
     experimental || (auto_threshold_bytes > 0 && text_len >= auto_threshold_bytes)
+}
+
+/// Load static Tab-trigger snippets from `<config-dir>/snippets.toml`. A missing
+/// or malformed file yields an empty set (the feature is simply inert) — never
+/// an error path, so a bad snippets file can't block the editor from starting.
+fn load_snippets() -> scribe_core::snippets::SnippetSet {
+    scribe_core::config::Config::config_dir()
+        .map(|d| d.join("snippets.toml"))
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| scribe_core::snippets::SnippetSet::from_toml(&s).ok())
+        .unwrap_or_default()
 }
 
 fn effective_wrap_width(word_wrap: bool, available: f32) -> f32 {
@@ -5450,6 +5487,15 @@ impl ScribeApp {
                 }
                 self.find_in_files_open = true;
             }
+            // Wave-5 P1: Ctrl+. toggles zen / distraction-free mode. Entering zen
+            // also closes the find bars so nothing but the editor remains.
+            if cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Period) {
+                self.zen_mode = !self.zen_mode;
+                if self.zen_mode {
+                    self.find_open = false;
+                    self.find_in_files_open = false;
+                }
+            }
             // Ctrl/Cmd+Shift+P opens the command palette (plugin + builtin cmds).
             if cmd && i.modifiers.shift && i.key_pressed(egui::Key::P) {
                 if !self.palette_open {
@@ -5607,14 +5653,20 @@ impl ScribeApp {
                 act.open_fuzzy = true;
             }
             if i.key_pressed(egui::Key::Escape) {
-                self.find_open = false;
-                self.palette_open = false;
-                self.cheatsheet_open = false;
-                self.goto_open = false;
-                self.goto_symbol_open = false;
-                self.recent_open = false;
-                self.welcome_open = false;
-                self.fuzzy_open = false;
+                // Esc exits zen mode first so the chrome comes back before any
+                // overlay close — one press to leave distraction-free mode.
+                if self.zen_mode {
+                    self.zen_mode = false;
+                } else {
+                    self.find_open = false;
+                    self.palette_open = false;
+                    self.cheatsheet_open = false;
+                    self.goto_open = false;
+                    self.goto_symbol_open = false;
+                    self.recent_open = false;
+                    self.welcome_open = false;
+                    self.fuzzy_open = false;
+                }
             }
         });
         // #R6 — apply the find-bar F3 navigation collected above (outside the
@@ -5763,49 +5815,52 @@ impl ScribeApp {
         }
 
         // ---- Quick-access toolbar (replaces the classic menu bar) ----
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            // Phase 18 T18.5: apply the user-configurable button size + spacing
-            // BEFORE the horizontal row so every quick-access item inherits the
-            // sizing. All values are clamped at the config layer to defend
-            // against a malformed user toml producing a 4000-px-tall toolbar.
-            let btn = self.config.toolbar.clamped_button_size();
-            let gap = self.config.toolbar.clamped_button_spacing();
-            ui.spacing_mut().interact_size.y = btn;
-            ui.spacing_mut().item_spacing.x = gap;
-            ui.horizontal(|ui| {
-                // Settings + command palette are always present; the palette is
-                // the discoverable backbone for every action, so keep it visible.
-                // The gear toggles settings — clicking it while open closes it.
-                // Phosphor GEAR_SIX (loaded thin font) — the bare "⚙" U+2699
-                // emoji has no glyph in JetBrains Mono and rendered as tofu (#R5).
-                if ui
-                    .selectable_label(self.settings_open, egui_phosphor::thin::GEAR_SIX)
-                    .on_hover_text("Settings")
-                    .clicked()
-                {
-                    self.settings_open = !self.settings_open;
-                }
-                if ui
-                    .button(">_")
-                    .on_hover_text("Command palette (Ctrl+Shift+P)")
-                    .clicked()
-                {
-                    self.palette_open = true;
-                    self.focus_palette = true;
-                    self.palette_query.clear();
-                }
-                ui.separator();
+        // Wave-5 P1: hidden in zen / distraction-free mode.
+        if !self.zen_mode {
+            egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+                // Phase 18 T18.5: apply the user-configurable button size + spacing
+                // BEFORE the horizontal row so every quick-access item inherits the
+                // sizing. All values are clamped at the config layer to defend
+                // against a malformed user toml producing a 4000-px-tall toolbar.
+                let btn = self.config.toolbar.clamped_button_size();
+                let gap = self.config.toolbar.clamped_button_spacing();
+                ui.spacing_mut().interact_size.y = btn;
+                ui.spacing_mut().item_spacing.x = gap;
+                ui.horizontal(|ui| {
+                    // Settings + command palette are always present; the palette is
+                    // the discoverable backbone for every action, so keep it visible.
+                    // The gear toggles settings — clicking it while open closes it.
+                    // Phosphor GEAR_SIX (loaded thin font) — the bare "⚙" U+2699
+                    // emoji has no glyph in JetBrains Mono and rendered as tofu (#R5).
+                    if ui
+                        .selectable_label(self.settings_open, egui_phosphor::thin::GEAR_SIX)
+                        .on_hover_text("Settings")
+                        .clicked()
+                    {
+                        self.settings_open = !self.settings_open;
+                    }
+                    if ui
+                        .button(">_")
+                        .on_hover_text("Command palette (Ctrl+Shift+P)")
+                        .clicked()
+                    {
+                        self.palette_open = true;
+                        self.focus_palette = true;
+                        self.palette_query.clear();
+                    }
+                    ui.separator();
 
-                // User-customizable quick-access items (membership + order from
-                // config.toolbar; editable in Settings → Toolbar).
-                let items = self.config.toolbar.items.clone();
-                for id in &items {
-                    self.toolbar_item(ui, id, &mut act, &mut save_cfg, &mut start_lsp);
-                }
-                // The tab strip is its OWN bar (below), not crammed into the
-                // quick-access toolbar — see the tab_bar_position match below.
+                    // User-customizable quick-access items (membership + order from
+                    // config.toolbar; editable in Settings → Toolbar).
+                    let items = self.config.toolbar.items.clone();
+                    for id in &items {
+                        self.toolbar_item(ui, id, &mut act, &mut save_cfg, &mut start_lsp);
+                    }
+                    // The tab strip is its OWN bar (below), not crammed into the
+                    // quick-access toolbar — see the tab_bar_position match below.
+                });
             });
-        });
+        }
 
         // ---- Tab strip in its OWN bar (T18.4) — separate from the toolbar ----
         //
@@ -5813,7 +5868,8 @@ impl ScribeApp {
         // now carries its own chip header (note name + pin + close), so the
         // global strip is suppressed. New notes remain reachable via Ctrl+N,
         // the command palette, and the toolbar's customizable items.
-        if !self.config.editor.grid_enabled {
+        // Wave-5 P1: the whole tab strip is hidden in zen mode.
+        if !self.zen_mode && !self.config.editor.grid_enabled {
             match self.config.editor.tab_bar_position {
                 scribe_core::config::TabBarPosition::Top => {
                     // A dedicated tab bar directly below the quick-access toolbar
@@ -6669,128 +6725,131 @@ impl ScribeApp {
         // ---- Status bar ----
         let mut cycle_eol_for_active = false;
         let mut open_settings_for = None;
-        egui::TopBottomPanel::bottom("status")
-            .frame(egui::Frame::default().fill(panel))
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    // Edge padding so the leftmost status segment isn't flush against
-                    // the window edge (mirrors the titlebar's 10px lead-in).
-                    ui.add_space(8.0);
-                    let active = self.active.min(self.tabs.len().saturating_sub(1));
-                    if let Some(t) = self.tabs.get(active) {
-                        // F-025 — clickable EOL segment cycles LF → CRLF → CR.
-                        if ui
-                            .selectable_label(
-                                false,
-                                RichText::new(t.doc.eol().label().to_string())
-                                    .color(muted)
-                                    .small()
-                                    .monospace(),
-                            )
-                            .on_hover_text("Click to cycle line-ending: LF → CRLF → CR")
-                            .clicked()
-                        {
-                            cycle_eol_for_active = true;
-                        }
-                        // F-025 — encoding + language: click opens Settings
-                        // so the user lands on the relevant editor section.
-                        if ui
-                            .selectable_label(
-                                false,
-                                RichText::new(t.doc.encoding().name.clone())
-                                    .color(muted)
-                                    .small()
-                                    .monospace(),
-                            )
-                            .on_hover_text("Click to open Settings → Editor")
-                            .clicked()
-                        {
-                            open_settings_for = Some("Editor");
-                        }
-                        let lang = t.doc.language_hint().unwrap_or_else(|| "text".into());
-                        if ui
-                            .selectable_label(
-                                false,
-                                RichText::new(lang).color(accent).small().monospace(),
-                            )
-                            .on_hover_text("Click to open Settings → Editor (language hint)")
-                            .clicked()
-                        {
-                            open_settings_for = Some("Editor");
-                        }
-                        let lines = t.text.lines().count().max(1);
-                        // F-024 — word + line counters in the status bar.
-                        // Both are cheap (single-pass split) on the buffers
-                        // SCR1B3 targets (multi-GB files go through the rope
-                        // browser which sets is_read_only_large and short-
-                        // circuits this segment).
-                        let (words, chars) = if t.doc.is_read_only_large() {
-                            (0, 0)
-                        } else {
-                            (t.text.split_whitespace().count(), t.text.chars().count())
-                        };
-                        ui.label(
-                            RichText::new(format!("{lines} ln · {words} w · {chars} ch"))
-                                .color(muted)
-                                .small()
-                                .monospace(),
-                        );
-                        // F-005 / F-024 from docs/audits/overlooked-surfaces-2026-05-29.md:
-                        // Render the caret position ("Ln 4, Col 17") + the selection
-                        // length when non-empty. Every editor on Earth ships this
-                        // indicator; SCR1B3 used to omit it.
-                        if let Some((ln, col)) = self.last_cursor_line_col {
-                            ui.label(
-                                RichText::new(format!("Ln {ln}, Col {col}"))
-                                    .color(muted)
-                                    .small()
-                                    .monospace(),
-                            );
-                        }
-                        if self.last_selection_chars > 0 {
-                            let sel = self.last_selection_chars;
-                            let noun = if sel == 1 { "char" } else { "chars" };
-                            ui.label(
-                                RichText::new(format!("({sel} {noun} sel)"))
-                                    .color(accent)
-                                    .small()
-                                    .monospace(),
-                            );
-                        }
-                        if t.doc.is_read_only_large() {
-                            ui.label(
-                                RichText::new("[ large file: read-only ]")
-                                    .color(muted)
-                                    .small()
-                                    .monospace(),
-                            );
-                        }
-                        if spell_on {
-                            let (txt, col) = if spell_misspellings == 0 {
-                                (format!("spell {}", egui_phosphor::thin::CHECK), accent)
+        // Wave-5 P1: hidden in zen / distraction-free mode.
+        if !self.zen_mode {
+            egui::TopBottomPanel::bottom("status")
+                .frame(egui::Frame::default().fill(panel))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        // Edge padding so the leftmost status segment isn't flush against
+                        // the window edge (mirrors the titlebar's 10px lead-in).
+                        ui.add_space(8.0);
+                        let active = self.active.min(self.tabs.len().saturating_sub(1));
+                        if let Some(t) = self.tabs.get(active) {
+                            // F-025 — clickable EOL segment cycles LF → CRLF → CR.
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    RichText::new(t.doc.eol().label().to_string())
+                                        .color(muted)
+                                        .small()
+                                        .monospace(),
+                                )
+                                .on_hover_text("Click to cycle line-ending: LF → CRLF → CR")
+                                .clicked()
+                            {
+                                cycle_eol_for_active = true;
+                            }
+                            // F-025 — encoding + language: click opens Settings
+                            // so the user lands on the relevant editor section.
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    RichText::new(t.doc.encoding().name.clone())
+                                        .color(muted)
+                                        .small()
+                                        .monospace(),
+                                )
+                                .on_hover_text("Click to open Settings → Editor")
+                                .clicked()
+                            {
+                                open_settings_for = Some("Editor");
+                            }
+                            let lang = t.doc.language_hint().unwrap_or_else(|| "text".into());
+                            if ui
+                                .selectable_label(
+                                    false,
+                                    RichText::new(lang).color(accent).small().monospace(),
+                                )
+                                .on_hover_text("Click to open Settings → Editor (language hint)")
+                                .clicked()
+                            {
+                                open_settings_for = Some("Editor");
+                            }
+                            let lines = t.text.lines().count().max(1);
+                            // F-024 — word + line counters in the status bar.
+                            // Both are cheap (single-pass split) on the buffers
+                            // SCR1B3 targets (multi-GB files go through the rope
+                            // browser which sets is_read_only_large and short-
+                            // circuits this segment).
+                            let (words, chars) = if t.doc.is_read_only_large() {
+                                (0, 0)
                             } else {
-                                (format!("spell: {spell_misspellings}"), warn)
+                                (t.text.split_whitespace().count(), t.text.chars().count())
                             };
-                            ui.label(RichText::new(txt).color(col).small().monospace());
-                        }
-                        if diag_total > 0 {
-                            let col = if diag_errors > 0 { warn } else { muted };
                             ui.label(
-                                RichText::new(format!(
-                                    "{} {diag_errors}e / {diag_total}",
-                                    egui_phosphor::thin::PROHIBIT
-                                ))
-                                .color(col)
-                                .small()
-                                .monospace(),
+                                RichText::new(format!("{lines} ln · {words} w · {chars} ch"))
+                                    .color(muted)
+                                    .small()
+                                    .monospace(),
                             );
+                            // F-005 / F-024 from docs/audits/overlooked-surfaces-2026-05-29.md:
+                            // Render the caret position ("Ln 4, Col 17") + the selection
+                            // length when non-empty. Every editor on Earth ships this
+                            // indicator; SCR1B3 used to omit it.
+                            if let Some((ln, col)) = self.last_cursor_line_col {
+                                ui.label(
+                                    RichText::new(format!("Ln {ln}, Col {col}"))
+                                        .color(muted)
+                                        .small()
+                                        .monospace(),
+                                );
+                            }
+                            if self.last_selection_chars > 0 {
+                                let sel = self.last_selection_chars;
+                                let noun = if sel == 1 { "char" } else { "chars" };
+                                ui.label(
+                                    RichText::new(format!("({sel} {noun} sel)"))
+                                        .color(accent)
+                                        .small()
+                                        .monospace(),
+                                );
+                            }
+                            if t.doc.is_read_only_large() {
+                                ui.label(
+                                    RichText::new("[ large file: read-only ]")
+                                        .color(muted)
+                                        .small()
+                                        .monospace(),
+                                );
+                            }
+                            if spell_on {
+                                let (txt, col) = if spell_misspellings == 0 {
+                                    (format!("spell {}", egui_phosphor::thin::CHECK), accent)
+                                } else {
+                                    (format!("spell: {spell_misspellings}"), warn)
+                                };
+                                ui.label(RichText::new(txt).color(col).small().monospace());
+                            }
+                            if diag_total > 0 {
+                                let col = if diag_errors > 0 { warn } else { muted };
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} {diag_errors}e / {diag_total}",
+                                        egui_phosphor::thin::PROHIBIT
+                                    ))
+                                    .color(col)
+                                    .small()
+                                    .monospace(),
+                                );
+                            }
                         }
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(RichText::new(&self.status).color(muted).small().monospace());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(RichText::new(&self.status).color(muted).small().monospace());
+                        });
                     });
                 });
-            });
+        }
         // F-025 — apply the click-to-edit status-bar actions captured above.
         if cycle_eol_for_active {
             let active = self.active.min(self.tabs.len().saturating_sub(1));
@@ -6909,7 +6968,7 @@ impl ScribeApp {
         // ---- Minimap (rightmost strip) ----
         // Skipped for read-only huge files: the minimap hashes + lays out the
         // whole buffer, which defeats the viewport-culled browse path below.
-        if self.config.editor.show_minimap && !read_only {
+        if self.config.editor.show_minimap && !read_only && !self.zen_mode {
             self.show_minimap(ctx, panel, accent);
         }
 
@@ -6925,7 +6984,7 @@ impl ScribeApp {
         // (`line_gutter`). The read-only RopeEditor draws its OWN gutter, so
         // skip this one there (and avoid the O(n) `lines().count()` on a
         // 256 MiB+ buffer).
-        if show_line_numbers && !self.fold_view && !read_only {
+        if show_line_numbers && !self.fold_view && !read_only && !self.zen_mode {
             let total = self.tabs[active].text.lines().count().max(1);
             let digits = total.to_string().len().max(2);
             let gutter_w = digits as f32 * (font.size * 0.62) + 16.0;
@@ -7020,6 +7079,14 @@ impl ScribeApp {
                     // mutates it in place and we sync back to `text` ONLY when
                     // an edit actually changed content. `ropey` clones are O(1)
                     // (Arc-shared), so persistence costs no extra memory churn.
+                    // Capture the disjoint fields the editor needs BEFORE the
+                    // `&mut self.tabs` borrow (Wave-5 P1 snippets — gated on the
+                    // config toggle; `&self.snippets` coexists with the tab's
+                    // mutable rope borrow as a disjoint-field borrow).
+                    let render_whitespace = self.config.editor.render_whitespace;
+                    let snippets_enabled = self.config.editor.snippets_enabled;
+                    let snippets = &self.snippets;
+                    let hl = &self.hl;
                     let tab = &mut self.tabs[active];
                     // Lazily (re)build the persistent rope from `text`. Done as a
                     // separate `is_none` check rather than `get_or_insert_with`
@@ -7032,14 +7099,17 @@ impl ScribeApp {
                     let state = tab
                         .rope_state
                         .get_or_insert_with(scribe_render::RopeEditorState::new);
-                    let (resp, clipboard) =
+                    let mut editor =
                         scribe_render::RopeEditor::new(buf, font.clone(), gutter_row_h)
                             .with_text_color(fg)
                             .with_gutter_color(muted)
                             .with_line_numbers(show_line_numbers)
-                            .with_render_whitespace(self.config.editor.render_whitespace)
-                            .with_syntax(&self.hl, ext.clone())
-                            .show_editable(ui, state);
+                            .with_render_whitespace(render_whitespace)
+                            .with_syntax(hl, ext.clone());
+                    if snippets_enabled {
+                        editor = editor.with_snippets(snippets);
+                    }
+                    let (resp, clipboard) = editor.show_editable(ui, state);
                     // Sync `text` from the rope ONLY on a real content edit — the
                     // O(n) `to_string()` now runs on keystrokes, not every frame.
                     if resp.content_changed {
