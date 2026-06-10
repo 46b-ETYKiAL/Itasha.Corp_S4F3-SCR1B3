@@ -32,7 +32,17 @@ from fontTools.ttLib import TTFont
 from fontTools.varLib import instancer
 
 # The 11 verified-canonical toolbar kanji. Keep in lockstep with jp_glyph().
-KANJI = "新開保別検分図折畳番綴"
+TOOLBAR_KANJI = "新開保別検分図折畳番綴"
+
+# The titlebar subtitle kanji: 写本 (shahon, "manuscript"/"transcription").
+# Rendered as `SCR1B3 // 写本` in the frameless titlebar. These are NOT part of
+# jp_glyph() — they are brand chrome — but the subset font MUST cover them or
+# they tofu (the subset is the only CJK-capable face in the egui font stack).
+SUBTITLE_KANJI = "写本"
+
+# The full glyph set the app renders. The subset covers the union; jp_glyph()
+# stays pinned to TOOLBAR_KANJI only.
+KANJI = TOOLBAR_KANJI + SUBTITLE_KANJI
 
 
 def main() -> int:
@@ -68,7 +78,10 @@ def main() -> int:
     subsetter.subset(font)
     font.save(str(out))
 
-    print(f"wrote {out} ({out.stat().st_size} bytes) covering: {KANJI}")
+    # Report coverage as U+XXXX codepoints, not raw kanji — a cp1252 Windows
+    # console cannot encode CJK and would crash the script on the success line.
+    codepoints = " ".join(f"U+{ord(ch):04X}" for ch in KANJI)
+    print(f"wrote {out} ({out.stat().st_size} bytes) covering {len(KANJI)} glyphs: {codepoints}")
     return 0
 
 
