@@ -434,6 +434,11 @@ pub struct ScribeApp {
     md_preview_open: bool,
     /// Wave-5 P1: diff side panel — the open buffer vs the file on disk.
     diff_view_open: bool,
+    /// Wave-6 motion: fading caret-trail echoes as `(screen_rect, birth_time)`.
+    /// Fed when the caret moves (default TextEdit path); aged out each frame.
+    caret_trail: std::collections::VecDeque<(egui::Rect, f64)>,
+    /// Wave-6 motion: time the one-shot boot-glitch latched (first frame it ran).
+    boot_glitch_started: Option<f64>,
     find_open: bool,
     find_query: String,
     /// #R6 — currently-selected match in the find bar (0-based). Drives the
@@ -851,6 +856,8 @@ impl ScribeApp {
             snippets: load_snippets(),
             md_preview_open: false,
             diff_view_open: false,
+            caret_trail: std::collections::VecDeque::new(),
+            boot_glitch_started: None,
             find_open: false,
             find_query: String::new(),
             find_match_idx: 0,
@@ -7474,6 +7481,25 @@ impl ScribeApp {
                                 Some(line_col_from_char_index(text_ref, cc.index));
                             self.last_selection_chars =
                                 range.primary.index.abs_diff(range.secondary.index);
+                            // Wave-6 motion: feed the caret-trail when the caret moves.
+                            if self.config.motion.enabled && self.config.motion.caret_trail {
+                                let t = ui.input(|i| i.time);
+                                let caret_rect = egui::Rect::from_min_max(
+                                    out.galley_pos + rect.min.to_vec2(),
+                                    out.galley_pos + rect.max.to_vec2(),
+                                )
+                                .expand2(egui::vec2(1.0, 0.0));
+                                let moved = self
+                                    .caret_trail
+                                    .back()
+                                    .map_or(true, |(r, _)| r.min.distance(caret_rect.min) > 1.0);
+                                if moved {
+                                    self.caret_trail.push_back((caret_rect, t));
+                                    while self.caret_trail.len() > 24 {
+                                        self.caret_trail.pop_front();
+                                    }
+                                }
+                            }
                         }
                         // Capture each logical line's screen Y for the gutter (a row
                         // starts a logical line iff the previous row ended with \n).
@@ -7603,6 +7629,50 @@ impl ScribeApp {
             let t = ctx.input(|i| i.time);
             paint_crt_scanlines(ctx, self.config.motion.scanline_darkness, t);
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        // Wave-6 motion overlays (master-gated; never in the headless harness).
+        // Each is a calm post-effect; while any is active we drive a ~30 fps
+        // repaint so it animates. The resting (motion-off) frame is unchanged.
+        if !cfg!(test) && self.config.motion.enabled {
+            let t = ctx.input(|i| i.time);
+            let accent = ui_color(&self.theme, "accent", Rgba::new(0x4c, 0xc2, 0xff, 255));
+            let mut animating = false;
+            if self.config.motion.wired_ambient {
+                paint_wired_mesh(ctx, self.config.motion.clamped_mesh_density(), accent, t);
+                animating = true;
+            }
+            if self.config.motion.vhs_tracking {
+                paint_vhs_tracking(ctx, t);
+                animating = true;
+            }
+            if self.config.motion.flicker {
+                paint_flicker(ctx, self.config.motion.clamped_flicker_strength(), t);
+                animating = true;
+            }
+            if self.config.motion.caret_trail {
+                while let Some(&(_, born)) = self.caret_trail.front() {
+                    if t - born > 0.45 {
+                        self.caret_trail.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+                paint_caret_trail(ctx, &self.caret_trail, accent, t);
+                if !self.caret_trail.is_empty() {
+                    animating = true;
+                }
+            }
+            if self.config.motion.boot_glitch {
+                let started = *self.boot_glitch_started.get_or_insert(t);
+                let elapsed = t - started;
+                if elapsed <= 0.55 {
+                    paint_boot_glitch(ctx, elapsed);
+                    animating = true;
+                }
+            }
+            if animating {
+                ctx.request_repaint_after(std::time::Duration::from_millis(33));
+            }
         }
         // Phase 18 T18.1: 8-zone resize overlay for the frameless window. egui
         // doesn't restore OS resize when window decorations are off (winit
@@ -8698,6 +8768,176 @@ fn paint_crt_scanlines(ctx: &egui::Context, darkness: f32, t: f64) {
             band,
         );
         y += PERIOD;
+    }
+}
+
+/// Subtle full-window brightness flicker (CRT-style). A translucent black wash
+/// whose alpha wanders via layered sines of `t` (deterministic — no RNG, so the
+/// reduced-motion resting frame is stable). `strength` is capped at 0.20 for
+/// accessibility. `Order::Foreground` so it modulates the whole composited view.
+fn paint_flicker(ctx: &egui::Context, strength: f32, t: f64) {
+    let s = strength.clamp(0.0, 0.20);
+    if s <= 0.0 {
+        return;
+    }
+    let n = ((t * 17.0).sin() * 0.5 + (t * 53.0).sin() * 0.3 + (t * 97.0).sin() * 0.2).abs();
+    let a = (s * n as f32 * 90.0).round() as u8;
+    if a == 0 {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("crt-flicker"),
+    ));
+    painter.rect_filled(
+        ctx.content_rect(),
+        0.0,
+        Color32::from_rgba_unmultiplied(0, 0, 0, a),
+    );
+}
+
+/// VHS-style tracking lines: faint bright horizontal bands sweeping down the
+/// window at two different speeds, like analogue tape tracking error.
+fn paint_vhs_tracking(ctx: &egui::Context, t: f64) {
+    let rect = ctx.content_rect();
+    if rect.height() < 1.0 {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("vhs-tracking"),
+    ));
+    for (i, speed) in [(0u32, 0.13f64), (1, 0.071)].iter() {
+        let phase = (t * speed + *i as f64 * 0.5).rem_euclid(1.0) as f32;
+        let y = rect.top() + phase * rect.height();
+        let band_h = 16.0;
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left(), y),
+                egui::pos2(rect.right(), y + band_h),
+            ),
+            0.0,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 9),
+        );
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left(), y + band_h * 0.4),
+                egui::pos2(rect.right(), y + band_h * 0.6),
+            ),
+            0.0,
+            Color32::from_rgba_unmultiplied(255, 255, 255, 7),
+        );
+    }
+}
+
+/// Animated wired node-mesh ambient background (Lain "Wired" feel). `density`
+/// (0..1) drives the node count (8..64); nodes drift slowly and near neighbours
+/// are linked with faint accent lines. `Order::Background` so it sits BEHIND the
+/// editor like the tint overlay. O(n²) over n ≤ 64 — bounded per frame.
+fn paint_wired_mesh(ctx: &egui::Context, density: f32, color: Color32, t: f64) {
+    let rect = ctx.content_rect();
+    if rect.width() < 1.0 || rect.height() < 1.0 {
+        return;
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Background,
+        egui::Id::new("wired-mesh"),
+    ));
+    let n = (8.0 + density.clamp(0.0, 1.0) * 56.0) as usize;
+    let mut pts: Vec<egui::Pos2> = Vec::with_capacity(n);
+    for i in 0..n {
+        let fi = i as f64;
+        let bx = (fi * 0.732).fract() as f32;
+        let by = (fi * 0.387 + 0.13).fract() as f32;
+        let dx = ((t * 0.07 + fi * 1.3).sin() * 0.5 + 0.5) as f32;
+        let dy = ((t * 0.05 + fi * 0.7).cos() * 0.5 + 0.5) as f32;
+        let x = rect.left() + (bx * 0.85 + dx * 0.1) * rect.width();
+        let y = rect.top() + (by * 0.85 + dy * 0.1) * rect.height();
+        pts.push(egui::pos2(x, y));
+    }
+    let link = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 16);
+    let dot = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 40);
+    let max_d = rect.width().min(rect.height()) * 0.18;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if pts[i].distance(pts[j]) < max_d {
+                painter.line_segment([pts[i], pts[j]], egui::Stroke::new(1.0, link));
+            }
+        }
+        painter.circle_filled(pts[i], 1.5, dot);
+    }
+}
+
+/// Caret ghost-trail: fading echoes of recent caret rectangles. The caller feeds
+/// `trail` (rect + birth-time) as the caret moves; each echo fades over ~0.45s.
+fn paint_caret_trail(
+    ctx: &egui::Context,
+    trail: &std::collections::VecDeque<(egui::Rect, f64)>,
+    color: Color32,
+    now: f64,
+) {
+    if trail.is_empty() {
+        return;
+    }
+    const LIFE: f64 = 0.45;
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("caret-trail"),
+    ));
+    for (rect, born) in trail.iter() {
+        let age = (now - born).clamp(0.0, LIFE);
+        let f = 1.0 - (age / LIFE);
+        if f <= 0.0 {
+            continue;
+        }
+        let a = (f * 90.0) as u8;
+        painter.rect_filled(
+            *rect,
+            1.0,
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), a),
+        );
+    }
+}
+
+/// One-shot boot "glitch" sweep over the first ~0.55s after launch: a bright
+/// scan line descends while a few dark offset bands flicker, all fading out.
+/// `elapsed` is seconds since the first frame; outside `[0, DUR]` it no-ops.
+fn paint_boot_glitch(ctx: &egui::Context, elapsed: f64) {
+    const DUR: f64 = 0.55;
+    if !(0.0..=DUR).contains(&elapsed) {
+        return;
+    }
+    let rect = ctx.content_rect();
+    if rect.width() < 160.0 {
+        return; // first-frame 0-width content_rect guard
+    }
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("boot-glitch"),
+    ));
+    let p = (elapsed / DUR) as f32;
+    let fade = 1.0 - p;
+    let y = rect.top() + p * rect.height();
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            egui::pos2(rect.left(), y - 2.0),
+            egui::pos2(rect.right(), y + 2.0),
+        ),
+        0.0,
+        Color32::from_rgba_unmultiplied(255, 255, 255, (fade * 120.0) as u8),
+    );
+    for i in 0..3u32 {
+        let fi = i as f32;
+        let gy = rect.top() + ((p * 2.0 + fi * 0.27).fract()) * rect.height();
+        let gh = 6.0 + fi * 4.0;
+        painter.rect_filled(
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left(), gy),
+                egui::pos2(rect.right(), gy + gh),
+            ),
+            0.0,
+            Color32::from_rgba_unmultiplied(0, 0, 0, (fade * 60.0) as u8),
+        );
     }
 }
 

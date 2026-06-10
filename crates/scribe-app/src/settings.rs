@@ -1150,6 +1150,113 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+            if row_visible(q, "wired node mesh ambient background motion") {
+                ui.add_enabled_ui(on, |ui| {
+                    changed |= ui
+                        .checkbox(
+                            &mut config.motion.wired_ambient,
+                            "Wired node-mesh background",
+                        )
+                        .on_hover_text(
+                            "Draw an animated node-mesh ambient background behind the editor.",
+                        )
+                        .changed();
+                });
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.wired_ambient,
+                    &def.motion.wired_ambient,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "node mesh density motion") {
+                ui.label("Mesh density").on_hover_text(
+                    "How many nodes the wired-mesh background draws (sparse to dense).",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.motion.wired_ambient,
+                        egui::Slider::new(&mut config.motion.mesh_density, 0.0..=1.0),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.mesh_density,
+                    &def.motion.mesh_density,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "vhs tracking lines motion effect") {
+                ui.add_enabled_ui(on, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.motion.vhs_tracking, "VHS tracking lines")
+                        .on_hover_text(
+                            "Faint bright bands sweep down the window like analogue tape tracking.",
+                        )
+                        .changed();
+                });
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.vhs_tracking,
+                    &def.motion.vhs_tracking,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "screen flicker motion effect") {
+                ui.add_enabled_ui(on, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.motion.flicker, "Screen flicker")
+                        .on_hover_text("Subtle CRT-style brightness flicker over the whole window.")
+                        .changed();
+                });
+                ui.label("");
+                changed |= reset_to_default(ui, &mut config.motion.flicker, &def.motion.flicker);
+                ui.end_row();
+            }
+            if row_visible(q, "flicker strength motion") {
+                ui.label("Flicker strength")
+                    .on_hover_text("How strong the screen flicker is (capped low for comfort).");
+                changed |= ui
+                    .add_enabled(
+                        on && config.motion.flicker,
+                        egui::Slider::new(&mut config.motion.flicker_strength, 0.0..=0.20),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.flicker_strength,
+                    &def.motion.flicker_strength,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "caret cursor trail motion effect") {
+                ui.add_enabled_ui(on, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.motion.caret_trail, "Caret ghost-trail")
+                        .on_hover_text("A fading echo follows the caret as it moves.")
+                        .changed();
+                });
+                ui.label("");
+                changed |=
+                    reset_to_default(ui, &mut config.motion.caret_trail, &def.motion.caret_trail);
+                ui.end_row();
+            }
+            if row_visible(q, "boot glitch startup motion effect") {
+                ui.add_enabled_ui(on, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.motion.boot_glitch, "Boot glitch")
+                        .on_hover_text(
+                            "A one-shot glitch sweep plays for a moment when the app launches.",
+                        )
+                        .changed();
+                });
+                ui.label("");
+                changed |=
+                    reset_to_default(ui, &mut config.motion.boot_glitch, &def.motion.boot_glitch);
+                ui.end_row();
+            }
         });
         space(ui);
     }
@@ -2255,6 +2362,8 @@ mod wiring_guard {
             "toolbar.button_spacing_px" => src.contains("clamped_button_spacing"),
             "toolbar.icon_size_px" => src.contains("clamped_icon_size"),
             "motion.intensity" => src.contains("clamped_intensity"),
+            "motion.flicker_strength" => src.contains("clamped_flicker_strength"),
+            "motion.mesh_density" => src.contains("clamped_mesh_density"),
             _ => false,
         }
     }
@@ -2313,6 +2422,13 @@ mod wiring_guard {
         "motion.cursor_blink",
         "motion.crt_scanlines",
         "motion.scanline_darkness",
+        "motion.wired_ambient",
+        "motion.mesh_density",
+        "motion.vhs_tracking",
+        "motion.flicker",
+        "motion.flicker_strength",
+        "motion.caret_trail",
+        "motion.boot_glitch",
     ];
 
     /// Controls audited as DEAD (no runtime consumer yet). Shrinks as phases wire
