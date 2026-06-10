@@ -72,6 +72,10 @@ pub struct RopeEditor<'a> {
     /// `→` per tab) OVER each visible row. Pure overlay — the real text and
     /// the highlight spans are untouched.
     pub(crate) render_whitespace: bool,
+    /// Optional Tab-trigger snippet set. When present (and editing), a Tab
+    /// pressed right after a known snippet prefix expands it instead of
+    /// inserting an indent. `None` disables snippet expansion entirely.
+    pub(crate) snippets: Option<&'a scribe_core::snippets::SnippetSet>,
 }
 
 impl<'a> RopeEditor<'a> {
@@ -87,7 +91,15 @@ impl<'a> RopeEditor<'a> {
             line_numbers: false,
             gutter_color: Color32::from_rgb(0x5a, 0x58, 0x69),
             render_whitespace: false,
+            snippets: None,
         }
+    }
+
+    /// Enable Tab-trigger snippet expansion using `set`. A Tab pressed right
+    /// after a known prefix expands the snippet; otherwise Tab indents as usual.
+    pub fn with_snippets(mut self, set: &'a scribe_core::snippets::SnippetSet) -> Self {
+        self.snippets = Some(set);
+        self
     }
 
     /// Override the body text color (default is wired-noir `text`).
@@ -234,8 +246,32 @@ impl<'a> RopeEditor<'a> {
         // ---- input phase (mutates the rope) ----
         if focused {
             let events = ui.input(|i| i.events.clone());
+            let snippets = self.snippets;
             if let Some(rope) = self.buffer.as_rope_mut() {
                 for ev in &events {
+                    // Snippet Tab-trigger: a plain Tab right after a known prefix
+                    // expands the snippet instead of indenting. Checked before
+                    // apply_event so the normal Tab-indent path is skipped on a hit.
+                    if let (
+                        Some(set),
+                        egui::Event::Key {
+                            key: egui::Key::Tab,
+                            pressed: true,
+                            modifiers,
+                            ..
+                        },
+                    ) = (snippets, ev)
+                    {
+                        if !modifiers.shift
+                            && !modifiers.command
+                            && !modifiers.alt
+                            && try_expand_snippet(rope, state, set)
+                        {
+                            caret_moved = true;
+                            content_changed = true;
+                            continue;
+                        }
+                    }
                     let out = apply_event(rope, state, ev);
                     caret_moved |= out.consumed;
                     content_changed |= out.mutated;
@@ -800,6 +836,46 @@ pub struct EventOutcome {
     pub set_clipboard: Option<String>,
 }
 
+/// Expand a Tab-trigger snippet at the primary caret. Returns `true` when the
+/// identifier immediately before the caret matched a snippet prefix and was
+/// replaced by the expansion (with the caret placed at the first tab-stop).
+/// Single-caret, no-selection only; records one undo checkpoint.
+fn try_expand_snippet(
+    rope: &mut Rope,
+    state: &mut RopeEditorState,
+    snippets: &scribe_core::snippets::SnippetSet,
+) -> bool {
+    if !state.extra.is_empty() || state.edit.has_selection() {
+        return false;
+    }
+    let cursor = state.edit.cursor;
+    let is_word = |c: char| c == '_' || c.is_alphanumeric();
+    let mut start = cursor;
+    while start > 0 && is_word(rope.char(start - 1)) {
+        start -= 1;
+    }
+    if start == cursor {
+        return false;
+    }
+    let word: String = rope.slice(start..cursor).chars().collect();
+    let Some(snip) = snippets.lookup(&word) else {
+        return false;
+    };
+    let exp = scribe_core::snippets::expand(&snip.body);
+    // Undo checkpoint before mutating.
+    state
+        .history
+        .record(Snapshot::new(rope.to_string(), cursor), EditKind::Other);
+    // Select the typed prefix and replace it with the expansion.
+    state.edit.anchor = start;
+    state.edit.cursor = cursor;
+    editing::replace_selection(rope, &mut state.edit, &exp.text);
+    let caret = (start + exp.caret_offset).min(rope.len_chars());
+    state.edit.cursor = caret;
+    state.edit.anchor = caret;
+    true
+}
+
 /// Apply one egui input event to `(rope, state)`, integrating undo history.
 /// Pasted text arrives in `Event::Paste`; Copy/Cut hand their text back via
 /// `set_clipboard` (the host owns the OS clipboard).
@@ -1361,6 +1437,36 @@ mod tests {
         apply_event(&mut r, &mut st, &key_ev(egui::Key::D, false, true));
         assert!(st.is_multi(), "second D adds an occurrence caret");
         assert_eq!(st.extra.len(), 1, "exactly one new caret");
+    }
+
+    #[test]
+    fn snippet_tab_trigger_expands_known_prefix() {
+        let set = scribe_core::snippets::SnippetSet::from_toml(
+            "[[snippets]]\nprefix = \"fn\"\nbody = \"fn ${1}() {}\"\n",
+        )
+        .unwrap();
+        let mut r = Rope::from_str("fn");
+        let mut st = RopeEditorState::new();
+        st.edit = EditState::at(2); // caret right after the typed "fn"
+        assert!(try_expand_snippet(&mut r, &mut st, &set));
+        assert_eq!(r.to_string(), "fn () {}");
+        assert_eq!(st.edit.cursor, 3, "caret lands at the first tab stop");
+        // Undo restores the typed prefix.
+        apply_event(&mut r, &mut st, &key_ev(egui::Key::Z, false, true));
+        assert_eq!(r.to_string(), "fn");
+    }
+
+    #[test]
+    fn snippet_tab_trigger_ignores_unknown_prefix() {
+        let set = scribe_core::snippets::SnippetSet::from_toml(
+            "[[snippets]]\nprefix = \"fn\"\nbody = \"x\"\n",
+        )
+        .unwrap();
+        let mut r = Rope::from_str("xyz");
+        let mut st = RopeEditorState::new();
+        st.edit = EditState::at(3);
+        assert!(!try_expand_snippet(&mut r, &mut st, &set));
+        assert_eq!(r.to_string(), "xyz");
     }
 
     #[test]

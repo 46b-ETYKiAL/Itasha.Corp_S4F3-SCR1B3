@@ -30,6 +30,7 @@ pub mod lsp;
 pub mod plugin;
 pub mod search;
 pub mod session;
+pub mod snippets;
 pub mod spell;
 pub mod syntax;
 pub mod text_ops;
