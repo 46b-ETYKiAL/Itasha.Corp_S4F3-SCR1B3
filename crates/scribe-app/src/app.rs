@@ -260,6 +260,16 @@ struct EditorTab {
     /// A dot marker is drawn in the line-number gutter for each bookmarked
     /// line. Session-scoped (not persisted to disk).
     bookmarks: std::collections::BTreeSet<usize>,
+    /// Wave-3 perf: monotonic per-tab edit generation. Bumped on EVERY
+    /// mutation of `text` (the `set_text` funnel, the direct in-place editing
+    /// commands, the egui `TextEdit` `.changed()` frame, and the experimental
+    /// rope write-back). The minimap + spellcheck caches key off this `u64`
+    /// instead of re-hashing the whole buffer every frame — a 1-frame-stale
+    /// minimap/squiggle is visually harmless, so a post-edit counter is safe
+    /// for those two surfaces. (The syntax layouter deliberately keeps its
+    /// content hash — its cached galley bakes in the text, so a lagging
+    /// counter would render stale TEXT. See wave3-perf-plan.md.)
+    edit_gen: u64,
 }
 
 /// A recently-closed tab kept on the reopen stack (Ctrl+Shift+T), so an
@@ -283,6 +293,7 @@ impl EditorTab {
             rope_state: None,
             rope_buf: None,
             bookmarks: std::collections::BTreeSet::new(),
+            edit_gen: 0,
         }
     }
 
@@ -303,6 +314,7 @@ impl EditorTab {
             rope_state: None,
             rope_buf: None,
             bookmarks: std::collections::BTreeSet::new(),
+            edit_gen: 0,
         })
     }
 
@@ -329,6 +341,7 @@ impl EditorTab {
                     rope_state: None,
                     rope_buf: None,
                     bookmarks: std::collections::BTreeSet::new(),
+                    edit_gen: 0,
                 };
             }
         }
@@ -347,6 +360,7 @@ impl EditorTab {
     fn set_text(&mut self, new: String) {
         self.text = new;
         self.rope_buf = None;
+        self.edit_gen = self.edit_gen.wrapping_add(1);
     }
 
     fn title(&self) -> String {
@@ -508,6 +522,12 @@ pub struct ScribeApp {
     /// Cached syntax-highlight layout (keyed by text+lang+size) so syntect only
     /// re-runs when the buffer changes, not every frame (perf hotspot fix).
     hl_cache: std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
+    /// Wave-3: galley memo keyed by (content+fg key, wrap width). On a full hit
+    /// this returns the already-laid-out `Arc<Galley>` (an O(1) Arc bump) and
+    /// skips BOTH the per-frame `LayoutJob` deep-clone and `f.layout_job`. The
+    /// sibling `hl_cache` job memo still serves wrap-only changes (re-layout
+    /// without re-highlighting). Single-slot, like `hl_cache`.
+    hl_galley_cache: std::cell::RefCell<Option<(u64, f32, std::sync::Arc<egui::Galley>)>>,
     /// Incremental syntect-highlight state for the focused editable buffer, so a
     /// keystroke re-highlights only from the edited line downward (not the whole
     /// document). Single-slot like `hl_cache`: it re-seeds when focus moves to a
@@ -848,6 +868,7 @@ impl ScribeApp {
             last_autosave_at: None,
             last_backup_sig: 0,
             hl_cache: std::cell::RefCell::new(None),
+            hl_galley_cache: std::cell::RefCell::new(None),
             hl_inc_cache: std::cell::RefCell::new(IncrementalHighlightState::default()),
             spell_cache: std::cell::RefCell::new(None),
             _cfg_watcher: cfg_watcher,
@@ -898,7 +919,10 @@ impl ScribeApp {
         // capture.
         let hl = &self.hl;
         let hl_cache = &self.hl_cache;
+        let hl_galley_cache = &self.hl_galley_cache;
         let hl_inc_cache = &self.hl_inc_cache;
+        // Wave-3: theme foreground for the highlighter tail colour (per-pane).
+        let layout_fg = ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
         // #R5: theme colours + focused-pane id for the chip-styled pane headers
         // (the per-pane note bar now mirrors the top tab strip's chip look).
         let accent = ui_color(&self.theme, "accent", Rgba::new(0, 255, 254, 255));
@@ -1062,11 +1086,13 @@ impl ScribeApp {
                 let mut layouter = make_layouter(
                     hl,
                     hl_cache,
+                    hl_galley_cache,
                     hl_inc_cache,
                     ext.as_deref(),
                     font.clone(),
                     line_height,
                     word_wrap,
+                    layout_fg,
                 );
                 egui::ScrollArea::both()
                     .id_salt(("scr1b3-grid-pane", doc_id.raw()))
@@ -1077,6 +1103,11 @@ impl ScribeApp {
                             .desired_rows(20)
                             .layouter(&mut layouter);
                         let out = editor.show(ui);
+                        // Wave-3: per-pane edit-gen bump (grid panes share the
+                        // single-slot caches; a focus/edit change is a key change).
+                        if out.response.changed() {
+                            tabs[idx].edit_gen = tabs[idx].edit_gen.wrapping_add(1);
+                        }
                         // #28 — same render-whitespace overlay as the single-pane
                         // editor, so the markers appear in split/grid view too.
                         if render_whitespace {
@@ -1756,7 +1787,12 @@ impl ScribeApp {
         let key = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
-            tab.text.hash(&mut h);
+            // Wave-3: key off the per-tab edit generation instead of re-hashing
+            // the whole buffer every frame. `doc_id` disambiguates tabs that
+            // happen to share an edit_gen (the single-slot cache is shared). A
+            // 1-frame-stale squiggle after a keystroke is visually harmless.
+            tab.edit_gen.hash(&mut h);
+            tab.doc_id.raw().hash(&mut h);
             self.config.spellcheck.check_comments.hash(&mut h);
             self.config.spellcheck.check_strings.hash(&mut h);
             self.config.spellcheck.check_identifiers.hash(&mut h);
@@ -3248,6 +3284,9 @@ impl ScribeApp {
         } else {
             self.status = format!("no match for '{pat}'");
         }
+        // Wave-3: invalidate the gen-keyed minimap/spell caches.
+        let i = self.active;
+        self.tabs[i].edit_gen = self.tabs[i].edit_gen.wrapping_add(1);
     }
 
     /// F-016 — Toggle the line-comment prefix on every line touched by the
@@ -3313,6 +3352,8 @@ impl ScribeApp {
         if trailing_nl {
             text.push('\n');
         }
+        let i = self.active;
+        self.tabs[i].edit_gen = self.tabs[i].edit_gen.wrapping_add(1);
     }
 
     /// F-017 — Swap the cursor line with the neighbour `dir` rows away (-1 =
@@ -3351,6 +3392,8 @@ impl ScribeApp {
         if trailing_nl {
             text.push('\n');
         }
+        let i = self.active;
+        self.tabs[i].edit_gen = self.tabs[i].edit_gen.wrapping_add(1);
     }
 
     /// F-017 — Duplicate the cursor line in-place: the new copy lands on the
@@ -3378,6 +3421,8 @@ impl ScribeApp {
         if trailing_nl {
             text.push('\n');
         }
+        let i = self.active;
+        self.tabs[i].edit_gen = self.tabs[i].edit_gen.wrapping_add(1);
     }
 
     /// F-017 — Join the cursor line with the next: trims the trailing
@@ -3412,6 +3457,8 @@ impl ScribeApp {
         if trailing_nl {
             text.push('\n');
         }
+        let i = self.active;
+        self.tabs[i].edit_gen = self.tabs[i].edit_gen.wrapping_add(1);
     }
 
     /// F-015 — Scroll the active buffer so the given 1-based line is in the
@@ -3582,6 +3629,7 @@ impl ScribeApp {
         if c.prefix_start <= byte && byte <= text.len() {
             text.replace_range(c.prefix_start..byte, &item);
         }
+        self.tabs[active].edit_gen = self.tabs[active].edit_gen.wrapping_add(1);
     }
 
     /// Render the minimap strip (rightmost): a memoized scaled overview of the
@@ -3599,12 +3647,15 @@ impl ScribeApp {
             .show(ctx, |ui| {
                 ui.label(RichText::new("MAP").color(accent).small().monospace());
                 let avail = ui.available_size();
-                let text = self.tabs[self.active].text.clone();
-                // Memoize the tiny galley keyed by (text, width).
+                // Wave-3: memoize the tiny galley keyed by (edit_gen, doc_id,
+                // width) — no per-frame full-buffer hash AND no per-frame clone.
+                // The owned String is built ONLY on a cache miss (egui `layout`
+                // takes it by value); doc_id disambiguates tabs sharing edit_gen.
                 let galley = {
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
-                    text.hash(&mut h);
+                    self.tabs[self.active].edit_gen.hash(&mut h);
+                    self.tabs[self.active].doc_id.raw().hash(&mut h);
                     avail.x.to_bits().hash(&mut h);
                     let key = h.finish();
                     let mut slot = self.minimap_cache.borrow_mut();
@@ -3615,7 +3666,7 @@ impl ScribeApp {
                             // needs `&mut`; use fonts_mut(...) instead of fonts(...).
                             let g = ui.fonts_mut(|f| {
                                 f.layout(
-                                    text.clone(),
+                                    self.tabs[self.active].text.clone(),
                                     FontId::monospace(3.0),
                                     Color32::from_rgb(0x8a, 0x88, 0x99),
                                     avail.x,
@@ -3657,8 +3708,12 @@ impl ScribeApp {
     /// Render the folded read-only preview: per-region toggles plus the
     /// brace-collapsed projection of the active buffer.
     fn show_fold_view(&mut self, ui: &mut egui::Ui, font: FontId, ext: Option<&str>) {
-        let text = self.tabs[self.active].text.clone();
-        let regions = crate::editor_features::fold_regions(&text);
+        // Wave-3: borrow instead of cloning the whole buffer every frame the
+        // fold view is shown. `fold_regions`/`project_folded` take &str, and the
+        // toolbar closure below only captures `self.folds` (disjoint from
+        // `self.tabs` under edition-2021 closure capture), so the borrow holds.
+        let text = &self.tabs[self.active].text;
+        let regions = crate::editor_features::fold_regions(text);
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("FOLDS").small().monospace());
             if ui.small_button("fold all").clicked() {
@@ -3686,18 +3741,21 @@ impl ScribeApp {
         });
         ui.separator();
         let (mut projected, _map) =
-            crate::editor_features::project_folded(&text, &regions, &self.folds);
+            crate::editor_features::project_folded(text, &regions, &self.folds);
         let line_height = self.config.fonts.line_height;
         let hl = &self.hl;
         let word_wrap = self.config.editor.word_wrap;
+        let layout_fg = ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
         let mut layouter = make_layouter(
             hl,
             &self.hl_cache,
+            &self.hl_galley_cache,
             &self.hl_inc_cache,
             ext,
             font,
             line_height,
             word_wrap,
+            layout_fg,
         );
         egui::ScrollArea::both()
             .id_salt("fold-scroll")
@@ -4586,6 +4644,7 @@ fn highlight_job(
     font: FontId,
     line_height_mult: f32,
     inc_cache: &mut IncrementalHighlightState,
+    fg: Color32,
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
     let lines = hl.highlight_document_incremental(text, ext, inc_cache);
@@ -4613,12 +4672,14 @@ fn highlight_job(
                 }
                 byte = s.range.end;
             }
-            // Append any tail not covered by spans.
+            // Append any tail not covered by spans. Wave-3: use the theme
+            // foreground (was hardcoded GRAY — washed out vs the body text and
+            // mismatched the rope editor, which already uses the theme fg).
             if byte < line.len() {
-                job.append(&line[byte..], 0.0, plain(Color32::GRAY));
+                job.append(&line[byte..], 0.0, plain(fg));
             }
         } else {
-            job.append(line, 0.0, plain(Color32::GRAY));
+            job.append(line, 0.0, plain(fg));
         }
         char_cursor += line.len();
     }
@@ -4635,6 +4696,15 @@ fn highlight_job(
 /// a custom layouter that blindly honours it wraps even when wrap is off — the
 /// "word wrap is always on" bug. When wrap is off we force infinite width so the
 /// galley lays out on one line and the `ScrollArea::both` scrolls horizontally.
+/// Wave-3: decide whether the *editable* central editor should render this
+/// buffer through the in-house viewport-culled rope editor. True when the user
+/// opted in (`experimental`), OR when auto-promotion is enabled (`threshold > 0`)
+/// AND the buffer is at least `threshold` bytes. A pure function so the
+/// branch-selection logic is unit-testable without driving an egui frame.
+fn use_rope_editor(experimental: bool, text_len: usize, auto_threshold_bytes: usize) -> bool {
+    experimental || (auto_threshold_bytes > 0 && text_len >= auto_threshold_bytes)
+}
+
 fn effective_wrap_width(word_wrap: bool, available: f32) -> f32 {
     if word_wrap {
         available
@@ -4672,14 +4742,17 @@ fn paint_squiggle(painter: &egui::Painter, x0: f32, x1: f32, y: f32, color: Colo
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_layouter<'a>(
     hl: &'a Highlighter,
     cache: &'a std::cell::RefCell<Option<(u64, std::sync::Arc<LayoutJob>)>>,
+    gcache: &'a std::cell::RefCell<Option<(u64, f32, std::sync::Arc<egui::Galley>)>>,
     inc_cache: &'a std::cell::RefCell<IncrementalHighlightState>,
     ext: Option<&'a str>,
     font: FontId,
     line_height: f32,
     word_wrap: bool,
+    fg: Color32,
 ) -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> std::sync::Arc<egui::Galley> + 'a {
     // egui 0.34: TextEdit::layouter callback now receives `&dyn TextBuffer`
     // instead of `&str` (so non-String buffers can be hosted). We still want
@@ -4692,7 +4765,26 @@ fn make_layouter<'a>(
         ext.hash(&mut hasher);
         font.size.to_bits().hash(&mut hasher);
         line_height.to_bits().hash(&mut hasher);
+        // Wave-3: fold the tail/foreground colour into the key so a theme switch
+        // (which changes `fg` but not the text) invalidates the cached job.
+        let [r, g, b, a] = fg.to_array();
+        r.hash(&mut hasher);
+        g.hash(&mut hasher);
+        b.hash(&mut hasher);
+        a.hash(&mut hasher);
         let key = hasher.finish();
+        let eff_wrap = effective_wrap_width(word_wrap, wrap);
+        // Wave-3: full galley hit — same content key AND same wrap width. Return
+        // the cached Arc<Galley> (O(1) bump); skip the LayoutJob deep-clone AND
+        // the re-layout. egui's own FontsView cache does NOT save the clone.
+        {
+            let gslot = gcache.borrow();
+            if let Some((gk, gw, gal)) = gslot.as_ref() {
+                if *gk == key && *gw == eff_wrap {
+                    return gal.clone();
+                }
+            }
+        }
         let job_arc = {
             let mut slot = cache.borrow_mut();
             match slot.as_ref() {
@@ -4705,6 +4797,7 @@ fn make_layouter<'a>(
                         font.clone(),
                         line_height,
                         &mut inc_cache.borrow_mut(),
+                        fg,
                     ));
                     *slot = Some((key, arc.clone()));
                     arc
@@ -4712,9 +4805,11 @@ fn make_layouter<'a>(
             }
         };
         let mut job = (*job_arc).clone();
-        job.wrap.max_width = effective_wrap_width(word_wrap, wrap);
+        job.wrap.max_width = eff_wrap;
         // egui 0.34: FontsView::layout_job caches into the view → needs &mut.
-        ui.fonts_mut(|f| f.layout_job(job))
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+        *gcache.borrow_mut() = Some((key, eff_wrap, galley.clone()));
+        galley
     }
 }
 
@@ -5194,6 +5289,7 @@ impl ScribeApp {
         if self.config.editor.note_theme != self.applied_note_theme {
             self.hl.set_theme(&self.config.editor.note_theme);
             *self.hl_cache.borrow_mut() = None;
+            *self.hl_galley_cache.borrow_mut() = None;
             self.applied_note_theme = self.config.editor.note_theme.clone();
         }
 
@@ -6740,7 +6836,14 @@ impl ScribeApp {
                 // bridged from `text` each frame and written back after, so the
                 // rest of the app (save, status bar, find) keeps seeing a
                 // String. Default OFF — the egui path below stays canonical.
-                if self.config.editor.experimental_rope_editor {
+                // Wave-3: ALSO auto-engaged for buffers past the configured byte
+                // threshold (default 16 MiB) so a multi-MiB file gets O(viewport)
+                // rendering instead of the per-frame O(n) egui TextEdit.
+                if use_rope_editor(
+                    self.config.editor.experimental_rope_editor,
+                    self.tabs[active].text.len(),
+                    self.config.editor.rope_editor_auto_threshold_bytes,
+                ) {
                     let fg = ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
                     // KEYSTONE perf: the rope persists across frames in the tab.
                     // Build it once (O(n)) from `text`; thereafter the widget
@@ -6774,6 +6877,9 @@ impl ScribeApp {
                             tab.text = rope.to_string();
                             tab.doc.mark_dirty();
                         }
+                        // Wave-3: rope write-back bypasses set_text + the egui
+                        // Response, so bump the gen counter here for parity.
+                        tab.edit_gen = tab.edit_gen.wrapping_add(1);
                     }
                     if let Some(text) = clipboard {
                         if let Ok(mut cb) = arboard::Clipboard::new() {
@@ -6855,14 +6961,18 @@ impl ScribeApp {
                 let anchor: Option<(egui::Pos2, usize)> = {
                     let hl = &self.hl;
                     let ext_ref = ext.as_deref();
+                    let layout_fg =
+                        ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
                     let mut layouter = make_layouter(
                         hl,
                         &self.hl_cache,
+                        &self.hl_galley_cache,
                         &self.hl_inc_cache,
                         ext_ref,
                         font.clone(),
                         line_height,
                         word_wrap,
+                        layout_fg,
                     );
                     let mut sa = if word_wrap {
                         egui::ScrollArea::vertical()
@@ -6888,6 +6998,13 @@ impl ScribeApp {
                             .interactive(!read_only)
                             .layouter(&mut layouter);
                         let out = editor.show(ui);
+                        // Wave-3: the egui in-place edit happened inside show();
+                        // `.changed()` is true exactly on the edited frame, so this
+                        // is the ONLY hook for the default editor's text mutation.
+                        // Bump the gen counter so the minimap + spell caches refresh.
+                        if out.response.changed() {
+                            self.tabs[active].edit_gen = self.tabs[active].edit_gen.wrapping_add(1);
+                        }
                         // #78 — paint a red squiggle under each misspelling. Map
                         // the byte span to galley cursor rects and draw a wavy
                         // underline along the word's baseline. Painted on the
@@ -7740,6 +7857,75 @@ mod perf_and_security_tests {
             before,
             "no tab opened for an unreadable path"
         );
+    }
+}
+
+#[cfg(test)]
+mod wave3_perf_tests {
+    //! Wave-3 perf: the minimap + spellcheck caches now key off a per-tab
+    //! `edit_gen` counter instead of re-hashing the whole buffer every frame.
+    //! Correctness hinges on EVERY text mutation advancing the counter — these
+    //! tests pin the Rust-side mutation funnels (Class A + Class B). The egui /
+    //! rope write-back paths (Class C/D) require a live frame and are covered by
+    //! the `out.response.changed()` / `resp.content_changed` hooks directly.
+    use super::{use_rope_editor, ScribeApp};
+    use scribe_core::Config;
+
+    fn gen(app: &ScribeApp) -> u64 {
+        app.tabs[app.active].edit_gen
+    }
+
+    #[test]
+    fn use_rope_editor_decision_matrix() {
+        // The experimental opt-in forces the rope editor regardless of size.
+        assert!(use_rope_editor(true, 0, 0));
+        assert!(use_rope_editor(true, 10, 16 * 1024 * 1024));
+        // threshold 0 disables auto-promotion no matter how big the buffer is.
+        assert!(!use_rope_editor(false, usize::MAX, 0));
+        // Below the threshold → the canonical egui TextEdit path.
+        assert!(!use_rope_editor(false, 1024, 16 * 1024 * 1024));
+        // At or above the threshold → the viewport-culled rope path.
+        assert!(use_rope_editor(false, 16 * 1024 * 1024, 16 * 1024 * 1024));
+        assert!(use_rope_editor(false, 32 * 1024 * 1024, 16 * 1024 * 1024));
+    }
+
+    #[test]
+    fn set_text_advances_edit_gen() {
+        let mut app = ScribeApp::new_test(Config::default());
+        let g0 = gen(&app);
+        app.tabs[app.active].set_text("hello\nworld\n".to_string());
+        assert!(
+            gen(&app) > g0,
+            "set_text (Class A funnel) must bump edit_gen"
+        );
+    }
+
+    #[test]
+    fn direct_edit_commands_advance_edit_gen() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[app.active].text = "alpha\nbravo\ncharlie\n".to_string();
+        app.last_cursor_line_col = Some((2, 1)); // 1-based line 2 (bravo)
+
+        let g = gen(&app);
+        app.duplicate_cursor_line();
+        assert!(gen(&app) > g, "duplicate_cursor_line must bump edit_gen");
+
+        let g = gen(&app);
+        app.move_cursor_line(1);
+        assert!(gen(&app) > g, "move_cursor_line must bump edit_gen");
+
+        let g = gen(&app);
+        app.join_cursor_line_with_next();
+        assert!(
+            gen(&app) > g,
+            "join_cursor_line_with_next must bump edit_gen"
+        );
+
+        app.find_query = "a".to_string();
+        app.replace_query = "X".to_string();
+        let g = gen(&app);
+        app.replace_in_active(true);
+        assert!(gen(&app) > g, "replace_in_active must bump edit_gen");
     }
 }
 
