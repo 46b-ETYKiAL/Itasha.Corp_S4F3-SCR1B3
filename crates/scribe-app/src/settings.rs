@@ -713,6 +713,10 @@ fn render_sections(
             "word wrap",
             "minimap",
             "restore session",
+            "scroll speed",
+            "animate jump scrolls",
+            "middle click autoscroll",
+            "autoscroll sensitivity",
         ],
     ) {
         head(
@@ -798,6 +802,65 @@ fn render_sections(
                 &mut config.editor.render_whitespace,
                 &def.editor.render_whitespace,
             );
+        });
+        ui.add_space(6.0);
+
+        // -- Scroll --
+        group(
+            ui,
+            "Scroll",
+            "Mouse-wheel speed, jump-scroll animation, and middle-click autoscroll.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-editor-scroll", |ui| {
+            if row_visible(q, "scroll speed") {
+                ui.label("Scroll speed").on_hover_text(
+                    "Mouse-wheel scrolling speed. egui's default (40) feels slow next to \
+                     Windows; 75 is the SCR1B3 default.",
+                );
+                changed |= ui
+                    .add(egui::Slider::new(&mut config.scroll.speed, 10.0..=200.0))
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.scroll.speed, &def.scroll.speed);
+                ui.end_row();
+            }
+            changed |= grid_bool(
+                ui,
+                q,
+                "animate jump scrolls",
+                "Animate jump scrolls",
+                "Ease programmatic jumps (go-to-line, find-next) instead of snapping instantly.",
+                &mut config.scroll.animate_jumps,
+                &def.scroll.animate_jumps,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "middle click autoscroll",
+                "Middle-click autoscroll",
+                "Click the mouse wheel, then move the pointer away from the click point to \
+                 scroll continuously (Windows-style). Any click exits.",
+                &mut config.scroll.autoscroll,
+                &def.scroll.autoscroll,
+            );
+            if row_visible(q, "autoscroll sensitivity") {
+                ui.label("Autoscroll sensitivity").on_hover_text(
+                    "How fast middle-click autoscroll drifts per pixel of pointer offset \
+                     from the click point.",
+                );
+                changed |= ui
+                    .add(egui::Slider::new(
+                        &mut config.scroll.autoscroll_sensitivity,
+                        2.0..=15.0,
+                    ))
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.scroll.autoscroll_sensitivity,
+                    &def.scroll.autoscroll_sensitivity,
+                );
+                ui.end_row();
+            }
         });
         ui.add_space(6.0);
 

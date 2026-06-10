@@ -4952,12 +4952,146 @@ impl eframe::App for ScribeApp {
     }
 }
 
+/// Transient middle-click-autoscroll state, parked in egui's per-`Context`
+/// data store (`ctx.data`) rather than on `ScribeApp` so the feature is fully
+/// self-contained in [`ScribeApp::apply_scroll_settings`] — no struct field or
+/// constructor wiring. `anchor` is the screen-space origin where the wheel was
+/// clicked; while `active`, content drifts at a velocity proportional to the
+/// pointer's offset from `anchor`.
+#[derive(Clone, Copy)]
+struct AutoScrollState {
+    active: bool,
+    anchor: egui::Pos2,
+}
+
+impl Default for AutoScrollState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            anchor: egui::Pos2::ZERO,
+        }
+    }
+}
+
 impl ScribeApp {
+    /// Apply the Wave-2 scroll knobs and drive middle-click autoscroll. Called
+    /// at the very top of [`Self::frame_tick`], before any `ScrollArea` shows.
+    ///
+    /// - **Wheel speed** is `line_scroll_speed` (pre-smoothing; egui's built-in
+    ///   "reach 90% in 0.1s" wheel smoothing still applies, so no double-smooth).
+    /// - **Jump animation** eases programmatic scrolls (goto-line / find-next).
+    /// - **Autoscroll** injects into `smooth_scroll_delta` so the ScrollArea the
+    ///   pointer is over consumes it — the same additive contract `ScrollArea`
+    ///   uses for the wheel, without threading a handle through every pane.
+    fn apply_scroll_settings(&self, ctx: &egui::Context) {
+        let scroll = self.config.scroll;
+        ctx.options_mut(|o| o.input_options.line_scroll_speed = scroll.clamped_speed());
+        ctx.all_styles_mut(|s| {
+            s.scroll_animation = if scroll.animate_jumps {
+                egui::style::ScrollAnimation::new(1500.0, egui::Rangef::new(0.05, 0.20))
+            } else {
+                egui::style::ScrollAnimation::none()
+            };
+        });
+        if !scroll.autoscroll {
+            return;
+        }
+        let id = egui::Id::new("scr1b3_autoscroll");
+        let mut st: AutoScrollState = ctx.data(|d| d.get_temp(id).unwrap_or_default());
+        // The central editor region (everything left after the titlebar / toolbar
+        // / tab / status panels). At the top of a frame `available_rect` still
+        // holds last frame's central area, so this excludes a middle-click on a
+        // tab / toolbar button (which must keep its own middle-click meaning, e.g.
+        // close-tab) from starting an autoscroll drift + repaint loop.
+        let editor_area = ctx.available_rect();
+        let (mb_pressed, exit_pressed, pos, dt) = ctx.input(|i| {
+            (
+                i.pointer.button_pressed(egui::PointerButton::Middle),
+                i.pointer.button_pressed(egui::PointerButton::Primary)
+                    || i.pointer.button_pressed(egui::PointerButton::Secondary),
+                i.pointer.latest_pos(),
+                i.stable_dt,
+            )
+        });
+        // Enter on a middle press (toggles off if already active); otherwise a
+        // left/right press exits. `entered` gates the entering frame so the same
+        // press can't both enter and immediately drift.
+        let mut entered = false;
+        if mb_pressed {
+            if st.active {
+                st.active = false;
+            } else if let Some(p) = pos {
+                // Only arm autoscroll for a middle-click inside the editor surface
+                // — never on the tabs / toolbar / status chrome.
+                if editor_area.contains(p) {
+                    st.active = true;
+                    st.anchor = p;
+                    entered = true;
+                }
+            }
+        } else if st.active && exit_pressed {
+            st.active = false;
+        }
+        if st.active && !entered {
+            if let Some(p) = pos {
+                let from_anchor = p - st.anchor;
+                let dead = scroll.clamped_dead_zone();
+                let drifting = from_anchor.length() >= dead;
+                if drifting {
+                    // smooth_scroll_delta +y moves content down (view toward the
+                    // top), so to scroll toward the END when the pointer is BELOW
+                    // the anchor (from_anchor.y > 0) the injected delta is negated.
+                    let delta = -from_anchor * scroll.clamped_sensitivity() * dt;
+                    // ScrollArea consumes `smooth_scroll_delta` (zeroing it when it
+                    // takes it), so injecting here scrolls the hovered area.
+                    ctx.input_mut(|i| i.smooth_scroll_delta += delta);
+                    // Keep integrating the drift even when the pointer is held
+                    // stationary-but-offset (no input event would otherwise wake
+                    // the reactive loop). Crucially, when the pointer is AT rest in
+                    // the dead-zone we do NOT request a repaint — otherwise a plain
+                    // middle-click (e.g. that also closed a tab) would spin forever.
+                    ctx.request_repaint();
+                }
+                // Origin glyph on a foreground layer + a directional cursor so the
+                // affordance reads like the Windows wheel-click autoscroll. Drawn
+                // whenever active (cheap; persists between input events at rest).
+                let col = ctx.style().visuals.text_color();
+                let painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("scr1b3_autoscroll_glyph"),
+                ));
+                painter.circle_stroke(st.anchor, 11.0, egui::Stroke::new(1.5, col));
+                painter.circle_filled(st.anchor, 1.5, col);
+                let icon = if !drifting {
+                    egui::CursorIcon::Move
+                } else if from_anchor.y.abs() >= from_anchor.x.abs() {
+                    if from_anchor.y < 0.0 {
+                        egui::CursorIcon::ResizeNorth
+                    } else {
+                        egui::CursorIcon::ResizeSouth
+                    }
+                } else if from_anchor.x < 0.0 {
+                    egui::CursorIcon::ResizeWest
+                } else {
+                    egui::CursorIcon::ResizeEast
+                };
+                ctx.set_cursor_icon(icon);
+            }
+        }
+        ctx.data_mut(|d| d.insert_temp(id, st));
+    }
+
     /// One per-frame tick of the editor UI. Separated from `eframe::App::ui` so
     /// `egui_kittest` E2E tests can drive it through `Context::run` without an
     /// `eframe::Frame`. Drives every top-level panel via the deprecated-but-
     /// functional `Panel::show(ctx, …)` path.
     pub(crate) fn frame_tick(&mut self, ctx: &egui::Context) {
+        // Wave 2 scroll: apply the wheel-speed + jump-animation knobs and run the
+        // middle-click autoscroll state machine BEFORE any ScrollArea shows this
+        // frame (egui reads line_scroll_speed while building the wheel delta, and
+        // the autoscroll injects into smooth_scroll_delta which the hovered
+        // ScrollArea consumes when it renders later this tick).
+        self.apply_scroll_settings(ctx);
         // Drain a palette-requested clipboard/history action BEFORE any panel
         // renders, so the injected event reaches the central editor (shown
         // later this frame) and egui's TextEdit performs it natively.
@@ -8855,6 +8989,48 @@ mod e2e {
         h.run();
         let has_beta = h.state().tabs.iter().any(|t| t.title() == "beta.txt");
         assert!(!has_beta, "middle-clicking a tab must close it");
+    }
+
+    /// Wave 2: the Editor settings page exposes the Scroll-speed control.
+    #[test]
+    fn settings_exposes_scroll_speed_control() {
+        let mut h = ui_harness(fresh_app());
+        h.run();
+        h.state_mut().settings_open = true;
+        h.run();
+        h.get_by_label("Editor").click();
+        h.run();
+        // Panics (failing the test) if the Scroll-speed slider label is absent.
+        let _ = h.get_by_label("Scroll speed");
+    }
+
+    /// Wave 2: a middle-click INSIDE the editor arms autoscroll; the existing
+    /// `middle_click_tab_closes_it` proves a middle-click on a TAB does not (it
+    /// would otherwise spin the harness past max_steps via the drift repaint).
+    #[test]
+    fn middle_click_in_editor_arms_autoscroll() {
+        // Short buffer so the editor widget's centre (what `click_button` targets)
+        // is ON-SCREEN — a click on off-viewport content is correctly rejected by
+        // the visible-editor-area gate, which is the feature, not a bug.
+        let mut app = fresh_app();
+        app.tabs[0].text = "hi\n".to_string();
+        let mut h = ui_harness(app);
+        h.run();
+        let id = egui::Id::new("scr1b3_autoscroll");
+        let armed = |h: &egui_kittest::Harness<'_, ScribeApp>| {
+            h.ctx
+                .data(|d| d.get_temp::<AutoScrollState>(id))
+                .map(|s| s.active)
+                .unwrap_or(false)
+        };
+        assert!(!armed(&h), "autoscroll starts disarmed");
+        h.get_by_role(egui::accesskit::Role::MultilineTextInput)
+            .click_button(egui::PointerButton::Middle);
+        h.run();
+        assert!(
+            armed(&h),
+            "a middle-click inside the editor must arm autoscroll"
+        );
     }
 
     #[test]

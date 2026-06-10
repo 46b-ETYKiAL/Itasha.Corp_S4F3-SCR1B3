@@ -22,6 +22,56 @@ pub struct Config {
     pub toolbar: ToolbarConfig,
     #[serde(default)]
     pub motion: MotionConfig,
+    #[serde(default)]
+    pub scroll: ScrollConfig,
+}
+
+/// Scroll behaviour (Wave 2). `speed` is egui's `line_scroll_speed` wheel-notch
+/// multiplier — the single biggest wheel-speed lever (egui's `40.0` default is
+/// noticeably slower than the Windows system feel; `75.0` ≈ 1.9× that). It is
+/// applied PRE-smoothing, so egui's built-in `reach 90% in 0.1s` wheel smoothing
+/// still applies — no double-smoothing. `animate_jumps` eases programmatic
+/// jump-scrolls (goto-line / find-next) via egui's `scroll_animation`; it does
+/// NOT affect plain wheel speed. Middle-click autoscroll (the Windows
+/// wheel-click → drift behaviour) is opt-out via `autoscroll`, with a
+/// distance→velocity `sensitivity` (points/sec per screen-pixel of offset) and a
+/// `dead_zone` radius so a still pointer doesn't drift.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ScrollConfig {
+    pub speed: f32,
+    pub animate_jumps: bool,
+    pub autoscroll: bool,
+    pub autoscroll_sensitivity: f32,
+    pub autoscroll_dead_zone: f32,
+}
+
+impl Default for ScrollConfig {
+    fn default() -> Self {
+        Self {
+            speed: 75.0,
+            animate_jumps: true,
+            autoscroll: true,
+            autoscroll_sensitivity: 6.0,
+            autoscroll_dead_zone: 12.0,
+        }
+    }
+}
+
+impl ScrollConfig {
+    /// Wheel speed clamped to the settings-slider band so a malformed toml can't
+    /// produce a twitchy (too fast) or near-dead (too slow) scroll.
+    pub fn clamped_speed(&self) -> f32 {
+        self.speed.clamp(10.0, 200.0)
+    }
+    /// Autoscroll distance→velocity gain, clamped to the slider band.
+    pub fn clamped_sensitivity(&self) -> f32 {
+        self.autoscroll_sensitivity.clamp(2.0, 15.0)
+    }
+    /// Autoscroll dead-zone radius (screen px), clamped to the slider band.
+    pub fn clamped_dead_zone(&self) -> f32 {
+        self.autoscroll_dead_zone.clamp(4.0, 40.0)
+    }
 }
 
 /// Motion / animation catalog (Phase 17 T17.3). Master switch + per-effect
@@ -721,6 +771,30 @@ mod tests {
         let from_empty = Config::config_dir_from(Some(std::ffi::OsString::new()));
         let from_none = Config::config_dir_from(None);
         assert_eq!(from_empty, from_none);
+    }
+
+    #[test]
+    fn scroll_defaults_are_sane_and_clamp() {
+        let s = ScrollConfig::default();
+        assert_eq!(s.speed, 75.0);
+        assert!(s.animate_jumps && s.autoscroll);
+        // Out-of-band values clamp to the slider range.
+        let wild = ScrollConfig {
+            speed: 9000.0,
+            autoscroll_sensitivity: -3.0,
+            autoscroll_dead_zone: 999.0,
+            ..ScrollConfig::default()
+        };
+        assert_eq!(wild.clamped_speed(), 200.0);
+        assert_eq!(wild.clamped_sensitivity(), 2.0);
+        assert_eq!(wild.clamped_dead_zone(), 40.0);
+    }
+
+    #[test]
+    fn scroll_config_absent_section_defaults() {
+        // A toml without a [scroll] table must still load with scroll defaults.
+        let cfg = Config::from_toml_str("[editor]\ntab_width = 4\n").unwrap();
+        assert_eq!(cfg.scroll, ScrollConfig::default());
     }
 
     #[test]
