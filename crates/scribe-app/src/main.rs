@@ -23,6 +23,7 @@ mod md_preview;
 mod plugin_manager;
 mod settings;
 mod theme_editor;
+mod to_markdown;
 mod updater;
 
 use std::process::ExitCode;
