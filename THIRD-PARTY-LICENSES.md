@@ -41,6 +41,90 @@ index.
 - **Text**: [`crates/scribe-app/assets/fonts/VT323/OFL.txt`](crates/scribe-app/assets/fonts/VT323/OFL.txt)
 - **Copyright**: Copyright 2011 The VT323 Project Authors
 
+### Doto
+
+- **Source**: https://github.com/oliverlalan/Doto
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/Doto/OFL.txt`](assets/fonts/Doto/OFL.txt)
+- **Copyright**: Copyright 2024 The Doto Project Authors
+
+### Major Mono Display
+
+- **Source**: https://github.com/googlefonts/majormono
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/MajorMonoDisplay/OFL.txt`](assets/fonts/MajorMonoDisplay/OFL.txt)
+- **Copyright**: Copyright 2018 The Major Mono Project Authors
+
+### Chakra Petch
+
+- **Source**: https://github.com/cadsondemak/Chakra-Petch
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/ChakraPetch/OFL.txt`](assets/fonts/ChakraPetch/OFL.txt)
+- **Copyright**: Copyright 2018 The Chakra Petch Project Authors
+
+### Wallpoet
+
+- **Source**: https://github.com/google/fonts/tree/main/ofl/wallpoet
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/Wallpoet/OFL.txt`](assets/fonts/Wallpoet/OFL.txt)
+- **Copyright**: Copyright (c) 6 April 2011, Lars Berggren (lars@punktlars.se)
+
+### Michroma
+
+- **Source**: https://github.com/googlefonts/Michroma-font
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/Michroma/OFL.txt`](assets/fonts/Michroma/OFL.txt)
+- **Copyright**: Copyright 2011 The Michroma Project Authors
+
+### Red Hat Mono
+
+- **Source**: https://github.com/RedHatOfficial/RedHatFont
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/RedHatMono/OFL.txt`](assets/fonts/RedHatMono/OFL.txt)
+- **Copyright**: Copyright 2024 The Red Hat Project Authors
+
+### Teko
+
+- **Source**: https://github.com/googlefonts/teko
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/Teko/OFL.txt`](assets/fonts/Teko/OFL.txt)
+- **Copyright**: Copyright 2023 The Teko Project Authors
+
+### Rajdhani
+
+- **Source**: https://github.com/google/fonts/tree/main/ofl/rajdhani
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/Rajdhani/OFL.txt`](assets/fonts/Rajdhani/OFL.txt)
+- **Copyright**: Copyright (c) 2014, Indian Type Foundry (info@indiantypefoundry.com)
+
+### Saira
+
+- **Source**: https://github.com/Omnibus-Type/Saira
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/Saira/OFL.txt`](assets/fonts/Saira/OFL.txt)
+- **Copyright**: Copyright 2020 The Saira Project Authors
+
+### Zen Dots
+
+- **Source**: https://github.com/googlefonts/zen-dots
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/ZenDots/OFL.txt`](assets/fonts/ZenDots/OFL.txt)
+- **Copyright**: Copyright 2021 The Dots Project Authors
+
+### Syncopate
+
+- **Source**: https://github.com/google/fonts/tree/main/apache/syncopate
+- **License**: Apache License 2.0 (Apache-2.0) — NOT OFL. Google Fonts ships Syncopate under `apache/`, so its redistribution terms differ from the other bundled faces. Apache-2.0 is already on the allow-list below.
+- **Text**: [`assets/fonts/Syncopate/LICENSE.txt`](assets/fonts/Syncopate/LICENSE.txt)
+- **Copyright**: Copyright (c) 2010 Brian J. Bonislawsky DBA Astigmatic (AOETI)
+
+### Spline Sans Mono
+
+- **Source**: https://github.com/SorkinType/SplineSansMono
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/SplineSansMono/OFL.txt`](assets/fonts/SplineSansMono/OFL.txt)
+- **Copyright**: Copyright 2022 The Spline Sans Mono Project Authors
+
 ### Hack (via `epaint_default_fonts`)
 
 - **Source**: https://github.com/source-foundry/Hack

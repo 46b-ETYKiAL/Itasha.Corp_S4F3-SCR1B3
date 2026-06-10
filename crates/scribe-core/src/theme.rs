@@ -1004,6 +1004,471 @@ impl Theme {
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    //  Wave 4 — twelve influence palettes (brand-fonts-themes spec). Same
+    //  13-ui-key + 8-syntax-key shape as every other built-in. Accent
+    //  discipline: one accent = system voice; Akira-red alarm-only EXCEPT the
+    //  documented opt-in exceptions noted per theme.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// `dialup-glow` — Early-Internet / dial-up modem phosphor. Teal-green
+    /// system voice over CRT-blue haze; hyperlink-blue as a syntax voice.
+    pub fn dialup_glow() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x04, 0x08, 0x0a, 255));
+        ui.insert("foreground".into(), Rgba::new(0xb8, 0xd4, 0xd0, 255));
+        ui.insert("panel".into(), Rgba::new(0x0a, 0x10, 0x14, 255));
+        ui.insert("bezel".into(), Rgba::new(0x16, 0x24, 0x2c, 255));
+        ui.insert("gutter".into(), Rgba::new(0x04, 0x08, 0x0a, 255));
+        ui.insert("line_number".into(), Rgba::new(0x4a, 0x64, 0x70, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0x3c, 0xe0, 0xc0, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0x3c, 0xe0, 0xc0, 255));
+        ui.insert("selection".into(), Rgba::new(0x3c, 0xe0, 0xc0, 0x33));
+        ui.insert("accent".into(), Rgba::new(0x3c, 0xe0, 0xc0, 255));
+        ui.insert("ok".into(), Rgba::new(0x88, 0xc4, 0x9a, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x3b, 0x30, 255));
+        ui.insert("warning".into(), Rgba::new(0xf2, 0xb3, 0x3d, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0x5a, 0x8c, 0xd6, 255));
+        syntax.insert("function".into(), Rgba::new(0x3c, 0xe0, 0xc0, 255));
+        syntax.insert("string".into(), Rgba::new(0x88, 0xc4, 0x9a, 255));
+        syntax.insert("comment".into(), Rgba::new(0x3a, 0x4e, 0x52, 255));
+        syntax.insert("type".into(), Rgba::new(0x7a, 0xa8, 0xc4, 255));
+        syntax.insert("constant".into(), Rgba::new(0xd6, 0xa9, 0x5a, 255));
+        syntax.insert("number".into(), Rgba::new(0xd6, 0xa9, 0x5a, 255));
+        syntax.insert("variable".into(), Rgba::new(0xb8, 0xd4, 0xd0, 255));
+        Theme {
+            name: "dialup-glow".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `present-day` — Serial Experiments Lain. Cool CRT-grey wash with a
+    /// single sodium-amber bleed accent (Lain's bedroom lamp). Grey-dominant.
+    pub fn present_day() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x0c, 0x0d, 0x10, 255));
+        ui.insert("foreground".into(), Rgba::new(0xc4, 0xc2, 0xcc, 255));
+        ui.insert("panel".into(), Rgba::new(0x14, 0x15, 0x19, 255));
+        ui.insert("bezel".into(), Rgba::new(0x22, 0x25, 0x30, 255));
+        ui.insert("gutter".into(), Rgba::new(0x0c, 0x0d, 0x10, 255));
+        ui.insert("line_number".into(), Rgba::new(0x5a, 0x5a, 0x66, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0xc8, 0xa0, 0x6a, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0xc8, 0xa0, 0x6a, 255));
+        ui.insert("selection".into(), Rgba::new(0xc8, 0xa0, 0x6a, 0x2e));
+        ui.insert("accent".into(), Rgba::new(0xc8, 0xa0, 0x6a, 255));
+        ui.insert("ok".into(), Rgba::new(0x9a, 0xa8, 0xa0, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x3b, 0x30, 255));
+        ui.insert("warning".into(), Rgba::new(0xf2, 0xb3, 0x3d, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0x8a, 0x8a, 0xa8, 255));
+        syntax.insert("function".into(), Rgba::new(0xc8, 0xa0, 0x6a, 255));
+        syntax.insert("string".into(), Rgba::new(0x9a, 0xa8, 0xa0, 255));
+        syntax.insert("comment".into(), Rgba::new(0x44, 0x45, 0x4f, 255));
+        syntax.insert("type".into(), Rgba::new(0xa8, 0xa8, 0xbc, 255));
+        syntax.insert("constant".into(), Rgba::new(0xc8, 0xb0, 0x7a, 255));
+        syntax.insert("number".into(), Rgba::new(0xc8, 0xb0, 0x7a, 255));
+        syntax.insert("variable".into(), Rgba::new(0xc4, 0xc2, 0xcc, 255));
+        Theme {
+            name: "present-day".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `thermoptic` — early Ghost in the Shell (1995). Thermo-optic-camouflage
+    /// jade-green refraction system voice; amber dive-readout for constants.
+    pub fn thermoptic() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x06, 0x0a, 0x09, 255));
+        ui.insert("foreground".into(), Rgba::new(0xb0, 0xc8, 0xbc, 255));
+        ui.insert("panel".into(), Rgba::new(0x0c, 0x14, 0x12, 255));
+        ui.insert("bezel".into(), Rgba::new(0x16, 0x22, 0x1e, 255));
+        ui.insert("gutter".into(), Rgba::new(0x06, 0x0a, 0x09, 255));
+        ui.insert("line_number".into(), Rgba::new(0x46, 0x64, 0x5a, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0x4e, 0xd6, 0xa0, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0x4e, 0xd6, 0xa0, 255));
+        ui.insert("selection".into(), Rgba::new(0x4e, 0xd6, 0xa0, 0x30));
+        ui.insert("accent".into(), Rgba::new(0x4e, 0xd6, 0xa0, 255));
+        ui.insert("ok".into(), Rgba::new(0x8a, 0xc0, 0xa8, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x3b, 0x30, 255));
+        ui.insert("warning".into(), Rgba::new(0xf2, 0xb3, 0x3d, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0x5a, 0xa8, 0xc4, 255));
+        syntax.insert("function".into(), Rgba::new(0x4e, 0xd6, 0xa0, 255));
+        syntax.insert("string".into(), Rgba::new(0x8a, 0xc0, 0xa8, 255));
+        syntax.insert("comment".into(), Rgba::new(0x36, 0x48, 0x40, 255));
+        syntax.insert("type".into(), Rgba::new(0x9e, 0xc4, 0xb4, 255));
+        syntax.insert("constant".into(), Rgba::new(0xe0, 0xa8, 0x5a, 255));
+        syntax.insert("number".into(), Rgba::new(0xe0, 0xa8, 0x5a, 255));
+        syntax.insert("variable".into(), Rgba::new(0xb0, 0xc8, 0xbc, 255));
+        Theme {
+            name: "thermoptic".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `capsule-mono` — Akira, restrained read. Biolume-cyan system voice;
+    /// Kaneda candy-red reserved alarm-only (distinct `error` value).
+    pub fn capsule_mono() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x0a, 0x07, 0x08, 255));
+        ui.insert("foreground".into(), Rgba::new(0xe4, 0xd4, 0xc8, 255));
+        ui.insert("panel".into(), Rgba::new(0x16, 0x10, 0x1a, 255));
+        ui.insert("bezel".into(), Rgba::new(0x26, 0x18, 0x26, 255));
+        ui.insert("gutter".into(), Rgba::new(0x0a, 0x07, 0x08, 255));
+        ui.insert("line_number".into(), Rgba::new(0x6a, 0x4a, 0x58, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0x38, 0xb8, 0xc8, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0x38, 0xb8, 0xc8, 255));
+        ui.insert("selection".into(), Rgba::new(0x38, 0xb8, 0xc8, 0x2e));
+        ui.insert("accent".into(), Rgba::new(0x38, 0xb8, 0xc8, 255));
+        ui.insert("ok".into(), Rgba::new(0x9c, 0xb0, 0xc4, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x20, 0x30, 255));
+        ui.insert("warning".into(), Rgba::new(0xf0, 0xc4, 0x4a, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0xc8, 0x64, 0x96, 255));
+        syntax.insert("function".into(), Rgba::new(0x38, 0xb8, 0xc8, 255));
+        syntax.insert("string".into(), Rgba::new(0xc4, 0x9c, 0x6a, 255));
+        syntax.insert("comment".into(), Rgba::new(0x48, 0x36, 0x46, 255));
+        syntax.insert("type".into(), Rgba::new(0x9c, 0xb0, 0xc4, 255));
+        syntax.insert("constant".into(), Rgba::new(0xf0, 0xc4, 0x4a, 255));
+        syntax.insert("number".into(), Rgba::new(0xf0, 0xc4, 0x4a, 255));
+        syntax.insert("variable".into(), Rgba::new(0xe4, 0xd4, 0xc8, 255));
+        Theme {
+            name: "capsule-mono".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `jet-age` — Space-age / Googie retro-futurism. Atomic-teal system voice
+    /// over brushed-aluminium; sodium used in an accent (keyword) role only.
+    pub fn jet_age() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x0a, 0x0c, 0x0e, 255));
+        ui.insert("foreground".into(), Rgba::new(0xdc, 0xe0, 0xe4, 255));
+        ui.insert("panel".into(), Rgba::new(0x14, 0x18, 0x20, 255));
+        ui.insert("bezel".into(), Rgba::new(0x22, 0x28, 0x32, 255));
+        ui.insert("gutter".into(), Rgba::new(0x0a, 0x0c, 0x0e, 255));
+        ui.insert("line_number".into(), Rgba::new(0x5e, 0x6a, 0x74, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0x3a, 0xc8, 0xc0, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0x3a, 0xc8, 0xc0, 255));
+        ui.insert("selection".into(), Rgba::new(0x3a, 0xc8, 0xc0, 0x2e));
+        ui.insert("accent".into(), Rgba::new(0x3a, 0xc8, 0xc0, 255));
+        ui.insert("ok".into(), Rgba::new(0x8a, 0xb0, 0xa8, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x3b, 0x30, 255));
+        ui.insert("warning".into(), Rgba::new(0xf2, 0xb3, 0x3d, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0xe0, 0x8a, 0x48, 255));
+        syntax.insert("function".into(), Rgba::new(0x3a, 0xc8, 0xc0, 255));
+        syntax.insert("string".into(), Rgba::new(0x8a, 0xb0, 0xa8, 255));
+        syntax.insert("comment".into(), Rgba::new(0x3a, 0x42, 0x4c, 255));
+        syntax.insert("type".into(), Rgba::new(0xa8, 0xb8, 0xc4, 255));
+        syntax.insert("constant".into(), Rgba::new(0xe0, 0xc0, 0x78, 255));
+        syntax.insert("number".into(), Rgba::new(0xe0, 0xc0, 0x78, 255));
+        syntax.insert("variable".into(), Rgba::new(0xdc, 0xe0, 0xe4, 255));
+        Theme {
+            name: "jet-age".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `packet-trace` — Cybersecurity / Wireshark-dark. Acid-green system voice;
+    /// distinct alert-amber `warning` + alarm-red `error`.
+    pub fn packet_trace() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x07, 0x09, 0x0c, 255));
+        ui.insert("foreground".into(), Rgba::new(0xc0, 0xcc, 0xd4, 255));
+        ui.insert("panel".into(), Rgba::new(0x0e, 0x12, 0x18, 255));
+        ui.insert("bezel".into(), Rgba::new(0x1a, 0x22, 0x30, 255));
+        ui.insert("gutter".into(), Rgba::new(0x07, 0x09, 0x0c, 255));
+        ui.insert("line_number".into(), Rgba::new(0x4a, 0x58, 0x68, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0x5a, 0xf0, 0xa0, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0x5a, 0xf0, 0xa0, 255));
+        ui.insert("selection".into(), Rgba::new(0x5a, 0xf0, 0xa0, 0x2e));
+        ui.insert("accent".into(), Rgba::new(0x5a, 0xf0, 0xa0, 255));
+        ui.insert("ok".into(), Rgba::new(0x5a, 0xf0, 0xa0, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x3b, 0x30, 255));
+        ui.insert("warning".into(), Rgba::new(0xf2, 0xb3, 0x3d, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0x6a, 0xa0, 0xe0, 255));
+        syntax.insert("function".into(), Rgba::new(0x5a, 0xf0, 0xa0, 255));
+        syntax.insert("string".into(), Rgba::new(0x9a, 0xc4, 0x8a, 255));
+        syntax.insert("comment".into(), Rgba::new(0x36, 0x42, 0x4e, 255));
+        syntax.insert("type".into(), Rgba::new(0x88, 0xb8, 0xc4, 255));
+        syntax.insert("constant".into(), Rgba::new(0xe0, 0xb4, 0x5a, 255));
+        syntax.insert("number".into(), Rgba::new(0xe0, 0xb4, 0x5a, 255));
+        syntax.insert("variable".into(), Rgba::new(0xc0, 0xcc, 0xd4, 255));
+        Theme {
+            name: "packet-trace".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `cockpit-amber` — Mecha cockpit interior. HUD-amber system voice
+    /// (documented opt-in: mecha HUDs are intrinsically amber), radar-green
+    /// for functions.
+    pub fn cockpit_amber() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x08, 0x09, 0x0c, 255));
+        ui.insert("foreground".into(), Rgba::new(0xd4, 0xd8, 0xe0, 255));
+        ui.insert("panel".into(), Rgba::new(0x12, 0x15, 0x1c, 255));
+        ui.insert("bezel".into(), Rgba::new(0x1e, 0x26, 0x30, 255));
+        ui.insert("gutter".into(), Rgba::new(0x08, 0x09, 0x0c, 255));
+        ui.insert("line_number".into(), Rgba::new(0x58, 0x64, 0x74, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0xf0, 0xa8, 0x28, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0xf0, 0xa8, 0x28, 255));
+        ui.insert("selection".into(), Rgba::new(0xf0, 0xa8, 0x28, 0x2e));
+        ui.insert("accent".into(), Rgba::new(0xf0, 0xa8, 0x28, 255));
+        ui.insert("ok".into(), Rgba::new(0x58, 0xc0, 0x88, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x3b, 0x30, 255));
+        ui.insert("warning".into(), Rgba::new(0xf0, 0xc0, 0x40, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0x5a, 0x86, 0xc0, 255));
+        syntax.insert("function".into(), Rgba::new(0x58, 0xc0, 0x88, 255));
+        syntax.insert("string".into(), Rgba::new(0xa8, 0xb4, 0x98, 255));
+        syntax.insert("comment".into(), Rgba::new(0x38, 0x42, 0x4e, 255));
+        syntax.insert("type".into(), Rgba::new(0xa0, 0xb0, 0xc0, 255));
+        syntax.insert("constant".into(), Rgba::new(0xf0, 0xc0, 0x40, 255));
+        syntax.insert("number".into(), Rgba::new(0xf0, 0xc0, 0x40, 255));
+        syntax.insert("variable".into(), Rgba::new(0xd4, 0xd8, 0xe0, 255));
+        Theme {
+            name: "cockpit-amber".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `nerv-magi` — Evangelion / NERV terminal. Eva-green system voice on a
+    /// pure-black void; hazard amber-orange foreground; alarm-red error.
+    pub fn nerv_magi() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x00, 0x00, 0x00, 255));
+        ui.insert("foreground".into(), Rgba::new(0xe8, 0xa0, 0x30, 255));
+        ui.insert("panel".into(), Rgba::new(0x0a, 0x08, 0x05, 255));
+        ui.insert("bezel".into(), Rgba::new(0x1a, 0x14, 0x08, 255));
+        ui.insert("gutter".into(), Rgba::new(0x00, 0x00, 0x00, 255));
+        ui.insert("line_number".into(), Rgba::new(0x6a, 0x54, 0x20, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0x7a, 0xe0, 0x20, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0x7a, 0xe0, 0x20, 255));
+        ui.insert("selection".into(), Rgba::new(0x7a, 0xe0, 0x20, 0x2e));
+        ui.insert("accent".into(), Rgba::new(0x7a, 0xe0, 0x20, 255));
+        ui.insert("ok".into(), Rgba::new(0x7a, 0xe0, 0x20, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x00, 0x40, 255));
+        ui.insert("warning".into(), Rgba::new(0xff, 0xc4, 0x00, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0xf0, 0x60, 0x30, 255));
+        syntax.insert("function".into(), Rgba::new(0x7a, 0xe0, 0x20, 255));
+        syntax.insert("string".into(), Rgba::new(0xc0, 0xa8, 0x48, 255));
+        syntax.insert("comment".into(), Rgba::new(0x4a, 0x3c, 0x18, 255));
+        syntax.insert("type".into(), Rgba::new(0xa8, 0xc0, 0x60, 255));
+        syntax.insert("constant".into(), Rgba::new(0xff, 0xc4, 0x00, 255));
+        syntax.insert("number".into(), Rgba::new(0xff, 0xc4, 0x00, 255));
+        syntax.insert("variable".into(), Rgba::new(0xe8, 0xa0, 0x30, 255));
+        Theme {
+            name: "nerv-magi".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `colony-drift` — Gundam UC Federation ops display. Federation-blue
+    /// system voice, armour-white text, Char-red alarm-only, V-fin yellow.
+    pub fn colony_drift() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x09, 0x0b, 0x10, 255));
+        ui.insert("foreground".into(), Rgba::new(0xe0, 0xe4, 0xec, 255));
+        ui.insert("panel".into(), Rgba::new(0x11, 0x15, 0x1e, 255));
+        ui.insert("bezel".into(), Rgba::new(0x1c, 0x24, 0x30, 255));
+        ui.insert("gutter".into(), Rgba::new(0x09, 0x0b, 0x10, 255));
+        ui.insert("line_number".into(), Rgba::new(0x56, 0x62, 0x7a, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0x2a, 0x78, 0xd8, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0x2a, 0x78, 0xd8, 255));
+        ui.insert("selection".into(), Rgba::new(0x2a, 0x78, 0xd8, 0x2e));
+        ui.insert("accent".into(), Rgba::new(0x2a, 0x78, 0xd8, 255));
+        ui.insert("ok".into(), Rgba::new(0x88, 0xa0, 0xb8, 255));
+        ui.insert("error".into(), Rgba::new(0xd0, 0x18, 0x28, 255));
+        ui.insert("warning".into(), Rgba::new(0xf0, 0xc8, 0x28, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0x4a, 0x88, 0xe0, 255));
+        syntax.insert("function".into(), Rgba::new(0x2a, 0x78, 0xd8, 255));
+        syntax.insert("string".into(), Rgba::new(0x88, 0xa0, 0xb8, 255));
+        syntax.insert("comment".into(), Rgba::new(0x36, 0x41, 0x50, 255));
+        syntax.insert("type".into(), Rgba::new(0x98, 0xae, 0xc8, 255));
+        syntax.insert("constant".into(), Rgba::new(0xf0, 0xc8, 0x28, 255));
+        syntax.insert("number".into(), Rgba::new(0xf0, 0xc8, 0x28, 255));
+        syntax.insert("variable".into(), Rgba::new(0xe0, 0xe4, 0xec, 255));
+        Theme {
+            name: "colony-drift".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `kanjo-loop` — 80s–2000s JDM daytime touge / sticker-bomb. **OPT-IN**:
+    /// candy-red is the system voice (documented exception to alarm-only-red,
+    /// like akira-redshift/atompunk-sodium). Lime + underglow-pink syntax.
+    pub fn kanjo_loop() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x0b, 0x0a, 0x08, 255));
+        ui.insert("foreground".into(), Rgba::new(0xd8, 0xd4, 0xcc, 255));
+        ui.insert("panel".into(), Rgba::new(0x14, 0x11, 0x0e, 255));
+        ui.insert("bezel".into(), Rgba::new(0x28, 0x1c, 0x16, 255));
+        ui.insert("gutter".into(), Rgba::new(0x0b, 0x0a, 0x08, 255));
+        ui.insert("line_number".into(), Rgba::new(0x6a, 0x5a, 0x4a, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0xd8, 0x20, 0x2e, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0xd8, 0x20, 0x2e, 255));
+        ui.insert("selection".into(), Rgba::new(0xd8, 0x20, 0x2e, 0x2e));
+        ui.insert("accent".into(), Rgba::new(0xd8, 0x20, 0x2e, 255));
+        ui.insert("ok".into(), Rgba::new(0x28, 0xd8, 0x60, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x3b, 0x30, 255));
+        ui.insert("warning".into(), Rgba::new(0xf0, 0xa0, 0x30, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0xe8, 0x40, 0x88, 255));
+        syntax.insert("function".into(), Rgba::new(0x28, 0xd8, 0x60, 255));
+        syntax.insert("string".into(), Rgba::new(0xb0, 0xa8, 0x78, 255));
+        syntax.insert("comment".into(), Rgba::new(0x3e, 0x34, 0x2a, 255));
+        syntax.insert("type".into(), Rgba::new(0xc0, 0xa8, 0x78, 255));
+        syntax.insert("constant".into(), Rgba::new(0xf0, 0xa0, 0x30, 255));
+        syntax.insert("number".into(), Rgba::new(0xf0, 0xa0, 0x30, 255));
+        syntax.insert("variable".into(), Rgba::new(0xd8, 0xd4, 0xcc, 255));
+        Theme {
+            name: "kanjo-loop".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `yaksha-ink` — Gharliera. Near-monochrome bone-on-black ink wash; a
+    /// single bruised-magenta system voice.
+    pub fn yaksha_ink() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x08, 0x08, 0x0a, 255));
+        ui.insert("foreground".into(), Rgba::new(0xe6, 0xe4, 0xe0, 255));
+        ui.insert("panel".into(), Rgba::new(0x10, 0x10, 0x12, 255));
+        ui.insert("bezel".into(), Rgba::new(0x1e, 0x1e, 0x22, 255));
+        ui.insert("gutter".into(), Rgba::new(0x08, 0x08, 0x0a, 255));
+        ui.insert("line_number".into(), Rgba::new(0x58, 0x58, 0x5e, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0xd6, 0x28, 0x6e, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0xd6, 0x28, 0x6e, 255));
+        ui.insert("selection".into(), Rgba::new(0xd6, 0x28, 0x6e, 0x2e));
+        ui.insert("accent".into(), Rgba::new(0xd6, 0x28, 0x6e, 255));
+        ui.insert("ok".into(), Rgba::new(0xa0, 0xa0, 0x9a, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x3b, 0x30, 255));
+        ui.insert("warning".into(), Rgba::new(0xf2, 0xb3, 0x3d, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0x9a, 0x8a, 0xa0, 255));
+        syntax.insert("function".into(), Rgba::new(0xd6, 0x28, 0x6e, 255));
+        syntax.insert("string".into(), Rgba::new(0xa0, 0xa0, 0x9a, 255));
+        syntax.insert("comment".into(), Rgba::new(0x38, 0x38, 0x3e, 255));
+        syntax.insert("type".into(), Rgba::new(0xb8, 0xb4, 0xbc, 255));
+        syntax.insert("constant".into(), Rgba::new(0xc4, 0x9a, 0x6a, 255));
+        syntax.insert("number".into(), Rgba::new(0xc4, 0x9a, 0x6a, 255));
+        syntax.insert("variable".into(), Rgba::new(0xe6, 0xe4, 0xe0, 255));
+        Theme {
+            name: "yaksha-ink".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
+    /// `datamosh-haze` — antireal / 4nt1r34l. Faded analog haze; oxidised-teal
+    /// system voice, corrupted-magenta keyword bleed over warm sepia-grey.
+    pub fn datamosh_haze() -> Theme {
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), Rgba::new(0x0c, 0x0a, 0x0a, 255));
+        ui.insert("foreground".into(), Rgba::new(0xca, 0xc0, 0xb4, 255));
+        ui.insert("panel".into(), Rgba::new(0x14, 0x11, 0x0f, 255));
+        ui.insert("bezel".into(), Rgba::new(0x22, 0x1c, 0x1a, 255));
+        ui.insert("gutter".into(), Rgba::new(0x0c, 0x0a, 0x0a, 255));
+        ui.insert("line_number".into(), Rgba::new(0x6a, 0x5e, 0x54, 255));
+        ui.insert(
+            "line_number_active".into(),
+            Rgba::new(0x4a, 0xb0, 0xa8, 255),
+        );
+        ui.insert("cursor".into(), Rgba::new(0x4a, 0xb0, 0xa8, 255));
+        ui.insert("selection".into(), Rgba::new(0x4a, 0xb0, 0xa8, 0x2e));
+        ui.insert("accent".into(), Rgba::new(0x4a, 0xb0, 0xa8, 255));
+        ui.insert("ok".into(), Rgba::new(0xa0, 0xa8, 0x9c, 255));
+        ui.insert("error".into(), Rgba::new(0xff, 0x3b, 0x30, 255));
+        ui.insert("warning".into(), Rgba::new(0xf2, 0xb3, 0x3d, 255));
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), Rgba::new(0xb0, 0x70, 0x8a, 255));
+        syntax.insert("function".into(), Rgba::new(0x4a, 0xb0, 0xa8, 255));
+        syntax.insert("string".into(), Rgba::new(0xa8, 0x9c, 0x84, 255));
+        syntax.insert("comment".into(), Rgba::new(0x3e, 0x36, 0x2e, 255));
+        syntax.insert("type".into(), Rgba::new(0xa0, 0xa8, 0x9c, 255));
+        syntax.insert("constant".into(), Rgba::new(0xc4, 0x9a, 0x78, 255));
+        syntax.insert("number".into(), Rgba::new(0xc4, 0x9a, 0x78, 255));
+        syntax.insert("variable".into(), Rgba::new(0xca, 0xc0, 0xb4, 255));
+        Theme {
+            name: "datamosh-haze".into(),
+            appearance: Appearance::Dark,
+            palette: BTreeMap::new(),
+            ui,
+            syntax,
+        }
+    }
+
     /// The list of built-in theme names — drives the in-app theme picker.
     /// User themes (TOML files under `<config_dir>/themes/`) compose on top.
     pub fn builtin_names() -> &'static [&'static str] {
@@ -1032,6 +1497,19 @@ impl Theme {
             "terminal-lock",
             "mecha-armour",
             "shutoko-night",
+            // Wave 4 influence palettes (brand-fonts-themes spec).
+            "dialup-glow",
+            "present-day",
+            "thermoptic",
+            "capsule-mono",
+            "jet-age",
+            "packet-trace",
+            "cockpit-amber",
+            "nerv-magi",
+            "colony-drift",
+            "kanjo-loop",
+            "yaksha-ink",
+            "datamosh-haze",
         ]
     }
 
@@ -1062,6 +1540,19 @@ impl Theme {
             "terminal-lock" => Some(Theme::terminal_lock()),
             "mecha-armour" => Some(Theme::mecha_armour()),
             "shutoko-night" => Some(Theme::shutoko_night()),
+            // Wave 4.
+            "dialup-glow" => Some(Theme::dialup_glow()),
+            "present-day" => Some(Theme::present_day()),
+            "thermoptic" => Some(Theme::thermoptic()),
+            "capsule-mono" => Some(Theme::capsule_mono()),
+            "jet-age" => Some(Theme::jet_age()),
+            "packet-trace" => Some(Theme::packet_trace()),
+            "cockpit-amber" => Some(Theme::cockpit_amber()),
+            "nerv-magi" => Some(Theme::nerv_magi()),
+            "colony-drift" => Some(Theme::colony_drift()),
+            "kanjo-loop" => Some(Theme::kanjo_loop()),
+            "yaksha-ink" => Some(Theme::yaksha_ink()),
+            "datamosh-haze" => Some(Theme::datamosh_haze()),
             _ => None,
         }
     }
