@@ -429,6 +429,11 @@ pub struct ScribeApp {
     zen_mode: bool,
     /// Wave-5 P1: static Tab-trigger snippets loaded from `<config>/snippets.toml`.
     snippets: scribe_core::snippets::SnippetSet,
+    /// Wave-5 P1: markdown live-preview side panel (Ctrl+Shift+V). Shown only
+    /// for markdown buffers; renders the buffer via pulldown-cmark → egui.
+    md_preview_open: bool,
+    /// Wave-5 P1: diff side panel — the open buffer vs the file on disk.
+    diff_view_open: bool,
     find_open: bool,
     find_query: String,
     /// #R6 — currently-selected match in the find bar (0-based). Drives the
@@ -844,6 +849,8 @@ impl ScribeApp {
             focus_find_in_files: false,
             zen_mode: false,
             snippets: load_snippets(),
+            md_preview_open: false,
+            diff_view_open: false,
             find_open: false,
             find_query: String::new(),
             find_match_idx: 0,
@@ -2123,6 +2130,12 @@ impl ScribeApp {
                     self.find_open = false;
                     self.find_in_files_open = false;
                 }
+            }
+            BuiltinCommand::ToggleMarkdownPreview => {
+                self.md_preview_open = !self.md_preview_open;
+            }
+            BuiltinCommand::ToggleDiffView => {
+                self.diff_view_open = !self.diff_view_open;
             }
             BuiltinCommand::ToggleSpellcheck => {
                 self.config.spellcheck.enabled = !self.config.spellcheck.enabled;
@@ -4110,6 +4123,8 @@ pub(crate) enum BuiltinCommand {
     ToggleSplitView,
     ToggleMinimap,
     ToggleZen,
+    ToggleMarkdownPreview,
+    ToggleDiffView,
     ToggleSpellcheck,
     ToggleWordWrap,
     ToggleLineNumbers,
@@ -4285,6 +4300,16 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Toggle line numbers",
         shortcut: "",
         action: BuiltinCommand::ToggleLineNumbers,
+    },
+    BuiltinEntry {
+        label: "Toggle diff vs disk",
+        shortcut: "",
+        action: BuiltinCommand::ToggleDiffView,
+    },
+    BuiltinEntry {
+        label: "Toggle markdown preview",
+        shortcut: "Ctrl+Shift+V",
+        action: BuiltinCommand::ToggleMarkdownPreview,
     },
     BuiltinEntry {
         label: "Toggle minimap",
@@ -5495,6 +5520,10 @@ impl ScribeApp {
                     self.find_open = false;
                     self.find_in_files_open = false;
                 }
+            }
+            // Wave-5 P1: Ctrl+Shift+V toggles the markdown live-preview panel.
+            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::V) {
+                self.md_preview_open = !self.md_preview_open;
             }
             // Ctrl/Cmd+Shift+P opens the command palette (plugin + builtin cmds).
             if cmd && i.modifiers.shift && i.key_pressed(egui::Key::P) {
@@ -6964,6 +6993,90 @@ impl ScribeApp {
         let read_only = self.tabs[active].doc.is_read_only_large();
         // The editor should be ready to type whenever no field/menu is open.
         let overlay_open = self.find_open || self.palette_open || self.settings_open;
+
+        // ---- Wave-5 P1: markdown live preview (right side panel) ----
+        // Only for markdown buffers; renders the buffer via pulldown-cmark.
+        if self.md_preview_open && !self.zen_mode {
+            let is_md = self
+                .tabs
+                .get(active)
+                .and_then(|t| t.doc.language_hint())
+                .map(|l| l == "md" || l == "markdown")
+                .unwrap_or(false);
+            if is_md {
+                let md = self.tabs[active].text.clone();
+                egui::SidePanel::right("md-preview")
+                    .default_width(360.0)
+                    .frame(egui::Frame::default().fill(panel).inner_margin(8.0))
+                    .show(ctx, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Markdown preview").color(muted).small());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("close").clicked() {
+                                        self.md_preview_open = false;
+                                    }
+                                },
+                            );
+                        });
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                crate::md_preview::show(ui, &md, accent, muted);
+                            });
+                    });
+            }
+        }
+
+        // ---- Wave-5 P1: diff vs disk (right side panel) ----
+        if self.diff_view_open && !self.zen_mode {
+            let cur = self.tabs.get(active).map(|t| t.text.clone());
+            let disk = self
+                .tabs
+                .get(active)
+                .and_then(|t| t.doc.path())
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            let colors = crate::diff_view::DiffColors {
+                insert: ui_color(&self.theme, "ok", Rgba::new(0x6e, 0xc7, 0x7a, 255)),
+                delete: ui_color(&self.theme, "error", Rgba::new(0xd0, 0x6e, 0x6e, 255)),
+                context: muted,
+            };
+            if let Some(cur) = cur {
+                egui::SidePanel::right("diff-view")
+                    .default_width(420.0)
+                    .frame(egui::Frame::default().fill(panel).inner_margin(8.0))
+                    .show(ctx, |ui| {
+                        let rows = crate::diff_view::diff_lines(&disk, &cur);
+                        let (ins, del) = crate::diff_view::summary(&rows);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Diff vs disk").color(muted).small());
+                            ui.label(
+                                RichText::new(format!("+{ins}"))
+                                    .color(colors.insert)
+                                    .small(),
+                            );
+                            ui.label(
+                                RichText::new(format!("-{del}"))
+                                    .color(colors.delete)
+                                    .small(),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.small_button("close").clicked() {
+                                        self.diff_view_open = false;
+                                    }
+                                },
+                            );
+                        });
+                        ui.separator();
+                        crate::diff_view::show_rows(ui, &rows, colors);
+                    });
+            }
+        }
 
         // ---- Minimap (rightmost strip) ----
         // Skipped for read-only huge files: the minimap hashes + lays out the

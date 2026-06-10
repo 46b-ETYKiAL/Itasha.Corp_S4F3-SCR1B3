@@ -13,11 +13,13 @@
 mod action_log;
 mod app;
 mod cli;
+mod diff_view;
 mod editor_features;
 mod filetree;
 mod find_in_files;
 mod fuzzy;
 mod grid;
+mod md_preview;
 mod plugin_manager;
 mod settings;
 mod theme_editor;

@@ -3062,6 +3062,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags 2.11.1",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pxfm"
 version = "0.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3472,7 +3483,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scribe-app"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "arboard",
  "eframe",
@@ -3483,6 +3494,7 @@ dependencies = [
  "mimalloc",
  "minisign",
  "notify",
+ "pulldown-cmark",
  "rfd",
  "scribe-core",
  "scribe-render",
@@ -3490,6 +3502,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "similar",
  "skrifa",
  "tempfile",
  "toml",
@@ -3500,7 +3513,7 @@ dependencies = [
 
 [[package]]
 name = "scribe-core"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "chardetng",
  "directories",
@@ -3531,7 +3544,7 @@ dependencies = [
 
 [[package]]
 name = "scribe-render"
-version = "0.4.20"
+version = "0.4.21"
 dependencies = [
  "egui",
  "ropey",
@@ -3699,6 +3712,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "siphasher"
@@ -4246,6 +4265,12 @@ dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-ident"
