@@ -4455,6 +4455,21 @@ pub(crate) const FONT_FAMILIES: &[(&str, &str)] = &[
     ("B612 Mono", "B612Mono"),
     ("Share Tech Mono", "ShareTechMono"),
     ("VT323", "VT323"),
+    // Wave 4 — brand display + accent faces. Several are display/proportional
+    // and best used as the App-UI font rather than the note body; all cover
+    // Basic Latin so none tofu when chosen.
+    ("Doto", "Doto"),
+    ("Major Mono Display", "MajorMonoDisplay"),
+    ("Chakra Petch", "ChakraPetch"),
+    ("Wallpoet", "Wallpoet"),
+    ("Michroma", "Michroma"),
+    ("Red Hat Mono", "RedHatMono"),
+    ("Teko", "Teko"),
+    ("Rajdhani", "Rajdhani"),
+    ("Saira", "Saira"),
+    ("Zen Dots", "ZenDots"),
+    ("Syncopate", "Syncopate"),
+    ("Spline Sans Mono", "SplineSansMono"),
 ];
 
 /// Selectable note (editor) colour themes (#104) — the syntect bundled set
@@ -4543,6 +4558,47 @@ fn build_fonts(editor_family: &str, ui_family: &str) -> egui::FontDefinitions {
         "../../../assets/fonts/ShareTechMono/ShareTechMono-Regular.ttf"
     );
     embed!("VT323", "../../../assets/fonts/VT323/VT323-Regular.ttf");
+    // Wave 4 — brand display + accent faces (atomic with the FONT_FAMILIES
+    // additions above; a key without its embed fails the registration test).
+    embed!("Doto", "../../../assets/fonts/Doto/Doto[ROND,wght].ttf");
+    embed!(
+        "MajorMonoDisplay",
+        "../../../assets/fonts/MajorMonoDisplay/MajorMonoDisplay-Regular.ttf"
+    );
+    embed!(
+        "ChakraPetch",
+        "../../../assets/fonts/ChakraPetch/ChakraPetch-Regular.ttf"
+    );
+    embed!(
+        "Wallpoet",
+        "../../../assets/fonts/Wallpoet/Wallpoet-Regular.ttf"
+    );
+    embed!(
+        "Michroma",
+        "../../../assets/fonts/Michroma/Michroma-Regular.ttf"
+    );
+    embed!(
+        "RedHatMono",
+        "../../../assets/fonts/RedHatMono/RedHatMono[wght].ttf"
+    );
+    embed!("Teko", "../../../assets/fonts/Teko/Teko[wght].ttf");
+    embed!(
+        "Rajdhani",
+        "../../../assets/fonts/Rajdhani/Rajdhani-Regular.ttf"
+    );
+    embed!("Saira", "../../../assets/fonts/Saira/Saira[wdth,wght].ttf");
+    embed!(
+        "ZenDots",
+        "../../../assets/fonts/ZenDots/ZenDots-Regular.ttf"
+    );
+    embed!(
+        "Syncopate",
+        "../../../assets/fonts/Syncopate/Syncopate-Regular.ttf"
+    );
+    embed!(
+        "SplineSansMono",
+        "../../../assets/fonts/SplineSansMono/SplineSansMono[wght].ttf"
+    );
     embed!(
         "NotoSansJP-Subset",
         "../../../assets/fonts/NotoSansJP/NotoSansJP-Subset.ttf"
