@@ -4022,7 +4022,7 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
     },
     ShortcutEntry {
         chord: "F11",
-        action: "Toggle OS fullscreen",
+        action: "Toggle fullscreen — editor only, all chrome hidden (Esc exits)",
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+T",
@@ -5756,10 +5756,15 @@ impl ScribeApp {
                 act.open_fuzzy = true;
             }
             if i.key_pressed(egui::Key::Escape) {
-                // Esc exits zen mode first so the chrome comes back before any
-                // overlay close — one press to leave distraction-free mode.
+                // Esc exits zen mode / F11 fullscreen first so the chrome comes
+                // back before any overlay close — one press to leave the
+                // distraction-free / fullscreen surface.
                 if self.zen_mode {
                     self.zen_mode = false;
+                } else if i.viewport().fullscreen.unwrap_or(false) {
+                    // Exit OS fullscreen via the existing deferred handler
+                    // (it sends Fullscreen(false) since we are currently in it).
+                    act.toggle_fullscreen = true;
                 } else {
                     self.find_open = false;
                     self.palette_open = false;
@@ -5848,8 +5853,16 @@ impl ScribeApp {
         );
         let warn = ui_color(&self.theme, "warning", Rgba::new(0xfb, 0xbf, 0x24, 255));
 
+        // F11 fullscreen (editor-only): derive the OS fullscreen state each frame
+        // (no separate field — avoids a re-sync race when the user exits via the
+        // OS). `chrome_hidden` hides the toolbar/tabs/status/minimap/gutter; the
+        // custom titlebar additionally hides in fullscreen (the OS gives no frame),
+        // whereas zen keeps it for window dragging.
+        let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        let chrome_hidden = self.zen_mode || fullscreen;
+
         // ---- Custom frameless titlebar ----
-        if self.config.appearance.frameless {
+        if self.config.appearance.frameless && !fullscreen {
             egui::TopBottomPanel::top("titlebar")
                 .exact_height(34.0)
                 .frame(egui::Frame::default().fill(panel))
@@ -5918,8 +5931,8 @@ impl ScribeApp {
         }
 
         // ---- Quick-access toolbar (replaces the classic menu bar) ----
-        // Wave-5 P1: hidden in zen / distraction-free mode.
-        if !self.zen_mode {
+        // Hidden in zen / distraction-free mode and in F11 fullscreen.
+        if !chrome_hidden {
             egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
                 // Phase 18 T18.5: apply the user-configurable button size + spacing
                 // BEFORE the horizontal row so every quick-access item inherits the
@@ -5971,8 +5984,8 @@ impl ScribeApp {
         // now carries its own chip header (note name + pin + close), so the
         // global strip is suppressed. New notes remain reachable via Ctrl+N,
         // the command palette, and the toolbar's customizable items.
-        // Wave-5 P1: the whole tab strip is hidden in zen mode.
-        if !self.zen_mode && !self.config.editor.grid_enabled {
+        // The whole tab strip is hidden in zen mode and F11 fullscreen.
+        if !chrome_hidden && !self.config.editor.grid_enabled {
             match self.config.editor.tab_bar_position {
                 scribe_core::config::TabBarPosition::Top => {
                     // A dedicated tab bar directly below the quick-access toolbar
@@ -6828,8 +6841,8 @@ impl ScribeApp {
         // ---- Status bar ----
         let mut cycle_eol_for_active = false;
         let mut open_settings_for = None;
-        // Wave-5 P1: hidden in zen / distraction-free mode.
-        if !self.zen_mode {
+        // Hidden in zen / distraction-free mode and in F11 fullscreen.
+        if !chrome_hidden {
             egui::TopBottomPanel::bottom("status")
                 .frame(egui::Frame::default().fill(panel))
                 .show(ctx, |ui| {
@@ -7070,7 +7083,7 @@ impl ScribeApp {
 
         // ---- Wave-5 P1: markdown live preview (right side panel) ----
         // Only for markdown buffers; renders the buffer via pulldown-cmark.
-        if self.md_preview_open && !self.zen_mode {
+        if self.md_preview_open && !chrome_hidden {
             let is_md = self
                 .tabs
                 .get(active)
@@ -7105,7 +7118,7 @@ impl ScribeApp {
         }
 
         // ---- Wave-5 P1: diff vs disk (right side panel) ----
-        if self.diff_view_open && !self.zen_mode {
+        if self.diff_view_open && !chrome_hidden {
             let cur = self.tabs.get(active).map(|t| t.text.clone());
             let disk = self
                 .tabs
@@ -7155,7 +7168,7 @@ impl ScribeApp {
         // ---- Minimap (rightmost strip) ----
         // Skipped for read-only huge files: the minimap hashes + lays out the
         // whole buffer, which defeats the viewport-culled browse path below.
-        if self.config.editor.show_minimap && !read_only && !self.zen_mode {
+        if self.config.editor.show_minimap && !read_only && !chrome_hidden {
             self.show_minimap(ctx, panel, accent);
         }
 
@@ -7171,7 +7184,7 @@ impl ScribeApp {
         // (`line_gutter`). The read-only RopeEditor draws its OWN gutter, so
         // skip this one there (and avoid the O(n) `lines().count()` on a
         // 256 MiB+ buffer).
-        if show_line_numbers && !self.fold_view && !read_only && !self.zen_mode {
+        if show_line_numbers && !self.fold_view && !read_only && !chrome_hidden {
             let total = self.tabs[active].text.lines().count().max(1);
             let digits = total.to_string().len().max(2);
             let gutter_w = digits as f32 * (font.size * 0.62) + 16.0;
@@ -7978,7 +7991,7 @@ impl ScribeApp {
         let _ = overlay_open;
         if self.config.appearance.frameless {
             let maximized = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
-            if !maximized {
+            if !maximized && !fullscreen {
                 handle_frameless_resize(ctx);
             }
         }
