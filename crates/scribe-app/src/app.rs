@@ -11060,10 +11060,12 @@ def";
             //     same loop the active tab IS a pathless scratch, so the
             //     fall-through fires. Easier to skip than to keep the
             //     fixture path alive across CloseAllTabs side-effects.
+            //   - ConvertToMarkdown opens an rfd save dialog for the .md target.
             match entry.action {
-                BuiltinCommand::OpenFile | BuiltinCommand::OpenFolder | BuiltinCommand::Save => {
-                    continue
-                }
+                BuiltinCommand::OpenFile
+                | BuiltinCommand::OpenFolder
+                | BuiltinCommand::Save
+                | BuiltinCommand::ConvertToMarkdown => continue,
                 _ => app.execute_builtin(entry.action),
             }
         }
