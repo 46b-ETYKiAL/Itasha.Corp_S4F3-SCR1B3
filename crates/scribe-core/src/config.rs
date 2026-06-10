@@ -358,6 +358,68 @@ pub struct EditorConfig {
     /// field existed.
     #[serde(default = "default_true")]
     pub snippets_enabled: bool,
+    /// Highlight the line the caret is on with a faint full-width band. Default
+    /// OFF (the calm-surface default; opt-in like the other overlays).
+    #[serde(default)]
+    pub current_line_highlight: bool,
+    /// Caret shape drawn over egui's native caret. Default `Bar` = egui's own
+    /// look (so the default is a visual no-op).
+    #[serde(default)]
+    pub caret_style: CaretStyle,
+    /// Caret stroke width in points for the Bar/Underline styles (Block ignores
+    /// it — it fills the cell). Clamped to [1.0, 4.0] at render time.
+    #[serde(default = "default_caret_width")]
+    pub caret_width: f32,
+    /// Draw faint vertical indent-guide lines at each `tab_width` column.
+    /// Default OFF.
+    #[serde(default)]
+    pub indent_guides: bool,
+    /// Box-highlight the bracket matching the one next to the caret. Default OFF.
+    #[serde(default)]
+    pub bracket_match: bool,
+    /// Smooth (eased) wheel scrolling. Default ON — egui's native feel. Off makes
+    /// the wheel jump in discrete notches (snappier, no glide).
+    #[serde(default = "default_true")]
+    pub smooth_scroll: bool,
+    /// Scrollbar chrome style for the editor surface.
+    #[serde(default)]
+    pub scrollbar_style: ScrollbarStyle,
+}
+
+/// Caret shape rendered over the editor's native caret. `Bar` reproduces egui's
+/// default thin vertical caret (so it is a visual no-op when selected).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CaretStyle {
+    #[default]
+    Bar,
+    /// Full-cell filled rectangle — the retro terminal look.
+    Block,
+    /// A thick underline at the caret's baseline.
+    Underline,
+}
+
+/// Editor scrollbar chrome. `Auto` = egui default (shows on hover/scroll);
+/// `Thin` = a slimmer bar; `Hidden` = no visible bar (scroll still works).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScrollbarStyle {
+    #[default]
+    Auto,
+    Thin,
+    Hidden,
+}
+
+/// serde default for the caret stroke width.
+fn default_caret_width() -> f32 {
+    1.0
+}
+
+impl EditorConfig {
+    /// Caret stroke width clamped to a sane band.
+    pub fn clamped_caret_width(&self) -> f32 {
+        self.caret_width.clamp(1.0, 4.0)
+    }
 }
 
 /// serde default for the note syntax-colour theme (#104).
@@ -456,6 +518,13 @@ impl Default for EditorConfig {
             cursor_positions: std::collections::HashMap::new(),
             render_whitespace: false,
             snippets_enabled: true,
+            current_line_highlight: false,
+            caret_style: CaretStyle::Bar,
+            caret_width: default_caret_width(),
+            indent_guides: false,
+            bracket_match: false,
+            smooth_scroll: true,
+            scrollbar_style: ScrollbarStyle::Auto,
         }
     }
 }
@@ -1045,6 +1114,34 @@ mod tests {
         let s = c2.to_toml_string();
         let back: Config = toml::from_str(&s).expect("config TOML round-trip");
         assert!(back.editor.render_whitespace);
+    }
+
+    #[test]
+    fn wave6_editor_customization_defaults() {
+        let e = EditorConfig::default();
+        assert!(!e.current_line_highlight && !e.indent_guides && !e.bracket_match);
+        assert_eq!(e.caret_style, CaretStyle::Bar); // visual no-op default
+        assert!(e.smooth_scroll); // ON by default
+        assert_eq!(e.scrollbar_style, ScrollbarStyle::Auto);
+        assert_eq!(e.clamped_caret_width(), 1.0);
+        let wide = EditorConfig {
+            caret_width: 99.0,
+            ..EditorConfig::default()
+        };
+        assert_eq!(wide.clamped_caret_width(), 4.0);
+    }
+
+    #[test]
+    fn wave6_customization_round_trips() {
+        let mut c = Config::default();
+        c.editor.caret_style = CaretStyle::Block;
+        c.editor.scrollbar_style = ScrollbarStyle::Thin;
+        c.editor.indent_guides = true;
+        let s = c.to_toml_string();
+        let back: Config = toml::from_str(&s).expect("config TOML round-trip");
+        assert_eq!(back.editor.caret_style, CaretStyle::Block);
+        assert_eq!(back.editor.scrollbar_style, ScrollbarStyle::Thin);
+        assert!(back.editor.indent_guides);
     }
 
     /// F-021 helper: record_scroll_pos inserts + caps at SCROLL_POS_CAP.
