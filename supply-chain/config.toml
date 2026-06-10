@@ -529,6 +529,14 @@ criteria = "safe-to-run"
 version = "0.5.12"
 criteria = "safe-to-deploy"
 
+[[exemptions.htmd]]
+version = "0.5.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.html5ever]]
+version = "0.38.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.http]]
 version = "1.4.1"
 criteria = "safe-to-deploy"
@@ -705,6 +713,14 @@ criteria = "safe-to-deploy"
 version = "0.4.32"
 criteria = "safe-to-deploy"
 
+[[exemptions.markup5ever]]
+version = "0.38.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.markup5ever_rcdom]]
+version = "0.38.0+unofficial"
+criteria = "safe-to-deploy"
+
 [[exemptions.memchr]]
 version = "2.8.1"
 criteria = "safe-to-deploy"
@@ -751,6 +767,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.ndk-sys]]
 version = "0.6.0+11769913"
+criteria = "safe-to-deploy"
+
+[[exemptions.new_debug_unreachable]]
+version = "1.0.6"
 criteria = "safe-to-deploy"
 
 [[exemptions.no-std-compat]]
@@ -897,6 +917,10 @@ criteria = "safe-to-deploy"
 version = "0.13.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.phf_codegen]]
+version = "0.13.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.phf_generator]]
 version = "0.13.1"
 criteria = "safe-to-deploy"
@@ -963,6 +987,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.ppv-lite86]]
 version = "0.2.21"
+criteria = "safe-to-deploy"
+
+[[exemptions.precomputed-hash]]
+version = "0.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.presser]]
@@ -1261,6 +1289,14 @@ criteria = "safe-to-deploy"
 version = "0.1.9"
 criteria = "safe-to-deploy"
 
+[[exemptions.string_cache]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.string_cache_codegen]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.subtle]]
 version = "2.6.1"
 criteria = "safe-to-deploy"
@@ -1279,6 +1315,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tempfile]]
 version = "3.27.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.tendril]]
+version = "0.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.termcolor]]
@@ -1421,6 +1461,10 @@ criteria = "safe-to-deploy"
 version = "2.1.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.utf-8]]
+version = "0.7.6"
+criteria = "safe-to-deploy"
+
 [[exemptions.utf8-zero]]
 version = "0.8.1"
 criteria = "safe-to-deploy"
@@ -1523,6 +1567,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.web-time]]
 version = "1.1.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.web_atoms]]
+version = "0.2.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.webbrowser]]
@@ -1751,6 +1799,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.xml-rs]]
 version = "0.8.28"
+criteria = "safe-to-deploy"
+
+[[exemptions.xml5ever]]
+version = "0.38.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.yoke]]

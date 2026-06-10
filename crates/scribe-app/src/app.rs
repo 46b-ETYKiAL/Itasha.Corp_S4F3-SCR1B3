@@ -2100,6 +2100,7 @@ impl ScribeApp {
                 }
             }
             BuiltinCommand::Save => self.save_active(),
+            BuiltinCommand::ConvertToMarkdown => self.convert_to_markdown_active(),
             BuiltinCommand::CloseActiveTab => self.close_tab(self.active),
             BuiltinCommand::CloseAllTabs => {
                 self.tabs.clear();
@@ -2492,6 +2493,36 @@ impl ScribeApp {
                     }
                 }
                 Err(e) => self.toast = Some(format!("save failed: {e}")),
+            }
+        }
+    }
+
+    /// Convert the active buffer to Markdown (by file type) and save it as a
+    /// `.md` file. The conversion is a pure `text -> markdown` transform
+    /// (HTML/CSV/JSON/TOML/code/text); the source tab is left untouched — only
+    /// the chosen `.md` file is written.
+    fn convert_to_markdown_active(&mut self) {
+        let active = self.active;
+        if active >= self.tabs.len() {
+            return;
+        }
+        let text = self.tabs[active].text.clone();
+        let ext = self.tabs[active].doc.language_hint();
+        let md = crate::to_markdown::to_markdown(&text, ext.as_deref());
+        let suggested = self.tabs[active]
+            .doc
+            .path()
+            .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .map(|stem| format!("{stem}.md"))
+            .unwrap_or_else(|| "untitled.md".to_string());
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Markdown", &["md"])
+            .set_file_name(&suggested)
+            .save_file()
+        {
+            match std::fs::write(&path, md) {
+                Ok(()) => self.status = format!("converted to Markdown → {}", path.display()),
+                Err(e) => self.toast = Some(format!("convert failed: {e}")),
             }
         }
     }
@@ -4125,6 +4156,7 @@ pub(crate) enum BuiltinCommand {
     Save,
     CloseActiveTab,
     CloseAllTabs,
+    ConvertToMarkdown,
     CycleTabNext,
     CycleTabPrev,
     ToggleSplitView,
@@ -4187,6 +4219,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Close all tabs",
         shortcut: "",
         action: BuiltinCommand::CloseAllTabs,
+    },
+    BuiltinEntry {
+        label: "Convert to Markdown and save as .md",
+        shortcut: "",
+        action: BuiltinCommand::ConvertToMarkdown,
     },
     BuiltinEntry {
         label: "Copy",

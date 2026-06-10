@@ -31,6 +31,8 @@ notify = { workspace = true }                 # config/theme live-reload
 mimalloc = "0.1"                               # global allocator — ~20% faster on egui/editor alloc churn (egui docs); unsafe is in-crate, app stays #![forbid(unsafe_code)]
 pulldown-cmark = { version = "0.13", default-features = false }
 similar = { version = "2", default-features = false, features = ["text"] }
+htmd = "0.5"
+toml.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
