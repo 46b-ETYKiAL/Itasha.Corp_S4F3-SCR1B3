@@ -106,6 +106,32 @@ pub struct MotionConfig {
     /// Scanline darkness (0.0 = invisible .. 1.0 = strong dark bands).
     #[serde(default = "default_scanline_darkness")]
     pub scanline_darkness: f32,
+    /// Subtle full-window brightness flicker (CRT-style). Off by default.
+    #[serde(default)]
+    pub flicker: bool,
+    /// Flicker strength (0.0 = none .. capped at 0.20 for accessibility).
+    #[serde(default = "default_flicker_strength")]
+    pub flicker_strength: f32,
+    /// VHS-style horizontal tracking lines that drift down the window. Off by
+    /// default.
+    #[serde(default)]
+    pub vhs_tracking: bool,
+    /// Animated wired node-mesh ambient background (Lain-inspired). Off by
+    /// default; drawn at Background order behind the editor.
+    #[serde(default)]
+    pub wired_ambient: bool,
+    /// Node-mesh density (0.0 = sparse .. 1.0 = dense, clamped). Drives the
+    /// node count of the wired-ambient background.
+    #[serde(default = "default_mesh_density")]
+    pub mesh_density: f32,
+    /// Caret ghost-trail: a fading echo follows the caret as it moves. Off by
+    /// default.
+    #[serde(default)]
+    pub caret_trail: bool,
+    /// One-shot boot "glitch" sweep on the first frames after launch. Off by
+    /// default; self-terminates.
+    #[serde(default)]
+    pub boot_glitch: bool,
 }
 
 /// Default CRT scanline darkness — subtle, readable bands.
@@ -113,11 +139,31 @@ fn default_scanline_darkness() -> f32 {
     0.3
 }
 
+/// Default flicker strength — barely perceptible.
+fn default_flicker_strength() -> f32 {
+    0.06
+}
+
+/// Default node-mesh density — a calm, sparse field.
+fn default_mesh_density() -> f32 {
+    0.4
+}
+
 impl MotionConfig {
     /// Clamped intensity so a malformed user config can't drive an animation
     /// outside its design band.
     pub fn clamped_intensity(&self) -> f32 {
         self.intensity.clamp(0.0, 1.0)
+    }
+
+    /// Flicker strength clamped to a calm, accessibility-safe ceiling.
+    pub fn clamped_flicker_strength(&self) -> f32 {
+        self.flicker_strength.clamp(0.0, 0.20)
+    }
+
+    /// Node-mesh density clamped to its design band.
+    pub fn clamped_mesh_density(&self) -> f32 {
+        self.mesh_density.clamp(0.0, 1.0)
     }
 }
 
@@ -131,6 +177,13 @@ impl Default for MotionConfig {
             cursor_blink: true,
             crt_scanlines: false,
             scanline_darkness: default_scanline_darkness(),
+            flicker: false,
+            flicker_strength: default_flicker_strength(),
+            vhs_tracking: false,
+            wired_ambient: false,
+            mesh_density: default_mesh_density(),
+            caret_trail: false,
+            boot_glitch: false,
         }
     }
 }
