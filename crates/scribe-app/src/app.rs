@@ -4032,7 +4032,15 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
         // Phosphor (Thin) ARROW_DOWN (U+E03E) / ARROW_UP (U+E08E) — the bare
         // U+2193/U+2191 arrows were tofu in the bundled fonts.
         chord: "Ctrl+Alt+\u{E03E} / \u{E08E}",
-        action: "Add caret below / above (multi-cursor — experimental editor)",
+        action: "Add caret below / above (multi-cursor — in-house editor)",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+D",
+        action: "Select word, then add caret on next occurrence (in-house editor)",
+    },
+    ShortcutEntry {
+        chord: "Alt+drag",
+        action: "Column / block selection (in-house editor)",
     },
     ShortcutEntry {
         chord: "Esc",
