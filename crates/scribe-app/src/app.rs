@@ -1509,6 +1509,59 @@ impl ScribeApp {
     // than clippy's suggested match-guard form, which would render the widget as
     // a side effect inside the guard condition.
     #[allow(clippy::collapsible_match)]
+    /// Render the quick-access toolbar contents (settings gear, command-palette
+    /// button, the user-ordered items, and the optional user-curated "⋯"
+    /// dropdown) into `ui`. Shared by the toolbar panel and the in-titlebar
+    /// placement (`appearance.toolbar_in_titlebar`).
+    fn toolbar_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        act: &mut Pending,
+        save_cfg: &mut bool,
+        start_lsp: &mut bool,
+    ) {
+        if ui
+            .selectable_label(self.settings_open, egui_phosphor::thin::GEAR_SIX)
+            .on_hover_text("Settings")
+            .clicked()
+        {
+            self.settings_open = !self.settings_open;
+        }
+        if ui
+            .button(">_")
+            .on_hover_text("Command palette (Ctrl+Shift+P)")
+            .clicked()
+        {
+            self.palette_open = true;
+            self.focus_palette = true;
+            self.palette_query.clear();
+        }
+        ui.separator();
+        // User-customizable quick-access items (membership + order from
+        // config.toolbar; editable in Settings → Toolbar).
+        let items = self.config.toolbar.items.clone();
+        for id in &items {
+            self.toolbar_item(ui, id, act, save_cfg, start_lsp);
+        }
+        // User-curated "⋯" dropdown — actions the user parked here to keep the
+        // bar clean. Shown only when non-empty.
+        let menu = self.config.toolbar.menu.clone();
+        if !menu.is_empty() {
+            ui.menu_button("⋯", |ui| {
+                for id in &menu {
+                    self.toolbar_item(ui, id, act, save_cfg, start_lsp);
+                }
+            })
+            .response
+            .on_hover_text("More actions");
+        }
+    }
+
+    // clippy 1.95's `collapsible_match` wants each `"id" => { if ui.button(..)
+    // .clicked() { .. } }` arm rewritten with the button call as a match GUARD.
+    // That would move a side-effecting widget call into the guard — worse style
+    // (guards should be pure) — so the per-arm `if` is intentional here.
+    #[allow(clippy::collapsible_match)]
     fn toolbar_item(
         &mut self,
         ui: &mut egui::Ui,
@@ -5963,11 +6016,14 @@ impl ScribeApp {
         // whereas zen keeps it for window dragging.
         let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
         let chrome_hidden = self.zen_mode || fullscreen;
+        // Toolbar-in-titlebar mode (only meaningful with the custom titlebar).
+        let toolbar_in_titlebar =
+            self.config.appearance.toolbar_in_titlebar && self.config.appearance.frameless;
 
         // ---- Custom frameless titlebar ----
         if self.config.appearance.frameless && !fullscreen {
             egui::TopBottomPanel::top("titlebar")
-                .exact_height(34.0)
+                .exact_height(if toolbar_in_titlebar { 40.0 } else { 34.0 })
                 .frame(egui::Frame::default().fill(panel))
                 .show(ctx, |ui| {
                     let resp = ui.interact(
@@ -6008,6 +6064,12 @@ impl ScribeApp {
                                 .color(muted)
                                 .small(),
                         );
+                        // Toolbar-in-titlebar mode: the quick-access toolbar sits
+                        // here, between the wordmark and the window caption buttons.
+                        if toolbar_in_titlebar {
+                            ui.add_space(12.0);
+                            self.toolbar_contents(ui, &mut act, &mut save_cfg, &mut start_lsp);
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let is_max = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
                             let close_hover = Color32::from_rgb(0xE8, 0x11, 0x23);
@@ -6034,8 +6096,8 @@ impl ScribeApp {
         }
 
         // ---- Quick-access toolbar (replaces the classic menu bar) ----
-        // Hidden in zen / distraction-free mode and in F11 fullscreen.
-        if !chrome_hidden {
+        // Hidden in zen / fullscreen; suppressed when moved into the titlebar.
+        if !chrome_hidden && !toolbar_in_titlebar {
             egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
                 // Phase 18 T18.5: apply the user-configurable button size + spacing
                 // BEFORE the horizontal row so every quick-access item inherits the
@@ -6046,37 +6108,7 @@ impl ScribeApp {
                 ui.spacing_mut().interact_size.y = btn;
                 ui.spacing_mut().item_spacing.x = gap;
                 ui.horizontal(|ui| {
-                    // Settings + command palette are always present; the palette is
-                    // the discoverable backbone for every action, so keep it visible.
-                    // The gear toggles settings — clicking it while open closes it.
-                    // Phosphor GEAR_SIX (loaded thin font) — the bare "⚙" U+2699
-                    // emoji has no glyph in JetBrains Mono and rendered as tofu (#R5).
-                    if ui
-                        .selectable_label(self.settings_open, egui_phosphor::thin::GEAR_SIX)
-                        .on_hover_text("Settings")
-                        .clicked()
-                    {
-                        self.settings_open = !self.settings_open;
-                    }
-                    if ui
-                        .button(">_")
-                        .on_hover_text("Command palette (Ctrl+Shift+P)")
-                        .clicked()
-                    {
-                        self.palette_open = true;
-                        self.focus_palette = true;
-                        self.palette_query.clear();
-                    }
-                    ui.separator();
-
-                    // User-customizable quick-access items (membership + order from
-                    // config.toolbar; editable in Settings → Toolbar).
-                    let items = self.config.toolbar.items.clone();
-                    for id in &items {
-                        self.toolbar_item(ui, id, &mut act, &mut save_cfg, &mut start_lsp);
-                    }
-                    // The tab strip is its OWN bar (below), not crammed into the
-                    // quick-access toolbar — see the tab_bar_position match below.
+                    self.toolbar_contents(ui, &mut act, &mut save_cfg, &mut start_lsp);
                 });
             });
         }

@@ -566,6 +566,12 @@ pub struct AppearanceConfig {
     /// independently of the app background.
     #[serde(default = "default_true")]
     pub link_backgrounds: bool,
+    /// Move the quick-access toolbar INTO the custom titlebar (between the app
+    /// wordmark and the window caption buttons), suppressing the separate
+    /// toolbar bar — a compact single-row chrome. Only takes effect with
+    /// `frameless` on (the titlebar exists only then). Default OFF.
+    #[serde(default)]
+    pub toolbar_in_titlebar: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -579,6 +585,7 @@ impl Default for AppearanceConfig {
             background_override: None,
             note_background_override: None,
             link_backgrounds: true,
+            toolbar_in_titlebar: false,
         }
     }
 }
@@ -734,6 +741,12 @@ impl Default for PluginConfig {
 #[serde(default)]
 pub struct ToolbarConfig {
     pub items: Vec<String>,
+    /// User-curated "more actions" dropdown. Action ids placed here are reached
+    /// via a single "⋯" menu button on the toolbar instead of taking a slot —
+    /// keeps the bar clean. Empty by default (no dropdown shown). Same id space
+    /// as `items` (`app::TOOLBAR_ACTIONS`).
+    #[serde(default)]
+    pub menu: Vec<String>,
     /// Minimum height of each quick-access button in logical pixels. Clamped
     /// to [16.0, 64.0] at render time. Phase 18 T18.5.
     #[serde(default = "ToolbarConfig::default_button_size")]
@@ -792,6 +805,7 @@ impl Default for ToolbarConfig {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+            menu: Vec::new(),
             button_size_px: Self::default_button_size(),
             button_spacing_px: Self::default_button_spacing(),
             icon_size_px: Self::default_icon_size(),

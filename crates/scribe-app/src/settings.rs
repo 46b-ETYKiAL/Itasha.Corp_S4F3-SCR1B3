@@ -508,6 +508,17 @@ fn render_sections(
             changed |= grid_bool(
                 ui,
                 q,
+                "toolbar in titlebar compact chrome",
+                "Toolbar in the title bar",
+                "Move the quick-access toolbar into the custom title bar (between the app name and \
+                 the window buttons) and hide the separate toolbar row — a compact single-row \
+                 chrome. Requires the frameless window.",
+                &mut config.appearance.toolbar_in_titlebar,
+                &def.appearance.toolbar_in_titlebar,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
                 "toolbar icons words phosphor",
                 "Toolbar shows icons instead of words",
                 "When off, the quick-access toolbar renders text labels (the default). When on, \
@@ -2337,6 +2348,54 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
             changed = true;
         }
     });
+
+    // ---- User-curated "⋯" dropdown menu ----
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Dropdown (⋯ menu)").strong().small());
+    ui.label(
+        egui::RichText::new(
+            "Actions parked in the toolbar's ⋯ menu — reachable without taking a toolbar slot, \
+             so the bar stays clean.",
+        )
+        .weak()
+        .small(),
+    );
+    let mut menu_rm: Option<usize> = None;
+    for i in 0..config.toolbar.menu.len() {
+        let label = action_label(&config.toolbar.menu[i]);
+        ui.horizontal(|ui| {
+            if ui
+                .button(ph::X)
+                .on_hover_text("Remove from the ⋯ menu")
+                .clicked()
+            {
+                menu_rm = Some(i);
+            }
+            ui.label(label);
+        });
+    }
+    if let Some(i) = menu_rm {
+        config.toolbar.menu.remove(i);
+        changed = true;
+    }
+    ui.horizontal(|ui| {
+        ui.label("add to menu:");
+        egui::ComboBox::from_id_salt("toolbar-menu-add")
+            .selected_text("choose…")
+            .show_ui(ui, |ui| {
+                for (id, label) in crate::app::TOOLBAR_ACTIONS {
+                    if *id == "sep" {
+                        continue;
+                    }
+                    if ui.selectable_label(false, *label).clicked() {
+                        config.toolbar.menu.push((*id).to_string());
+                        changed = true;
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Pick an action to add to the ⋯ dropdown.");
+    });
     changed
 }
 
@@ -2478,6 +2537,7 @@ mod wiring_guard {
     const WIRED: &[&str] = &[
         "appearance.theme",
         "appearance.frameless",
+        "appearance.toolbar_in_titlebar",
         "appearance.toolbar_icons",
         "appearance.jp_glyph_labels",
         "appearance.background_override",
