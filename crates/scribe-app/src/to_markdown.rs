@@ -141,7 +141,12 @@ fn toml_to_md(text: &str) -> String {
 /// Cell content is escaped for table safety: `|` → `\|`, and any embedded
 /// newline → `<br>`.
 fn csv_to_md(text: &str) -> String {
-    let records = parse_csv(text);
+    let records = match parse_csv(text) {
+        Some(records) => records,
+        // Unterminated quote → malformed CSV. Preserve the bytes verbatim in a
+        // fenced block rather than fabricate a table from a half-parsed record.
+        None => return fenced("csv", text),
+    };
 
     // Drop fully-empty trailing record produced by a final trailing newline.
     let records: Vec<Vec<String>> = records
@@ -205,11 +210,14 @@ fn escape_cell(cell: &str) -> String {
 
 /// Minimal RFC-4180-ish CSV parser.
 ///
-/// Returns a `Vec` of records, each a `Vec` of field strings. A field may be
-/// quoted with `"`; inside a quoted field, `""` is a literal quote and `,` /
-/// newline are literal content. Outside quotes, `,` separates fields and
-/// `\n` / `\r\n` separates records.
-fn parse_csv(text: &str) -> Vec<Vec<String>> {
+/// Returns `Some(records)` — each record a `Vec` of field strings — for
+/// well-formed input. A field may be quoted with `"`; inside a quoted field,
+/// `""` is a literal quote and `,` / newline are literal content. Outside
+/// quotes, `,` separates fields and `\n` / `\r\n` separates records.
+///
+/// Returns `None` when the input ends inside an unterminated quoted field
+/// (malformed per RFC 4180); the caller falls back to a lossless fenced block.
+fn parse_csv(text: &str) -> Option<Vec<Vec<String>>> {
     let mut records: Vec<Vec<String>> = Vec::new();
     let mut record: Vec<String> = Vec::new();
     let mut field = String::new();
@@ -253,13 +261,20 @@ fn parse_csv(text: &str) -> Vec<Vec<String>> {
         }
     }
 
+    // A quote that never closed → malformed CSV. Signal the caller to fall
+    // back to a lossless fenced block rather than fabricate a table from a
+    // half-parsed record.
+    if in_quotes {
+        return None;
+    }
+
     // Flush the final field/record if the input did not end with a newline.
     if !field.is_empty() || !record.is_empty() {
         record.push(field);
         records.push(record);
     }
 
-    records
+    Some(records)
 }
 
 // ---------------------------------------------------------------------------
@@ -573,5 +588,27 @@ mod tests {
     fn csv_pipe_escaped() {
         let md = to_markdown("a|b,c\n1,2\n", Some("csv"));
         assert!(md.contains("a\\|b"), "pipe not escaped in cell:\n{md}");
+    }
+
+    #[test]
+    fn csv_unterminated_quote_falls_back_to_fence() {
+        // A quote that never closes is malformed CSV (RFC 4180). Rather than
+        // fabricate a table from a half-parsed record, the converter must fall
+        // back to a lossless fenced block that preserves the bytes verbatim.
+        for src in ["\"unterminated", "a,b\nx,\"y", "\"x\ny"] {
+            let md = to_markdown(src, Some("csv"));
+            assert!(
+                md.starts_with("```csv") || md.starts_with("````"),
+                "unterminated quote should fence, got:\n{md}"
+            );
+            assert!(
+                md.contains(src),
+                "fence must preserve the original bytes:\n{md}"
+            );
+            assert!(
+                !md.contains("| --- |"),
+                "malformed CSV must not produce a table:\n{md}"
+            );
+        }
     }
 }
