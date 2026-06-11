@@ -21,6 +21,30 @@
 use egui::{Color32, RichText};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 
+/// Render markdown source to a standalone, self-contained HTML document (for the
+/// "Export as HTML" command). Uses pulldown-cmark's own HTML writer — pure Rust,
+/// no webview, no network. A minimal embedded stylesheet keeps the output
+/// readable on its own.
+pub fn to_html(md: &str) -> String {
+    let parser = Parser::new(md);
+    let mut body = String::new();
+    pulldown_cmark::html::push_html(&mut body, parser);
+    format!(
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <style>\n\
+         body{{max-width:46rem;margin:2rem auto;padding:0 1rem;\
+         font:16px/1.6 system-ui,sans-serif;color:#1b1b1b}}\n\
+         pre,code{{font-family:ui-monospace,monospace}}\n\
+         pre{{background:#f4f4f4;padding:.75rem;overflow:auto;border-radius:6px}}\n\
+         code{{background:#f4f4f4;padding:.1rem .3rem;border-radius:3px}}\n\
+         pre code{{background:none;padding:0}}\n\
+         blockquote{{border-left:3px solid #ccc;margin:0;padding-left:1rem;color:#555}}\n\
+         table{{border-collapse:collapse}}td,th{{border:1px solid #ccc;padding:.3rem .6rem}}\n\
+         </style>\n</head>\n<body>\n{body}</body>\n</html>\n"
+    )
+}
+
 /// A renderable block in document order. Inline styling within a block is
 /// flattened to a sequence of [`MdRun`]s.
 #[derive(Debug, Clone, PartialEq)]
@@ -424,6 +448,15 @@ mod tests {
             })
             .collect();
         assert_eq!(markers, vec!["1.", "2.", "3.", "•", "•"]);
+    }
+
+    #[test]
+    fn to_html_wraps_a_standalone_document() {
+        let html = to_html("# Title\n\nSome **bold** text.\n");
+        assert!(html.starts_with("<!DOCTYPE html>"));
+        assert!(html.contains("<h1>Title</h1>"));
+        assert!(html.contains("<strong>bold</strong>"));
+        assert!(html.trim_end().ends_with("</html>"));
     }
 
     #[test]

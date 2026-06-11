@@ -1013,6 +1013,10 @@ criteria = "safe-to-deploy"
 version = "0.13.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.pulldown-cmark-escape]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.pxfm]]
 version = "0.1.29"
 criteria = "safe-to-deploy"
