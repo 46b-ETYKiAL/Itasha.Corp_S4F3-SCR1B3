@@ -74,14 +74,19 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           # The Release workflow runs in parallel and creates the release only
-          # after its multi-platform builds finish, which can be AFTER this job.
-          # Wait (up to ~10 min) for the release to exist before attaching, so
-          # the SBOM upload never races ahead of release creation.
-          for i in $(seq 1 60); do
+          # after its multi-platform builds finish, which is AFTER this job. The
+          # release.yml build (3 OS targets + cargo-auditable + minisign signing
+          # + winchecksec + SLSA provenance) takes ~12 min, so a 10-min wait
+          # raced ahead of release creation and hard-failed on every release
+          # (e.g. v0.4.28/v0.4.29: release job completed ~30s after the old
+          # timeout expired). Wait up to ~30 min — comfortably longer than the
+          # release build — so the SBOM upload never races ahead of release
+          # creation. The `gh release upload --clobber` below is idempotent.
+          for i in $(seq 1 180); do
             if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
               break
             fi
-            echo "release $tag not yet created (attempt $i/60) — waiting 10s..."
+            echo "release $tag not yet created (attempt $i/180) — waiting 10s..."
             sleep 10
           done
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
