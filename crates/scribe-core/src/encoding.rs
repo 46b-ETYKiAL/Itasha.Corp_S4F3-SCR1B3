@@ -61,6 +61,27 @@ pub fn decode(bytes: &[u8]) -> (String, DetectedEncoding) {
 /// the target encoding: `encoding_rs` substitutes a replacement, so those
 /// characters are silently LOST on save and the caller MUST warn the user.
 pub fn encode_checked(text: &str, enc: &DetectedEncoding) -> (Vec<u8>, bool) {
+    // `encoding_rs` is DECODE-ONLY for UTF-16: per the WHATWG Encoding Standard
+    // it re-encodes UTF-16 labels as UTF-8, which would silently corrupt a
+    // UTF-16 file on save (a UTF-16 BOM prefixed to UTF-8 bytes). Hand-encode
+    // the two byte orders so opening + saving a UTF-16 file round-trips
+    // faithfully. UTF-16 covers all of Unicode, so it is never lossy.
+    if enc.name == "UTF-16LE" || enc.name == "UTF-16BE" {
+        let le = enc.name == "UTF-16LE";
+        let mut out = Vec::with_capacity(text.len() * 2 + 2);
+        if enc.had_bom {
+            out.extend_from_slice(if le { &[0xFF, 0xFE] } else { &[0xFE, 0xFF] });
+        }
+        for unit in text.encode_utf16() {
+            let bytes = if le {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            };
+            out.extend_from_slice(&bytes);
+        }
+        return (out, false);
+    }
     let encoding = Encoding::for_label(enc.name.as_bytes()).unwrap_or(encoding_rs::UTF_8);
     let (cow, _, had_unmappable) = encoding.encode(text);
     let mut out = Vec::with_capacity(cow.len() + 3);
@@ -139,5 +160,66 @@ mod tests {
         };
         let (_b, lossy3) = encode_checked("速記 ok", &utf8);
         assert!(!lossy3);
+    }
+
+    #[test]
+    fn utf16be_bom_roundtrips() {
+        // "Hi" in UTF-16BE with BOM.
+        let input = vec![0xFE, 0xFF, 0x00, b'H', 0x00, b'i'];
+        let (text, enc) = decode(&input);
+        assert_eq!(text, "Hi");
+        assert_eq!(enc.name, "UTF-16BE");
+        assert!(enc.had_bom);
+        // Re-encoding must re-emit the BE BOM + the original bytes.
+        assert_eq!(encode(&text, &enc), input);
+    }
+
+    #[test]
+    fn utf16le_bom_reemitted_on_encode() {
+        let enc = DetectedEncoding {
+            name: "UTF-16LE".to_string(),
+            had_bom: true,
+        };
+        let bytes = encode("Hi", &enc);
+        assert_eq!(bytes, vec![0xFF, 0xFE, b'H', 0x00, b'i', 0x00]);
+    }
+
+    #[test]
+    fn windows_1252_roundtrips_latin1() {
+        // 0xE9 is 'é' in windows-1252.
+        let input = vec![b'c', b'a', b'f', 0xE9];
+        let (text, enc) = decode(&input);
+        assert_eq!(text, "café");
+        // The detected name re-encodes back to the same Latin-1 bytes.
+        assert_eq!(encode(&text, &enc), input);
+    }
+
+    #[test]
+    fn empty_input_roundtrips_to_empty() {
+        let (text, enc) = decode(&[]);
+        assert_eq!(text, "");
+        assert_eq!(enc.name, "UTF-8");
+        assert!(encode(&text, &enc).is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_decodes_lossily_without_panic() {
+        // A lone continuation byte is not valid UTF-8; decode must not panic and
+        // must still yield a string (the editor never refuses to open a file).
+        let input = vec![b'a', 0xFF, 0x80, b'b'];
+        let (text, _enc) = decode(&input);
+        assert!(text.contains('a') && text.contains('b'));
+    }
+
+    #[test]
+    fn unknown_encoding_name_falls_back_to_utf8() {
+        let enc = DetectedEncoding {
+            name: "not-a-real-encoding".to_string(),
+            had_bom: false,
+        };
+        let (bytes, lossy) = encode_checked("héllo", &enc);
+        // UTF-8 fallback represents everything (not lossy) + round-trips.
+        assert!(!lossy);
+        assert_eq!(bytes, "héllo".as_bytes());
     }
 }
