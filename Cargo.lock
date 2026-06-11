@@ -3556,7 +3556,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scribe-app"
-version = "0.4.26"
+version = "0.4.27"
 dependencies = [
  "arboard",
  "eframe",
@@ -3587,7 +3587,7 @@ dependencies = [
 
 [[package]]
 name = "scribe-core"
-version = "0.4.26"
+version = "0.4.27"
 dependencies = [
  "chardetng",
  "directories",
@@ -3618,7 +3618,7 @@ dependencies = [
 
 [[package]]
 name = "scribe-render"
-version = "0.4.26"
+version = "0.4.27"
 dependencies = [
  "egui",
  "ropey",
