@@ -34,3 +34,4 @@ tar = "0.4"                                       # tar archive extraction of th
 [dev-dependencies]
 tempfile = "3"
 minisign = "0.9"                                 # sign in tests only (verify path round-trip)
+proptest = "1.8.0"

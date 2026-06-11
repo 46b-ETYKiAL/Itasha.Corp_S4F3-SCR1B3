@@ -56,6 +56,24 @@ test = false
 doc = false
 bench = false
 
+# An arbitrary snippets.toml + body expansion must never panic (malformed TOML
+# returns Err; expand walks arbitrary ${N}/$0 markers safely).
+[[bin]]
+name = "snippets_parse"
+path = "fuzz_targets/snippets_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Decoding arbitrary file bytes (any encoding) must never panic — decode is
+# lossy-by-design and always yields a String; re-encoding must not panic either.
+[[bin]]
+name = "encoding_decode"
+path = "fuzz_targets/encoding_decode.rs"
+test = false
+doc = false
+bench = false
+
 # Independent workspace: keeps the fuzz crate out of the root workspace so the
 # main build/test/clippy/deny gates never try to compile it on stable.
 [workspace]

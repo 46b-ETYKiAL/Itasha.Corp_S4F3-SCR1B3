@@ -1219,3 +1219,82 @@ mod tests {
         assert_eq!(st.selection(), 1..3);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    //! Property-based invariants for the pure caret/selection transforms — the
+    //! correctness backbone of the editor. These assert the laws that must hold
+    //! for ANY input, complementing the example-based tests above.
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// `word_bounds` always returns a range that contains the caret and
+        /// stays within the buffer.
+        #[test]
+        fn word_bounds_contains_caret_and_in_bounds(s in ".*", c in 0usize..80) {
+            let r = Rope::from_str(&s);
+            let n = r.len_chars();
+            let c = c.min(n);
+            let (lo, hi) = word_bounds(&r, c);
+            prop_assert!(lo <= c, "lo {lo} <= c {c}");
+            prop_assert!(c <= hi, "c {c} <= hi {hi}");
+            prop_assert!(hi <= n, "hi {hi} <= n {n}");
+        }
+
+        /// `should_skip_over` never panics and only ever returns true for a
+        /// closer sitting under the caret.
+        #[test]
+        fn should_skip_over_is_total(s in ".*", c in 0usize..80, ch in any::<char>()) {
+            let r = Rope::from_str(&s);
+            let c = c.min(r.len_chars());
+            if should_skip_over(&r, c, ch) {
+                prop_assert!(c < r.len_chars());
+                prop_assert_eq!(r.char(c), ch);
+            }
+        }
+
+        /// Block selection produces carets that stay within the buffer.
+        #[test]
+        fn block_selection_carets_in_bounds(
+            s in ".*",
+            l0 in 0usize..12, c0 in 0usize..30,
+            l1 in 0usize..12, c1 in 0usize..30,
+        ) {
+            let r = Rope::from_str(&s);
+            let n = r.len_chars();
+            for cur in block_selection(&r, (l0, c0), (l1, c1)) {
+                prop_assert!(cur.cursor <= n);
+                prop_assert!(cur.anchor <= n);
+            }
+        }
+
+        /// `dedupe_carets` is idempotent — running it twice equals running once.
+        #[test]
+        fn dedupe_carets_idempotent(positions in prop::collection::vec(0usize..120, 0..24)) {
+            let mut carets: Vec<EditState> = positions.iter().map(|&p| EditState::at(p)).collect();
+            dedupe_carets(&mut carets);
+            let once = carets.clone();
+            dedupe_carets(&mut carets);
+            prop_assert_eq!(once, carets);
+        }
+
+        /// `add_next_occurrence` never moves a caret outside the buffer and never
+        /// shrinks the caret set.
+        #[test]
+        fn add_next_occurrence_keeps_carets_in_bounds(s in ".*", a in 0usize..80, b in 0usize..80) {
+            let r = Rope::from_str(&s);
+            let n = r.len_chars();
+            let (lo, hi) = (a.min(n), b.min(n));
+            let mut p = EditState::at(hi.max(lo));
+            p.anchor = lo.min(hi);
+            let before = vec![p];
+            let mut carets = before.clone();
+            let _ = add_next_occurrence(&r, &mut carets);
+            prop_assert!(carets.len() >= before.len());
+            for cur in &carets {
+                prop_assert!(cur.cursor <= n && cur.anchor <= n);
+            }
+        }
+    }
+}

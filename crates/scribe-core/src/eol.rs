@@ -136,3 +136,37 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    //! Property invariants for line-ending normalization — these must hold for
+    //! any text so that opening + saving never reshuffles line endings.
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// LF-normalized text contains no carriage returns at all.
+        #[test]
+        fn normalize_removes_all_cr(s in ".*") {
+            prop_assert!(!normalize_to_lf(&s).contains('\r'));
+        }
+
+        /// normalize → apply(any style) → normalize recovers the LF form: the
+        /// editor can switch a file's EOL style losslessly.
+        #[test]
+        fn normalize_apply_renormalize_is_stable(s in ".*") {
+            let norm = normalize_to_lf(&s);
+            for eol in [Eol::Lf, Eol::Crlf, Eol::Cr] {
+                let applied = apply(&norm, eol);
+                prop_assert_eq!(normalize_to_lf(&applied), norm.clone());
+            }
+        }
+
+        /// `detect` never panics and always returns one of the three styles.
+        #[test]
+        fn detect_is_total(s in ".*") {
+            let e = detect(&s);
+            prop_assert!(matches!(e, Eol::Lf | Eol::Crlf | Eol::Cr));
+        }
+    }
+}
