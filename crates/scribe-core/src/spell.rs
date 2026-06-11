@@ -76,8 +76,11 @@ impl HashSetEngine {
 impl SpellEngine for HashSetEngine {
     fn is_correct(&self, word: &str) -> bool {
         let w = word.to_lowercase();
-        // Numbers and very short tokens are always "correct".
-        if w.len() < 2 || w.chars().any(|c| c.is_ascii_digit()) {
+        // Numbers and very short tokens are always "correct". Count CHARS, not
+        // bytes: `w.len() < 2` would still check a single 2-byte letter (`é`, `я`)
+        // against the dictionary and flag it misspelled, while skipping 1-byte
+        // ASCII — an inconsistency for non-Latin scripts.
+        if w.chars().count() < 2 || w.chars().any(|c| c.is_ascii_digit()) {
             return true;
         }
         self.words.contains(&w) || self.user_words.contains(&w)
@@ -372,6 +375,17 @@ mod tests {
         let e = engine();
         assert!(e.is_correct("x"));
         assert!(e.is_correct("abc123"));
+    }
+
+    #[test]
+    fn single_multibyte_letter_is_treated_as_short_token() {
+        // `é` / `я` are single CHARS but 2 BYTES each. The old `w.len() < 2`
+        // byte check did NOT skip them, so a lone non-Latin letter was looked up
+        // in the (English) dictionary and flagged misspelled — inconsistent with
+        // the 1-byte ASCII case which WAS skipped. Char-count makes both consistent.
+        let e = engine();
+        assert!(e.is_correct("\u{e9}")); // é — single char, must be ignored
+        assert!(e.is_correct("\u{44f}")); // я — single char, must be ignored
     }
 
     #[test]

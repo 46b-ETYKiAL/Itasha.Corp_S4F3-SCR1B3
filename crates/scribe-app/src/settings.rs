@@ -33,15 +33,24 @@ const CATEGORIES: &[&str] = &[
 
 /// Parse a `#RRGGBB` (or `RRGGBB`) hex string into a `Color32`. Returns `None`
 /// on malformed input so the caller can fall back to a default swatch.
+///
+/// `s.len()` is the BYTE length: a 6-byte value containing a multibyte char
+/// (e.g. `aa€b`, where `€` is 3 bytes) passes the `== 6` check, then `&s[0..2]`
+/// would slice through a UTF-8 char boundary and panic — which `panic = "abort"`
+/// turns into an app crash, losing unsaved buffers. This is reachable from the
+/// Window → Transparency tint field and from a hand-edited `config.toml`. Reject
+/// non-ASCII first so byte-length and the ASCII hex windows agree, and slice via
+/// `get`/`from_utf8` so no range can panic. Mirrors [`parse_hex_color`].
 fn parse_hex_rgb(s: &str) -> Option<egui::Color32> {
     let s = s.trim().trim_start_matches('#');
-    if s.len() != 6 {
+    if !s.is_ascii() || s.len() != 6 {
         return None;
     }
-    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-    Some(egui::Color32::from_rgb(r, g, b))
+    let comp = |i: usize| -> Option<u8> {
+        let bytes = s.as_bytes().get(i..i + 2)?;
+        u8::from_str_radix(std::str::from_utf8(bytes).ok()?, 16).ok()
+    };
+    Some(egui::Color32::from_rgb(comp(0)?, comp(2)?, comp(4)?))
 }
 
 /// egui temp-data key the Plugins section sets when "Manage plugins…" is
@@ -2432,6 +2441,42 @@ mod hex_color {
         assert_eq!(parse_hex_color("aa\u{20ac}b"), None); // 6 bytes, splits €
         assert_eq!(parse_hex_color("#aa\u{20ac}b"), None); // same, with hash
         assert_eq!(parse_hex_color("\u{20ac}\u{20ac}"), None); // 6 bytes, all non-ascii
+    }
+}
+
+#[cfg(test)]
+mod hex_rgb {
+    use super::parse_hex_rgb;
+
+    #[test]
+    fn parses_with_and_without_hash() {
+        assert_eq!(
+            parse_hex_rgb("#112233"),
+            Some(egui::Color32::from_rgb(0x11, 0x22, 0x33))
+        );
+        assert_eq!(
+            parse_hex_rgb("aabbcc"),
+            Some(egui::Color32::from_rgb(0xaa, 0xbb, 0xcc))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed() {
+        assert_eq!(parse_hex_rgb("#123"), None);
+        assert_eq!(parse_hex_rgb("nothex!"), None);
+        assert_eq!(parse_hex_rgb(""), None);
+    }
+
+    #[test]
+    fn rejects_non_ascii_without_panicking() {
+        // The twin of the `parse_hex_color` regression: `parse_hex_rgb` (used by
+        // the Window → Transparency tint field at settings.rs:1475, fed straight
+        // from `config.window.tint`) had the same byte-length + raw-slice panic.
+        // A 6-byte value crossing a char boundary aborted the app instead of
+        // returning `None`.
+        assert_eq!(parse_hex_rgb("aa\u{20ac}b"), None); // 6 bytes, splits €
+        assert_eq!(parse_hex_rgb("#aa\u{20ac}b"), None); // same, with hash
+        assert_eq!(parse_hex_rgb("\u{20ac}\u{20ac}"), None); // 6 bytes, all non-ascii
     }
 }
 
