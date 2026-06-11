@@ -313,4 +313,83 @@ mod tests {
         let raw = std::fs::read(&p).unwrap();
         assert_eq!(raw, b"x\r\ny\r\n");
     }
+
+    #[test]
+    fn utf8_bom_preserved_across_open_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bom.txt");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"hi\n");
+        std::fs::write(&p, &bytes).unwrap();
+        let mut doc = Document::open(&p).unwrap();
+        assert_eq!(doc.text(), "hi\n");
+        doc.set_text("bye\n");
+        doc.save().unwrap();
+        // The BOM is re-emitted on save (round-trip preserves the file's shape).
+        let raw = std::fs::read(&p).unwrap();
+        assert_eq!(&raw[..3], &[0xEF, 0xBB, 0xBF]);
+        assert_eq!(&raw[3..], b"bye\n");
+    }
+
+    #[test]
+    fn utf16le_file_decodes_and_reencodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("u16.txt");
+        // "Hi\n" UTF-16LE with BOM.
+        std::fs::write(&p, [0xFF, 0xFE, b'H', 0, b'i', 0, b'\n', 0]).unwrap();
+        let mut doc = Document::open(&p).unwrap();
+        assert_eq!(doc.text(), "Hi\n");
+        doc.set_text("Ok\n");
+        doc.save().unwrap();
+        let raw = std::fs::read(&p).unwrap();
+        // BOM + UTF-16LE encoding of "Ok\n".
+        assert_eq!(raw, [0xFF, 0xFE, b'O', 0, b'k', 0, b'\n', 0]);
+    }
+
+    #[test]
+    fn latin1_file_roundtrips_unchanged_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("latin1.txt");
+        std::fs::write(&p, [b'c', b'a', b'f', 0xE9, b'\n']).unwrap(); // café\n
+        let mut doc = Document::open(&p).unwrap();
+        assert_eq!(doc.text(), "café\n");
+        doc.save().unwrap();
+        let raw = std::fs::read(&p).unwrap();
+        assert_eq!(raw, [b'c', b'a', b'f', 0xE9, b'\n']);
+    }
+
+    #[test]
+    fn set_eol_changes_on_disk_line_endings() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("eol.txt");
+        std::fs::write(&p, b"a\nb\n").unwrap();
+        let mut doc = Document::open(&p).unwrap();
+        assert_eq!(doc.eol(), Eol::Lf);
+        doc.set_eol(Eol::Crlf);
+        doc.save().unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"a\r\nb\r\n");
+    }
+
+    #[test]
+    fn no_trailing_newline_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("notrail.txt");
+        std::fs::write(&p, b"no newline at end").unwrap();
+        let mut doc = Document::open(&p).unwrap();
+        assert_eq!(doc.text(), "no newline at end");
+        doc.set_text("still none");
+        doc.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "still none");
+    }
+
+    #[test]
+    fn empty_file_opens_and_saves_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("empty.txt");
+        std::fs::write(&p, b"").unwrap();
+        let mut doc = Document::open(&p).unwrap();
+        assert_eq!(doc.text(), "");
+        doc.save().unwrap();
+        assert!(std::fs::read(&p).unwrap().is_empty());
+    }
 }
