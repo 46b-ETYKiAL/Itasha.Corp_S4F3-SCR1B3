@@ -223,3 +223,56 @@ mod tests {
         assert_eq!(bytes, "héllo".as_bytes());
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    //! Property invariants for decode/encode — a corruption bug here loses user
+    //! data on every save, so the laws are asserted over arbitrary input.
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Decoding arbitrary bytes must NEVER panic (the editor opens any file).
+        #[test]
+        fn decode_is_total(bytes in prop::collection::vec(any::<u8>(), 0..256)) {
+            let (_text, _enc) = decode(&bytes);
+        }
+
+        /// A string that decodes as plain UTF-8 (no BOM) re-encodes to the exact
+        /// original bytes — the lossless round-trip the editor depends on.
+        #[test]
+        fn utf8_roundtrips_losslessly(s in ".*") {
+            let (text, enc) = decode(s.as_bytes());
+            if enc.name == "UTF-8" && !enc.had_bom {
+                prop_assert_eq!(&text, &s);
+                prop_assert_eq!(encode(&text, &enc), s.clone().into_bytes());
+            }
+        }
+
+        /// The hand-rolled UTF-16LE/BE encoder is exact and never lossy (UTF-16
+        /// covers all of Unicode). Verified by decoding the produced units
+        /// directly — statistical `decode` can't ID BOM-less UTF-16, so the
+        /// encoder is checked independently of detection.
+        #[test]
+        fn utf16_encoder_is_exact(s in ".*", be in any::<bool>(), bom in any::<bool>()) {
+            let enc = DetectedEncoding {
+                name: if be { "UTF-16BE" } else { "UTF-16LE" }.to_string(),
+                had_bom: bom,
+            };
+            let (bytes, lossy) = encode_checked(&s, &enc);
+            prop_assert!(!lossy);
+            let start = if bom { 2 } else { 0 };
+            let units: Vec<u16> = bytes[start..]
+                .chunks_exact(2)
+                .map(|c| {
+                    if be {
+                        u16::from_be_bytes([c[0], c[1]])
+                    } else {
+                        u16::from_le_bytes([c[0], c[1]])
+                    }
+                })
+                .collect();
+            prop_assert_eq!(String::from_utf16(&units).unwrap(), s);
+        }
+    }
+}

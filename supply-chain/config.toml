@@ -1009,6 +1009,10 @@ criteria = "safe-to-deploy"
 version = "1.0.18"
 criteria = "safe-to-deploy"
 
+[[exemptions.proptest]]
+version = "1.11.0"
+criteria = "safe-to-run"
+
 [[exemptions.pulldown-cmark]]
 version = "0.13.4"
 criteria = "safe-to-deploy"
@@ -1020,6 +1024,10 @@ criteria = "safe-to-deploy"
 [[exemptions.pxfm]]
 version = "0.1.29"
 criteria = "safe-to-deploy"
+
+[[exemptions.quick-error]]
+version = "1.2.3"
+criteria = "safe-to-run"
 
 [[exemptions.quick-error]]
 version = "2.0.1"
@@ -1048,6 +1056,10 @@ criteria = "safe-to-deploy"
 [[exemptions.rand_core]]
 version = "0.9.5"
 criteria = "safe-to-deploy"
+
+[[exemptions.rand_xorshift]]
+version = "0.4.0"
+criteria = "safe-to-run"
 
 [[exemptions.range-alloc]]
 version = "0.1.5"
@@ -1152,6 +1164,10 @@ criteria = "safe-to-deploy"
 [[exemptions.rustversion]]
 version = "1.0.22"
 criteria = "safe-to-deploy"
+
+[[exemptions.rusty-fork]]
+version = "0.3.1"
+criteria = "safe-to-run"
 
 [[exemptions.salsa20]]
 version = "0.10.2"
@@ -1437,6 +1453,10 @@ criteria = "safe-to-deploy"
 version = "1.2.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.unarray]]
+version = "0.1.4"
+criteria = "safe-to-run"
+
 [[exemptions.unicase]]
 version = "2.9.0"
 criteria = "safe-to-deploy"
@@ -1492,6 +1512,10 @@ criteria = "safe-to-deploy"
 [[exemptions.version_check]]
 version = "0.9.5"
 criteria = "safe-to-deploy"
+
+[[exemptions.wait-timeout]]
+version = "0.2.1"
+criteria = "safe-to-run"
 
 [[exemptions.walkdir]]
 version = "2.5.0"
