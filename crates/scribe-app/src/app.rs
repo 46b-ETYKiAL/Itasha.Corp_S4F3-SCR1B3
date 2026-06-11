@@ -752,6 +752,20 @@ impl ScribeApp {
                     if config.plugins.disabled.contains(&p.manifest.id) {
                         continue;
                     }
+                    // Honor the manifest's declared `min_app_version` floor. The
+                    // helper + its tests existed but were never wired into the
+                    // load loop, so a plugin requiring a newer host would load
+                    // and then fail in surprising ways. Fail-safe: refuse to load
+                    // an incompatible plugin and warn.
+                    if !p.manifest.is_app_version_ok(env!("CARGO_PKG_VERSION")) {
+                        tracing::warn!(
+                            "plugin '{}' skipped: requires app >= {:?}, this build is {}",
+                            p.manifest.id,
+                            p.manifest.min_app_version,
+                            env!("CARGO_PKG_VERSION")
+                        );
+                        continue;
+                    }
                     let Ok(src) = std::fs::read_to_string(p.entry_path()) else {
                         continue;
                     };
@@ -3435,32 +3449,48 @@ impl ScribeApp {
     }
 
     /// F-008 — Replace `find_query` with `replace_query` in the active
-    /// buffer. `all=true` walks every literal match; `all=false` replaces
-    /// only the first occurrence. Honors the configured `Query::flags` for
-    /// case + whole-word + regex semantics so the replace surface mirrors
-    /// the find one. Skips when either field is empty.
+    /// buffer. `all=true` replaces every match; `all=false` replaces only the
+    /// first. Matches with the SAME engine the find bar highlights with
+    /// ([`find_matches_active`] → a default literal, case-insensitive
+    /// [`scribe_core::search::Query`]), so Replace touches exactly what the
+    /// user sees highlighted. Skips when the find field is empty.
+    ///
+    /// Root cause of the prior divergence: this used `str::replace` /
+    /// `str::find`, which are case-SENSITIVE, while the find bar highlights
+    /// case-INSENSITIVELY — so "Replace All" silently skipped the case-variant
+    /// matches the find bar had highlighted (find said 3, replace changed 1).
+    /// Unifying both surfaces on `find_all` eliminates the divergence. The
+    /// replacement is spliced LITERALLY (the find bar exposes no regex toggle,
+    /// so `$1`-style regex expansion must not leak in).
     fn replace_in_active(&mut self, all: bool) {
         if self.find_query.is_empty() || self.active >= self.tabs.len() {
             return;
         }
         let pat = self.find_query.clone();
         let rep = self.replace_query.clone();
-        let text = &mut self.tabs[self.active].text;
-        let n_before = text.len();
-        if all {
-            *text = text.replace(&pat, &rep);
-            let replaced = text.len() != n_before;
-            self.status = if replaced {
-                format!("replaced all '{pat}' -> '{rep}'")
-            } else {
-                format!("no match for '{pat}'")
-            };
-        } else if let Some(pos) = text.find(&pat) {
-            text.replace_range(pos..pos + pat.len(), &rep);
-            self.status = format!("replaced '{pat}' -> '{rep}'");
-        } else {
+        let q = scribe_core::search::Query {
+            pattern: pat.clone(),
+            ..Default::default()
+        };
+        let matches =
+            scribe_core::search::find_all(&self.tabs[self.active].text, &q).unwrap_or_default();
+        if matches.is_empty() {
             self.status = format!("no match for '{pat}'");
+            return;
         }
+        // Splice right-to-left so earlier byte offsets stay valid as the text
+        // shifts. Match spans are UTF-8 char boundaries (regex guarantee), so
+        // `replace_range` cannot panic on a boundary.
+        let text = &mut self.tabs[self.active].text;
+        let spans = if all { &matches[..] } else { &matches[..1] };
+        for m in spans.iter().rev() {
+            text.replace_range(m.start..m.end, &rep);
+        }
+        self.status = if all {
+            format!("replaced {} x '{pat}' -> '{rep}'", matches.len())
+        } else {
+            format!("replaced '{pat}' -> '{rep}'")
+        };
         // Wave-3: invalidate the gen-keyed minimap/spell caches.
         let i = self.active;
         self.tabs[i].edit_gen = self.tabs[i].edit_gen.wrapping_add(1);
@@ -3836,7 +3866,13 @@ impl ScribeApp {
         };
         let text = &mut self.tabs[active].text;
         let byte = char_to_byte(text, ci);
-        if c.prefix_start <= byte && byte <= text.len() {
+        // `c.prefix_start` is a byte offset captured a frame EARLIER; the buffer
+        // may have mutated since (e.g. an async edit between popup-open and
+        // accept), leaving it mid-multibyte-char. `replace_range` panics on a
+        // non-boundary offset → `panic = "abort"`. `char_to_byte` already clamps
+        // `byte` to a boundary; re-validate `prefix_start` the same way before
+        // splicing. On a stale offset we drop the completion rather than crash.
+        if c.prefix_start <= byte && byte <= text.len() && text.is_char_boundary(c.prefix_start) {
             text.replace_range(c.prefix_start..byte, &item);
         }
         self.tabs[active].edit_gen = self.tabs[active].edit_gen.wrapping_add(1);
@@ -11017,6 +11053,48 @@ def";
         app.replace_query = "x".into();
         app.replace_in_active(true);
         assert_eq!(app.tabs[0].text, "x x x");
+    }
+
+    /// F-008 replace: replace matches the find bar's CASE-INSENSITIVE semantics.
+    /// The find bar (`find_matches_active`) highlights "Foo"/"foo"/"FOO" alike;
+    /// the old `str::replace` was case-SENSITIVE and silently changed only the
+    /// exact-case match the user did NOT see as the sole highlight. Both surfaces
+    /// now share `search::find_all`, so replace touches what find highlights.
+    #[test]
+    fn replace_in_active_matches_find_bar_case_insensitively() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "Foo foo FOO".into();
+        app.find_query = "foo".into();
+        app.replace_query = "x".into();
+        app.replace_in_active(true);
+        assert_eq!(app.tabs[0].text, "x x x");
+    }
+
+    /// The replacement is spliced LITERALLY — a `$`-containing replacement is not
+    /// treated as a regex capture reference (the find bar has no regex toggle).
+    #[test]
+    fn replace_in_active_replacement_is_literal_not_regex_expanded() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "ab".into();
+        app.find_query = "a".into();
+        app.replace_query = "$1".into();
+        app.replace_in_active(true);
+        assert_eq!(app.tabs[0].text, "$1b");
+    }
+
+    /// A stale completion offset that lands mid-multibyte-char must not abort the
+    /// app: `replace_range` panics on a non-boundary byte offset (`panic = abort`).
+    #[test]
+    fn accept_completion_with_stale_non_boundary_offset_does_not_panic() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "a\u{e9}".into(); // 'a' + 'é' (2 bytes) → byte len 3
+        app.completion = Some(Completion {
+            prefix_start: 2, // mid-'é' — NOT a UTF-8 char boundary
+            items: vec!["zz".to_string()],
+            selected: 0,
+        });
+        app.accept_completion(0, Some(2)); // must not panic
+        assert_eq!(app.tabs[0].text, "a\u{e9}"); // dropped the stale completion
     }
 
     /// F-017 — move-line-down swaps the cursor line with its neighbour.

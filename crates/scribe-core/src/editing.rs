@@ -128,10 +128,17 @@ pub fn backspace(rope: &mut Rope, st: &mut EditState) {
     if delete_selection(rope, st) {
         return;
     }
-    if st.cursor > 0 {
-        let to = clamp(rope, st.cursor);
+    // Guard the CLAMPED index, not the raw cursor: a stale `st.cursor > 0`
+    // restored from a session manifest over a now-empty rope would clamp to
+    // `to == 0`, and `to - 1` then underflows → `rope.remove(usize::MAX..0)`
+    // panics → `panic = "abort"` crashes the editor. `delete_forward` already
+    // guards its clamped index this way.
+    let to = clamp(rope, st.cursor);
+    if to > 0 {
         rope.remove(to - 1..to);
         st.collapse_to(to - 1);
+    } else {
+        st.collapse_to(0);
     }
 }
 
@@ -226,9 +233,16 @@ where
     carets.sort_by_key(|c| c.selection().start.min(c.cursor));
     let mut offset: isize = 0;
     for caret in carets.iter_mut() {
-        // Shift this caret by the net length change earlier carets caused.
-        caret.cursor = (caret.cursor as isize + offset).max(0) as usize;
-        caret.anchor = (caret.anchor as isize + offset).max(0) as usize;
+        // Shift this caret by the net length change earlier carets caused, then
+        // clamp BOTH ends to the live char-length. The low `.max(0)` alone is not
+        // enough: a delete-class op (`delete_selection`/`replace_selection`/…)
+        // does not re-clamp the selection's high end, so a stale caret whose
+        // index exceeds the current length would hand `rope.remove` an
+        // out-of-range range → panic → `panic = "abort"`. Insert/backspace launder
+        // their index through `clamp`, but the delete-class primitives do not.
+        let len = rope.len_chars();
+        caret.cursor = ((caret.cursor as isize + offset).max(0) as usize).min(len);
+        caret.anchor = ((caret.anchor as isize + offset).max(0) as usize).min(len);
         let before = rope.len_chars() as isize;
         f(rope, caret);
         offset += rope.len_chars() as isize - before;
@@ -845,6 +859,35 @@ mod tests {
         backspace(&mut r, &mut st);
         assert_eq!(r.to_string(), "ad");
         assert_eq!(st.cursor, 1);
+    }
+
+    #[test]
+    fn backspace_with_stale_cursor_over_empty_rope_is_noop() {
+        // A `cursor > 0` restored from a session manifest over a now-empty rope:
+        // the old guard checked the RAW cursor, so `to = clamp(..) = 0` then
+        // `to - 1` underflowed → `rope.remove(usize::MAX..0)` aborted the editor.
+        let mut r = rope("");
+        let mut st = EditState::at(5);
+        backspace(&mut r, &mut st); // must not panic
+        assert_eq!(r.to_string(), "");
+        assert_eq!(st.cursor, 0);
+    }
+
+    #[test]
+    fn for_each_caret_clamps_stale_caret_past_end() {
+        // A stale multi-cursor selection whose range exceeds the live length:
+        // the low-only `.max(0)` clamp left the high end past `len_chars`, so a
+        // delete-class op handed `rope.remove` an out-of-range range → abort.
+        let mut r = rope("ab");
+        let mut carets = vec![EditState {
+            anchor: 5,
+            cursor: 9,
+            goal_col: None,
+        }];
+        for_each_caret(&mut r, &mut carets, |rope, st| {
+            delete_selection(rope, st);
+        }); // must not panic
+        assert_eq!(r.to_string(), "ab");
     }
 
     #[test]

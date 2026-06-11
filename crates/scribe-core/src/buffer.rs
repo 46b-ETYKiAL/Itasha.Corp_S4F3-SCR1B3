@@ -97,10 +97,26 @@ impl Buffer {
 
         if size >= MMAP_THRESHOLD {
             let file = fs::File::open(path)?;
-            // SAFETY: read-only mmap of a file we just opened; we never
-            // write through it and the only reads happen via the
-            // `Buffer::Mmap` variant accessors below. Documented exception
-            // to the crate-root `#![deny(unsafe_code)]`.
+            // SAFETY: read-only mmap of a file we just opened; we never write
+            // through it and the only reads happen via the `Buffer::Mmap`
+            // accessors below. Documented exception to the crate-root
+            // `#![deny(unsafe_code)]`.
+            //
+            // The load-bearing precondition of `Mmap::map` is that the backing
+            // file MUST NOT be truncated (shrunk) by another process while the
+            // map is live: a read of a now-unbacked page is undefined behaviour
+            // (SIGBUS on Unix, an exception on Windows). SCR1B3's own safe API
+            // never truncates a mapped file — the map is dropped on
+            // `promote_to_rope` before any edit, and we only ever read it — so
+            // the only way to hit the UB is a *concurrent external* truncation
+            // of a file open in the read-only browse view, which is outside
+            // this process's control and the inherent caveat of `mmap`. We do
+            // NOT hand out a borrow into the map that could outlive it: every
+            // consumer (`len_bytes`, `from_utf8_lossy`, `encoding::decode`)
+            // copies to owned, and `as_rope()` returns `None` for the `Mmap`
+            // variant, structurally forcing a promote-to-owned before any
+            // `&Rope` exists. Do not add an accessor that returns a `&str` /
+            // `&[u8]` borrowed from the map without re-examining this contract.
             #[allow(unsafe_code)]
             let mmap = unsafe { memmap2::Mmap::map(&file)? };
             Ok(Buffer::Mmap {
