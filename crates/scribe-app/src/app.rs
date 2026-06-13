@@ -27,11 +27,15 @@ use std::path::{Path, PathBuf};
 /// state is visible at a glance (not just in the right-click menu). Pure +
 /// unit-tested so the affordance can't silently drop.
 fn tab_display_label(title: &str, pinned: bool) -> String {
-    if pinned {
-        format!("{} {title}", egui_phosphor::thin::PUSH_PIN)
-    } else {
-        title.to_string()
-    }
+    // Pinned state is shown by the DIMMED, drag-disabled grab handle that leads
+    // every tab (see `grip_handle` + `draw_tab_strip`), NOT by a glyph prefix.
+    // The old `PUSH_PIN` prefix rendered as a tofu □ to the LEFT of the title in
+    // this build's font atlas (the same egui-phosphor `.notdef` footgun that
+    // forced `grip_handle` to paint its dots) — that empty square was the
+    // reported "box left of the tab name". Drop it; the painted grip is the
+    // single, font-independent left affordance now.
+    let _ = pinned;
+    title.to_string()
 }
 
 /// Size of a 90°-rotated tab cell (#82). Rotating the horizontal label swaps
@@ -394,6 +398,11 @@ pub struct ScribeApp {
     did_update_check: bool,
     /// In-app self-updater state machine (network check + download + apply).
     updater: crate::updater::Updater,
+    /// `notify`-mode update notice: `Some(version)` when a launch check found a
+    /// newer release. Rendered as a prominent top banner (Update / Dismiss),
+    /// NOT the passive toast — so the notify-mode update is noticeable and the
+    /// "Update" button jumps straight to Settings → Updates to start it.
+    update_notice: Option<String>,
     hl: Highlighter,
     tabs: Vec<EditorTab>,
     active: usize,
@@ -852,6 +861,7 @@ impl ScribeApp {
             last_os_theme: None,
             did_update_check: false,
             updater: crate::updater::Updater::default(),
+            update_notice: None,
             hl: Highlighter::new(),
             active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
@@ -2659,7 +2669,7 @@ impl ScribeApp {
                 if _rotated {
                     ui.vertical(|ui| self.draw_rotated_side_tabs(ui, accent, muted));
                 } else {
-                    ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted, true));
+                    ui.vertical(|ui| self.draw_tab_strip(ui, accent, muted));
                 }
             });
     }
@@ -2975,7 +2985,7 @@ impl ScribeApp {
     ///   the extra `dnd_drop_zone` interaction that used to swallow the click is
     ///   gone. The index arithmetic lives in [`tab_index_after_move`] (unit-tested).
     ///   Closes F-001 / F-043 from `docs/audits/overlooked-surfaces-2026-05-29.md`.
-    fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32, side: bool) {
+    fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
         let active = self.active;
         let mut switch_to = None;
         let mut close = None;
@@ -3003,18 +3013,22 @@ impl ScribeApp {
         for i in 0..self.tabs.len() {
             let selected = i == active;
             let pinned = self.tabs[i].pinned;
-            // Pinned tabs carry a visible pin glyph so the state is obvious
-            // without opening the right-click menu.
             let shown = tab_display_label(&self.tabs[i].title(), pinned);
             let pin_label = if pinned { "Unpin tab" } else { "Pin tab" };
             // Each tab is a cohesive CHIP: the active tab gets a filled, rounded
-            // accent background spanning the label + pin + close so it reads as a
-            // real tab; inactive tabs are dimmed text. Click = switch, drag =
-            // reorder, middle-click / ✕ = close. Pin toggle shows on the active
-            // tab; close shows on every tab.
+            // accent background + a thin accent outline spanning the grip · label ·
+            // pin · close so it reads as a real tab; inactive tabs are dimmed text.
+            // Click = switch, drag = reorder, middle-click / ✕ = close. The fill +
+            // outline + margins MATCH `draw_rotated_side_tabs` so a tab looks the
+            // same size/shape in every orientation (horizontal and rotated).
             let chip = egui::Frame::default()
-                .inner_margin(egui::Margin::symmetric(8, 3))
+                .inner_margin(egui::Margin::symmetric(8, 4))
                 .corner_radius(egui::CornerRadius::same(5))
+                .stroke(if selected {
+                    egui::Stroke::new(1.0, accent.linear_multiply(0.5))
+                } else {
+                    egui::Stroke::NONE
+                })
                 .fill(if selected {
                     accent.linear_multiply(0.20)
                 } else {
@@ -3028,12 +3042,15 @@ impl ScribeApp {
                 // would stack into a ragged column per tab (#30).
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
-                    // Side strips lead each tab with an explicit drag GRIP so the
-                    // row reads grip · name · pin · close, mirroring the split-pane
-                    // header. Painted dots (`grip_handle`), never a phosphor glyph,
-                    // so the handle can't tofu. Top/bottom strips have no room for a
-                    // grip column, so the name stays the drag target there.
-                    if side {
+                    // EVERY tab — top/bottom AND side — leads with an explicit drag
+                    // GRIP so the row reads grip · name · pin · close, identical in
+                    // all orientations and mirroring the split-pane header. Painted
+                    // dots (`grip_handle`), never a phosphor glyph, so the handle is
+                    // a clean grab affordance and can't tofu into an empty square (it
+                    // is the single left-of-title affordance — there is no separate
+                    // pin-glyph box). A pinned tab shows the grip DIMMED + drag-
+                    // disabled, which is how pinned state now reads.
+                    {
                         if pinned {
                             grip_handle(ui, false, muted).on_hover_text("Pinned — drag disabled");
                         } else {
@@ -5653,12 +5670,11 @@ impl ScribeApp {
         // Once per launch: kick off an automatic update check if opted in.
         self.maybe_remind_update(ctx);
         // Drain the updater worker each frame. A `notify`-mode launch check that
-        // found a release queues a one-shot passive toast (plain text, no glyphs).
+        // found a release raises a prominent top banner (Update / Dismiss) instead
+        // of the easily-missed passive toast — see the "update-notice" panel below.
         self.updater.poll(ctx);
         if let Some(v) = self.updater.toast_pending.take() {
-            self.toast = Some(format!(
-                "SCR1B3 v{v} is available. Open Settings and choose Updates to install."
-            ));
+            self.update_notice = Some(v);
         }
         // `auto`-mode found-an-update yes/no modal.
         self.render_update_prompt(ctx);
@@ -6104,7 +6120,21 @@ impl ScribeApp {
                         // here, between the wordmark and the window caption buttons.
                         if toolbar_in_titlebar {
                             ui.add_space(12.0);
-                            self.toolbar_contents(ui, &mut act, &mut save_cfg, &mut start_lsp);
+                            // Button PARITY with the standalone toolbar row: apply the
+                            // SAME configured button height + item spacing here so the
+                            // quick-access buttons are identical in size, spacing, look,
+                            // and behaviour whether the toolbar lives in the titlebar or
+                            // in its own row. (Previously this branch skipped the spacing
+                            // setup the standalone path applies, so the buttons rendered
+                            // a different size/spacing.) Scoped so it can't perturb the
+                            // wordmark or caption buttons around it.
+                            let btn = self.config.toolbar.clamped_button_size();
+                            let gap = self.config.toolbar.clamped_button_spacing();
+                            ui.scope(|ui| {
+                                ui.spacing_mut().interact_size.y = btn;
+                                ui.spacing_mut().item_spacing.x = gap;
+                                self.toolbar_contents(ui, &mut act, &mut save_cfg, &mut start_lsp);
+                            });
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let is_max = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
@@ -6156,6 +6186,11 @@ impl ScribeApp {
         // global strip is suppressed. New notes remain reachable via Ctrl+N,
         // the command palette, and the toolbar's customizable items.
         // The whole tab strip is hidden in zen mode and F11 fullscreen.
+        // Set when the tab bar is at Bottom: its panel is rendered later, AFTER
+        // the status bar, so the status bar keeps the very bottom screen edge and
+        // the tab strip stacks directly above it (egui gives the first-shown bottom
+        // panel the outermost slot).
+        let mut bottom_tabs_deferred = false;
         if !chrome_hidden && !self.config.editor.grid_enabled {
             match self.config.editor.tab_bar_position {
                 scribe_core::config::TabBarPosition::Top => {
@@ -6164,15 +6199,17 @@ impl ScribeApp {
                     egui::TopBottomPanel::top("tabs-top")
                         .frame(egui::Frame::default().fill(panel))
                         .show(ctx, |ui| {
-                            ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted, false));
+                            ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
                         });
                 }
                 scribe_core::config::TabBarPosition::Bottom => {
-                    egui::TopBottomPanel::bottom("tabs-bottom")
-                        .frame(egui::Frame::default().fill(panel))
-                        .show(ctx, |ui| {
-                            ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted, false));
-                        });
+                    // DEFERRED: a bottom tab bar must sit ABOVE the status bar, but
+                    // egui gives the FIRST-shown bottom panel the screen edge. The
+                    // status panel is shown later (below), so rendering the tab strip
+                    // here would pin it under the status bar. Defer it and render it
+                    // immediately AFTER the status panel so status keeps the very
+                    // bottom edge and the tab strip stacks directly above it.
+                    bottom_tabs_deferred = true;
                 }
                 scribe_core::config::TabBarPosition::Left => {
                     let rotated = self.config.editor.side_tabs_rotated;
@@ -6242,6 +6279,52 @@ impl ScribeApp {
                         }
                     });
                 });
+        }
+
+        // ---- Update-available notice (notify mode) ----
+        //
+        // A PROMINENT top banner (accent-filled, bold) — not the passive toast —
+        // so a found update is actually noticeable. Carries an "Update" button
+        // that jumps straight to Settings → Updates to begin the update, plus a
+        // "Dismiss" button. Shown only in `notify` mode (auto mode uses the modal).
+        if let Some(v) = self.update_notice.clone() {
+            let mut want_update = false;
+            let mut want_dismiss = false;
+            egui::TopBottomPanel::top("update-notice")
+                .frame(
+                    egui::Frame::default()
+                        .fill(accent.linear_multiply(0.22))
+                        .inner_margin(egui::Margin::symmetric(10, 7)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "SCR1B3 v{v} is available — you have v{}.",
+                                crate::updater::current_version()
+                            ))
+                            .color(accent)
+                            .strong(),
+                        );
+                        ui.add_space(8.0);
+                        if ui.button(RichText::new("Update").strong()).clicked() {
+                            want_update = true;
+                        }
+                        if ui.button("Dismiss").clicked() {
+                            want_dismiss = true;
+                        }
+                    });
+                });
+            if want_update {
+                // Jump to Settings → Updates so the user can start the update
+                // (download → verify → restart) from the manual update controls.
+                crate::settings::request_category(ctx, "Updates");
+                self.settings_open = true;
+                self.update_notice = None;
+            }
+            if want_dismiss {
+                self.update_notice = None;
+            }
         }
 
         // ---- Find / Replace bar ----
@@ -7135,6 +7218,16 @@ impl ScribeApp {
                             ui.label(RichText::new(&self.status).color(muted).small().monospace());
                         });
                     });
+                });
+        }
+        // Bottom tab bar (deferred from the tab-position match): rendered HERE,
+        // after the status panel, so the status bar keeps the very bottom edge
+        // and the tab strip sits directly above it.
+        if bottom_tabs_deferred {
+            egui::TopBottomPanel::bottom("tabs-bottom")
+                .frame(egui::Frame::default().fill(panel))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
                 });
         }
         // F-025 — apply the click-to-edit status-bar actions captured above.
@@ -10065,6 +10158,33 @@ mod e2e {
         assert!(app.tabs.len() >= 2);
     }
 
+    /// The Bottom tab strip must render ABOVE the status bar (status keeps the
+    /// very bottom screen edge). Verified by y-order: the status bar's "LF"
+    /// eol-button sits BELOW a tab's close (✕).
+    #[test]
+    fn bottom_tab_bar_sits_above_status_bar() {
+        use egui_kittest::kittest::Queryable as _;
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.appearance.frameless = false;
+        cfg.editor.tab_bar_position = scribe_core::config::TabBarPosition::Bottom;
+        let app = ScribeApp::new_test(cfg);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 600.0))
+            .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+        h.run();
+        h.run();
+        let status_lf = h.get_by_label("LF").rect();
+        let tab_close = h.get_by_label(egui_phosphor::thin::X).rect();
+        assert!(
+            status_lf.center().y > tab_close.center().y,
+            "status bar must be BELOW the bottom tab strip: \
+             status.y={:.1} tab.y={:.1}",
+            status_lf.center().y,
+            tab_close.center().y
+        );
+    }
+
     /// #30 node.rect verification — a ROTATE-OFF side tab lays its controls out
     /// as a horizontal ROW (grip · name · pin · close): the close (✕) shares the
     /// pin's row (≈ same y) and sits to its RIGHT. Before the fix the side strip
@@ -10397,13 +10517,12 @@ mod e2e {
     }
 
     #[test]
-    fn pinned_tab_label_carries_pin_glyph() {
-        let pin = egui_phosphor::thin::PUSH_PIN;
-        let pinned = super::tab_display_label("notes.txt", true);
-        assert!(
-            pinned.starts_with(pin),
-            "pinned tab label must lead with the pin glyph, got {pinned:?}"
-        );
+    fn tab_label_is_plain_title_no_tofu_pin_glyph() {
+        // The pin glyph prefix was removed: it rendered as a tofu □ left of the
+        // title in this build's font atlas (the egui-phosphor .notdef footgun).
+        // Pinned state now reads from the dimmed, drag-disabled grab handle.
+        // The label must be the bare title in BOTH states — no leading glyph.
+        assert_eq!(super::tab_display_label("notes.txt", true), "notes.txt");
         assert_eq!(super::tab_display_label("notes.txt", false), "notes.txt");
     }
 

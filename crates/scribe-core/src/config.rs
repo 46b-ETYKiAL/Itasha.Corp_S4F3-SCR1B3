@@ -569,8 +569,9 @@ pub struct AppearanceConfig {
     /// Move the quick-access toolbar INTO the custom titlebar (between the app
     /// wordmark and the window caption buttons), suppressing the separate
     /// toolbar bar — a compact single-row chrome. Only takes effect with
-    /// `frameless` on (the titlebar exists only then). Default OFF.
-    #[serde(default)]
+    /// `frameless` on (the titlebar exists only then). Default ON (the buttons
+    /// render identically to the standalone toolbar row).
+    #[serde(default = "default_true")]
     pub toolbar_in_titlebar: bool,
 }
 
@@ -585,7 +586,7 @@ impl Default for AppearanceConfig {
             background_override: None,
             note_background_override: None,
             link_backgrounds: true,
-            toolbar_in_titlebar: false,
+            toolbar_in_titlebar: true,
         }
     }
 }
@@ -1014,6 +1015,22 @@ mod tests {
         // Side-tab rotation defaults OFF — labels stay horizontal (the familiar
         // look) until the user opts into vertical text.
         assert!(!EditorConfig::default().side_tabs_rotated);
+    }
+
+    #[test]
+    fn toolbar_in_titlebar_defaults_on() {
+        // The compact single-row chrome (toolbar in the custom titlebar) is the
+        // default. frameless is also on by default, so the titlebar exists to
+        // host it.
+        assert!(AppearanceConfig::default().toolbar_in_titlebar);
+        assert!(AppearanceConfig::default().frameless);
+        // A config that OMITS the key must also default ON (via `default_true`),
+        // not fall back to bool::default() = false.
+        let cfg: AppearanceConfig = toml::from_str("").unwrap();
+        assert!(
+            cfg.toolbar_in_titlebar,
+            "missing toolbar_in_titlebar key must default ON"
+        );
     }
 
     #[test]
