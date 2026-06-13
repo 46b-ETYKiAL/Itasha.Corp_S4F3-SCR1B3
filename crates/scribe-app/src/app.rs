@@ -5633,6 +5633,22 @@ impl ScribeApp {
         ctx.data_mut(|d| d.insert_temp(id, st));
     }
 
+    /// Drop every cached, atlas-baked galley (the note-text highlight galley and
+    /// the minimap galley) plus the highlight-job memo. MUST be called right
+    /// after `ctx.set_fonts()` rebuilds the font atlas: an `Arc<Galley>` baked
+    /// against the OLD atlas keeps stale glyph→texture UVs, so reusing it after
+    /// the rebuild paints garbled "broken" text. The layouter cache key
+    /// (`make_layouter`) keys on font SIZE but not the family face — and
+    /// `FontId::monospace` is identical before/after a face swap — so the cache
+    /// cannot self-invalidate on a family change; this explicit drop is the only
+    /// signal. (Bug: changing the app UI font silently rebuilt the atlas and the
+    /// note text rendered from the stale galley.)
+    fn invalidate_galley_caches(&self) {
+        *self.hl_cache.borrow_mut() = None;
+        *self.hl_galley_cache.borrow_mut() = None;
+        *self.minimap_cache.borrow_mut() = None;
+    }
+
     /// One per-frame tick of the editor UI. Separated from `eframe::App::ui` so
     /// `egui_kittest` E2E tests can drive it through `Context::run` without an
     /// `eframe::Frame`. Drives every top-level panel via the deprecated-but-
@@ -5737,6 +5753,11 @@ impl ScribeApp {
                 &self.config.fonts.ui_family,
             ));
             self.applied_font_family = font_key;
+            // The atlas was just rebuilt — drop every galley baked against the
+            // OLD atlas, or the note text repaints from stale glyph UVs and looks
+            // garbled. This fires for a NOTE-font OR a UI-font change (the latter
+            // was the reported "changing the app UI font breaks the note font").
+            self.invalidate_galley_caches();
         }
 
         // #104 — apply the note syntax colour theme to the highlighter when it
@@ -10182,6 +10203,45 @@ mod e2e {
              status.y={:.1} tab.y={:.1}",
             status_lf.center().y,
             tab_close.center().y
+        );
+    }
+
+    /// `invalidate_galley_caches` must drop the atlas-baked galley caches so a
+    /// font switch can't repaint the note from a stale (garbled) galley.
+    #[test]
+    fn invalidate_galley_caches_clears_all_baked_galley_caches() {
+        let app = ScribeApp::new_test(Config::default());
+        *app.hl_cache.borrow_mut() =
+            Some((42, std::sync::Arc::new(egui::text::LayoutJob::default())));
+        assert!(app.hl_cache.borrow().is_some());
+        app.invalidate_galley_caches();
+        assert!(app.hl_cache.borrow().is_none(), "hl_cache must clear");
+        assert!(app.hl_galley_cache.borrow().is_none(), "galley cache clear");
+        assert!(app.minimap_cache.borrow().is_none(), "minimap cache clear");
+    }
+
+    /// Changing ONLY the app UI font must trigger the restart-free font rebuild
+    /// (which re-applies the atlas + drops stale galleys). Regression for
+    /// "changing the app UI font breaks the note font" — the note text rendered
+    /// from a galley baked against the pre-rebuild atlas.
+    #[test]
+    fn changing_ui_font_triggers_font_rebuild() {
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.appearance.frameless = false;
+        let app = ScribeApp::new_test(cfg);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 600.0))
+            .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+        h.run();
+        let before = h.state().applied_font_family.clone();
+        // Flip ONLY the UI font (note/editor family unchanged).
+        h.state_mut().config.fonts.ui_family = "Fira Mono".to_string();
+        h.run();
+        assert_ne!(
+            h.state().applied_font_family,
+            before,
+            "a UI-font change must trigger the font rebuild + cache invalidation"
         );
     }
 
