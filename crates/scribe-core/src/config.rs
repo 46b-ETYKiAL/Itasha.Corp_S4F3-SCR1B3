@@ -850,6 +850,38 @@ impl Config {
         toml::to_string_pretty(self).unwrap_or_default()
     }
 
+    /// Atomically write the config to `path` (serialize → temp file in the same
+    /// dir → rename). Two correctness guarantees the plain `fs::write` lacked,
+    /// both of which silently corrupted persistence:
+    ///
+    /// 1. **Atomic.** A `fs::write` truncates then streams, so the live config
+    ///    WATCHER could fire mid-write and read a partially-written-but-still-
+    ///    valid TOML (truncated at a table boundary). Because every section is
+    ///    `#[serde(default)]`, the missing later sections deserialize to DEFAULTS,
+    ///    and the reload then clobbered those in-memory settings back to default —
+    ///    the "some settings revert after reopen" bug. A temp-then-rename means
+    ///    the watcher only ever observes the complete file.
+    /// 2. **Never writes empty.** If serialization fails, `to_toml_string`'s
+    ///    `unwrap_or_default()` returns `""`; writing that would wipe the whole
+    ///    config. We refuse to write an empty/failed serialization (returns an
+    ///    error instead of destroying the file).
+    pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let body = self.to_toml_string();
+        if body.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "config serialization produced empty output; refusing to overwrite",
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Temp in the SAME dir so the rename is a same-volume atomic replace.
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, body.as_bytes())?;
+        std::fs::rename(&tmp, path)
+    }
+
     /// Default per-OS config directory: e.g. `%APPDATA%/scr1b3` /
     /// `~/.config/scr1b3` / `~/Library/Application Support/scr1b3`.
     ///
@@ -1112,6 +1144,37 @@ mod tests {
             cfg.restore_session,
             "missing restore_session must default ON"
         );
+    }
+
+    #[test]
+    fn save_to_writes_atomically_and_round_trips() {
+        // Regression for "settings revert after reopen": the save must be a single
+        // atomic temp+rename (no partial file for the watcher to read), the temp
+        // must be renamed away, and the on-disk TOML must round-trip exactly —
+        // including populated path maps alongside changed scalar settings.
+        let dir = std::env::temp_dir().join(format!("scr1b3-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scr1b3.toml");
+        let mut c = Config::default();
+        c.editor
+            .scroll_positions
+            .insert("/x/y.rs".to_string(), 42.0);
+        c.editor.cursor_positions.insert("/x/y.rs".to_string(), 7);
+        c.toolbar.show_dropdown = false;
+        c.appearance.toolbar_in_titlebar = false;
+        c.save_to(&path).expect("save_to must succeed");
+        assert!(
+            !path.with_extension("toml.tmp").exists(),
+            "the temp file must be renamed away (atomic write)"
+        );
+        let s = std::fs::read_to_string(&path).unwrap();
+        assert!(!s.is_empty(), "must never persist an empty config");
+        let back = Config::from_toml_str(&s).unwrap();
+        assert_eq!(
+            back, c,
+            "config must round-trip exactly through an atomic save"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
