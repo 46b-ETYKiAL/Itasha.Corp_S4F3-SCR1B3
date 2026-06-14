@@ -6,12 +6,25 @@ use crate::error::{CoreError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Current config schema version. Bumped whenever a one-time migration is
+/// needed (see [`Config::migrate`]). A config written before schema versioning
+/// deserializes with `schema_version == 0` (the serde default for a missing
+/// field) and is migrated up on load.
+pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+
 /// Root config. `#[serde(default)]` everywhere so a partial user file merges
 /// onto defaults rather than failing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-#[derive(Default)]
 pub struct Config {
+    /// One-time-migration schema version. A fresh config is born at
+    /// [`CURRENT_SCHEMA_VERSION`]; an existing config written before versioning
+    /// loads as `0` (serde default for the missing field) and [`migrate`] brings
+    /// it forward exactly once. NEVER hand-edit downward.
+    ///
+    /// [`migrate`]: Config::migrate
+    #[serde(default)]
+    pub schema_version: u32,
     pub editor: EditorConfig,
     pub appearance: AppearanceConfig,
     pub fonts: FontConfig,
@@ -24,6 +37,28 @@ pub struct Config {
     pub motion: MotionConfig,
     #[serde(default)]
     pub scroll: ScrollConfig,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        // A FRESH config is born already at the current schema version, so
+        // `migrate` is a no-op for new users (no spurious first-run rewrite).
+        // Only an EXISTING file (which deserializes `schema_version` to 0) is
+        // migrated. Every other field defers to its own `Default`.
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            editor: EditorConfig::default(),
+            appearance: AppearanceConfig::default(),
+            fonts: FontConfig::default(),
+            window: WindowConfig::default(),
+            updates: UpdateConfig::default(),
+            spellcheck: SpellcheckConfig::default(),
+            plugins: PluginConfig::default(),
+            toolbar: ToolbarConfig::default(),
+            motion: MotionConfig::default(),
+            scroll: ScrollConfig::default(),
+        }
+    }
 }
 
 /// Scroll behaviour (Wave 2). `speed` is egui's `line_scroll_speed` wheel-notch
@@ -912,16 +947,62 @@ impl Config {
         Self::config_dir().map(|d| d.join("scr1b3.toml"))
     }
 
+    /// Apply one-time, version-gated migrations in place. Returns `true` when
+    /// anything changed (the caller should then persist).
+    ///
+    /// **Why this exists.** Every section is `#[serde(default)]`, so a value
+    /// STORED in the user's file always wins over the source default. That means
+    /// a good default flipped on in a later release (line numbers, restore
+    /// session, toolbar-in-titlebar, …) can NEVER reach a user whose config
+    /// predates the flip — their stored value (or stored-`false`) sticks forever.
+    /// Each migration step re-applies the intended experience-baseline ONCE, then
+    /// bumps `schema_version`, so the user's own later deliberate changes are
+    /// never overridden again (the step won't re-run).
+    pub fn migrate(&mut self) -> bool {
+        let mut changed = false;
+
+        // v0 → v1: re-assert the experience-baseline toggles that ship on by
+        // default but were stuck off for users whose config predates the flip.
+        // One-shot: after this, `schema_version == 1` and the block is skipped,
+        // so toggling any of these off later is respected.
+        if self.schema_version < 1 {
+            self.editor.show_line_numbers = true;
+            self.editor.show_minimap = true;
+            self.editor.word_wrap = true;
+            self.editor.restore_session = true;
+            self.editor.restore_cursor_position = true;
+            self.appearance.toolbar_in_titlebar = true;
+            self.toolbar.show_dropdown = true;
+            self.schema_version = 1;
+            changed = true;
+        }
+
+        // Guard: never let a future bug leave the version below current after a
+        // successful migration pass (keeps `migrate` idempotent).
+        debug_assert!(self.schema_version <= CURRENT_SCHEMA_VERSION);
+        changed
+    }
+
     /// Load config from the OS config file, or defaults if absent/broken.
     /// Returns `(config, Option<error_message>)` — never fails to produce a
-    /// usable config.
+    /// usable config. An existing config is migrated up to the current schema on
+    /// load (and the result persisted atomically so the migration is durable and
+    /// runs exactly once).
     pub fn load_or_default() -> (Self, Option<String>) {
         let Some(path) = Self::config_file_path() else {
             return (Self::default(), None);
         };
         match std::fs::read_to_string(&path) {
             Ok(s) => match Self::from_toml_str(&s) {
-                Ok(cfg) => (cfg, None),
+                Ok(mut cfg) => {
+                    if cfg.migrate() {
+                        // Persist so the one-time migration doesn't re-run and the
+                        // upgraded baseline is durable. Best-effort: a failed save
+                        // doesn't block startup (it just re-applies next launch).
+                        let _ = cfg.save_to(&path);
+                    }
+                    (cfg, None)
+                }
                 Err(e) => (Self::default(), Some(e.to_string())),
             },
             Err(_) => (Self::default(), None), // absent = use defaults silently
@@ -964,6 +1045,72 @@ mod tests {
     fn word_wrap_and_animations_on_by_default() {
         assert!(Config::default().editor.word_wrap);
         assert!(Config::default().motion.enabled);
+    }
+
+    #[test]
+    fn fresh_config_is_born_at_current_schema_version() {
+        // A new user's config is already current, so `migrate` is a no-op
+        // (no spurious first-run rewrite).
+        let mut c = Config::default();
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(!c.migrate(), "a current-version config must not migrate");
+    }
+
+    #[test]
+    fn legacy_config_migrates_experience_defaults_once() {
+        // An existing config with no schema_version (→ 0) that has the
+        // experience toggles stored OFF — the exact "good default can't reach
+        // the user" bug. Migration must flip them on and stamp version 1.
+        let toml = "\
+[editor]
+show_line_numbers = false
+show_minimap = false
+word_wrap = false
+restore_session = false
+restore_cursor_position = false
+
+[appearance]
+toolbar_in_titlebar = false
+
+[toolbar]
+show_dropdown = false
+";
+        let mut c = Config::from_toml_str(toml).unwrap();
+        assert_eq!(c.schema_version, 0, "legacy config loads as version 0");
+        assert!(
+            !c.editor.show_line_numbers,
+            "stored false wins pre-migration"
+        );
+
+        assert!(c.migrate(), "v0 config must report a change");
+        assert!(c.editor.show_line_numbers);
+        assert!(c.editor.show_minimap);
+        assert!(c.editor.word_wrap);
+        assert!(c.editor.restore_session);
+        assert!(c.editor.restore_cursor_position);
+        assert!(c.appearance.toolbar_in_titlebar);
+        assert!(c.toolbar.show_dropdown);
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
+
+        // Idempotent: a second pass changes nothing, so a user who later turns
+        // any of these OFF is respected (the v0 block never re-runs).
+        assert!(
+            !c.migrate(),
+            "already-migrated config must not migrate again"
+        );
+        c.editor.show_minimap = false; // user's deliberate later choice
+        assert!(!c.migrate());
+        assert!(
+            !c.editor.show_minimap,
+            "migration must not override a v1 user choice"
+        );
+    }
+
+    #[test]
+    fn schema_version_round_trips() {
+        let c = Config::default();
+        let back = Config::from_toml_str(&c.to_toml_string()).unwrap();
+        assert_eq!(back.schema_version, CURRENT_SCHEMA_VERSION);
     }
 
     #[test]

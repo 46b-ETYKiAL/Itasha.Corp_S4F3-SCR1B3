@@ -388,6 +388,15 @@ impl EditorTab {
 
 pub struct ScribeApp {
     config: Config,
+    /// Resolved config/runtime directory (where `scr1b3.toml`, the session
+    /// manifest, and the unsaved-buffer backups live). Resolved ONCE at build
+    /// from `Config::config_dir()`. `new_test` overrides it to a per-instance
+    /// temp dir so a test's periodic hot-exit snapshot can NEVER write into the
+    /// real user config dir — that test-isolation gap is what leaked a unit
+    /// test's `"a very long line"` fixture into the real session backup, where
+    /// it then restored as a phantom note on every launch. `None` only when no
+    /// OS config dir can be resolved.
+    config_dir: Option<PathBuf>,
     theme: Theme,
     /// Last OS-reported system theme (dark/light) we acted on, so the
     /// `appearance.follow_os_theme` watcher only re-applies on an actual change
@@ -689,7 +698,22 @@ impl ScribeApp {
     pub fn new_test(mut config: Config) -> Self {
         config.editor.restore_session = false;
         config.plugins.enabled = false;
-        Self::build(config, None, None, false)
+        let mut app = Self::build(config, None, None, false);
+        // Redirect ALL config/session writes to a per-instance temp dir so a
+        // test's periodic hot-exit snapshot never touches the real user config
+        // dir. Without this, `session_backup`-on tests wrote their fixture text
+        // into the real `%APPDATA%` session backup (test pollution).
+        app.config_dir = Some(Self::unique_test_config_dir());
+        app
+    }
+
+    /// A process-unique, per-call temp directory for hermetic test config I/O.
+    #[cfg(test)]
+    fn unique_test_config_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("scr1b3-test-{}-{n}", std::process::id()))
     }
 
     fn build(
@@ -863,6 +887,7 @@ impl ScribeApp {
 
         Self {
             config,
+            config_dir: Config::config_dir(),
             theme,
             last_os_theme: None,
             did_update_check: false,
@@ -1575,20 +1600,38 @@ impl ScribeApp {
             self.toolbar_item(ui, id, act, save_cfg, start_lsp);
         }
         // User-curated overflow dropdown — actions the user parked here to keep
-        // the bar clean. Shown only when the toggle is on AND there are parked
-        // actions. The trigger is PAINTED three dots, NOT the "⋯" glyph: U+22EF
-        // renders as a tofu □ in this build's font atlas (the same egui-phosphor
-        // .notdef footgun that forced the grip to paint its dots), so a glyph
-        // trigger showed an empty square. Painted dots are font-independent and
-        // read as a clean "more actions" affordance.
+        // the bar clean. Shown whenever the toggle is ON (even with an empty
+        // menu, so the toggle has a VISIBLE effect — previously it was gated on a
+        // non-empty menu, so turning it on with the default empty menu looked
+        // inert, the "toggle does nothing" report). An empty menu opens to a
+        // hint pointing at the editor. The trigger is PAINTED three dots, NOT the
+        // "⋯" glyph: U+22EF renders as a tofu □ in this build's font atlas (the
+        // same egui-phosphor .notdef footgun that forced the grip to paint its
+        // dots). Painted dots are font-independent and read as a clean "more
+        // actions" affordance.
         let menu = self.config.toolbar.menu.clone();
-        if self.config.toolbar.show_dropdown && !menu.is_empty() {
+        if self.config.toolbar.show_dropdown {
             let dot = ui.visuals().weak_text_color();
             let btn_h = ui.spacing().interact_size.y;
             let btn = egui::Button::new("").min_size(egui::vec2(22.0, btn_h));
             let resp = egui::menu::menu_custom_button(ui, btn, |ui| {
-                for id in &menu {
-                    self.toolbar_item(ui, id, act, save_cfg, start_lsp);
+                if menu.is_empty() {
+                    ui.set_min_width(180.0);
+                    ui.label(egui::RichText::new("No actions added yet").strong());
+                    ui.label(
+                        egui::RichText::new(
+                            "Add actions in Settings → Toolbar → More-actions menu.",
+                        )
+                        .weak(),
+                    );
+                    if ui.button("Open toolbar settings").clicked() {
+                        self.settings_open = true;
+                        ui.close_menu();
+                    }
+                } else {
+                    for id in &menu {
+                        self.toolbar_item(ui, id, act, save_cfg, start_lsp);
+                    }
                 }
             })
             .response
@@ -2106,7 +2149,10 @@ impl ScribeApp {
     }
 
     fn save_config(&mut self) {
-        let Some(path) = Config::config_file_path() else {
+        // Use the instance's resolved config dir (test-isolated in `new_test`),
+        // NOT the global `Config::config_file_path()`, so tests never write the
+        // real user `scr1b3.toml`.
+        let Some(path) = self.config_dir.as_ref().map(|d| d.join("scr1b3.toml")) else {
             return;
         };
         // Atomic, never-empty write (Config::save_to): the config WATCHER must
@@ -2435,7 +2481,10 @@ impl ScribeApp {
     /// recorded by path only; orphan backups are pruned. Best-effort.
     fn snapshot_session_backups(&mut self) {
         use scribe_core::session;
-        let Some(dir) = Config::config_dir() else {
+        // Instance config dir (test-isolated in `new_test`) — NOT the global
+        // `Config::config_dir()`. A test's periodic snapshot must never write its
+        // unsaved-buffer fixture into the real user session backup.
+        let Some(dir) = self.config_dir.clone() else {
             return;
         };
         let bdir = session::backup_dir(&dir);
@@ -10381,6 +10430,44 @@ mod e2e {
         );
     }
 
+    /// Regression for the "toggle does nothing when turned on" report: the
+    /// more-actions dropdown must appear when `show_dropdown` is on EVEN with an
+    /// EMPTY menu (previously it was gated on a non-empty menu, so enabling it
+    /// with the default empty menu rendered no button — looked inert).
+    #[test]
+    fn dropdown_shows_when_enabled_even_with_empty_menu() {
+        use egui_kittest::kittest::NodeT as _;
+        let count_toolbar_buttons = |h: &egui_kittest::Harness<'_, ScribeApp>| {
+            h.root()
+                .children_recursive()
+                .filter(|n| {
+                    let ak = n.accesskit_node();
+                    format!("{:?}", ak.role()) == "Button"
+                        && ak.bounding_box().map(|b| b.y0 < 60.0).unwrap_or(false)
+                })
+                .count()
+        };
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        cfg.toolbar.items = vec!["save".to_string()];
+        cfg.toolbar.menu = Vec::new(); // EMPTY menu — the default state
+        cfg.toolbar.show_dropdown = true;
+        let mut h = ui_harness(ScribeApp::new_test(cfg));
+        h.run();
+        h.run();
+        let with = count_toolbar_buttons(&h);
+        h.state_mut().config.toolbar.show_dropdown = false;
+        h.run();
+        h.run();
+        let without = count_toolbar_buttons(&h);
+        assert_eq!(
+            with,
+            without + 1,
+            "with an EMPTY menu, enabling the dropdown must still add its button \
+             (with={with}, without={without})"
+        );
+    }
+
     /// #30 node.rect verification — a ROTATE-OFF side tab lays its controls out
     /// as a horizontal ROW (grip · name · pin · close): the close (✕) shares the
     /// pin's row (≈ same y) and sits to its RIGHT. Before the fix the side strip
@@ -11896,6 +11983,40 @@ def";
         app.tabs[0].text = "x   \ny".to_string();
         run_frames(&mut app, 3);
         assert_eq!(app.tabs.len(), 1);
+    }
+
+    /// Regression: a test's periodic hot-exit snapshot MUST write into the
+    /// per-instance temp dir, never the real user config dir. This is the guard
+    /// for the "unit-test fixture leaked into the real session backup and then
+    /// restored as a phantom note" bug. We drive the exact offending shape
+    /// (session_backup on + an unsaved untitled buffer) and assert the snapshot
+    /// landed in the isolated dir, and that the isolated dir is NOT the real one.
+    #[test]
+    fn session_snapshot_writes_to_isolated_dir_not_real_config() {
+        let mut cfg = Config::default();
+        cfg.editor.session_backup = true;
+        let mut app = ScribeApp::new_test(cfg);
+
+        let test_dir = app.config_dir.clone().expect("new_test sets a config dir");
+        assert_ne!(
+            Some(test_dir.clone()),
+            Config::config_dir(),
+            "new_test must isolate config_dir away from the real OS config dir"
+        );
+
+        // The exact shape that leaked: an unsaved untitled buffer holding the
+        // unit-test fixture text, driven through a frame so the snapshot fires.
+        app.tabs[0].text = "a very long line ".repeat(40);
+        run_frames(&mut app, 1);
+
+        // The hot-exit snapshot (which DOES run — session_backup on, content
+        // unsaved) wrote its manifest into the ISOLATED dir, proving the real
+        // user session backup is never touched by tests.
+        let isolated_manifest = scribe_core::session::manifest_path(&test_dir);
+        assert!(
+            isolated_manifest.exists(),
+            "hot-exit snapshot must target the test-isolated config dir"
+        );
     }
 
     /// Reopen-closed-tab restores an accidentally closed tab's content.

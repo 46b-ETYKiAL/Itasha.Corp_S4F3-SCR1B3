@@ -2386,10 +2386,35 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     {
         changed = true;
     }
+    // Menu rows: reorder (↑/↓) + remove, mirroring the Items editor's
+    // keyboard-accessible controls so the menu is curated the same way.
+    let mut menu_mv: Option<(usize, isize)> = None;
     let mut menu_rm: Option<usize> = None;
-    for i in 0..config.toolbar.menu.len() {
+    let mn = config.toolbar.menu.len();
+    if mn == 0 {
+        ui.label(
+            egui::RichText::new("No actions in the menu yet — click one from the palette below.")
+                .weak()
+                .small(),
+        );
+    }
+    for i in 0..mn {
         let label = action_label(&config.toolbar.menu[i]);
         ui.horizontal(|ui| {
+            if ui
+                .add_enabled(i > 0, egui::Button::new(ph::CARET_UP))
+                .on_hover_text("Move up")
+                .clicked()
+            {
+                menu_mv = Some((i, -1));
+            }
+            if ui
+                .add_enabled(i + 1 < mn, egui::Button::new(ph::CARET_DOWN))
+                .on_hover_text("Move down")
+                .clicked()
+            {
+                menu_mv = Some((i, 1));
+            }
             if ui
                 .button(ph::X)
                 .on_hover_text("Remove from the menu")
@@ -2400,10 +2425,52 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
             ui.label(label);
         });
     }
+    if let Some((i, d)) = menu_mv {
+        let j = (i as isize + d).clamp(0, mn as isize - 1) as usize;
+        if i != j {
+            config.toolbar.menu.swap(i, j);
+            changed = true;
+        }
+    }
     if let Some(i) = menu_rm {
         config.toolbar.menu.remove(i);
         changed = true;
     }
+    ui.add_space(4.0);
+    // Palette — click an action to add it to the menu. Same 3-column grid the
+    // Items editor uses, so adding to the menu now works the SAME way as adding
+    // to the toolbar (the previous bare append-only combobox was the "the add
+    // method needs improving" report). Separators are meaningless in a menu, so
+    // they are excluded.
+    ui.label(
+        egui::RichText::new("Palette (click to add to the menu)")
+            .strong()
+            .small(),
+    );
+    egui::Grid::new("scr1b3-toolbar-menu-palette")
+        .num_columns(3)
+        .spacing([6.0, 6.0])
+        .show(ui, |ui| {
+            let mut col = 0;
+            for (id, label) in crate::app::TOOLBAR_ACTIONS {
+                if *id == "sep" {
+                    continue;
+                }
+                if ui
+                    .add(egui::Button::new(*label))
+                    .on_hover_text("Click to add to the more-actions menu")
+                    .clicked()
+                {
+                    config.toolbar.menu.push((*id).to_string());
+                    changed = true;
+                }
+                col += 1;
+                if col % 3 == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("add to menu:");
         egui::ComboBox::from_id_salt("toolbar-menu-add")
@@ -2421,6 +2488,15 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
             })
             .response
             .on_hover_text("Pick an action to add to the more-actions dropdown.");
+        if ui
+            .button("clear menu")
+            .on_hover_text("Remove every action from the more-actions menu.")
+            .clicked()
+            && !config.toolbar.menu.is_empty()
+        {
+            config.toolbar.menu.clear();
+            changed = true;
+        }
     });
     changed
 }
