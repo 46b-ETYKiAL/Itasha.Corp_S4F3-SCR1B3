@@ -973,13 +973,13 @@ impl ScribeApp {
         let Some(mut tree) = self.grid_tree.take() else {
             return;
         };
-        let line_height = self.config.fonts.line_height;
+        let line_height = self.config.fonts.clamped_line_height();
         let word_wrap = self.config.editor.word_wrap;
         // #28 — render-whitespace toggle + editor font size captured as locals so
         // the per-pane body closure (which can't re-borrow `self.config`) can
         // paint the `·`/`→` whitespace overlay on each pane's galley too.
         let render_whitespace = self.config.editor.render_whitespace;
-        let editor_font_size = self.config.fonts.editor_size;
+        let editor_font_size = self.config.fonts.clamped_editor_size();
         // Disjoint-field borrows captured as locals BEFORE the central-panel
         // closure (which mutably borrows `self.tabs`). The highlighter + its
         // cache are different fields than `tabs`, so the immutable borrows here
@@ -3645,6 +3645,16 @@ impl ScribeApp {
         if lines.is_empty() {
             return;
         }
+        // Guard `ln` too, not just `target`: the cursor line (from
+        // `last_cursor_line_col`, a 1-based line count that can point AT the
+        // post-final-newline empty line) can equal `lines.len()` after the
+        // trailing-"" pop above, while `target = ln - 1` is still in range — so
+        // `lines.swap(ln, target)` would index `ln` out of bounds and abort
+        // (`panic = "abort"`). The sibling line-ops (`duplicate_cursor_line`,
+        // `join_cursor_line_with_next`) already guard `ln` this way.
+        if ln >= lines.len() {
+            return;
+        }
         let target = (ln as i32) + dir;
         if target < 0 || (target as usize) >= lines.len() {
             return;
@@ -3746,7 +3756,8 @@ impl ScribeApp {
             // assumes scroll-area = full window vertically — keep that.
             self.pending_scroll = Some(y.max(0.0));
         } else {
-            let lh = self.config.fonts.editor_size * self.config.fonts.line_height;
+            let lh =
+                self.config.fonts.clamped_editor_size() * self.config.fonts.clamped_line_height();
             self.pending_scroll = Some((line0 as f32) * lh);
         }
         self.status = format!("go to line {line_1based}");
@@ -3782,7 +3793,8 @@ impl ScribeApp {
         if let Some(&y) = self.line_gutter.get(line0) {
             self.pending_scroll = Some(y.max(0.0));
         } else {
-            let lh = self.config.fonts.editor_size * self.config.fonts.line_height;
+            let lh =
+                self.config.fonts.clamped_editor_size() * self.config.fonts.clamped_line_height();
             self.pending_scroll = Some((line0 as f32) * lh);
         }
     }
@@ -4014,7 +4026,7 @@ impl ScribeApp {
         ui.separator();
         let (mut projected, _map) =
             crate::editor_features::project_folded(text, &regions, &self.folds);
-        let line_height = self.config.fonts.line_height;
+        let line_height = self.config.fonts.clamped_line_height();
         let hl = &self.hl;
         let word_wrap = self.config.editor.word_wrap;
         let layout_fg = ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
@@ -5088,8 +5100,13 @@ fn highlight_job(
             // Append any tail not covered by spans. Wave-3: use the theme
             // foreground (was hardcoded GRAY — washed out vs the body text and
             // mismatched the rope editor, which already uses the theme fg).
-            if byte < line.len() {
-                job.append(&line[byte..], 0.0, plain(fg));
+            // Use `get(..)` (like the per-span slice above) rather than a direct
+            // `&line[byte..]`: if the highlighter ever emits a span boundary that
+            // is not a UTF-8 char boundary, a direct slice would panic → abort.
+            if let Some(tail) = line.get(byte..) {
+                if !tail.is_empty() {
+                    job.append(tail, 0.0, plain(fg));
+                }
             }
         } else {
             job.append(line, 0.0, plain(fg));
@@ -7412,8 +7429,8 @@ impl ScribeApp {
 
         let active = self.active.min(self.tabs.len().saturating_sub(1));
         self.active = active;
-        let font = FontId::monospace(self.config.fonts.editor_size);
-        let line_height = self.config.fonts.line_height;
+        let font = FontId::monospace(self.config.fonts.clamped_editor_size());
+        let line_height = self.config.fonts.clamped_line_height();
         let word_wrap = self.config.editor.word_wrap;
         let show_line_numbers = self.config.editor.show_line_numbers;
         let gutter_row_h = font.size * line_height;
@@ -7876,7 +7893,8 @@ impl ScribeApp {
                         // buffer text and the syntax spans are untouched.
                         if self.config.editor.render_whitespace {
                             let painter = ui.painter();
-                            let ws_font = FontId::monospace(self.config.fonts.editor_size);
+                            let ws_font =
+                                FontId::monospace(self.config.fonts.clamped_editor_size());
                             let ws_color = muted.gamma_multiply(0.7);
                             let origin = out.galley_pos.to_vec2();
                             for row in &out.galley.rows {
@@ -7912,7 +7930,7 @@ impl ScribeApp {
                                 .flat_map(|r| r.glyphs.iter())
                                 .map(|g| g.advance_width)
                                 .find(|w| *w > 0.0)
-                                .unwrap_or(self.config.fonts.editor_size * 0.6);
+                                .unwrap_or(self.config.fonts.clamped_editor_size() * 0.6);
                             let step = cell_w * self.config.editor.tab_width as f32;
                             if step > 1.0 {
                                 let guide = Color32::from_rgba_unmultiplied(
@@ -8083,7 +8101,7 @@ impl ScribeApp {
                                         .flat_map(|r| r.glyphs.iter())
                                         .map(|g| g.advance_width)
                                         .find(|w| *w > 0.0)
-                                        .unwrap_or(self.config.fonts.editor_size * 0.6);
+                                        .unwrap_or(self.config.fonts.clamped_editor_size() * 0.6);
                                     match self.config.editor.caret_style {
                                         scribe_core::config::CaretStyle::Block => {
                                             let blk = Color32::from_rgba_unmultiplied(
@@ -11386,6 +11404,20 @@ def";
         app.last_cursor_line_col = Some((1, 1));
         app.move_cursor_line(-1);
         assert_eq!(app.tabs[0].text, "alpha\nbeta\n");
+    }
+
+    /// Regression: move-line-UP from the post-final-newline empty line of a
+    /// newline-terminated file must NOT panic. The 1-based cursor line (3) maps
+    /// to `ln = 2`, which equals `lines.len()` after the trailing-"" pop — an
+    /// unguarded `lines.swap(ln, target)` indexed `ln` out of bounds → abort.
+    #[test]
+    fn move_cursor_line_up_from_trailing_empty_line_does_not_panic() {
+        let mut app = ScribeApp::new_test(Config::default());
+        app.tabs[0].text = "a\nb\n".into();
+        // Caret parked on the empty trailing line (status reports it as line 3).
+        app.last_cursor_line_col = Some((3, 1));
+        app.move_cursor_line(-1); // must not panic
+        assert_eq!(app.tabs[0].text, "a\nb\n"); // out-of-range op is a no-op
     }
 
     /// F-017 — duplicate inserts a copy on the row below.

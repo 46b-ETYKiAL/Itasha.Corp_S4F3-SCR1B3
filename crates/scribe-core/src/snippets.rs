@@ -58,16 +58,32 @@ pub fn expand(body: &str) -> Expansion {
             if chars.peek() == Some(&'{') {
                 chars.next(); // consume '{'
                 let mut num = String::new();
+                let mut closed = false;
                 while let Some(&d) = chars.peek() {
                     if d == '}' {
                         chars.next();
+                        closed = true;
                         break;
                     }
                     num.push(d);
                     chars.next();
                 }
-                if let Ok(n) = num.parse::<u32>() {
-                    stops.push((text.chars().count(), n));
+                if closed {
+                    if let Ok(n) = num.parse::<u32>() {
+                        stops.push((text.chars().count(), n));
+                        continue;
+                    }
+                }
+                // Malformed — unterminated (`${5`) OR a non-numeric body
+                // (`${abc}`). Re-emit the consumed characters LITERALLY instead of
+                // dropping them: a snippet body containing a literal `${…}` must
+                // not lose content (and an unterminated `${5` must not fabricate a
+                // phantom tab-stop).
+                text.push('$');
+                text.push('{');
+                text.push_str(&num);
+                if closed {
+                    text.push('}');
                 }
                 continue;
             } else if chars.peek().map(|d| d.is_ascii_digit()).unwrap_or(false) {
@@ -83,7 +99,11 @@ pub fn expand(body: &str) -> Expansion {
                 }
                 if let Ok(n) = num.parse::<u32>() {
                     stops.push((text.chars().count(), n));
+                    continue;
                 }
+                // Numeric overflow (e.g. `$99999999999999`) — re-emit literally.
+                text.push('$');
+                text.push_str(&num);
                 continue;
             }
         }
@@ -135,5 +155,22 @@ mod tests {
         let set = SnippetSet::default();
         assert!(set.lookup("nope").is_none());
         assert!(set.is_empty());
+    }
+
+    #[test]
+    fn malformed_dollar_brace_is_preserved_not_dropped() {
+        // A body containing a literal `${…}` (unterminated, or a non-numeric
+        // body) must NOT lose content — previously the consumed chars were
+        // silently dropped (and `${5` even fabricated a phantom tab-stop).
+        assert_eq!(expand("x${abc").text, "x${abc"); // unterminated, non-numeric
+        assert_eq!(expand("price: ${5").text, "price: ${5"); // unterminated, numeric
+        assert_eq!(expand("a${b}c").text, "a${b}c"); // closed, non-numeric
+        assert_eq!(expand("${}").text, "${}"); // closed, empty
+                                               // A VALID stop still parses + is stripped (caret lands there).
+        let ok = expand("a${1}b");
+        assert_eq!(ok.text, "ab");
+        assert_eq!(ok.caret_offset, 1);
+        // `$N` numeric overflow is re-emitted literally, not dropped.
+        assert_eq!(expand("$99999999999999").text, "$99999999999999");
     }
 }

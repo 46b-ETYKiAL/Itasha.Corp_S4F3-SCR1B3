@@ -643,6 +643,21 @@ impl Default for FontConfig {
     }
 }
 
+impl FontConfig {
+    /// Editor font size clamped to a sane band, so a hand-edited TOML with
+    /// `editor_size = 0` (or negative) can't render an invisible editor. Mirrors
+    /// the `clamped_*` discipline every other config struct uses.
+    pub fn clamped_editor_size(&self) -> f32 {
+        self.editor_size.clamp(6.0, 96.0)
+    }
+
+    /// Line-height multiplier clamped to a sane band (a `0` would collapse every
+    /// row to zero height; a huge value would explode the gutter).
+    pub fn clamped_line_height(&self) -> f32 {
+        self.line_height.clamp(0.8, 4.0)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateMode {
@@ -1041,6 +1056,30 @@ mod tests {
             cfg.toolbar_in_titlebar,
             "missing toolbar_in_titlebar key must default ON"
         );
+    }
+
+    #[test]
+    fn font_size_and_line_height_are_clamped() {
+        // A hand-edited TOML with 0/negative values must not produce an invisible
+        // (zero-size) or zero-height editor.
+        let bad = FontConfig {
+            editor_size: 0.0,
+            line_height: 0.0,
+            ..FontConfig::default()
+        };
+        assert_eq!(bad.clamped_editor_size(), 6.0);
+        assert_eq!(bad.clamped_line_height(), 0.8);
+        let huge = FontConfig {
+            editor_size: 9999.0,
+            line_height: 99.0,
+            ..FontConfig::default()
+        };
+        assert_eq!(huge.clamped_editor_size(), 96.0);
+        assert_eq!(huge.clamped_line_height(), 4.0);
+        // The default is within band (unchanged).
+        let d = FontConfig::default();
+        assert_eq!(d.clamped_editor_size(), d.editor_size);
+        assert_eq!(d.clamped_line_height(), d.line_height);
     }
 
     #[test]

@@ -326,6 +326,15 @@ impl Updater {
             return;
         };
         let (installer, version) = (installer.clone(), version.clone());
+        // Anti-downgrade (TUF rollback-attack defense): re-check at APPLY time
+        // that the staged release is strictly newer than the running build, so a
+        // replayed older-but-validly-signed installer can never be run over us.
+        // The in-place-swap path (`apply_and_restart`) already does this; the
+        // installer path must too, or the two apply routes defend asymmetrically.
+        if let Err(e) = update::ensure_upgrade(&version, current_version()) {
+            self.state = UpdateState::Failed(e);
+            return;
+        }
         // Launch with a UAC elevation prompt — the setup.exe is
         // requireAdministrator, so a plain CreateProcess fails with os error 740.
         // The staging dir is NOT cleaned here: the installer is running FROM it;
