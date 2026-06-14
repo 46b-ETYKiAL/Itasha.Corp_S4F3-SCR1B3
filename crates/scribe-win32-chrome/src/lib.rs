@@ -1,31 +1,54 @@
 //! Isolated Win32 window-chrome fixups.
 //!
 //! This is the ONLY crate in the SCR1B3 tree permitted `unsafe` — mirroring
-//! scribe-core's single mmap exception. It quarantines three audited Win32 calls
-//! that fix the "doubled caption buttons" bug:
+//! scribe-core's single mmap exception. It quarantines the audited Win32 FFI
+//! that removes the "doubled caption buttons" the OS draws over our custom
+//! titlebar on a frameless + transparent window.
 //!
-//! winit keeps `WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` on undecorated
-//! **top-level** windows (the only branch that strips caption bits is gated on
-//! `WS_CHILD`; see winit #2754). On Windows 11, DWM paints the three native
-//! caption buttons from those residual style bits — in the composited non-client
-//! band, OVER the app's custom titlebar. Removing the DWM backdrop did nothing
-//! because the backdrop was never the cause; the per-frame
-//! `ViewportCommand::Decorations(false)` re-assert was also a no-op (it only
-//! re-clears winit's decorations marker, never the style bits). The fix is to
-//! clear those bits on the HWND.
+//! ## Why the previous approaches failed
+//!
+//! winit leaves `WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` on undecorated
+//! TOP-LEVEL windows (it only strips caption bits on `WS_CHILD`; winit #2754).
+//! Two earlier fixes were the WRONG mechanism:
+//!
+//!   1. **Stripping those `WS_*` style bits.** DWM draws the caption buttons
+//!      from the window's NON-CLIENT (NC) frame GEOMETRY, not purely from the
+//!      style bits — so clearing the bits did not remove the buttons.
+//!   2. **`DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED`.** winit implements
+//!      Windows transparency via `DwmEnableBlurBehindWindow`, and per Microsoft
+//!      that path is *mutually exclusive* with disabling NC rendering — so the
+//!      per-frame call fought winit's own transparency and never removed the
+//!      buttons. (It only LOOKED inert when opaque because the solid panel fill
+//!      covered the always-present NC strip; lowering the alpha unmasked it —
+//!      the "doubled min/max/close with transparency on" report.)
+//!
+//! ## The fix (production-proven: MS DWM custom-frame sample, BorderlessWindow,
+//! Tao)
+//!
+//! Subclass the HWND and return **0** from `WM_NCCALCSIZE` when `wParam == TRUE`.
+//! Per Microsoft's "Custom Window Frame Using DWM": returning 0 makes the entire
+//! window the client area, "removing the standard frame … this includes the
+//! region where the caption buttons are drawn." With no NC strip, DWM has
+//! nowhere to draw the system min/max/close — in opaque AND transparent modes.
+//!
+//! This is safe in SCR1B3 specifically because resize and drag are already
+//! egui-owned (a `ViewportCommand::BeginResize` edge overlay — winit #4186 — and
+//! `ViewportCommand::StartDrag`), so the NC area is unused for them. The one
+//! thing the NC calc still owes us is a MAXIMIZED window that respects the
+//! monitor work area (and an auto-hide taskbar), which the maximized branch
+//! handles by clamping the client rect to `rcWork`.
 
-/// Strip the residual native caption buttons from THIS process's main top-level
-/// window so Windows stops painting them over the custom titlebar. Windows-only;
-/// a no-op everywhere else.
+/// Ensure THIS process's main top-level window draws no system caption buttons
+/// over the custom titlebar, by installing a one-time `WM_NCCALCSIZE` subclass
+/// that turns the whole window into client area. Windows-only; a no-op
+/// everywhere else.
 ///
-/// Safe + cheap to call every frame: the HWND is discovered once and cached, the
-/// `WS_*` style change is only issued when the bits are actually present (e.g.
-/// after a maximize re-applies winit's window styles), and DWM non-client
-/// rendering is disabled (re-asserted each frame — one cheap `dwmapi` call, no
-/// frame recalc) so the system caption can't bleed through a transparent window.
+/// Safe + cheap to call every frame: the HWND is discovered once and cached, and
+/// the subclass is installed exactly once (subsequent calls are a single relaxed
+/// atomic load).
 #[cfg(windows)]
 pub fn ensure_caption_stripped() {
-    imp::ensure_caption_stripped();
+    imp::ensure_borderless();
 }
 
 /// No-op on non-Windows platforms (the bug is Windows-DWM-specific).
@@ -34,20 +57,29 @@ pub fn ensure_caption_stripped() {}
 
 #[cfg(windows)]
 mod imp {
-    use std::sync::atomic::{AtomicIsize, Ordering};
-    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use windows_sys::Win32::Graphics::Dwm::{
-        DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY,
+    use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+
+    use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::Shell::{
+        DefSubclassProc, SHAppBarMessage, SetWindowSubclass, ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible,
-        SetWindowLongPtrW, SetWindowPos, GWL_STYLE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+        EnumWindows, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible, SetWindowPos,
+        GWL_STYLE, NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, WM_NCCALCSIZE, WS_MAXIMIZE,
     };
 
     /// Cached main-window HWND (0 = not yet found). One window per process.
     static CACHED_HWND: AtomicIsize = AtomicIsize::new(0);
+    /// Set once the NC subclass is successfully installed (install is one-shot).
+    static SUBCLASSED: AtomicBool = AtomicBool::new(false);
+
+    /// A stable, arbitrary subclass id for our single subclass entry.
+    const SUBCLASS_ID: usize = 0x5C_1B_3E;
 
     /// `EnumWindows` callback: record the first visible top-level window owned by
     /// this process into the `*mut isize` passed via `lparam`, then stop.
@@ -71,15 +103,90 @@ mod imp {
         found
     }
 
-    fn strip(hwnd: isize) {
-        let bits = (WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX) as isize;
-        // SAFETY: `hwnd` is an OS window handle owned by this process; these are
-        // the canonical style-query / style-set / frame-recalc calls.
+    /// Whether the window is currently maximized (its `WS_MAXIMIZE` style is set).
+    fn is_maximized(hwnd: HWND) -> bool {
+        // SAFETY: `hwnd` is an OS window owned by this process; GWL_STYLE read.
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+        style & WS_MAXIMIZE != 0
+    }
+
+    /// The work area (screen minus taskbar) of the monitor the window is on.
+    fn monitor_work_area(hwnd: HWND) -> Option<RECT> {
+        // SAFETY: canonical monitor-info query; `mi.cbSize` set before the call.
+        unsafe {
+            let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if mon.is_null() {
+                return None;
+            }
+            let mut mi: MONITORINFO = std::mem::zeroed();
+            mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(mon, &mut mi) != 0 {
+                Some(mi.rcWork)
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Whether any taskbar is in auto-hide mode. A borderless window that
+    /// maximally covers an auto-hide taskbar's edge prevents it from popping up;
+    /// the caller insets that edge by 1px to keep it reachable.
+    fn taskbar_is_autohide() -> bool {
+        // SAFETY: canonical app-bar state query; `cbSize` set before the call.
+        unsafe {
+            let mut abd: APPBARDATA = std::mem::zeroed();
+            abd.cbSize = std::mem::size_of::<APPBARDATA>() as u32;
+            let state = SHAppBarMessage(ABM_GETSTATE, &mut abd) as u32;
+            state & ABS_AUTOHIDE != 0
+        }
+    }
+
+    /// The `WM_NCCALCSIZE` subclass: turn the whole window into client area so
+    /// the OS reserves no non-client strip (hence draws no caption buttons),
+    /// while keeping a maximized window inside the monitor work area.
+    unsafe extern "system" fn nc_subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _ref: usize,
+    ) -> LRESULT {
+        if msg == WM_NCCALCSIZE && wparam != 0 {
+            // wParam == TRUE: `lparam` is `*mut NCCALCSIZE_PARAMS`. Returning 0
+            // with `rgrc[0]` (the proposed client rect) left as the full window
+            // rect makes the entire window client area → no NC caption strip →
+            // no system min/max/close, opaque or transparent.
+            if is_maximized(hwnd) {
+                // A borderless maximize would otherwise cover the taskbar. Clamp
+                // the client rect to the monitor work area.
+                if let Some(mut work) = monitor_work_area(hwnd) {
+                    if taskbar_is_autohide() {
+                        // Leave a 1px sliver on the bottom so an auto-hide
+                        // taskbar (the common edge) can still pop up.
+                        work.bottom -= 1;
+                    }
+                    let params = lparam as *mut NCCALCSIZE_PARAMS;
+                    (*params).rgrc[0] = work;
+                }
+            }
+            return 0;
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+
+    /// Install the NC subclass on `hwnd` and force a frame recalculation so the
+    /// new (zero) non-client area takes effect immediately. Returns whether the
+    /// subclass was installed.
+    fn install_nc_subclass(hwnd: isize) -> bool {
+        // SAFETY: `hwnd` is an OS window owned by this process; this is the
+        // canonical comctl32 subclass install + a frame-changed re-layout.
         unsafe {
             let h = hwnd as HWND;
-            let style = GetWindowLongPtrW(h, GWL_STYLE);
-            if style & bits != 0 {
-                SetWindowLongPtrW(h, GWL_STYLE, style & !bits);
+            let ok = SetWindowSubclass(h, Some(nc_subclass_proc), SUBCLASS_ID, 0) != 0;
+            if ok {
+                // "The new client area is not visible until the client region
+                // needs to be resized" — trigger it once.
                 SetWindowPos(
                     h,
                     std::ptr::null_mut(),
@@ -90,45 +197,20 @@ mod imp {
                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                 );
             }
+            ok
         }
     }
 
-    /// Tell DWM to STOP rendering this window's non-client area, so it never
-    /// composites the system caption buttons over our custom titlebar.
-    ///
-    /// The `strip` above removes the WS_* STYLE bits that ASK Windows for the
-    /// buttons — that is sufficient on an OPAQUE window. But with a TRANSPARENT
-    /// window the system caption was still being composited by DWM and bled
-    /// THROUGH the translucent panel fills (when opaque, the solid panel hid it;
-    /// when translucent, it showed — the "doubled min/max/close with transparency
-    /// on" report). `DWMNCRP_DISABLED` disables DWM's non-client rendering for the
-    /// window entirely, which is the composition-layer complement to the style
-    /// strip. Idempotent and cheap (one `dwmapi` call, no frame recalc), so it is
-    /// re-asserted every frame in case enabling transparency re-enables NC
-    /// rendering.
-    fn disable_dwm_nc_rendering(hwnd: isize) {
-        let policy: i32 = DWMNCRP_DISABLED;
-        // SAFETY: `hwnd` is an OS window owned by this process; this is the
-        // canonical DWM attribute-set call (4-byte DWMNCRENDERINGPOLICY value).
-        unsafe {
-            DwmSetWindowAttribute(
-                hwnd as HWND,
-                DWMWA_NCRENDERING_POLICY as u32,
-                std::ptr::addr_of!(policy).cast::<core::ffi::c_void>(),
-                std::mem::size_of::<i32>() as u32,
-            );
-        }
-    }
-
-    pub fn ensure_caption_stripped() {
+    pub fn ensure_borderless() {
         let mut hwnd = CACHED_HWND.load(Ordering::Relaxed);
         if hwnd == 0 {
             hwnd = find_main_window();
             CACHED_HWND.store(hwnd, Ordering::Relaxed);
         }
-        if hwnd != 0 {
-            strip(hwnd);
-            disable_dwm_nc_rendering(hwnd);
+        // Install the subclass exactly once (early frames may run before the
+        // window exists; we retry each frame until it does, then stop).
+        if hwnd != 0 && !SUBCLASSED.load(Ordering::Relaxed) && install_nc_subclass(hwnd) {
+            SUBCLASSED.store(true, Ordering::Relaxed);
         }
     }
 }
