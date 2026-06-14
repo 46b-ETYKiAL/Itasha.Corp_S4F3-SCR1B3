@@ -1574,17 +1574,31 @@ impl ScribeApp {
         for id in &items {
             self.toolbar_item(ui, id, act, save_cfg, start_lsp);
         }
-        // User-curated "⋯" dropdown — actions the user parked here to keep the
-        // bar clean. Shown only when the toggle is on AND there are parked actions.
+        // User-curated overflow dropdown — actions the user parked here to keep
+        // the bar clean. Shown only when the toggle is on AND there are parked
+        // actions. The trigger is PAINTED three dots, NOT the "⋯" glyph: U+22EF
+        // renders as a tofu □ in this build's font atlas (the same egui-phosphor
+        // .notdef footgun that forced the grip to paint its dots), so a glyph
+        // trigger showed an empty square. Painted dots are font-independent and
+        // read as a clean "more actions" affordance.
         let menu = self.config.toolbar.menu.clone();
         if self.config.toolbar.show_dropdown && !menu.is_empty() {
-            ui.menu_button("⋯", |ui| {
+            let dot = ui.visuals().weak_text_color();
+            let btn_h = ui.spacing().interact_size.y;
+            let btn = egui::Button::new("").min_size(egui::vec2(22.0, btn_h));
+            let resp = egui::menu::menu_custom_button(ui, btn, |ui| {
                 for id in &menu {
                     self.toolbar_item(ui, id, act, save_cfg, start_lsp);
                 }
             })
             .response
             .on_hover_text("More actions");
+            // Paint a horizontal 3-dot "⋯" centered in the button rect.
+            let c = resp.rect.center();
+            let painter = ui.painter();
+            for dx in [-4.0_f32, 0.0, 4.0] {
+                painter.circle_filled(egui::pos2(c.x + dx, c.y), 1.6, dot);
+            }
         }
     }
 
@@ -2095,10 +2109,10 @@ impl ScribeApp {
         let Some(path) = Config::config_file_path() else {
             return;
         };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match std::fs::write(&path, self.config.to_toml_string()) {
+        // Atomic, never-empty write (Config::save_to): the config WATCHER must
+        // never observe a partial file, or it reloads later-section defaults over
+        // the in-memory settings (the "settings revert after reopen" bug).
+        match self.config.save_to(&path) {
             Ok(()) => self.status = "settings saved".to_string(),
             Err(e) => {
                 let msg = format!("could not save settings: {e}");
@@ -2689,8 +2703,10 @@ impl ScribeApp {
     /// clamped so a very long filename can't make the bar enormous.
     fn side_tab_bar_width(&self, ctx: &egui::Context, rotated: bool) -> f32 {
         if rotated {
-            // Vertical-text column + the close/pin buttons stacked above it.
-            return 44.0;
+            // Vertical-text column + the grip/pin/close stacked above it. Kept
+            // snug to the content (was a fat 44) so a rotated tab's thickness is
+            // close to a horizontal tab's height instead of floating in a wide bar.
+            return 30.0;
         }
         let font = ctx
             .style()
@@ -2742,7 +2758,11 @@ impl ScribeApp {
         let mut dragging: Option<egui::Pos2> = None;
         let mut rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(self.tabs.len());
         let mut add_tab = false;
-        let pad = egui::vec2(8.0, 10.0);
+        // `pad.x` is the cross-axis (screen left/right) padding around the
+        // vertical text — kept tight so the rotated tab's thickness matches a
+        // horizontal tab rather than looking chunky. `pad.y` is along the reading
+        // direction (the word's ends).
+        let pad = egui::vec2(6.0, 8.0);
         let font = egui::TextStyle::Button.resolve(ui.style());
 
         for i in 0..self.tabs.len() {
@@ -7309,6 +7329,10 @@ impl ScribeApp {
                             }
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Inset from the right window edge so the last glyph
+                            // isn't flush against it (right_to_left places this
+                            // space at the right edge, before the text).
+                            ui.add_space(8.0);
                             ui.label(RichText::new(&self.status).color(muted).small().monospace());
                         });
                     });
@@ -10319,38 +10343,41 @@ mod e2e {
         );
     }
 
-    /// The Settings → Toolbar "show ⋯ dropdown" toggle hides the overflow menu
-    /// button even when actions are parked in it.
+    /// The Settings → Toolbar "show dropdown" toggle adds/removes exactly one
+    /// toolbar button (the painted-dots overflow trigger). The trigger is a
+    /// painted button with no text label (the "⋯" glyph tofu'd), so we count
+    /// toolbar-band Button nodes rather than match a glyph label.
     #[test]
-    fn toolbar_dropdown_toggle_hides_overflow_menu() {
+    fn toolbar_dropdown_toggle_changes_button_count() {
         use egui_kittest::kittest::NodeT as _;
+        let count_toolbar_buttons = |h: &egui_kittest::Harness<'_, ScribeApp>| {
+            h.root()
+                .children_recursive()
+                .filter(|n| {
+                    let ak = n.accesskit_node();
+                    format!("{:?}", ak.role()) == "Button"
+                        && ak.bounding_box().map(|b| b.y0 < 60.0).unwrap_or(false)
+                })
+                .count()
+        };
         let mut cfg = Config::default();
         cfg.editor.first_run_completed = true;
-        // Short toolbar so the row never overflows and the ⋯ stays on-screen.
         cfg.toolbar.items = vec!["save".to_string()];
         cfg.toolbar.menu = vec!["find".to_string()]; // a parked action → dropdown wants to show
         cfg.toolbar.show_dropdown = true;
-        // The overflow menu button is the U+22EF midline ellipsis (matches the
-        // `menu_button("\u{22ef}", …)` in `toolbar_contents`).
-        let ellipsis = "\u{22ef}";
-        let has_dropdown = |h: &egui_kittest::Harness<'_, ScribeApp>| {
-            h.root()
-                .children_recursive()
-                .any(|n| n.accesskit_node().label().as_deref() == Some(ellipsis))
-        };
         let mut h = ui_harness(ScribeApp::new_test(cfg));
         h.run();
         h.run();
-        assert!(
-            has_dropdown(&h),
-            "dropdown must show when the toggle is ON and a menu action is parked"
-        );
+        let with = count_toolbar_buttons(&h);
         h.state_mut().config.toolbar.show_dropdown = false;
         h.run();
         h.run();
-        assert!(
-            !has_dropdown(&h),
-            "dropdown must be hidden when the toggle is OFF"
+        let without = count_toolbar_buttons(&h);
+        assert_eq!(
+            with,
+            without + 1,
+            "toggling the dropdown OFF must remove exactly one toolbar button \
+             (with={with}, without={without})"
         );
     }
 

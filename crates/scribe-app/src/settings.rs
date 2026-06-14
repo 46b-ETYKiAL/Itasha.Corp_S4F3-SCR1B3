@@ -2358,12 +2358,16 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         }
     });
 
-    // ---- User-curated "⋯" dropdown menu ----
+    // ---- User-curated "more-actions" dropdown menu ----
     ui.add_space(8.0);
-    ui.label(egui::RichText::new("Dropdown (⋯ menu)").strong().small());
+    ui.label(
+        egui::RichText::new("Dropdown (more-actions menu)")
+            .strong()
+            .small(),
+    );
     ui.label(
         egui::RichText::new(
-            "Actions parked in the toolbar's ⋯ menu — reachable without taking a toolbar slot, \
+            "Actions parked in the toolbar's more-actions menu — reachable without taking a toolbar slot, \
              so the bar stays clean.",
         )
         .weak()
@@ -2372,10 +2376,10 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     if ui
         .checkbox(
             &mut config.toolbar.show_dropdown,
-            "Show the ⋯ dropdown on the toolbar",
+            "Show the more-actions dropdown on the toolbar",
         )
         .on_hover_text(
-            "When off, the ⋯ overflow button is hidden even if actions are parked in it \
+            "When off, the overflow button is hidden even if actions are parked in it \
              (they stay reachable via the command palette).",
         )
         .changed()
@@ -2388,7 +2392,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         ui.horizontal(|ui| {
             if ui
                 .button(ph::X)
-                .on_hover_text("Remove from the ⋯ menu")
+                .on_hover_text("Remove from the menu")
                 .clicked()
             {
                 menu_rm = Some(i);
@@ -2416,7 +2420,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
                 }
             })
             .response
-            .on_hover_text("Pick an action to add to the ⋯ dropdown.");
+            .on_hover_text("Pick an action to add to the more-actions dropdown.");
     });
     changed
 }
