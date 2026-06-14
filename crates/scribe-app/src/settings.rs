@@ -2178,7 +2178,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
                 // DOTS_SIX_VERTICAL glyph rendered as a tofu square in this build's
                 // atlas (#89), so we paint the dots (font-independent).
                 let grip_c = ui.visuals().weak_text_color();
-                crate::app::grip_handle(ui, false, grip_c)
+                crate::app::grip_handle(ui, false, grip_c, false)
                     .on_hover_text("Drag to reorder")
                     .on_hover_cursor(egui::CursorIcon::Grab);
                 if ui
@@ -2319,7 +2319,7 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         // Painted dot-grip (the phosphor glyph tofu'd in this atlas).
                         let grip_c = ui.visuals().weak_text_color();
-                        crate::app::grip_handle(ui, false, grip_c);
+                        crate::app::grip_handle(ui, false, grip_c, false);
                         ui.label(*label);
                     });
                 })
@@ -2369,6 +2369,19 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         .weak()
         .small(),
     );
+    if ui
+        .checkbox(
+            &mut config.toolbar.show_dropdown,
+            "Show the ⋯ dropdown on the toolbar",
+        )
+        .on_hover_text(
+            "When off, the ⋯ overflow button is hidden even if actions are parked in it \
+             (they stay reachable via the command palette).",
+        )
+        .changed()
+    {
+        changed = true;
+    }
     let mut menu_rm: Option<usize> = None;
     for i in 0..config.toolbar.menu.len() {
         let label = action_label(&config.toolbar.menu[i]);

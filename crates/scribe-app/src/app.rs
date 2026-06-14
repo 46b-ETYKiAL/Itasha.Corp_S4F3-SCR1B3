@@ -415,6 +415,12 @@ pub struct ScribeApp {
     /// `config.fonts.editor_family` diverges from this, the font set is rebuilt
     /// and re-applied — a restart-free font-theme switch.
     applied_font_family: String,
+    /// Set the frame a font switch calls `ctx.set_fonts`. `set_fonts` only takes
+    /// effect at the START of the NEXT frame, so the galley caches must be dropped
+    /// AGAIN on that next frame (after the new atlas is live) — clearing them only
+    /// on the switch frame re-bakes a galley against the still-OLD atlas, which is
+    /// why the note briefly rendered blank/garbled until the next edit re-keyed it.
+    font_rebuild_pending: bool,
     /// Set when the user asks to close (custom titlebar ✕). Funnels into the
     /// same two-phase close path as an OS-initiated close.
     want_close: bool,
@@ -867,6 +873,7 @@ impl ScribeApp {
             tabs,
             visuals_applied: false,
             applied_font_family: String::new(),
+            font_rebuild_pending: false,
             applied_note_theme: String::new(),
             want_close: false,
             closing: false,
@@ -1043,13 +1050,13 @@ impl ScribeApp {
                                 // vanished against the active chip's accent fill).
                                 let grip_color = muted;
                                 if pinned {
-                                    grip_handle(ui, false, grip_color)
+                                    grip_handle(ui, false, grip_color, false)
                                         .on_hover_text("Pinned — drag disabled");
                                 } else {
                                     // `drag_started()` fires ONCE on drag start (egui_tiles
                                     // expects a single `DragStarted`); a held-button check
                                     // would re-fire every frame and wedge the tile drag.
-                                    let handle = grip_handle(ui, true, grip_color)
+                                    let handle = grip_handle(ui, true, grip_color, false)
                                         .on_hover_text("Drag to rearrange")
                                         .on_hover_cursor(egui::CursorIcon::Grab);
                                     if handle.drag_started() {
@@ -1568,9 +1575,9 @@ impl ScribeApp {
             self.toolbar_item(ui, id, act, save_cfg, start_lsp);
         }
         // User-curated "⋯" dropdown — actions the user parked here to keep the
-        // bar clean. Shown only when non-empty.
+        // bar clean. Shown only when the toggle is on AND there are parked actions.
         let menu = self.config.toolbar.menu.clone();
-        if !menu.is_empty() {
+        if self.config.toolbar.show_dropdown && !menu.is_empty() {
             ui.menu_button("⋯", |ui| {
                 for id in &menu {
                     self.toolbar_item(ui, id, act, save_cfg, start_lsp);
@@ -2767,11 +2774,12 @@ impl ScribeApp {
                     // #30 column order: grip · rotated-name · pin · close (top→bottom).
                     // Drag GRIP at the head — painted dots (`grip_handle`), never a
                     // phosphor glyph, so the handle can't tofu. Pinned tabs show a
-                    // dimmed, drag-disabled grip.
+                    // dimmed, drag-disabled grip. `rotated = true` turns the grip on
+                    // its side (3×2 dots) so it matches the vertical-text tab.
                     if pinned {
-                        grip_handle(ui, false, muted).on_hover_text("Pinned — drag disabled");
+                        grip_handle(ui, false, muted, true).on_hover_text("Pinned — drag disabled");
                     } else {
-                        let g = grip_handle(ui, true, muted)
+                        let g = grip_handle(ui, true, muted, true)
                             .on_hover_text("Drag to reorder")
                             .on_hover_cursor(egui::CursorIcon::Grab);
                         if g.dragged() {
@@ -3052,9 +3060,10 @@ impl ScribeApp {
                     // disabled, which is how pinned state now reads.
                     {
                         if pinned {
-                            grip_handle(ui, false, muted).on_hover_text("Pinned — drag disabled");
+                            grip_handle(ui, false, muted, false)
+                                .on_hover_text("Pinned — drag disabled");
                         } else {
-                            let g = grip_handle(ui, true, muted)
+                            let g = grip_handle(ui, true, muted, false)
                                 .on_hover_text("Drag to reorder")
                                 .on_hover_cursor(egui::CursorIcon::Grab);
                             if g.dragged() {
@@ -4984,21 +4993,39 @@ fn panel_fill(
     }
 }
 
-/// Paint a 2×3 dot drag-grip and return its response. We paint the dots instead
-/// of drawing the phosphor `DOTS_SIX_VERTICAL` glyph because that PUA codepoint
+/// Paint a dot drag-grip and return its response. We paint the dots instead of
+/// drawing the phosphor `DOTS_SIX_VERTICAL` glyph because that PUA codepoint
 /// renders as a tofu square in this build's font atlas (the glyph IS in the
 /// font and phosphor IS registered in both families, yet egui's atlas resolves
 /// it to .notdef here — a known egui-phosphor footgun). Painted dots are
 /// font-independent and always render as a clean, recognizable grip. `enabled`
 /// = false dims it and drops the drag sense (used for pinned panes).
-pub(crate) fn grip_handle(ui: &mut egui::Ui, enabled: bool, color: Color32) -> egui::Response {
+///
+/// `rotated` flips the grip's orientation to MATCH the tab's text orientation:
+/// `false` (default) paints a 2×3 column of dots (a tall handle) for horizontal
+/// tabs/headers; `true` paints a 3×2 row of dots (a wide handle) for the rotated
+/// (vertical-text) side tabs, so the grip reads as a handle in that orientation
+/// instead of staying vertical against horizontal text.
+pub(crate) fn grip_handle(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    color: Color32,
+    rotated: bool,
+) -> egui::Response {
     let h = ui.text_style_height(&egui::TextStyle::Body);
     let sense = if enabled {
         egui::Sense::click_and_drag()
     } else {
         egui::Sense::hover()
     };
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(11.0, h), sense);
+    // Swap the allocation's aspect with the orientation: tall+narrow for the
+    // vertical handle, wide+short for the rotated (horizontal) handle.
+    let size = if rotated {
+        egui::vec2(h.max(15.0), 11.0)
+    } else {
+        egui::vec2(11.0, h)
+    };
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
     let dim = if enabled {
         color
     } else {
@@ -5006,8 +5033,15 @@ pub(crate) fn grip_handle(ui: &mut egui::Ui, enabled: bool, color: Color32) -> e
     };
     let c = rect.center();
     let painter = ui.painter();
-    for &x in &[c.x - 2.5, c.x + 2.5] {
-        for &y in &[c.y - 4.5, c.y, c.y + 4.5] {
+    // 2 cols × 3 rows (vertical) vs 3 cols × 2 rows (rotated) — the dot grid is
+    // transposed so the handle's long axis follows the tab's long axis.
+    let (xs, ys): (&[f32], &[f32]) = if rotated {
+        (&[c.x - 4.5, c.x, c.x + 4.5], &[c.y - 2.5, c.y + 2.5])
+    } else {
+        (&[c.x - 2.5, c.x + 2.5], &[c.y - 4.5, c.y, c.y + 4.5])
+    };
+    for &x in xs {
+        for &y in ys {
             painter.circle_filled(egui::pos2(x, y), 1.5, dim);
         }
     }
@@ -5654,6 +5688,16 @@ impl ScribeApp {
     /// `eframe::Frame`. Drives every top-level panel via the deprecated-but-
     /// functional `Panel::show(ctx, …)` path.
     pub(crate) fn frame_tick(&mut self, ctx: &egui::Context) {
+        // Font-switch step 2 (see step 1 at the `ctx.set_fonts` call below):
+        // `set_fonts` took effect at the START of this frame, so the NEW atlas is
+        // now live. Drop the galley caches that were (re)baked against the OLD
+        // atlas on the switch frame, BEFORE any panel renders this frame — the
+        // editor then re-bakes against the new atlas and the note paints correctly
+        // immediately (no blank/garbled frame, no need to type to refresh).
+        if self.font_rebuild_pending {
+            self.invalidate_galley_caches();
+            self.font_rebuild_pending = false;
+        }
         // Wave 2 scroll: apply the wheel-speed + jump-animation knobs and run the
         // middle-click autoscroll state machine BEFORE any ScrollArea shows this
         // frame (egui reads line_scroll_speed while building the wheel delta, and
@@ -5748,16 +5792,21 @@ impl ScribeApp {
         // whenever the chosen note OR UI family changes (cheap string compare).
         let font_key = font_state_key(&self.config.fonts);
         if font_key != self.applied_font_family {
+            // Font-switch step 1: queue the new font set. `set_fonts` only takes
+            // effect at the START of the NEXT frame — THIS frame still renders with
+            // the old atlas. So: drop the stale caches now (cheap), then mark a
+            // rebuild pending + request a repaint so step 2 (top of `frame_tick`)
+            // drops the caches AGAIN next frame once the new atlas is live. Without
+            // the next-frame drop, this frame re-bakes a galley against the still-
+            // old atlas and the note renders blank/garbled until the next edit.
             ctx.set_fonts(build_fonts(
                 &self.config.fonts.editor_family,
                 &self.config.fonts.ui_family,
             ));
             self.applied_font_family = font_key;
-            // The atlas was just rebuilt — drop every galley baked against the
-            // OLD atlas, or the note text repaints from stale glyph UVs and looks
-            // garbled. This fires for a NOTE-font OR a UI-font change (the latter
-            // was the reported "changing the app UI font breaks the note font").
             self.invalidate_galley_caches();
+            self.font_rebuild_pending = true;
+            ctx.request_repaint();
         }
 
         // #104 — apply the note syntax colour theme to the highlighter when it
@@ -6094,9 +6143,16 @@ impl ScribeApp {
             self.config.appearance.toolbar_in_titlebar && self.config.appearance.frameless;
 
         // ---- Custom frameless titlebar ----
+        // Height is CONSTANT regardless of `toolbar_in_titlebar` — it is sized to
+        // fit the quick-access toolbar buttons in BOTH states (so toggling the
+        // option never resizes the titlebar). It grows only if the user raises the
+        // toolbar button-size setting (a separate, expected knob), and never drops
+        // below the bare-chrome baseline (34). Previously it was 40 when the
+        // toolbar lived here and 34 otherwise, so flipping the toggle jumped it.
+        let titlebar_h = (self.config.toolbar.clamped_button_size() + 10.0).max(34.0);
         if self.config.appearance.frameless && !fullscreen {
             egui::TopBottomPanel::top("titlebar")
-                .exact_height(if toolbar_in_titlebar { 40.0 } else { 34.0 })
+                .exact_height(titlebar_h)
                 .frame(egui::Frame::default().fill(panel))
                 .show(ctx, |ui| {
                     let resp = ui.interact(
@@ -10242,6 +10298,41 @@ mod e2e {
             h.state().applied_font_family,
             before,
             "a UI-font change must trigger the font rebuild + cache invalidation"
+        );
+    }
+
+    /// The Settings → Toolbar "show ⋯ dropdown" toggle hides the overflow menu
+    /// button even when actions are parked in it.
+    #[test]
+    fn toolbar_dropdown_toggle_hides_overflow_menu() {
+        use egui_kittest::kittest::NodeT as _;
+        let mut cfg = Config::default();
+        cfg.editor.first_run_completed = true;
+        // Short toolbar so the row never overflows and the ⋯ stays on-screen.
+        cfg.toolbar.items = vec!["save".to_string()];
+        cfg.toolbar.menu = vec!["find".to_string()]; // a parked action → dropdown wants to show
+        cfg.toolbar.show_dropdown = true;
+        // The overflow menu button is the U+22EF midline ellipsis (matches the
+        // `menu_button("\u{22ef}", …)` in `toolbar_contents`).
+        let ellipsis = "\u{22ef}";
+        let has_dropdown = |h: &egui_kittest::Harness<'_, ScribeApp>| {
+            h.root()
+                .children_recursive()
+                .any(|n| n.accesskit_node().label().as_deref() == Some(ellipsis))
+        };
+        let mut h = ui_harness(ScribeApp::new_test(cfg));
+        h.run();
+        h.run();
+        assert!(
+            has_dropdown(&h),
+            "dropdown must show when the toggle is ON and a menu action is parked"
+        );
+        h.state_mut().config.toolbar.show_dropdown = false;
+        h.run();
+        h.run();
+        assert!(
+            !has_dropdown(&h),
+            "dropdown must be hidden when the toggle is OFF"
         );
     }
 
