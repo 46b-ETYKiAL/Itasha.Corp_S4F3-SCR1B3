@@ -18,10 +18,11 @@
 /// window so Windows stops painting them over the custom titlebar. Windows-only;
 /// a no-op everywhere else.
 ///
-/// Safe + cheap to call every frame: the HWND is discovered once and cached, and
-/// the style change is only issued when the bits are actually present (e.g. after
-/// a maximize re-applies winit's window styles), so the steady-state cost is a
-/// single `GetWindowLongPtrW` read.
+/// Safe + cheap to call every frame: the HWND is discovered once and cached, the
+/// `WS_*` style change is only issued when the bits are actually present (e.g.
+/// after a maximize re-applies winit's window styles), and DWM non-client
+/// rendering is disabled (re-asserted each frame — one cheap `dwmapi` call, no
+/// frame recalc) so the system caption can't bleed through a transparent window.
 #[cfg(windows)]
 pub fn ensure_caption_stripped() {
     imp::ensure_caption_stripped();
@@ -35,6 +36,9 @@ pub fn ensure_caption_stripped() {}
 mod imp {
     use std::sync::atomic::{AtomicIsize, Ordering};
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY,
+    };
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible,
@@ -89,6 +93,33 @@ mod imp {
         }
     }
 
+    /// Tell DWM to STOP rendering this window's non-client area, so it never
+    /// composites the system caption buttons over our custom titlebar.
+    ///
+    /// The `strip` above removes the WS_* STYLE bits that ASK Windows for the
+    /// buttons — that is sufficient on an OPAQUE window. But with a TRANSPARENT
+    /// window the system caption was still being composited by DWM and bled
+    /// THROUGH the translucent panel fills (when opaque, the solid panel hid it;
+    /// when translucent, it showed — the "doubled min/max/close with transparency
+    /// on" report). `DWMNCRP_DISABLED` disables DWM's non-client rendering for the
+    /// window entirely, which is the composition-layer complement to the style
+    /// strip. Idempotent and cheap (one `dwmapi` call, no frame recalc), so it is
+    /// re-asserted every frame in case enabling transparency re-enables NC
+    /// rendering.
+    fn disable_dwm_nc_rendering(hwnd: isize) {
+        let policy: i32 = DWMNCRP_DISABLED;
+        // SAFETY: `hwnd` is an OS window owned by this process; this is the
+        // canonical DWM attribute-set call (4-byte DWMNCRENDERINGPOLICY value).
+        unsafe {
+            DwmSetWindowAttribute(
+                hwnd as HWND,
+                DWMWA_NCRENDERING_POLICY as u32,
+                std::ptr::addr_of!(policy).cast::<core::ffi::c_void>(),
+                std::mem::size_of::<i32>() as u32,
+            );
+        }
+    }
+
     pub fn ensure_caption_stripped() {
         let mut hwnd = CACHED_HWND.load(Ordering::Relaxed);
         if hwnd == 0 {
@@ -97,6 +128,7 @@ mod imp {
         }
         if hwnd != 0 {
             strip(hwnd);
+            disable_dwm_nc_rendering(hwnd);
         }
     }
 }
