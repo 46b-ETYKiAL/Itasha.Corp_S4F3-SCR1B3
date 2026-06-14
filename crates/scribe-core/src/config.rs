@@ -604,7 +604,7 @@ pub struct FontConfig {
     pub line_height: f32,
     /// Editor monospace font family — a "font theme". One of the bundled
     /// (OFL-licensed) family display names; an unknown value falls back to the
-    /// default. Default: "JetBrains Mono".
+    /// default. Default: "IBM Plex Mono".
     #[serde(default = "default_editor_family")]
     pub editor_family: String,
     /// App-UI font family (the proportional text everywhere EXCEPT the note
@@ -620,7 +620,10 @@ fn default_editor_family() -> String {
 }
 
 fn default_ui_family() -> String {
-    "System default".to_string()
+    // Default the app UI to the same face as the note body (IBM Plex Mono) so the
+    // whole app reads as one typeface out of the box. Users can still pick
+    // "System default" or any other bundled family in Settings → Fonts.
+    "IBM Plex Mono".to_string()
 }
 
 impl Default for FontConfig {
@@ -748,6 +751,12 @@ pub struct ToolbarConfig {
     /// as `items` (`app::TOOLBAR_ACTIONS`).
     #[serde(default)]
     pub menu: Vec<String>,
+    /// Whether the "⋯" overflow dropdown is shown on the toolbar. Default ON —
+    /// when on, the dropdown appears whenever `menu` is non-empty; turn it off to
+    /// hide the dropdown button entirely (the parked actions stay reachable via
+    /// the command palette). Toggled in Settings → Toolbar.
+    #[serde(default = "default_true")]
+    pub show_dropdown: bool,
     /// Minimum height of each quick-access button in logical pixels. Clamped
     /// to [16.0, 64.0] at render time. Phase 18 T18.5.
     #[serde(default = "ToolbarConfig::default_button_size")]
@@ -807,6 +816,7 @@ impl Default for ToolbarConfig {
             .map(|s| s.to_string())
             .collect(),
             menu: Vec::new(),
+            show_dropdown: true,
             button_size_px: Self::default_button_size(),
             button_spacing_px: Self::default_button_spacing(),
             icon_size_px: Self::default_icon_size(),
@@ -1030,6 +1040,38 @@ mod tests {
         assert!(
             cfg.toolbar_in_titlebar,
             "missing toolbar_in_titlebar key must default ON"
+        );
+    }
+
+    #[test]
+    fn note_and_ui_font_default_to_ibm_plex_mono() {
+        let f = FontConfig::default();
+        assert_eq!(f.editor_family, "IBM Plex Mono");
+        assert_eq!(f.ui_family, "IBM Plex Mono");
+        // A config missing the keys resolves to the same defaults.
+        let parsed: FontConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.editor_family, "IBM Plex Mono");
+        assert_eq!(parsed.ui_family, "IBM Plex Mono");
+    }
+
+    #[test]
+    fn toolbar_dropdown_defaults_visible() {
+        assert!(ToolbarConfig::default().show_dropdown);
+        // Missing key also defaults ON (default_true), not bool::default()=false.
+        let cfg: ToolbarConfig = toml::from_str("").unwrap();
+        assert!(
+            cfg.show_dropdown,
+            "missing show_dropdown key must default ON"
+        );
+    }
+
+    #[test]
+    fn reopen_last_session_defaults_on() {
+        assert!(EditorConfig::default().restore_session);
+        let cfg: EditorConfig = toml::from_str("").unwrap();
+        assert!(
+            cfg.restore_session,
+            "missing restore_session must default ON"
         );
     }
 
