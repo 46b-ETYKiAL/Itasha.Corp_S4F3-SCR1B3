@@ -154,15 +154,21 @@ fn update_launch_action(
     now: u64,
 ) -> Option<crate::updater::LaunchKind> {
     use scribe_core::config::UpdateMode;
-    let kind = match mode {
-        UpdateMode::Off | UpdateMode::Manual => return None,
-        UpdateMode::Notify => crate::updater::LaunchKind::Notify,
-        UpdateMode::Auto => crate::updater::LaunchKind::Auto,
-    };
-    if !scribe_core::update::is_check_due(last_check_unix, interval_hours, now) {
-        return None;
+    match mode {
+        UpdateMode::Off | UpdateMode::Manual => None,
+        // Notify is a passive, dismissible banner backed by ONE lightweight
+        // GitHub-Releases GET, so it checks on EVERY launch. It must NOT be
+        // gated by the interval throttle or by `last_check_unix` — that field is
+        // ALSO stamped by the manual "Check for updates" button, so sharing it
+        // meant a recent manual check silently suppressed launch-notify for 24h
+        // and the user relaunched without ever learning a release was out (the
+        // reported bug). `last_check_unix`/`interval_hours` are irrelevant here.
+        UpdateMode::Notify => Some(crate::updater::LaunchKind::Notify),
+        // Auto downloads in the background, so it stays interval-throttled to
+        // avoid repeated bandwidth use across frequent relaunches.
+        UpdateMode::Auto => scribe_core::update::is_check_due(last_check_unix, interval_hours, now)
+            .then_some(crate::updater::LaunchKind::Auto),
     }
-    Some(kind)
 }
 
 /// A stable signature of the open-file set (sorted paths) for change detection.
@@ -2068,9 +2074,15 @@ impl ScribeApp {
         ) else {
             return;
         };
-        // Due: record the check time so the interval is honored next launch.
-        self.config.updates.last_check_unix = Some(now_unix());
-        self.save_config();
+        // Only AUTO consumes the interval throttle, so only Auto needs the
+        // timestamp persisted. Notify checks every launch and ignores
+        // `last_check_unix`, so stamping it here would just be a needless config
+        // write on every launch (and re-coupling it to the manual-check field
+        // this fix deliberately decoupled).
+        if matches!(kind, crate::updater::LaunchKind::Auto) {
+            self.config.updates.last_check_unix = Some(now_unix());
+            self.save_config();
+        }
         self.updater.start_check(ctx, kind);
     }
 
@@ -6717,6 +6729,10 @@ impl ScribeApp {
             )
             .collapsible(false)
             .resizable(false)
+            // A fixed width so the primary command-discovery surface opens at a
+            // consistent size (matching the other modal pickers) instead of
+            // sizing to its content. Aligns with go-to-symbol/recent/fuzzy.
+            .default_width(600.0)
             .anchor(egui::Align2::CENTER_TOP, [0.0, 64.0])
             .show(ctx, |ui| {
                 let r = ui.text_edit_singleline(&mut self.palette_query);
@@ -6909,6 +6925,9 @@ impl ScribeApp {
             )
             .collapsible(false)
             .resizable(false)
+            // Consistent fixed width like the other modal pickers (was
+            // content-sized, so it opened narrower/inconsistent).
+            .default_width(400.0)
             .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -10145,21 +10164,30 @@ mod update_reminder_tests {
     }
 
     #[test]
-    fn notify_checks_when_due_as_notify_kind() {
+    fn notify_checks_on_every_launch_regardless_of_interval_or_manual_check() {
+        // Regression for "relaunch shows no update notification": Notify must
+        // check on EVERY launch — the interval throttle and a recent manual
+        // "Check for updates" (which stamps `last_check_unix`) must NOT suppress
+        // it. Notify is a passive, dismissible banner + one light API GET.
         let last = 1_000;
-        // 1h after a 24h-interval check → not due.
+        // 1 minute after a check (e.g. a manual press) → STILL checks.
         assert_eq!(
-            update_launch_action(UpdateMode::Notify, Some(last), 24, last + HOUR),
-            None,
-        );
-        // 24h later → due → a Notify-kind check.
-        assert_eq!(
-            update_launch_action(UpdateMode::Notify, Some(last), 24, last + 24 * HOUR),
+            update_launch_action(UpdateMode::Notify, Some(last), 24, last + 60),
             Some(LaunchKind::Notify),
         );
-        // Never checked → always due.
+        // 1h after → STILL checks (old behaviour suppressed this).
+        assert_eq!(
+            update_launch_action(UpdateMode::Notify, Some(last), 24, last + HOUR),
+            Some(LaunchKind::Notify),
+        );
+        // Never checked → checks.
         assert_eq!(
             update_launch_action(UpdateMode::Notify, None, 24, 0),
+            Some(LaunchKind::Notify),
+        );
+        // Even a 0-hour interval is irrelevant to Notify.
+        assert_eq!(
+            update_launch_action(UpdateMode::Notify, Some(last), 0, last),
             Some(LaunchKind::Notify),
         );
     }

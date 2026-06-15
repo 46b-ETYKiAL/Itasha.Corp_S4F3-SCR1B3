@@ -191,7 +191,11 @@ pub fn show(
     // A tall default + bigger inner editors mean the UI/Syntax colour lists are
     // visible without forced scrolling. `_v4` discards the old fixed-size rect.
     let screen = ctx.content_rect();
-    let def_w = 920.0_f32.min(screen.width() - 24.0);
+    // Width = only as wide as the content needs: the 170px category nav + the
+    // content pane, whose widest page (Toolbar) is capped at TB_W (560) + the
+    // search row, so ~760 fits everything without the old slack. (Was 920, which
+    // opened noticeably wider than necessary.) Still user-resizable.
+    let def_w = 760.0_f32.min(screen.width() - 24.0);
     let def_h = 760.0_f32.min(screen.height() - 24.0);
     egui::Window::new("settings")
         .id(egui::Id::new("scr1b3_settings_v4"))
@@ -199,7 +203,7 @@ pub fn show(
         .collapsible(false)
         .resizable(true)
         .default_size([def_w, def_h])
-        .min_size([560.0, 380.0])
+        .min_size([500.0, 380.0])
         .max_height(screen.height() - 16.0)
         // #77 — force the Settings window OPAQUE. The app-window transparency /
         // glass setting drives a translucent `window_fill`; without this the
@@ -997,6 +1001,24 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+            if row_visible(q, "autoscroll dead zone deadzone") {
+                ui.label("Autoscroll dead zone").on_hover_text(
+                    "Radius (px) around the middle-click origin where the pointer produces NO \
+                     scrolling — a still zone so small jitters don't drift the page.",
+                );
+                changed |= ui
+                    .add(egui::Slider::new(
+                        &mut config.scroll.autoscroll_dead_zone,
+                        4.0..=40.0,
+                    ))
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.scroll.autoscroll_dead_zone,
+                    &def.scroll.autoscroll_dead_zone,
+                );
+                ui.end_row();
+            }
         });
         ui.add_space(6.0);
 
@@ -1747,9 +1769,13 @@ fn render_sections(
                     .clicked()
                 {
                     updater.start_check(ui.ctx(), crate::updater::LaunchKind::Manual);
-                    // Record the check so the on-launch interval respects it.
-                    config.updates.last_check_unix = Some(crate::app::now_unix());
-                    changed = true;
+                    // NOTE: a manual check deliberately does NOT stamp
+                    // `last_check_unix`. That field is the AUTO-mode interval
+                    // throttle; letting a manual press write it used to suppress
+                    // the on-launch Notify check for 24h, so the user could
+                    // relaunch and never be told a release was out. Notify now
+                    // checks every launch regardless of this field, and Auto's
+                    // throttle should not be reset by a manual press.
                 }
                 render_update_status(ui, updater);
             });
