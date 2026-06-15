@@ -1187,16 +1187,21 @@ show_dropdown = false
         // then opened by an older build, must be left untouched — and must not
         // trip the debug-only migration invariants (the old `<= CURRENT` assert
         // panicked here in debug builds).
-        let mut forward = Config::default();
-        forward.schema_version = CURRENT_SCHEMA_VERSION + 5;
-        let deliberate = UpdateMode::Off;
-        forward.updates.mode = deliberate;
+        // Built from TOML (not Default + field reassign — that trips clippy's
+        // field_reassign_with_default) so we also confirm schema_version
+        // round-trips through deserialization.
+        let ahead = CURRENT_SCHEMA_VERSION + 5;
+        let mut forward = Config::from_toml_str(&format!(
+            "schema_version = {ahead}\n[updates]\nmode = \"off\"\n"
+        ))
+        .unwrap();
+        assert_eq!(forward.schema_version, ahead);
         assert!(
             !forward.migrate(),
             "forward-version config must not be changed"
         );
-        assert_eq!(forward.schema_version, CURRENT_SCHEMA_VERSION + 5);
-        assert_eq!(forward.updates.mode, deliberate);
+        assert_eq!(forward.schema_version, ahead);
+        assert_eq!(forward.updates.mode, UpdateMode::Off);
     }
 
     #[test]

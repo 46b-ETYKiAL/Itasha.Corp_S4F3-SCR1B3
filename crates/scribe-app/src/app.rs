@@ -703,6 +703,15 @@ impl ScribeApp {
     pub fn new_test(mut config: Config) -> Self {
         config.editor.restore_session = false;
         config.plugins.enabled = false;
+        // Deterministic e2e: the default update mode is now `Notify`, whose
+        // once-per-launch check (`maybe_remind_update`) spawns a network thread
+        // and keeps requesting repaints — which makes `Harness::run` (bounded
+        // step budget) never settle and panic with "exceeded max_steps". Tests
+        // must do no network and must be timing-independent, so force the
+        // updater OFF here (alongside session-restore + plugins). A test that
+        // specifically exercises the updater sets the mode explicitly and drives
+        // the harness with `run_steps`/`step`.
+        config.updates.mode = scribe_core::config::UpdateMode::Off;
         let mut app = Self::build(config, None, None, false);
         // Redirect ALL config/session writes to a per-instance temp dir so a
         // test's periodic hot-exit snapshot never touches the real user config
