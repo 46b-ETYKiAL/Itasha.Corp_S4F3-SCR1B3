@@ -1912,8 +1912,222 @@ fn render_sections(
 /// means "append a new action from the palette".
 #[derive(Clone, Debug)]
 enum ToolbarDrag {
-    Reorder(usize),
-    AddAction(String),
+    /// Reorder within ONE list. `salt` scopes the drag to its editor so a drag
+    /// started in the quick-access list can't be dropped into the dropdown-menu
+    /// list (and vice versa) — both editors share the `ToolbarDrag` payload type,
+    /// so the salt is what keeps their drops from cross-contaminating.
+    Reorder { salt: &'static str, from: usize },
+    /// Add a palette action into the `salt` list at the drop position.
+    AddAction { salt: &'static str, id: String },
+}
+
+impl ToolbarDrag {
+    fn salt(&self) -> &'static str {
+        match self {
+            ToolbarDrag::Reorder { salt, .. } | ToolbarDrag::AddAction { salt, .. } => salt,
+        }
+    }
+}
+
+/// Apply a queued toolbar drop to `list`. `target` is the insertion slot. A
+/// reorder removes the source and re-inserts it (adjusting the target if the
+/// removal shifted it); an add inserts the new id. Pure + unit-tested so the
+/// shared drag behaviour of BOTH toolbar editors can't silently regress.
+fn apply_toolbar_drop(list: &mut Vec<String>, target: usize, drag: ToolbarDrag) -> bool {
+    match drag {
+        ToolbarDrag::Reorder { from, .. } => {
+            if from >= list.len() {
+                return false;
+            }
+            let item = list.remove(from);
+            let t = if from < target { target - 1 } else { target };
+            list.insert(t.min(list.len()), item);
+            true
+        }
+        ToolbarDrag::AddAction { id, .. } => {
+            list.insert(target.min(list.len()), id);
+            true
+        }
+    }
+}
+
+/// One toolbar-list editor used by BOTH the quick-access list and the
+/// dropdown-menu list, so they look and behave identically (the prior divergence
+/// — one drag-based, one click-based — was the "needs uniformity" report). Each
+/// row is a grip + drag-to-reorder source with keyboard ↑/↓/✕; the palette below
+/// is a 3-column grid of chips that DRAG onto the list (insert at position) or
+/// CLICK to append. `salt` scopes the drag-and-drop to this list; `allow_sep`
+/// includes the separator action (meaningful only for the quick-access bar).
+/// Returns whether the list changed.
+fn toolbar_list_editor(
+    ui: &mut egui::Ui,
+    list: &mut Vec<String>,
+    salt: &'static str,
+    allow_sep: bool,
+) -> bool {
+    use egui_phosphor::thin as ph;
+    let mut changed = false;
+    let mut mv: Option<(usize, isize)> = None;
+    let mut rm: Option<usize> = None;
+    let mut drop_actions: Vec<(usize, ToolbarDrag)> = Vec::new();
+    let n = list.len();
+    // The in-flight drag, but ONLY if it belongs to this list (so insertion
+    // guides + drop zones stay scoped and don't react to the other editor).
+    let dragged: Option<ToolbarDrag> = egui::DragAndDrop::payload::<ToolbarDrag>(ui.ctx())
+        .map(|arc| (*arc).clone())
+        .filter(|d| d.salt() == salt);
+
+    if n == 0 {
+        ui.label(
+            egui::RichText::new("Empty — drag a chip from the palette, or click it to add.")
+                .weak()
+                .small(),
+        );
+    }
+    for (i, item) in list.iter().enumerate() {
+        let label = action_label(item);
+        let drag_id = egui::Id::new((salt, "row-drag", i));
+        ui.dnd_drag_source(drag_id, ToolbarDrag::Reorder { salt, from: i }, |ui| {
+            ui.horizontal(|ui| {
+                let grip_c = ui.visuals().weak_text_color();
+                crate::app::grip_handle(ui, false, grip_c, false)
+                    .on_hover_text("Drag to reorder")
+                    .on_hover_cursor(egui::CursorIcon::Grab);
+                if ui
+                    .add_enabled(i > 0, egui::Button::new(ph::CARET_UP))
+                    .on_hover_text("Move up")
+                    .clicked()
+                {
+                    mv = Some((i, -1));
+                }
+                if ui
+                    .add_enabled(i + 1 < n, egui::Button::new(ph::CARET_DOWN))
+                    .on_hover_text("Move down")
+                    .clicked()
+                {
+                    mv = Some((i, 1));
+                }
+                if ui.button(ph::X).on_hover_text("Remove").clicked() {
+                    rm = Some(i);
+                }
+                ui.label(label);
+            });
+        });
+        let (_resp, dropped) = ui.dnd_drop_zone::<ToolbarDrag, _>(
+            egui::Frame::default()
+                .inner_margin(egui::Margin::symmetric(2, 1))
+                .stroke(egui::Stroke::NONE),
+            |ui| {
+                if dragged.is_some() {
+                    ui.add(egui::Separator::default().horizontal().spacing(1.0));
+                } else {
+                    ui.add_space(2.0);
+                }
+            },
+        );
+        if let Some(payload) = dropped {
+            if payload.salt() == salt {
+                drop_actions.push((i + 1, (*payload).clone()));
+            }
+        }
+    }
+    // Leading drop zone so a drag can land at index 0.
+    let (_lead, lead_dropped) = ui.dnd_drop_zone::<ToolbarDrag, _>(
+        egui::Frame::default()
+            .inner_margin(egui::Margin::symmetric(2, 1))
+            .stroke(egui::Stroke::NONE),
+        |ui| {
+            if dragged.is_some() {
+                ui.label(egui::RichText::new("drop here for the top").weak().small());
+            } else {
+                ui.add_space(2.0);
+            }
+        },
+    );
+    if let Some(payload) = lead_dropped {
+        if payload.salt() == salt {
+            drop_actions.push((0, (*payload).clone()));
+        }
+    }
+
+    if let Some((i, d)) = mv {
+        let j = (i as isize + d).clamp(0, n as isize - 1) as usize;
+        if i != j {
+            list.swap(i, j);
+            changed = true;
+        }
+    }
+    if let Some(i) = rm {
+        list.remove(i);
+        changed = true;
+    }
+    // Apply drops in reverse so earlier insertions don't shift later targets.
+    for (target, drag) in drop_actions.into_iter().rev() {
+        if apply_toolbar_drop(list, target, drag) {
+            changed = true;
+        }
+    }
+
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new("Palette (drag onto the list, or click to add)")
+            .strong()
+            .small(),
+    );
+    // 3-column GRID (bounded width, never `available_width` — see TB_W note) of
+    // chips that are BOTH drag sources AND clickable. Click = append; drag =
+    // insert at the drop position.
+    egui::Grid::new((salt, "palette"))
+        .num_columns(3)
+        .spacing([6.0, 6.0])
+        .show(ui, |ui| {
+            let mut col = 0;
+            for (id, plabel) in crate::app::TOOLBAR_ACTIONS {
+                if !allow_sep && *id == "sep" {
+                    continue;
+                }
+                let drag_id = egui::Id::new((salt, "palette-drag", *id));
+                let resp = ui
+                    .dnd_drag_source(
+                        drag_id,
+                        ToolbarDrag::AddAction {
+                            salt,
+                            id: (*id).to_string(),
+                        },
+                        |ui| {
+                            let chip = egui::Frame::default()
+                                .inner_margin(egui::Margin::symmetric(6, 3))
+                                .fill(ui.visuals().widgets.inactive.bg_fill)
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    ui.visuals().widgets.inactive.bg_stroke.color,
+                                ))
+                                .corner_radius(egui::CornerRadius::same(4));
+                            chip.show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let grip_c = ui.visuals().weak_text_color();
+                                crate::app::grip_handle(ui, false, grip_c, false);
+                                ui.label(*plabel);
+                            });
+                        },
+                    )
+                    .response
+                    .on_hover_text("Drag onto the list above, or click, to add")
+                    .on_hover_cursor(egui::CursorIcon::Grab);
+                // Chips are draggable (Sense::drag) AND clickable: a press that
+                // doesn't turn into a drag appends the action — the keyboard- and
+                // click-friendly add path that replaces the old combobox.
+                if resp.clicked() {
+                    list.push((*id).to_string());
+                    changed = true;
+                }
+                col += 1;
+                if col % 3 == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+    changed
 }
 
 /// Add / remove / reorder the quick-access toolbar items. Returns `true` on any
@@ -2077,7 +2291,6 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
 }
 
 fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
-    use egui_phosphor::thin as ph;
     let mut changed = false;
     // Cap the editor content to a FIXED width (NOT available_width). This is the
     // load-bearing line for "the Settings window doesn't widen on the Toolbar
@@ -2180,212 +2393,18 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     }
     ui.add_space(8.0);
     ui.label(egui::RichText::new("Items").strong().small());
-
-    let mut mv: Option<(usize, isize)> = None;
-    let mut rm: Option<usize> = None;
-    // Drop-action queue: (target_index, payload). Applied after the row loop
-    // so the mutation doesn't invalidate iterator state.
-    let mut drop_actions: Vec<(usize, ToolbarDrag)> = Vec::new();
-    let n = config.toolbar.items.len();
-    // Track the current dragged index (if any) so we can paint a thin
-    // insertion guide between rows. egui's DnD doesn't expose the live
-    // pointer/dragged index directly; we read DragAndDrop::payload from
-    // the context to peek without consuming.
-    let dragged: Option<ToolbarDrag> =
-        egui::DragAndDrop::payload::<ToolbarDrag>(ui.ctx()).map(|arc| (*arc).clone());
-    for i in 0..n {
-        let label = action_label(&config.toolbar.items[i]);
-        // Each row is a drag source carrying `Reorder(i)`. egui paints the
-        // body at the cursor while dragging — free live preview.
-        let drag_id = egui::Id::new(("scr1b3-toolbar-item-drag", i));
-        ui.dnd_drag_source(drag_id, ToolbarDrag::Reorder(i), |ui| {
-            ui.horizontal(|ui| {
-                // A painted dot-grip signals "this row is draggable". The phosphor
-                // DOTS_SIX_VERTICAL glyph rendered as a tofu square in this build's
-                // atlas (#89), so we paint the dots (font-independent).
-                let grip_c = ui.visuals().weak_text_color();
-                crate::app::grip_handle(ui, false, grip_c, false)
-                    .on_hover_text("Drag to reorder")
-                    .on_hover_cursor(egui::CursorIcon::Grab);
-                if ui
-                    .add_enabled(i > 0, egui::Button::new(ph::CARET_UP))
-                    .on_hover_text("Move up")
-                    .clicked()
-                {
-                    mv = Some((i, -1));
-                }
-                if ui
-                    .add_enabled(i + 1 < n, egui::Button::new(ph::CARET_DOWN))
-                    .on_hover_text("Move down")
-                    .clicked()
-                {
-                    mv = Some((i, 1));
-                }
-                if ui
-                    .button(ph::X)
-                    .on_hover_text("Remove from toolbar")
-                    .clicked()
-                {
-                    rm = Some(i);
-                }
-                ui.label(label);
-            });
-        });
-        // Per-row drop zone immediately AFTER the row. A drop here means
-        // "insert before index i+1" (the next slot). For the LAST row we
-        // also accept drops at the tail.
-        let (_resp, dropped) = ui.dnd_drop_zone::<ToolbarDrag, _>(
-            egui::Frame::default()
-                .inner_margin(egui::Margin::symmetric(2, 1))
-                .stroke(egui::Stroke::NONE),
-            |ui| {
-                // Render a thin insertion guide ONLY while a compatible
-                // drag is in progress, so the UI stays calm otherwise.
-                if dragged.is_some() {
-                    ui.add(egui::Separator::default().horizontal().spacing(1.0));
-                } else {
-                    ui.add_space(2.0);
-                }
-            },
-        );
-        if let Some(payload) = dropped {
-            drop_actions.push((i + 1, (*payload).clone()));
-        }
-    }
-    // A leading drop zone before the first row so the user can drop AT
-    // INDEX 0. Rendered AFTER the loop to keep the row indices stable —
-    // the drop position is recorded as 0.
-    let (_lead_resp, lead_dropped) = ui.dnd_drop_zone::<ToolbarDrag, _>(
-        egui::Frame::default()
-            .inner_margin(egui::Margin::symmetric(2, 1))
-            .stroke(egui::Stroke::NONE),
-        |ui| {
-            if dragged.is_some() {
-                ui.label(
-                    egui::RichText::new("drop here for top of toolbar")
-                        .weak()
-                        .small(),
-                );
-            } else {
-                ui.add_space(2.0);
-            }
-        },
-    );
-    if let Some(payload) = lead_dropped {
-        drop_actions.push((0, (*payload).clone()));
-    }
-    if let Some((i, d)) = mv {
-        let j = (i as isize + d).clamp(0, n as isize - 1) as usize;
-        if i != j {
-            config.toolbar.items.swap(i, j);
-            changed = true;
-        }
-    }
-    if let Some(i) = rm {
-        config.toolbar.items.remove(i);
+    changed |= toolbar_list_editor(ui, &mut config.toolbar.items, "items", true);
+    if ui
+        .small_button("Reset toolbar to defaults")
+        .on_hover_text("Restore the quick-access items, sizing, and menu to their defaults.")
+        .clicked()
+    {
+        config.toolbar = ToolbarConfig::default();
         changed = true;
     }
-    // Apply drops in reverse so insertion indices stay valid as the
-    // vector grows.
-    for (target, drag) in drop_actions.into_iter().rev() {
-        match drag {
-            ToolbarDrag::Reorder(src) => {
-                if src < config.toolbar.items.len() {
-                    let item = config.toolbar.items.remove(src);
-                    // Adjust target if we removed an item before it.
-                    let t = if src < target { target - 1 } else { target };
-                    let t = t.min(config.toolbar.items.len());
-                    config.toolbar.items.insert(t, item);
-                    changed = true;
-                }
-            }
-            ToolbarDrag::AddAction(id) => {
-                let t = target.min(config.toolbar.items.len());
-                config.toolbar.items.insert(t, id);
-                changed = true;
-            }
-        }
-    }
 
-    ui.add_space(6.0);
-    // Palette — each available action is a drag source carrying its id.
-    // The original ComboBox (keyboard discoverable) stays for keyboard users.
-    ui.label(
-        egui::RichText::new("Palette (drag onto the list)")
-            .strong()
-            .small(),
-    );
-    // Lay the palette chips out in a fixed 3-column GRID rather than a
-    // `horizontal_wrapped` row. Wrapping depends on `available_width`, which an
-    // auto-sized egui Window leaves UNBOUNDED during its sizing pass, so the
-    // chips measured as one un-wrapped row (~all 12 actions side by side) and
-    // THAT desired width blew the window out to ~1034px on the Toolbar page
-    // (set_width / max_width / ScrollArea::max_width / fixed_rect were all
-    // bypassed in that pass). A Grid sizes from its column count + content, never
-    // from available_width, so its width is bounded and the window stays the same
-    // size as every other settings page.
-    egui::Grid::new("scr1b3-toolbar-palette")
-        .num_columns(3)
-        .spacing([6.0, 6.0])
-        .show(ui, |ui| {
-            for (i, (id, label)) in crate::app::TOOLBAR_ACTIONS.iter().enumerate() {
-                let drag_id = egui::Id::new(("scr1b3-toolbar-palette-drag", *id));
-                ui.dnd_drag_source(drag_id, ToolbarDrag::AddAction((*id).to_string()), |ui| {
-                    // #90 — chips read as grabbable: a faint grip + a filled chip
-                    // background, and a grab cursor on hover.
-                    let chip = egui::Frame::default()
-                        .inner_margin(egui::Margin::symmetric(6, 3))
-                        .fill(ui.visuals().widgets.inactive.bg_fill)
-                        .stroke(egui::Stroke::new(
-                            1.0,
-                            ui.visuals().widgets.inactive.bg_stroke.color,
-                        ))
-                        .corner_radius(egui::CornerRadius::same(4));
-                    chip.show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        // Painted dot-grip (the phosphor glyph tofu'd in this atlas).
-                        let grip_c = ui.visuals().weak_text_color();
-                        crate::app::grip_handle(ui, false, grip_c, false);
-                        ui.label(*label);
-                    });
-                })
-                .response
-                .on_hover_text("Drag onto the list above to add")
-                .on_hover_cursor(egui::CursorIcon::Grab);
-                if (i + 1) % 3 == 0 {
-                    ui.end_row();
-                }
-            }
-        });
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label("add:").on_hover_text(
-            "Append a toolbar action from the list (keyboard-friendly alternative to dragging).",
-        );
-        egui::ComboBox::from_id_salt("toolbar-add")
-            .selected_text("choose…")
-            .show_ui(ui, |ui| {
-                for (id, label) in crate::app::TOOLBAR_ACTIONS {
-                    if ui.selectable_label(false, *label).clicked() {
-                        config.toolbar.items.push((*id).to_string());
-                        changed = true;
-                    }
-                }
-            })
-            .response
-            .on_hover_text("Pick an action to append to the toolbar.");
-        if ui
-            .button("reset to defaults")
-            .on_hover_text("Restore the toolbar's items to the default set.")
-            .clicked()
-        {
-            config.toolbar = ToolbarConfig::default();
-            changed = true;
-        }
-    });
-
-    // ---- User-curated "more-actions" dropdown menu ----
-    ui.add_space(8.0);
+    // ---- User-curated "more-actions" dropdown menu (same editor as Items) ----
+    ui.add_space(10.0);
     ui.label(
         egui::RichText::new("Dropdown (more-actions menu)")
             .strong()
@@ -2393,8 +2412,9 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     );
     ui.label(
         egui::RichText::new(
-            "Actions parked in the toolbar's more-actions menu — reachable without taking a toolbar slot, \
-             so the bar stays clean.",
+            "Actions parked in the toolbar's more-actions menu — reachable without taking a \
+             toolbar slot, so the bar stays clean. Curated with the SAME controls as the items \
+             above.",
         )
         .weak()
         .small(),
@@ -2412,119 +2432,111 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     {
         changed = true;
     }
-    // Menu rows: reorder (↑/↓) + remove, mirroring the Items editor's
-    // keyboard-accessible controls so the menu is curated the same way.
-    let mut menu_mv: Option<(usize, isize)> = None;
-    let mut menu_rm: Option<usize> = None;
-    let mn = config.toolbar.menu.len();
-    if mn == 0 {
-        ui.label(
-            egui::RichText::new("No actions in the menu yet — click one from the palette below.")
-                .weak()
-                .small(),
-        );
-    }
-    for i in 0..mn {
-        let label = action_label(&config.toolbar.menu[i]);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(i > 0, egui::Button::new(ph::CARET_UP))
-                .on_hover_text("Move up")
-                .clicked()
-            {
-                menu_mv = Some((i, -1));
-            }
-            if ui
-                .add_enabled(i + 1 < mn, egui::Button::new(ph::CARET_DOWN))
-                .on_hover_text("Move down")
-                .clicked()
-            {
-                menu_mv = Some((i, 1));
-            }
-            if ui
-                .button(ph::X)
-                .on_hover_text("Remove from the menu")
-                .clicked()
-            {
-                menu_rm = Some(i);
-            }
-            ui.label(label);
-        });
-    }
-    if let Some((i, d)) = menu_mv {
-        let j = (i as isize + d).clamp(0, mn as isize - 1) as usize;
-        if i != j {
-            config.toolbar.menu.swap(i, j);
-            changed = true;
-        }
-    }
-    if let Some(i) = menu_rm {
-        config.toolbar.menu.remove(i);
+    changed |= toolbar_list_editor(ui, &mut config.toolbar.menu, "menu", false);
+    if ui
+        .small_button("Clear menu")
+        .on_hover_text("Remove every action from the more-actions menu.")
+        .clicked()
+        && !config.toolbar.menu.is_empty()
+    {
+        config.toolbar.menu.clear();
         changed = true;
     }
-    ui.add_space(4.0);
-    // Palette — click an action to add it to the menu. Same 3-column grid the
-    // Items editor uses, so adding to the menu now works the SAME way as adding
-    // to the toolbar (the previous bare append-only combobox was the "the add
-    // method needs improving" report). Separators are meaningless in a menu, so
-    // they are excluded.
-    ui.label(
-        egui::RichText::new("Palette (click to add to the menu)")
-            .strong()
-            .small(),
-    );
-    egui::Grid::new("scr1b3-toolbar-menu-palette")
-        .num_columns(3)
-        .spacing([6.0, 6.0])
-        .show(ui, |ui| {
-            let mut col = 0;
-            for (id, label) in crate::app::TOOLBAR_ACTIONS {
-                if *id == "sep" {
-                    continue;
-                }
-                if ui
-                    .add(egui::Button::new(*label))
-                    .on_hover_text("Click to add to the more-actions menu")
-                    .clicked()
-                {
-                    config.toolbar.menu.push((*id).to_string());
-                    changed = true;
-                }
-                col += 1;
-                if col % 3 == 0 {
-                    ui.end_row();
-                }
-            }
-        });
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label("add to menu:");
-        egui::ComboBox::from_id_salt("toolbar-menu-add")
-            .selected_text("choose…")
-            .show_ui(ui, |ui| {
-                for (id, label) in crate::app::TOOLBAR_ACTIONS {
-                    if *id == "sep" {
-                        continue;
-                    }
-                    if ui.selectable_label(false, *label).clicked() {
-                        config.toolbar.menu.push((*id).to_string());
-                        changed = true;
-                    }
-                }
-            })
-            .response
-            .on_hover_text("Pick an action to add to the more-actions dropdown.");
-        if ui
-            .button("clear menu")
-            .on_hover_text("Remove every action from the more-actions menu.")
-            .clicked()
-            && !config.toolbar.menu.is_empty()
-        {
-            config.toolbar.menu.clear();
-            changed = true;
-        }
-    });
     changed
+}
+
+#[cfg(test)]
+mod toolbar_drop {
+    use super::{apply_toolbar_drop, ToolbarDrag};
+
+    fn v(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn reorder_moves_item_to_target_slot() {
+        // Move index 0 to slot 3 (drop AFTER the 2nd row): a,b,c -> b,c,a.
+        let mut list = v(&["a", "b", "c"]);
+        assert!(apply_toolbar_drop(
+            &mut list,
+            3,
+            ToolbarDrag::Reorder {
+                salt: "items",
+                from: 0
+            }
+        ));
+        assert_eq!(list, v(&["b", "c", "a"]));
+    }
+
+    #[test]
+    fn reorder_to_top_and_no_op() {
+        let mut list = v(&["a", "b", "c"]);
+        // Drop the last at slot 0 → moves to top.
+        apply_toolbar_drop(
+            &mut list,
+            0,
+            ToolbarDrag::Reorder {
+                salt: "items",
+                from: 2,
+            },
+        );
+        assert_eq!(list, v(&["c", "a", "b"]));
+        // Out-of-range source is a safe no-op (never panics / never mutates).
+        let mut short = v(&["a"]);
+        assert!(!apply_toolbar_drop(
+            &mut short,
+            0,
+            ToolbarDrag::Reorder {
+                salt: "items",
+                from: 9
+            }
+        ));
+        assert_eq!(short, v(&["a"]));
+    }
+
+    #[test]
+    fn add_inserts_at_target() {
+        let mut list = v(&["a", "b"]);
+        apply_toolbar_drop(
+            &mut list,
+            1,
+            ToolbarDrag::AddAction {
+                salt: "items",
+                id: "x".to_string(),
+            },
+        );
+        assert_eq!(list, v(&["a", "x", "b"]));
+        // Target past the end clamps to append.
+        apply_toolbar_drop(
+            &mut list,
+            999,
+            ToolbarDrag::AddAction {
+                salt: "menu",
+                id: "z".to_string(),
+            },
+        );
+        assert_eq!(list, v(&["a", "x", "b", "z"]));
+    }
+
+    #[test]
+    fn salt_identifies_the_owning_list() {
+        assert_eq!(
+            ToolbarDrag::Reorder {
+                salt: "menu",
+                from: 0
+            }
+            .salt(),
+            "menu"
+        );
+        assert_eq!(
+            ToolbarDrag::AddAction {
+                salt: "items",
+                id: "a".into()
+            }
+            .salt(),
+            "items"
+        );
+    }
 }
 
 #[cfg(test)]
