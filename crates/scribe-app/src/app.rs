@@ -374,7 +374,12 @@ impl EditorTab {
         // bundled fonts AND double-marked pinned tabs (renderer pin + emoji).
         let name = self.doc.file_name();
         if self.is_dirty() {
-            format!("● {name}")
+            // Unsaved marker. MUST be ASCII: the `●` (U+25CF) used before rendered
+            // as a tofu □ in this build's font atlas (the egui-phosphor `.notdef`
+            // footgun) — the "empty square in the untitled tab" report; it showed
+            // only on dirty tabs (an untitled note with content), never on a fresh
+            // empty one. `*` is the Notepad++ unsaved convention and always renders.
+            format!("* {name}")
         } else {
             name.to_string()
         }
@@ -5617,6 +5622,20 @@ impl eframe::App for ScribeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let _ = ui;
+        // Feed the REAL native window handle to the Win32 caption-button fix.
+        // eframe's `Frame` implements `HasWindowHandle`, so this is the authentic
+        // HWND of THIS window — unlike the prior `EnumWindows` guess, which could
+        // (and likely did) latch onto the wrong top-level window, defeating every
+        // earlier caption-strip attempt. Handle access is safe (no `unsafe`).
+        #[cfg(windows)]
+        if self.config.appearance.frameless {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(handle) = _frame.window_handle() {
+                if let RawWindowHandle::Win32(w) = handle.as_raw() {
+                    scribe_win32_chrome::set_main_hwnd(w.hwnd.get());
+                }
+            }
+        }
         self.frame_tick(&ctx);
     }
 }
@@ -6254,51 +6273,14 @@ impl ScribeApp {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
                     }
                     ui.horizontal_centered(|ui| {
-                        ui.add_space(10.0);
-                        // Chrome text follows the APP UI font (Proportional family),
-                        // NOT the note/editor font. egui's default family for
-                        // RichText is Proportional, so simply NOT calling
-                        // `.monospace()` (which selects the Monospace family that the
-                        // note font leads) binds the titlebar to `ui_family`.
-                        // Split-tone wordmark: "S C R " in the primary accent, "1 B 3"
-                        // in the secondary brand colour. The two halves are painted with
-                        // zero item-spacing between them so they read as ONE wordmark
-                        // (egui otherwise inserts item_spacing.x between widgets, which
-                        // would split the mark into two words).
-                        let saved_spacing = ui.spacing().item_spacing.x;
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        ui.label(RichText::new("S C R ").color(accent).strong());
-                        ui.label(RichText::new("1 B 3").color(accent_alt).strong());
-                        ui.spacing_mut().item_spacing.x = saved_spacing;
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("//").color(muted));
-                        // Japanese brand subtitle (写本 — shahon). Replaces the English
-                        // tagline in the titlebar; the welcome screen keeps the tagline.
-                        ui.label(
-                            RichText::new(scribe_core::PRODUCT_SUBTITLE_JP)
-                                .color(muted)
-                                .small(),
-                        );
-                        // Toolbar-in-titlebar mode: the quick-access toolbar sits
-                        // here, between the wordmark and the window caption buttons.
-                        if toolbar_in_titlebar {
-                            ui.add_space(12.0);
-                            // Button PARITY with the standalone toolbar row: apply the
-                            // SAME configured button height + item spacing here so the
-                            // quick-access buttons are identical in size, spacing, look,
-                            // and behaviour whether the toolbar lives in the titlebar or
-                            // in its own row. (Previously this branch skipped the spacing
-                            // setup the standalone path applies, so the buttons rendered
-                            // a different size/spacing.) Scoped so it can't perturb the
-                            // wordmark or caption buttons around it.
-                            let btn = self.config.toolbar.clamped_button_size();
-                            let gap = self.config.toolbar.clamped_button_spacing();
-                            ui.scope(|ui| {
-                                ui.spacing_mut().interact_size.y = btn;
-                                ui.spacing_mut().item_spacing.x = gap;
-                                self.toolbar_contents(ui, &mut act, &mut save_cfg, &mut start_lsp);
-                            });
-                        }
+                        // RESERVE the window caption buttons on the RIGHT first. The
+                        // wordmark + in-titlebar toolbar then fill the space to their
+                        // LEFT, clipped to that boundary — so on a narrow window the
+                        // toolbar compresses/clips instead of the min/max/close buttons
+                        // being painted over by it (the "caption buttons go over the
+                        // toolbar when narrow" report). Previously the left content was
+                        // laid out first and the caption buttons took only the leftover
+                        // width, so a wide toolbar pushed them under itself / off-edge.
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let is_max = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
                             let close_hover = Color32::from_rgb(0xE8, 0x11, 0x23);
@@ -6319,6 +6301,53 @@ impl ScribeApp {
                             if caption_btn(ui, CaptionIcon::Minimize, muted, soft_hover).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
+                            // LEFT content: wordmark + (optional) in-titlebar toolbar,
+                            // laid out left-to-right in the width remaining to the left
+                            // of the caption buttons. The clip rect is pinned to that
+                            // region so an overflowing toolbar can never paint over the
+                            // reserved caption buttons.
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    ui.set_clip_rect(ui.max_rect().intersect(ui.clip_rect()));
+                                    ui.add_space(10.0);
+                                    // Chrome text follows the APP UI font (Proportional
+                                    // family), NOT the note/editor font. Split-tone
+                                    // wordmark: "S C R " accent, "1 B 3" secondary;
+                                    // painted with zero item-spacing so they read as ONE
+                                    // wordmark.
+                                    let saved_spacing = ui.spacing().item_spacing.x;
+                                    ui.spacing_mut().item_spacing.x = 0.0;
+                                    ui.label(RichText::new("S C R ").color(accent).strong());
+                                    ui.label(RichText::new("1 B 3").color(accent_alt).strong());
+                                    ui.spacing_mut().item_spacing.x = saved_spacing;
+                                    ui.add_space(6.0);
+                                    ui.label(RichText::new("//").color(muted));
+                                    // Japanese brand subtitle (写本 — shahon).
+                                    ui.label(
+                                        RichText::new(scribe_core::PRODUCT_SUBTITLE_JP)
+                                            .color(muted)
+                                            .small(),
+                                    );
+                                    if toolbar_in_titlebar {
+                                        ui.add_space(12.0);
+                                        // Button PARITY with the standalone toolbar row:
+                                        // same configured height + spacing so the buttons
+                                        // are identical whether the toolbar lives here or
+                                        // in its own row.
+                                        let btn = self.config.toolbar.clamped_button_size();
+                                        let gap = self.config.toolbar.clamped_button_spacing();
+                                        ui.spacing_mut().interact_size.y = btn;
+                                        ui.spacing_mut().item_spacing.x = gap;
+                                        self.toolbar_contents(
+                                            ui,
+                                            &mut act,
+                                            &mut save_cfg,
+                                            &mut start_lsp,
+                                        );
+                                    }
+                                },
+                            );
                         });
                     });
                 });
@@ -10430,6 +10459,16 @@ mod e2e {
         );
     }
 
+    // NOTE: the "caption buttons go over the toolbar when narrow" fix (titlebar
+    // reserve-caption-buttons-first layout in `ui()`) is NOT covered by a headless
+    // test. The custom caption buttons are painted directly via `caption_btn`
+    // (`allocate_exact_size` + `ui.painter()`) with NO accessible node, so they are
+    // invisible to the kittest accesskit tree; and accesskit reports widgets at
+    // their LOGICAL (un-clipped) positions, so the buggy and fixed layouts are
+    // indistinguishable through it. The fix is verified by code review of the
+    // reserve-first layout idiom plus the one-shot `%TEMP%\scr1b3-caption-diag.txt`
+    // NC-state diagnostic written on the user's real machine.
+
     /// Regression for the "toggle does nothing when turned on" report: the
     /// more-actions dropdown must appear when `show_dropdown` is on EVEN with an
     /// EMPTY menu (previously it was gated on a non-empty menu, so enabling it
@@ -10807,6 +10846,29 @@ mod e2e {
         // The label must be the bare title in BOTH states — no leading glyph.
         assert_eq!(super::tab_display_label("notes.txt", true), "notes.txt");
         assert_eq!(super::tab_display_label("notes.txt", false), "notes.txt");
+    }
+
+    #[test]
+    fn dirty_tab_marker_is_ascii_not_tofu_glyph() {
+        // The unsaved marker must be ASCII (`*`), never the `●`/`□` that tofu'd in
+        // the atlas — the "empty square in the untitled tab" report. A dirty
+        // untitled tab is the exact case that showed it.
+        let mut tab = EditorTab::scratch();
+        tab.text = "Hi".to_string(); // diverges from the empty saved doc → dirty
+        assert!(tab.is_dirty(), "tab with unsaved text must be dirty");
+        let title = tab.title();
+        assert!(
+            title.is_ascii(),
+            "dirty marker must be ASCII (no tofu-prone glyph): {title:?}"
+        );
+        assert!(
+            title.starts_with("* "),
+            "dirty title must lead with `* `: {title:?}"
+        );
+        assert!(!title.contains('\u{25CF}') && !title.contains('\u{25A1}'));
+        // A clean tab carries no marker.
+        let clean = EditorTab::scratch();
+        assert!(!clean.title().starts_with('*'));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// needed (see [`Config::migrate`]). A config written before schema versioning
 /// deserializes with `schema_version == 0` (the serde default for a missing
 /// field) and is migrated up on load.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Root config. `#[serde(default)]` everywhere so a partial user file merges
 /// onto defaults rather than failing.
@@ -697,10 +697,13 @@ impl FontConfig {
 #[serde(rename_all = "lowercase")]
 pub enum UpdateMode {
     Off,
-    Notify,
-    /// Default: SCR1B3 makes NO automatic network connection — the user checks
-    /// for updates on demand from Settings (on-brand for a telemetry-free app).
+    /// Default: on launch, do a single telemetry-free version check against the
+    /// public GitHub Releases API (no PII) and surface a passive notice when a
+    /// newer release exists. Nothing is downloaded without the user acting.
     #[default]
+    Notify,
+    /// No automatic network connection — the user checks for updates on demand
+    /// from Settings.
     Manual,
     Auto,
 }
@@ -723,9 +726,11 @@ pub struct UpdateConfig {
 impl Default for UpdateConfig {
     fn default() -> Self {
         Self {
-            // Manual by default: no automatic/background network. Notify and Auto
-            // are explicit opt-ins to an on-launch GitHub-Releases version check.
-            mode: UpdateMode::Manual,
+            // Notify by default: a single on-launch GitHub-Releases version check
+            // (telemetry-free, no PII) that surfaces a passive notice. Off and
+            // Manual are explicit opt-outs of the automatic check; Auto opts into
+            // background download.
+            mode: UpdateMode::Notify,
             check_interval_hours: 24,
             last_check_unix: None,
         }
@@ -977,6 +982,18 @@ impl Config {
             changed = true;
         }
 
+        // v1 → v2: the update-check default changed Manual → Notify. Upgrade only
+        // configs still on the OLD default (Manual) so users who deliberately
+        // chose Off or Auto keep their choice; the on-launch check is a single
+        // telemetry-free GitHub-Releases query (no PII).
+        if self.schema_version < 2 {
+            if self.updates.mode == UpdateMode::Manual {
+                self.updates.mode = UpdateMode::Notify;
+            }
+            self.schema_version = 2;
+            changed = true;
+        }
+
         // Guard: never let a future bug leave the version below current after a
         // successful migration pass (keeps `migrate` idempotent).
         debug_assert!(self.schema_version <= CURRENT_SCHEMA_VERSION);
@@ -1111,6 +1128,22 @@ show_dropdown = false
         let c = Config::default();
         let back = Config::from_toml_str(&c.to_toml_string()).unwrap();
         assert_eq!(back.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn update_mode_defaults_to_notify_and_v2_migrates_from_manual() {
+        // Fresh default is Notify.
+        assert_eq!(Config::default().updates.mode, UpdateMode::Notify);
+        // A legacy config explicitly on the OLD Manual default migrates to Notify.
+        let mut legacy = Config::from_toml_str("[updates]\nmode = \"manual\"\n").unwrap();
+        assert_eq!(legacy.schema_version, 0);
+        assert!(legacy.migrate());
+        assert_eq!(legacy.updates.mode, UpdateMode::Notify);
+        assert_eq!(legacy.schema_version, CURRENT_SCHEMA_VERSION);
+        // A deliberate Off (or Auto) choice is preserved across migration.
+        let mut off = Config::from_toml_str("[updates]\nmode = \"off\"\n").unwrap();
+        assert!(off.migrate());
+        assert_eq!(off.updates.mode, UpdateMode::Off);
     }
 
     #[test]
