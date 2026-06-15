@@ -157,4 +157,41 @@ mod tests {
         assert_eq!(response_id(&json!({"id": 7, "result": {}})), Some(7));
         assert_eq!(response_id(&notification("x", json!({}))), None);
     }
+
+    // ---- framing robustness: an LSP server's stdout is untrusted; malformed
+    // framing must produce a clean Err, never a panic or a hang. ----
+
+    #[test]
+    fn read_message_errs_on_missing_content_length() {
+        // Header block with no Content-Length, then end-of-headers.
+        let mut cur = Cursor::new(b"X-Other: 1\r\n\r\n".to_vec());
+        let err = read_message(&mut cur).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_message_errs_on_non_numeric_content_length() {
+        // A non-numeric Content-Length fails to parse → treated as missing.
+        let mut cur = Cursor::new(b"Content-Length: not-a-number\r\n\r\n{}".to_vec());
+        assert!(read_message(&mut cur).is_err());
+    }
+
+    #[test]
+    fn read_message_errs_on_truncated_body() {
+        // Declared length exceeds the actual body → read_exact hits EOF.
+        let mut cur = Cursor::new(b"Content-Length: 100\r\n\r\n{}".to_vec());
+        assert!(read_message(&mut cur).is_err());
+    }
+
+    #[test]
+    fn read_message_errs_on_malformed_json_body() {
+        // Correctly framed but the body is not valid JSON.
+        let body = b"not json";
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        let mut bytes = header.into_bytes();
+        bytes.extend_from_slice(body);
+        let mut cur = Cursor::new(bytes);
+        let err = read_message(&mut cur).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
 }
