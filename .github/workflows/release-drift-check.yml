@@ -1,0 +1,64 @@
+name: Release drift check
+
+# Catches the "version bumped in source but never released" gap (the cause of
+# the v0.4.36/v0.4.37 incident: Cargo.toml advanced to 0.4.37 on master while
+# the newest PUBLISHED GitHub Release was still v0.4.35, so the tag-gated
+# release.yml never ran and the in-app updater correctly reported "you're
+# current" — there was simply no newer release to offer).
+#
+# This job FAILS (loud, persistent red on master) whenever the workspace version
+# is AHEAD of the latest published release, i.e. a release tag was never cut.
+# To clear it: cut the release (`git tag vX.Y.Z && git push origin vX.Y.Z`,
+# which triggers release.yml). It does NOT publish anything itself — releasing
+# stays a deliberate, human-triggered step; this only makes the gap impossible
+# to miss.
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "0 12 * * *" # daily safety net even with no pushes
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: source version vs latest published release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - name: Compare workspace version to latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The workspace version is the first top-level `version = "..."` line.
+          src="$(grep -m1 -E '^version[[:space:]]*=' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ -z "$src" ]; then
+            echo "::error::could not read the workspace version from Cargo.toml"
+            exit 1
+          fi
+          latest="$(gh release view --json tagName -q .tagName 2>/dev/null | sed 's/^v//' || true)"
+          echo "source=v$src  latest_published_release=v${latest:-<none>}"
+
+          if [ -z "$latest" ]; then
+            echo "::warning::no published releases yet — nothing to compare against."
+            exit 0
+          fi
+          if [ "$src" = "$latest" ]; then
+            echo "In sync: source v$src matches the latest published release."
+            exit 0
+          fi
+          # Determine which is higher with semver-aware sort.
+          highest="$(printf '%s\n%s\n' "$src" "$latest" | sort -V | tail -1)"
+          if [ "$highest" = "$src" ]; then
+            echo "::error::Cargo.toml is at v$src but the newest published release is v$latest. A release was never cut, so the in-app updater will report users as 'current' on the older build. Cut it: 'git tag v$src && git push origin v$src' (triggers release.yml)."
+            exit 1
+          fi
+          # Source is BEHIND the latest release (e.g. a hotfix released out of band) — not a drift we gate on.
+          echo "Source v$src is behind the latest release v$latest; not a bump-without-release gap."
