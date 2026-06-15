@@ -1831,6 +1831,18 @@ mod tests {
     }
 
     #[test]
+    fn from_toml_str_is_robust_to_malformed_input() {
+        // The live-reload watcher feeds arbitrary on-disk bytes; malformed TOML
+        // must return Err (the loader then falls back to the default theme) and
+        // must NEVER panic.
+        assert!(Theme::from_toml_str("this = = not valid [[[ toml").is_err());
+        assert!(Theme::from_toml_str("\u{0}\u{1}\u{2} garbage").is_err());
+        // Syntactically-valid but structurally-minimal TOML must parse into a
+        // usable theme via serde defaults rather than panicking.
+        let _ = Theme::from_toml_str("name = \"partial\"\n");
+    }
+
+    #[test]
     fn to_toml_string_roundtrips_through_from_toml_str() {
         // T17.6: the serializer + parser are inverses. Lets the in-app
         // 'Export current theme' flow produce a TOML the live-reload watcher
