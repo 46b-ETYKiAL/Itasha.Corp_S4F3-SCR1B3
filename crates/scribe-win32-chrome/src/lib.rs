@@ -5,47 +5,55 @@
 //! that removes the "doubled caption buttons" the OS draws over our custom
 //! titlebar on a frameless + transparent window.
 //!
-//! ## Why the previous approaches failed
+//! ## Root cause (deep-researched, primary-sourced)
 //!
-//! winit leaves `WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` on undecorated
-//! TOP-LEVEL windows (it only strips caption bits on `WS_CHILD`; winit #2754).
-//! Two earlier fixes were the WRONG mechanism:
+//! winit leaves `WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` set on an
+//! UNDECORATED top-level window — it strips only `WS_CAPTION`/`WS_SIZEBOX`
+//! (winit #2754). On Win11 DWM draws the native min/max/close caption buttons
+//! GATED ON THOSE STYLE BITS. winit's transparency is `DwmEnableBlurBehindWindow`
+//! (a DWM-COMPOSITED frame), so it does not CREATE the buttons — it UNMASKS the
+//! DWM-drawn buttons the opaque panel was hiding ("doubled buttons with
+//! transparency on"; opaque pixels hid them before).
 //!
-//!   1. **Stripping those `WS_*` style bits.** DWM draws the caption buttons
-//!      from the window's NON-CLIENT (NC) frame GEOMETRY, not purely from the
-//!      style bits — so clearing the bits did not remove the buttons.
-//!   2. **`DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED`.** winit implements
-//!      Windows transparency via `DwmEnableBlurBehindWindow`, and per Microsoft
-//!      that path is *mutually exclusive* with disabling NC rendering — so the
-//!      per-frame call fought winit's own transparency and never removed the
-//!      buttons. (It only LOOKED inert when opaque because the solid panel fill
-//!      covered the always-present NC strip; lowering the alpha unmasked it —
-//!      the "doubled min/max/close with transparency on" report.)
+//! ## Why the earlier `WM_NCCALCSIZE` fix could never work
 //!
-//! ## The fix (production-proven: MS DWM custom-frame sample, BorderlessWindow,
-//! Tao)
+//! Returning 0 from `WM_NCCALCSIZE` removes the STANDARD non-client frame, but
+//! Microsoft documents that it "does not affect frames that are extended into
+//! the client area" / DWM-composited content. The caption buttons are
+//! DWM-composited, so `WM_NCCALCSIZE` is STRUCTURALLY incapable of removing
+//! them. (`DWMWA_NCRENDERING_POLICY = DWMNCRP_DISABLED` is also wrong — it fights
+//! winit's `DwmEnableBlurBehindWindow` transparency.)
 //!
-//! Subclass the HWND and return **0** from `WM_NCCALCSIZE` when `wParam == TRUE`.
-//! Per Microsoft's "Custom Window Frame Using DWM": returning 0 makes the entire
-//! window the client area, "removing the standard frame … this includes the
-//! region where the caption buttons are drawn." With no NC strip, DWM has
-//! nowhere to draw the system min/max/close — in opaque AND transparent modes.
+//! ## The fix (canonical: melak47/BorderlessWindow, MS DWM sample, Tao/Tauri,
+//! Electron)
 //!
-//! This is safe in SCR1B3 specifically because resize and drag are already
-//! egui-owned (a `ViewportCommand::BeginResize` edge overlay — winit #4186 — and
-//! `ViewportCommand::StartDrag`), so the NC area is unused for them. The one
-//! thing the NC calc still owes us is a MAXIMIZED window that respects the
-//! monitor work area (and an auto-hide taskbar), which the maximized branch
-//! handles by clamping the client rect to `rcWork`.
+//! CLEAR the caption-button style bits with `SetWindowLongPtrW(GWL_STYLE, …)` +
+//! `SetWindowPos(SWP_FRAMECHANGED)` — see [`imp::CAPTION_BUTTON_STYLES`]. With
+//! the bits gone, DWM draws no native buttons, in opaque OR transparent mode,
+//! and winit's transparency is left untouched. The strip is re-applied every
+//! frame because winit re-derives styles from its `WindowFlags` on some
+//! resize/restore paths (cheap: it only writes when a bit is actually present).
+//!
+//! The `WM_NCCALCSIZE` subclass is RETAINED, but ONLY for its other job: clamping
+//! a borderless MAXIMIZE to the monitor work area (and an auto-hide taskbar) so
+//! it doesn't cover the taskbar. Resize and drag are egui-owned
+//! (`ViewportCommand::BeginResize` — winit #4186 — and `StartDrag`), so the NC
+//! area is otherwise unused.
+//!
+//! Trade-off of clearing `WS_SYSMENU`: Alt+Space and the taskbar right-click
+//! system menu go away; the custom titlebar already provides min/max/close.
 
 /// Ensure THIS process's main top-level window draws no system caption buttons
-/// over the custom titlebar, by installing a one-time `WM_NCCALCSIZE` subclass
-/// that turns the whole window into client area. Windows-only; a no-op
+/// over the custom titlebar, by clearing the caption-button window styles
+/// (`WS_SYSMENU|WS_MINIMIZEBOX|WS_MAXIMIZEBOX`) winit leaves on the undecorated
+/// window, and installing a one-time `WM_NCCALCSIZE` subclass that clamps a
+/// borderless maximize to the monitor work area. Windows-only; a no-op
 /// everywhere else.
 ///
-/// Safe + cheap to call every frame: the HWND is discovered once and cached, and
-/// the subclass is installed exactly once (subsequent calls are a single relaxed
-/// atomic load).
+/// Safe + cheap to call every frame: the HWND is cached, the subclass installs
+/// once, and the style-strip only writes when a caption-button bit is actually
+/// present (so it self-heals if winit re-asserts the styles, at near-zero cost
+/// otherwise).
 #[cfg(windows)]
 pub fn ensure_caption_stripped() {
     imp::ensure_borderless();
@@ -84,9 +92,32 @@ mod imp {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClientRect, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
-        IsWindowVisible, SetWindowPos, GWL_STYLE, NCCALCSIZE_PARAMS, SWP_FRAMECHANGED,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCCALCSIZE, WS_MAXIMIZE,
+        IsWindowVisible, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, NCCALCSIZE_PARAMS,
+        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCCALCSIZE,
+        WS_CAPTION, WS_MAXIMIZE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
     };
+
+    /// The window-style bits that make DWM draw the native min/max/close caption
+    /// buttons. winit leaves `WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX` set on
+    /// an UNDECORATED window — it only strips `WS_CAPTION`/`WS_SIZEBOX` (winit
+    /// #2754). On a transparent (DWM blur-behind) window those buttons are DWM-
+    /// composited and show THROUGH as a doubled set over our custom titlebar.
+    /// Clearing these bits is the canonical fix (melak47/BorderlessWindow, the MS
+    /// DWM custom-frame sample, Tao/Tauri, Electron); `WM_NCCALCSIZE` cannot
+    /// remove them because they are composited by DWM, not part of the standard
+    /// non-client frame (MS WM_NCCALCSIZE docs). `WS_CAPTION` is included for
+    /// completeness — clearing an already-absent bit is a no-op.
+    const CAPTION_BUTTON_STYLES: u32 = WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CAPTION;
+
+    /// Whether any caption-button style bit is currently set on `style`.
+    fn caption_button_styles_present(style: u32) -> bool {
+        style & CAPTION_BUTTON_STYLES != 0
+    }
+
+    /// `style` with every caption-button bit cleared; all other bits preserved.
+    fn style_without_caption_buttons(style: u32) -> u32 {
+        style & !CAPTION_BUTTON_STYLES
+    }
 
     /// Cached main-window HWND (0 = not yet found). One window per process.
     /// Primed by [`set_main_hwnd`] with the real eframe handle when available;
@@ -248,6 +279,36 @@ mod imp {
         }
     }
 
+    /// Clear the caption-button window styles winit leaves on the undecorated
+    /// window, then force a frame recalculation so DWM stops compositing the
+    /// native min/max/close. Only acts when a bit is actually set, so it is cheap
+    /// to call every frame AND self-heals if winit re-asserts the styles on a
+    /// resize/restore (winit re-derives styles from its `WindowFlags`). Leaves
+    /// winit's `DwmEnableBlurBehindWindow` transparency untouched — unlike the old
+    /// `DWMNCRP_DISABLED` attempt, which fought it.
+    fn strip_caption_styles(hwnd: isize) {
+        // SAFETY: `hwnd` is an OS window owned by this process; GWL_STYLE
+        // read/write + a frame-changed re-layout — the canonical borderless
+        // technique (melak47/BorderlessWindow, MS DWM custom-frame sample).
+        unsafe {
+            let h = hwnd as HWND;
+            let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+            if !caption_button_styles_present(style) {
+                return; // already stripped — nothing to do this frame.
+            }
+            SetWindowLongPtrW(h, GWL_STYLE, style_without_caption_buttons(style) as isize);
+            SetWindowPos(
+                h,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+        }
+    }
+
     pub fn ensure_borderless() {
         let mut hwnd = CACHED_HWND.load(Ordering::Relaxed);
         if hwnd == 0 {
@@ -256,9 +317,20 @@ mod imp {
             CACHED_HWND.store(hwnd, Ordering::Relaxed);
         }
         // Install the subclass exactly once (early frames may run before the
-        // window exists; we retry each frame until it does, then stop).
+        // window exists; we retry each frame until it does, then stop). The
+        // subclass now exists ONLY for the maximized→work-area clamp (so a
+        // borderless maximize doesn't cover the taskbar); it is NOT what removes
+        // the caption buttons.
         if hwnd != 0 && !SUBCLASSED.load(Ordering::Relaxed) && install_nc_subclass(hwnd) {
             SUBCLASSED.store(true, Ordering::Relaxed);
+        }
+        // THE caption-button fix: strip the residual `WS_SYSMENU|WS_MINIMIZEBOX|
+        // WS_MAXIMIZEBOX` styles every frame (self-healing against winit
+        // re-asserting them). This is what actually removes the doubled native
+        // min/max/close that show through a transparent window — `WM_NCCALCSIZE`
+        // structurally cannot (DWM-composited; see CAPTION_BUTTON_STYLES).
+        if hwnd != 0 {
+            strip_caption_styles(hwnd);
         }
         // One-shot diagnostic: after the subclass is installed, record whether the
         // non-client strip is actually gone (client rect == window rect). Written
@@ -287,9 +359,18 @@ mod imp {
             let cli = (cr.right - cr.left, cr.bottom - cr.top);
             let nc_gone = gw != 0 && gc != 0 && win == cli;
             let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+            // The load-bearing signal post-fix: with the caption-button styles
+            // cleared, DWM draws no native min/max/close. `nc_strip_gone` is now
+            // secondary (it never governed the DWM-composited buttons).
+            let caption_btn_styles = if caption_button_styles_present(style) {
+                "present"
+            } else {
+                "stripped"
+            };
             format!(
                 "scr1b3 caption diag: hwnd=0x{hwnd:x} subclassed={} style=0x{style:08x} \
-                 win={}x{} client={}x{} nc_strip_gone={nc_gone}",
+                 caption_btn_styles={caption_btn_styles} win={}x{} client={}x{} \
+                 nc_strip_gone={nc_gone}",
                 SUBCLASSED.load(Ordering::Relaxed),
                 win.0,
                 win.1,
@@ -369,6 +450,27 @@ mod imp {
             assert_eq!(out.top, -120);
             assert_eq!(out.right, 0);
             assert_eq!(out.bottom, 919);
+        }
+
+        #[test]
+        fn caption_button_styles_detected_and_cleared() {
+            // A typical winit undecorated style: the caption-button bits set,
+            // plus an unrelated bit (WS_MAXIMIZE = the maximized STATE) that must
+            // be preserved.
+            let with = WS_CAPTION | WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_MAXIMIZE;
+            assert!(caption_button_styles_present(with));
+
+            let stripped = style_without_caption_buttons(with);
+            assert!(
+                !caption_button_styles_present(stripped),
+                "all caption-button bits must be cleared"
+            );
+            // The unrelated bit survives the strip.
+            assert_eq!(stripped & WS_MAXIMIZE, WS_MAXIMIZE);
+            // Idempotent: stripping an already-clean style changes nothing.
+            assert_eq!(style_without_caption_buttons(stripped), stripped);
+            // A style with none of the bits is reported clean (no needless work).
+            assert!(!caption_button_styles_present(WS_MAXIMIZE));
         }
     }
 }
