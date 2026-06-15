@@ -1599,28 +1599,60 @@ impl ScribeApp {
         }
         ui.separator();
         // User-customizable quick-access items (membership + order from
-        // config.toolbar; editable in Settings → Toolbar).
+        // config.toolbar; editable in Settings → Toolbar). When the bar is
+        // narrow (notably the in-titlebar toolbar on a small window), render as
+        // many items as FIT and fold the rest into the "⋯ more actions" dropdown
+        // — the user's "compress up to a point, keep the contents legible/
+        // reachable" intent — instead of clipping them off the edge where they
+        // become invisible AND unclickable. `available_width()` is egui's real
+        // remaining width at this cursor (after the pinned gear/palette/wordmark),
+        // so on a wide bar everything fits and nothing folds (unchanged).
         let items = self.config.toolbar.items.clone();
-        for id in &items {
+        let bspace = self.config.toolbar.clamped_button_spacing();
+        let item_w = (self.config.toolbar.clamped_button_size() + bspace).max(1.0);
+        let dropdown_w = 22.0 + bspace;
+        let visible = toolbar_visible_count(ui.available_width(), item_w, dropdown_w, items.len());
+        for id in &items[..visible] {
             self.toolbar_item(ui, id, act, save_cfg, start_lsp);
         }
+        let overflow: Vec<String> = items[visible..].to_vec();
         // User-curated overflow dropdown — actions the user parked here to keep
-        // the bar clean. Shown whenever the toggle is ON (even with an empty
+        // the bar clean — PLUS any items that didn't fit above (folded so they
+        // stay reachable). Shown whenever the toggle is ON (even with an empty
         // menu, so the toggle has a VISIBLE effect — previously it was gated on a
         // non-empty menu, so turning it on with the default empty menu looked
-        // inert, the "toggle does nothing" report). An empty menu opens to a
-        // hint pointing at the editor. The trigger is PAINTED three dots, NOT the
-        // "⋯" glyph: U+22EF renders as a tofu □ in this build's font atlas (the
-        // same egui-phosphor .notdef footgun that forced the grip to paint its
-        // dots). Painted dots are font-independent and read as a clean "more
-        // actions" affordance.
+        // inert, the "toggle does nothing" report) OR whenever there is forced
+        // overflow to surface. An otherwise-empty menu opens to a hint pointing
+        // at the editor. The trigger is PAINTED three dots, NOT the "⋯" glyph:
+        // U+22EF renders as a tofu □ in this build's font atlas (the same
+        // egui-phosphor .notdef footgun that forced the grip to paint its dots).
+        // Painted dots are font-independent and read as a clean "more actions"
+        // affordance.
         let menu = self.config.toolbar.menu.clone();
-        if self.config.toolbar.show_dropdown {
+        if self.config.toolbar.show_dropdown || !overflow.is_empty() {
             let dot = ui.visuals().weak_text_color();
             let btn_h = ui.spacing().interact_size.y;
             let btn = egui::Button::new("").min_size(egui::vec2(22.0, btn_h));
             let resp = egui::menu::menu_custom_button(ui, btn, |ui| {
-                if menu.is_empty() {
+                let mut any = false;
+                // Forced overflow first (the items that didn't fit the bar).
+                for id in &overflow {
+                    self.toolbar_item(ui, id, act, save_cfg, start_lsp);
+                    any = true;
+                }
+                // Then the user-parked menu, separated when both are present.
+                if !menu.is_empty() {
+                    if any {
+                        ui.separator();
+                    }
+                    for id in &menu {
+                        self.toolbar_item(ui, id, act, save_cfg, start_lsp);
+                    }
+                    any = true;
+                }
+                // Empty-state hint only when there is genuinely nothing to show
+                // (the toggle is on but no overflow and no parked actions).
+                if !any {
                     ui.set_min_width(180.0);
                     ui.label(egui::RichText::new("No actions added yet").strong());
                     ui.label(
@@ -1632,10 +1664,6 @@ impl ScribeApp {
                     if ui.button("Open toolbar settings").clicked() {
                         self.settings_open = true;
                         ui.close_menu();
-                    }
-                } else {
-                    for id in &menu {
-                        self.toolbar_item(ui, id, act, save_cfg, start_lsp);
                     }
                 }
             })
@@ -6281,11 +6309,17 @@ impl ScribeApp {
                         // toolbar when narrow" report). Previously the left content was
                         // laid out first and the caption buttons took only the leftover
                         // width, so a wide toolbar pushed them under itself / off-edge.
+                        // Caption-button height tracks the toolbar button size so
+                        // they stay consistent when the user picks a large size,
+                        // while preserving the default 28px (`.max(28.0)`).
+                        let cap_h = self.config.toolbar.clamped_button_size().max(28.0);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let is_max = ctx.input(|i| i.viewport().maximized).unwrap_or(false);
                             let close_hover = Color32::from_rgb(0xE8, 0x11, 0x23);
                             let soft_hover = Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 26);
-                            if caption_btn(ui, CaptionIcon::Close, muted, close_hover).clicked() {
+                            if caption_btn(ui, CaptionIcon::Close, muted, close_hover, cap_h)
+                                .clicked()
+                            {
                                 // Funnel into the two-phase close (hide-before-destroy)
                                 // so a transparent window leaves no DWM ghost (T19.1).
                                 self.want_close = true;
@@ -6295,10 +6329,12 @@ impl ScribeApp {
                             } else {
                                 CaptionIcon::Maximize
                             };
-                            if caption_btn(ui, max_icon, muted, soft_hover).clicked() {
+                            if caption_btn(ui, max_icon, muted, soft_hover, cap_h).clicked() {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!is_max));
                             }
-                            if caption_btn(ui, CaptionIcon::Minimize, muted, soft_hover).clicked() {
+                            if caption_btn(ui, CaptionIcon::Minimize, muted, soft_hover, cap_h)
+                                .clicked()
+                            {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
                             // LEFT content: wordmark + (optional) in-titlebar toolbar,
@@ -6321,14 +6357,19 @@ impl ScribeApp {
                                     ui.label(RichText::new("S C R ").color(accent).strong());
                                     ui.label(RichText::new("1 B 3").color(accent_alt).strong());
                                     ui.spacing_mut().item_spacing.x = saved_spacing;
-                                    ui.add_space(6.0);
-                                    ui.label(RichText::new("//").color(muted));
-                                    // Japanese brand subtitle (写本 — shahon).
-                                    ui.label(
-                                        RichText::new(scribe_core::PRODUCT_SUBTITLE_JP)
-                                            .color(muted)
-                                            .small(),
-                                    );
+                                    // Decorative separator + JP subtitle (写本 —
+                                    // shahon) drop out FIRST when the titlebar is
+                                    // tight, so the core "SCR1B3" wordmark never has
+                                    // to clip mid-glyph on a narrow window.
+                                    if ui.available_width() > 120.0 {
+                                        ui.add_space(6.0);
+                                        ui.label(RichText::new("//").color(muted));
+                                        ui.label(
+                                            RichText::new(scribe_core::PRODUCT_SUBTITLE_JP)
+                                                .color(muted)
+                                                .small(),
+                                        );
+                                    }
                                     if toolbar_in_titlebar {
                                         ui.add_space(12.0);
                                         // Button PARITY with the standalone toolbar row:
@@ -8741,13 +8782,38 @@ enum CaptionIcon {
     Close,
 }
 
+/// How many of `n` equal-width toolbar items fit in `avail` logical px before
+/// overflow. If they all fit, returns `n` (no overflow dropdown needed for
+/// them). Otherwise it RESERVES `dropdown_w` for the "⋯ more actions" trigger
+/// and returns how many whole items fit in the remaining width — the rest fold
+/// into the dropdown so they stay reachable instead of being clipped off the
+/// edge (the narrow-window "buttons cut off / unclickable" report). Pure +
+/// unit-tested so the in-titlebar toolbar's compress-then-overflow behaviour
+/// can't silently regress; `item_w` is an estimate (configured button size +
+/// spacing) so the split is graceful, never catastrophic.
+fn toolbar_visible_count(avail: f32, item_w: f32, dropdown_w: f32, n: usize) -> usize {
+    if n == 0 || item_w <= 0.0 {
+        return n;
+    }
+    if (n as f32) * item_w <= avail {
+        return n; // everything fits; no overflow trigger required
+    }
+    let usable = (avail - dropdown_w).max(0.0);
+    ((usable / item_w).floor() as usize).min(n)
+}
+
 fn caption_btn(
     ui: &mut egui::Ui,
     icon: CaptionIcon,
     base: Color32,
     hover_fill: Color32,
+    height: f32,
 ) -> egui::Response {
-    let size = egui::vec2(46.0, 28.0);
+    // 46px wide is the standard Windows caption-button width; the height tracks
+    // the titlebar so the buttons stay consistent with the in-titlebar toolbar
+    // buttons when the user picks a large toolbar button size (the default 28px
+    // is preserved — see the call site's `.max(28.0)`).
+    let size = egui::vec2(46.0, height);
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
     let painter = ui.painter();
     if resp.hovered() {
@@ -10457,6 +10523,23 @@ mod e2e {
             "toggling the dropdown OFF must remove exactly one toolbar button \
              (with={with}, without={without})"
         );
+    }
+
+    #[test]
+    fn toolbar_visible_count_folds_overflow_into_dropdown() {
+        // Everything fits → all visible, no overflow trigger reserved.
+        assert_eq!(toolbar_visible_count(300.0, 30.0, 28.0, 5), 5);
+        // Exactly fits the available width.
+        assert_eq!(toolbar_visible_count(150.0, 30.0, 28.0, 5), 5);
+        // Too narrow → reserve the dropdown trigger (28), fit the rest:
+        // (120 - 28) / 30 = 3 visible, 2 fold into "⋯".
+        assert_eq!(toolbar_visible_count(120.0, 30.0, 28.0, 5), 3);
+        // Extremely narrow → everything folds, none clipped off the edge.
+        assert_eq!(toolbar_visible_count(10.0, 30.0, 28.0, 5), 0);
+        // Degenerate inputs never panic and never exceed n.
+        assert_eq!(toolbar_visible_count(100.0, 0.0, 28.0, 4), 4);
+        assert_eq!(toolbar_visible_count(0.0, 30.0, 28.0, 0), 0);
+        assert!(toolbar_visible_count(50.0, 30.0, 28.0, 100) <= 100);
     }
 
     // NOTE: the "caption buttons go over the toolbar when narrow" fix (titlebar
