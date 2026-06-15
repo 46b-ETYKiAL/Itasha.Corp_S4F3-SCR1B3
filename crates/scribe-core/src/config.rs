@@ -964,6 +964,7 @@ impl Config {
     /// bumps `schema_version`, so the user's own later deliberate changes are
     /// never overridden again (the step won't re-run).
     pub fn migrate(&mut self) -> bool {
+        let original = self.schema_version;
         let mut changed = false;
 
         // v0 → v1: re-assert the experience-baseline toggles that ship on by
@@ -994,9 +995,17 @@ impl Config {
             changed = true;
         }
 
-        // Guard: never let a future bug leave the version below current after a
-        // successful migration pass (keeps `migrate` idempotent).
-        debug_assert!(self.schema_version <= CURRENT_SCHEMA_VERSION);
+        // Migration invariants (debug-only): it must never LOWER the version,
+        // and any config that started below the current schema must end exactly
+        // at it. A FORWARD-version config (`original > CURRENT`, e.g. a file
+        // written by a newer build then opened by an older one) is left untouched
+        // and legitimately stays ahead — so we must NOT assert an upper bound
+        // (the previous `schema_version <= CURRENT` assert panicked in debug
+        // builds on exactly that downgrade case).
+        debug_assert!(self.schema_version >= original);
+        debug_assert!(
+            original >= CURRENT_SCHEMA_VERSION || self.schema_version == CURRENT_SCHEMA_VERSION
+        );
         changed
     }
 
@@ -1015,16 +1024,42 @@ impl Config {
                     if cfg.migrate() {
                         // Persist so the one-time migration doesn't re-run and the
                         // upgraded baseline is durable. Best-effort: a failed save
-                        // doesn't block startup (it just re-applies next launch).
-                        let _ = cfg.save_to(&path);
+                        // doesn't block startup (it re-applies next launch), but we
+                        // log it rather than swallowing it silently.
+                        if let Err(e) = cfg.save_to(&path) {
+                            tracing::warn!(
+                                error = %e,
+                                "config schema migration could not be persisted; \
+                                 it will be re-applied on next launch"
+                            );
+                        }
                     }
                     (cfg, None)
                 }
-                Err(e) => (Self::default(), Some(e.to_string())),
+                Err(e) => {
+                    // The file exists but is malformed (hand-edit typo, partial
+                    // write, disk corruption). PRESERVE it as `<name>.toml.bak`
+                    // BEFORE the app starts on defaults — otherwise the very next
+                    // settings change saves defaults over the recoverable original
+                    // and the user's real settings are lost for good. Best-effort:
+                    // a failed backup must never block startup.
+                    backup_corrupt_config(&path);
+                    (Self::default(), Some(e.to_string()))
+                }
             },
             Err(_) => (Self::default(), None), // absent = use defaults silently
         }
     }
+}
+
+/// Copy a malformed config file to a `<name>.toml.bak` sibling so a user's
+/// hand-edited-but-broken (or partially-corrupted) settings are recoverable
+/// after the app falls back to defaults. Best-effort — any IO error is
+/// swallowed (the caller must not fail startup over a backup). Returns whether
+/// the backup was written, for testing.
+fn backup_corrupt_config(path: &std::path::Path) -> bool {
+    let bak = path.with_extension("toml.bak");
+    std::fs::copy(path, &bak).is_ok()
 }
 
 #[cfg(test)]
@@ -1144,6 +1179,62 @@ show_dropdown = false
         let mut off = Config::from_toml_str("[updates]\nmode = \"off\"\n").unwrap();
         assert!(off.migrate());
         assert_eq!(off.updates.mode, UpdateMode::Off);
+    }
+
+    #[test]
+    fn migrate_is_a_noop_and_never_panics_on_a_forward_version_config() {
+        // A config written by a NEWER build (schema_version ahead of CURRENT),
+        // then opened by an older build, must be left untouched — and must not
+        // trip the debug-only migration invariants (the old `<= CURRENT` assert
+        // panicked here in debug builds).
+        // Built from TOML (not Default + field reassign — that trips clippy's
+        // field_reassign_with_default) so we also confirm schema_version
+        // round-trips through deserialization.
+        let ahead = CURRENT_SCHEMA_VERSION + 5;
+        let mut forward = Config::from_toml_str(&format!(
+            "schema_version = {ahead}\n[updates]\nmode = \"off\"\n"
+        ))
+        .unwrap();
+        assert_eq!(forward.schema_version, ahead);
+        assert!(
+            !forward.migrate(),
+            "forward-version config must not be changed"
+        );
+        assert_eq!(forward.schema_version, ahead);
+        assert_eq!(forward.updates.mode, UpdateMode::Off);
+    }
+
+    #[test]
+    fn corrupt_config_is_backed_up_before_fallback_to_defaults() {
+        // A malformed config file must be preserved as `<name>.toml.bak` so the
+        // user's recoverable settings survive the app falling back to defaults.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("scr1b3.toml");
+        let corrupt = "this = is = not valid TOML [[[";
+        std::fs::write(&path, corrupt).unwrap();
+
+        assert!(backup_corrupt_config(&path), "backup must report success");
+
+        let bak = path.with_extension("toml.bak");
+        assert!(
+            bak.exists(),
+            "a .toml.bak must be written next to the original"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&bak).unwrap(),
+            corrupt,
+            "the backup must hold the ORIGINAL (recoverable) bytes verbatim"
+        );
+        // The original is left in place (the app's atomic save will replace it).
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn backup_corrupt_config_is_best_effort_on_a_missing_file() {
+        // Never panics / never fails startup when there's nothing to copy.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.toml");
+        assert!(!backup_corrupt_config(&missing));
     }
 
     #[test]
