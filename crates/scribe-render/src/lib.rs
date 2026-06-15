@@ -121,4 +121,48 @@ mod tests {
         let v = theme_to_visuals(&Theme::wired_noir());
         assert_eq!(v.extreme_bg_color, Color32::from_rgb(0x07, 0x0a, 0x0c));
     }
+
+    #[test]
+    fn syntax_color32_is_opaque_rgb() {
+        // Syntax colours have no alpha channel of their own — they must render
+        // fully opaque so highlighted text is never see-through.
+        let c = syntax_color32([10, 20, 30]);
+        assert_eq!(c, Color32::from_rgb(10, 20, 30));
+        assert_eq!(c.a(), 255);
+    }
+
+    #[test]
+    fn apply_window_opacity_translucent_panels_keep_window_fill_opaque() {
+        // The load-bearing invariant (see the fn's doc): the PANEL surfaces go
+        // translucent so the desktop shows through, but `window_fill` MUST stay
+        // opaque — egui draws dropdowns / context menus / tooltips / the Settings
+        // window from it, and lowering its alpha makes them unreadable (the
+        // "transparency makes popups see-through" regression class).
+        let mut v = Visuals::dark();
+        v.window_fill = Color32::from_rgb(0x20, 0x20, 0x20);
+        v.panel_fill = Color32::from_rgb(0x10, 0x10, 0x10);
+        v.extreme_bg_color = Color32::from_rgb(0x05, 0x05, 0x05);
+        v.faint_bg_color = Color32::from_rgb(0x15, 0x15, 0x15);
+
+        apply_window_opacity(&mut v, 0.5);
+        assert_eq!(v.panel_fill.a(), 128, "panel must go ~half translucent");
+        assert_eq!(v.extreme_bg_color.a(), 128);
+        assert_eq!(v.faint_bg_color.a(), 128);
+        assert_eq!(v.window_fill.a(), 255, "window_fill must stay OPAQUE");
+
+        // Fully transparent: panels vanish, window_fill still opaque.
+        apply_window_opacity(&mut v, 0.0);
+        assert_eq!(v.panel_fill.a(), 0);
+        assert_eq!(v.window_fill.a(), 255);
+    }
+
+    #[test]
+    fn apply_window_opacity_clamps_out_of_range() {
+        let mut v = Visuals::dark();
+        v.panel_fill = Color32::from_rgb(1, 2, 3);
+        apply_window_opacity(&mut v, 9.0); // above 1.0 → clamps to fully opaque
+        assert_eq!(v.panel_fill.a(), 255);
+        apply_window_opacity(&mut v, -3.0); // below 0.0 → clamps to fully transparent
+        assert_eq!(v.panel_fill.a(), 0);
+    }
 }
