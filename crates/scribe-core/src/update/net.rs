@@ -1019,6 +1019,79 @@ mod tests {
         );
     }
 
+    /// Defense-in-depth against the zip-slip / TARmageddon class
+    /// (CVE-2025-59825): a tar entry whose PATH carries a directory PREFIX is
+    /// neutralised to its BASENAME — `extract_binary` joins only
+    /// `path.file_name()` to the output dir, so the binary always lands INSIDE
+    /// `dir` and can never escape it. This locks in the basename-only invariant
+    /// so a future refactor cannot reintroduce path traversal.
+    ///
+    /// Note: we use a multi-segment subdir prefix rather than literal `..`
+    /// because the `tar` crate REFUSES to even build an archive whose entry path
+    /// contains `..` (`append_data` returns an error) — that is the FIRST layer
+    /// of defense. Since extraction reduces any path to its `file_name()`,
+    /// stripping a subdir prefix exercises the exact same neutralisation code
+    /// path a `..` entry would hit if a hand-crafted archive smuggled one in.
+    #[test]
+    fn extract_binary_neutralises_path_prefix_to_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_name = if cfg!(windows) {
+            "scr1b3.exe"
+        } else {
+            "scr1b3"
+        };
+        let payload = b"fake binary payload";
+        let prefixed_path = format!("nested/evil/subdir/{bin_name}");
+
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, &prefixed_path, &payload[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let archive_bytes = gz.finish().unwrap();
+
+        let extracted = extract_binary(&archive_bytes, dir.path()).unwrap();
+        // The subdir prefix was stripped: the binary landed at dir/<basename>,
+        // NOT at dir/nested/evil/subdir/<basename> and never outside dir.
+        assert_eq!(extracted, dir.path().join(bin_name));
+        assert!(
+            extracted.starts_with(dir.path()),
+            "extracted path escaped the target dir: {extracted:?}"
+        );
+        assert!(
+            !dir.path().join("nested").exists(),
+            "the subdir prefix must not have been recreated under the target dir"
+        );
+        assert_eq!(fs::read(&extracted).unwrap(), payload);
+    }
+
+    /// First layer of zip-slip defense: the `tar` crate itself refuses to
+    /// construct an archive whose entry path contains `..` — so a traversal
+    /// archive cannot be produced through the normal API at all. Documents +
+    /// asserts that invariant (the basename-strip in `extract_binary` is the
+    /// second layer, covered above).
+    #[test]
+    fn tar_builder_refuses_to_write_a_dotdot_entry() {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(&mut gz);
+        let mut header = tar::Header::new_gnu();
+        let payload = b"x";
+        header.set_size(payload.len() as u64);
+        header.set_cksum();
+        let res = builder.append_data(&mut header, "../../etc/evil", &payload[..]);
+        assert!(
+            res.is_err(),
+            "tar builder must reject a `..` traversal entry path"
+        );
+    }
+
     #[test]
     fn extract_binary_errs_when_no_binary_entry() {
         let dir = tempfile::tempdir().unwrap();

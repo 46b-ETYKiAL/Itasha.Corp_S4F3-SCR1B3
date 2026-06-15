@@ -168,6 +168,29 @@ mod imp {
         }
     }
 
+    /// PURE geometry decision for the maximized `WM_NCCALCSIZE` client rect.
+    ///
+    /// A borderless maximize would otherwise cover the taskbar, so a maximized
+    /// window clamps its client rect to the monitor work area. When an auto-hide
+    /// taskbar is present we leave a 1px sliver on the bottom edge (the common
+    /// edge) so it can still pop up.
+    ///
+    /// `proposed` is the OS-proposed client rect (the full window rect); it is
+    /// returned unchanged here — the caller only invokes this on the maximized
+    /// path, where the work-area clamp wins. The non-maximized path returns the
+    /// proposed rect unchanged and never calls this. Keeping `proposed` in the
+    /// signature documents the contract and keeps the function self-describing.
+    fn maximized_client_rect(proposed: RECT, work: RECT, taskbar_autohide: bool) -> RECT {
+        let _ = proposed;
+        let mut work = work;
+        if taskbar_autohide {
+            // Leave a 1px sliver on the bottom so an auto-hide taskbar (the
+            // common edge) can still pop up.
+            work.bottom -= 1;
+        }
+        work
+    }
+
     /// The `WM_NCCALCSIZE` subclass: turn the whole window into client area so
     /// the OS reserves no non-client strip (hence draws no caption buttons),
     /// while keeping a maximized window inside the monitor work area.
@@ -186,15 +209,12 @@ mod imp {
             // no system min/max/close, opaque or transparent.
             if is_maximized(hwnd) {
                 // A borderless maximize would otherwise cover the taskbar. Clamp
-                // the client rect to the monitor work area.
-                if let Some(mut work) = monitor_work_area(hwnd) {
-                    if taskbar_is_autohide() {
-                        // Leave a 1px sliver on the bottom so an auto-hide
-                        // taskbar (the common edge) can still pop up.
-                        work.bottom -= 1;
-                    }
+                // the client rect to the monitor work area via the pure decision.
+                if let Some(work) = monitor_work_area(hwnd) {
                     let params = lparam as *mut NCCALCSIZE_PARAMS;
-                    (*params).rgrc[0] = work;
+                    let proposed = (*params).rgrc[0];
+                    (*params).rgrc[0] =
+                        maximized_client_rect(proposed, work, taskbar_is_autohide());
                 }
             }
             return 0;
@@ -285,6 +305,70 @@ mod imp {
         let path = std::env::temp_dir().join("scr1b3-caption-diag.txt");
         if let Ok(mut f) = std::fs::File::create(&path) {
             let _ = writeln!(f, "{}", nc_state_line(hwnd));
+        }
+    }
+
+    #[cfg(all(windows, test))]
+    mod tests {
+        use super::*;
+
+        fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+            RECT {
+                left,
+                top,
+                right,
+                bottom,
+            }
+        }
+
+        #[test]
+        fn maximized_clamps_to_work_area() {
+            // Proposed = full monitor; work area reserves the bottom (taskbar).
+            let proposed = rect(0, 0, 1920, 1080);
+            let work = rect(0, 0, 1920, 1040);
+            let out = maximized_client_rect(proposed, work, false);
+            // No inset when the taskbar is not auto-hide: returns the work area.
+            assert_eq!(out.left, work.left);
+            assert_eq!(out.top, work.top);
+            assert_eq!(out.right, work.right);
+            assert_eq!(out.bottom, work.bottom);
+        }
+
+        #[test]
+        fn autohide_taskbar_gets_one_px_inset() {
+            let proposed = rect(0, 0, 1920, 1080);
+            let work = rect(0, 0, 1920, 1080);
+            let out = maximized_client_rect(proposed, work, true);
+            // Bottom inset by exactly 1px; other edges identical to the work area.
+            assert_eq!(out.bottom, work.bottom - 1);
+            assert_eq!(out.left, work.left);
+            assert_eq!(out.top, work.top);
+            assert_eq!(out.right, work.right);
+        }
+
+        #[test]
+        fn multi_monitor_offset_preserved() {
+            // A second monitor placed left of / above the primary: negative origin.
+            let proposed = rect(-1920, -120, 0, 960);
+            let work = rect(-1920, -120, 0, 920);
+            let out = maximized_client_rect(proposed, work, false);
+            // Offset coordinates carried through exactly, no inset.
+            assert_eq!(out.left, -1920);
+            assert_eq!(out.top, -120);
+            assert_eq!(out.right, 0);
+            assert_eq!(out.bottom, 920);
+        }
+
+        #[test]
+        fn autohide_inset_preserves_offset_edges() {
+            // Auto-hide inset on an offset monitor still only touches `bottom`.
+            let proposed = rect(-1920, -120, 0, 960);
+            let work = rect(-1920, -120, 0, 920);
+            let out = maximized_client_rect(proposed, work, true);
+            assert_eq!(out.left, -1920);
+            assert_eq!(out.top, -120);
+            assert_eq!(out.right, 0);
+            assert_eq!(out.bottom, 919);
         }
     }
 }

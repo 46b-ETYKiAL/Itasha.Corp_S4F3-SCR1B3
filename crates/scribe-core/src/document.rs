@@ -392,4 +392,45 @@ mod tests {
         doc.save().unwrap();
         assert!(std::fs::read(&p).unwrap().is_empty());
     }
+
+    // Property-based complement to the example-based round-trip tests above:
+    // for ANY pure-ASCII UTF-8 content under ANY EOL style, open->save must
+    // reproduce the on-disk bytes EXACTLY and never report a lossy encode. This
+    // catches content-dependent regressions in the LF-normalize -> EOL-reapply
+    // -> encode pipeline that fixed example inputs would miss.
+    //
+    // NOTE: the >=256 MiB mmap read path (`LARGE_FILE_THRESHOLD`) is NOT
+    // exercised here — constructing a file that large in a unit test is
+    // prohibitive, and the threshold is a non-injectable `const`. The bytes
+    // path (normal files) is covered exhaustively.
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(96))]
+        #[test]
+        fn save_reopen_is_byte_identical_for_ascii(
+            lines in proptest::collection::vec("[ -~]{0,32}", 1..8),
+            eol_idx in 0usize..3,
+            trailing in proptest::prelude::any::<bool>(),
+        ) {
+            let eol = [Eol::Lf, Eol::Crlf, Eol::Cr][eol_idx];
+            let mut content = lines.join(eol.as_str());
+            if trailing {
+                content.push_str(eol.as_str());
+            }
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("rt.txt");
+            std::fs::write(&p, content.as_bytes()).unwrap();
+
+            let mut doc = Document::open(&p).unwrap();
+            // With >=2 lines there is an unambiguous separator, so the EOL must
+            // be detected exactly. (A single line / trailing-only case can be
+            // ambiguous, so we only assert byte-identity there.)
+            if lines.len() >= 2 {
+                proptest::prop_assert_eq!(doc.eol(), eol);
+            }
+            let lossy = doc.save().unwrap();
+            proptest::prop_assert!(!lossy, "pure-ASCII content must never encode lossily");
+            let reread = std::fs::read(&p).unwrap();
+            proptest::prop_assert_eq!(reread, content.as_bytes());
+        }
+    }
 }
