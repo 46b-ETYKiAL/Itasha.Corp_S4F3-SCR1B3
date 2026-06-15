@@ -33,6 +33,12 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 similar = { version = "2", default-features = false, features = ["text"] }
 htmd = "0.5"
 toml.workspace = true
+# Read the REAL native window handle from eframe's `Frame` (which implements
+# `HasWindowHandle`) so the Win32 caption-button fix targets the correct HWND
+# instead of an `EnumWindows` guess. Version-matched to eframe 0.34's
+# raw-window-handle (0.6) so the trait/types line up. Handle extraction is safe
+# (no `unsafe`), so the app keeps `#![forbid(unsafe_code)]`.
+raw-window-handle = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

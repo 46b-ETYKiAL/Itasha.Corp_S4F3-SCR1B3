@@ -55,6 +55,21 @@ pub fn ensure_caption_stripped() {
 #[cfg(not(windows))]
 pub fn ensure_caption_stripped() {}
 
+/// Prime the crate with the REAL native window handle (from eframe's
+/// `Frame`/`HasWindowHandle`). This is the authoritative HWND of the app's
+/// window; passing it here means [`ensure_caption_stripped`] subclasses the
+/// CORRECT window instead of falling back to an `EnumWindows` guess (which could
+/// latch onto the wrong top-level window — the likely reason earlier caption
+/// fixes had no effect). Idempotent; call every frame. Windows-only.
+#[cfg(windows)]
+pub fn set_main_hwnd(hwnd: isize) {
+    imp::set_main_hwnd(hwnd);
+}
+
+/// No-op on non-Windows platforms.
+#[cfg(not(windows))]
+pub fn set_main_hwnd(_hwnd: isize) {}
+
 #[cfg(windows)]
 mod imp {
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -68,18 +83,30 @@ mod imp {
         DefSubclassProc, SHAppBarMessage, SetWindowSubclass, ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible, SetWindowPos,
-        GWL_STYLE, NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, WM_NCCALCSIZE, WS_MAXIMIZE,
+        EnumWindows, GetClientRect, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
+        IsWindowVisible, SetWindowPos, GWL_STYLE, NCCALCSIZE_PARAMS, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCCALCSIZE, WS_MAXIMIZE,
     };
 
     /// Cached main-window HWND (0 = not yet found). One window per process.
+    /// Primed by [`set_main_hwnd`] with the real eframe handle when available;
+    /// falls back to the `EnumWindows` guess only if never primed.
     static CACHED_HWND: AtomicIsize = AtomicIsize::new(0);
     /// Set once the NC subclass is successfully installed (install is one-shot).
     static SUBCLASSED: AtomicBool = AtomicBool::new(false);
+    /// Set once the one-shot diagnostic file has been written.
+    static DIAG_WRITTEN: AtomicBool = AtomicBool::new(false);
 
     /// A stable, arbitrary subclass id for our single subclass entry.
     const SUBCLASS_ID: usize = 0x5C_1B_3E;
+
+    /// Prime the cached HWND with the authoritative handle (see the public
+    /// wrapper). Stores only a non-zero value; idempotent.
+    pub fn set_main_hwnd(hwnd: isize) {
+        if hwnd != 0 {
+            CACHED_HWND.store(hwnd, Ordering::Relaxed);
+        }
+    }
 
     /// `EnumWindows` callback: record the first visible top-level window owned by
     /// this process into the `*mut isize` passed via `lparam`, then stop.
@@ -204,6 +231,7 @@ mod imp {
     pub fn ensure_borderless() {
         let mut hwnd = CACHED_HWND.load(Ordering::Relaxed);
         if hwnd == 0 {
+            // Not primed with the real eframe handle yet — fall back to the guess.
             hwnd = find_main_window();
             CACHED_HWND.store(hwnd, Ordering::Relaxed);
         }
@@ -211,6 +239,52 @@ mod imp {
         // window exists; we retry each frame until it does, then stop).
         if hwnd != 0 && !SUBCLASSED.load(Ordering::Relaxed) && install_nc_subclass(hwnd) {
             SUBCLASSED.store(true, Ordering::Relaxed);
+        }
+        // One-shot diagnostic: after the subclass is installed, record whether the
+        // non-client strip is actually gone (client rect == window rect). Written
+        // to %TEMP%\scr1b3-caption-diag.txt so a STILL-failing fix can be debugged
+        // from evidence rather than another blind guess.
+        if hwnd != 0
+            && SUBCLASSED.load(Ordering::Relaxed)
+            && !DIAG_WRITTEN.swap(true, Ordering::Relaxed)
+        {
+            write_diag(hwnd);
+        }
+    }
+
+    /// Build a one-line snapshot of the window's NC state. `nc_strip_gone` is the
+    /// load-bearing signal: when the `WM_NCCALCSIZE` fix works, the client rect
+    /// equals the full window rect (no reserved caption strip).
+    fn nc_state_line(hwnd: isize) -> String {
+        // SAFETY: `hwnd` is an OS window owned by this process; rect + style reads.
+        unsafe {
+            let h = hwnd as HWND;
+            let mut wr: RECT = std::mem::zeroed();
+            let mut cr: RECT = std::mem::zeroed();
+            let gw = GetWindowRect(h, &mut wr);
+            let gc = GetClientRect(h, &mut cr);
+            let win = (wr.right - wr.left, wr.bottom - wr.top);
+            let cli = (cr.right - cr.left, cr.bottom - cr.top);
+            let nc_gone = gw != 0 && gc != 0 && win == cli;
+            let style = GetWindowLongPtrW(h, GWL_STYLE) as u32;
+            format!(
+                "scr1b3 caption diag: hwnd=0x{hwnd:x} subclassed={} style=0x{style:08x} \
+                 win={}x{} client={}x{} nc_strip_gone={nc_gone}",
+                SUBCLASSED.load(Ordering::Relaxed),
+                win.0,
+                win.1,
+                cli.0,
+                cli.1
+            )
+        }
+    }
+
+    /// Write the diagnostic line to `%TEMP%\scr1b3-caption-diag.txt` (best-effort).
+    fn write_diag(hwnd: isize) {
+        use std::io::Write;
+        let path = std::env::temp_dir().join("scr1b3-caption-diag.txt");
+        if let Ok(mut f) = std::fs::File::create(&path) {
+            let _ = writeln!(f, "{}", nc_state_line(hwnd));
         }
     }
 }
