@@ -9591,6 +9591,9 @@ mod tab_reorder_tests;
 mod change_bar_tests;
 
 #[cfg(test)]
+mod visual_qa;
+
+#[cfg(test)]
 mod update_reminder_tests;
 
 #[cfg(test)]
