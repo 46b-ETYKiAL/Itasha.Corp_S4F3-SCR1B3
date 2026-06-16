@@ -50,12 +50,14 @@ toml = { workspace = true }                    # Tree<Pane> round-trip test (Pha
 minisign = "0.9"                               # sign in plugin-manager verify tests (round-trip only)
 # Official egui UI-interaction test harness: drives the real render loop and
 # clicks widgets BY LABEL (AccessKit) so tests exercise features the way a user
-# does — not state-set-then-assert. Lockstep with egui 0.34. The `wgpu` +
-# `snapshot` features add the offscreen render-to-image backend used by the
-# (ignored, GPU-gated) visual-QA harness in src/app/visual_qa.rs.
+# does — not state-set-then-assert. Lockstep with egui 0.34. The `wgpu` feature
+# adds the offscreen render-to-image backend (`Harness::render`) used by the
+# (ignored, GPU-gated) visual-QA harness in src/app/visual_qa.rs. The `snapshot`
+# feature is deliberately NOT enabled: we save+inspect the PNG ourselves, and
+# snapshot's baseline-diff machinery (dify/rayon/open/…) would add a pile of
+# unvetted dev-only crates for no benefit.
 egui_kittest = { version = "0.34", default-features = false, features = [
     "wgpu",
-    "snapshot",
 ] }
 # Visual-QA render harness deps (dev-only; all already in the lock tree via
 # eframe/egui-wgpu, so no new supply-chain surface). `wgpu`+`pollster` probe a
