@@ -31,6 +31,9 @@ All settings are grouped into six tables: `[editor]`, `[appearance]`, `[fonts]`,
 | `show_change_bar` | boolean | `true` | Notepad++-style change bar in the gutter: amber marks lines edited but unsaved, green marks edited-then-saved lines, untouched lines have none. |
 | `show_minimap` | boolean | `true` | Show the minimap. |
 | `word_wrap` | boolean | `false` | Soft-wrap long lines to the viewport width. |
+| `highlight_selection_occurrences` | boolean | `true` | When text is selected, faintly box every other matching run in the viewport. |
+| `highlight_trailing_whitespace` | boolean | `false` | Tint trailing spaces/tabs on each line (distinct from rendering all whitespace). |
+| `rulers` | array of integers | `[]` | Vertical guide rulers at these 1-based columns, e.g. `[80, 100]`. Empty = none. |
 | `auto_save` | boolean | `false` | Automatically save dirty buffers. |
 | `restore_session` | boolean | `true` | Reopen the previous session's tabs on launch. |
 

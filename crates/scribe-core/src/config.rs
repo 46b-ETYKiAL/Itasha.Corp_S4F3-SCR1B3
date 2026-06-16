@@ -420,6 +420,18 @@ pub struct EditorConfig {
     /// Box-highlight the bracket matching the one next to the caret. Default OFF.
     #[serde(default)]
     pub bracket_match: bool,
+    /// Faintly box every other occurrence of the current selection in the
+    /// viewport (VS Code / Sublime style). Default ON.
+    #[serde(default = "default_true")]
+    pub highlight_selection_occurrences: bool,
+    /// Tint trailing whitespace on each line a faint warn colour (distinct
+    /// from `render_whitespace`, which shows ALL whitespace). Default OFF.
+    #[serde(default)]
+    pub highlight_trailing_whitespace: bool,
+    /// Vertical guide rulers at these 1-based column positions (e.g. [80, 100]).
+    /// Empty = no rulers. Default empty.
+    #[serde(default)]
+    pub rulers: Vec<usize>,
     /// Smooth (eased) wheel scrolling. Default ON — egui's native feel. Off makes
     /// the wheel jump in discrete notches (snappier, no glide).
     #[serde(default = "default_true")]
@@ -568,6 +580,9 @@ impl Default for EditorConfig {
             caret_width: default_caret_width(),
             indent_guides: false,
             bracket_match: false,
+            highlight_selection_occurrences: true,
+            highlight_trailing_whitespace: false,
+            rulers: Vec::new(),
             smooth_scroll: true,
             scrollbar_style: ScrollbarStyle::Auto,
         }
