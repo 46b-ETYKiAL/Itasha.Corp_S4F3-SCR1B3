@@ -14,6 +14,7 @@ mod action_log;
 mod app;
 mod change_bar;
 mod cli;
+mod datetime;
 mod diff_view;
 mod editor_features;
 mod filetree;

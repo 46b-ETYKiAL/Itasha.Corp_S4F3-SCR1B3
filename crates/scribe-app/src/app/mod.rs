@@ -574,6 +574,16 @@ pub struct ScribeApp {
     /// the recent-files modal renders this frame. Opened via Ctrl+R, the
     /// command palette, or the toolbar's "Recent" button.
     recent_open: bool,
+    /// When true, the recent-folders modal renders this frame (mirrors
+    /// `recent_open`). Opened via the command palette / "Open recent folder".
+    recent_folders_open: bool,
+    /// Command-palette → caret-command bridges. These commands need the egui
+    /// `TextEditState` (only reachable with `ctx`), so the palette (which has
+    /// no `ctx`) sets a flag here that `frame_tick` drains, mirroring the `act`
+    /// keyboard path. Taken (reset) when handled.
+    pending_jump_bracket: bool,
+    pending_insert_datetime: bool,
+    pending_dup_selection: bool,
     /// F-013 from docs/audits/overlooked-surfaces-2026-05-29.md: when true,
     /// the welcome modal renders this frame. Auto-opened on first launch
     /// (when `config.editor.first_run_completed` is false); reachable
@@ -1010,6 +1020,10 @@ impl ScribeApp {
             settings_open: false,
             cheatsheet_open: false,
             recent_open: false,
+            recent_folders_open: false,
+            pending_jump_bracket: false,
+            pending_insert_datetime: false,
+            pending_dup_selection: false,
             welcome_open: welcome_on_launch,
             fuzzy_open: false,
             fuzzy_query: String::new(),
@@ -1630,6 +1644,116 @@ impl ScribeApp {
             )));
         state.store(ctx, id);
         true
+    }
+
+    /// Move the caret to the bracket paired with the one at/next to the caret
+    /// (Ctrl+M). No-op when the caret is not on a bracket pair. Bounded to the
+    /// same buffer size as the bracket-match highlight.
+    fn jump_matching_bracket(&mut self, ctx: &egui::Context, id: egui::Id, active: usize) {
+        if self.tabs[active].text.len() > 500_000 {
+            return;
+        }
+        let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+            return;
+        };
+        let Some(range) = state.cursor.char_range() else {
+            return;
+        };
+        let caret = range.primary.index;
+        let Some((open_ci, close_ci)) =
+            matching_bracket_char_indices(&self.tabs[active].text, caret)
+        else {
+            return;
+        };
+        // The caret sits on (or just past) one bracket of the pair; jump to the
+        // other end. Pick whichever end the caret is NOT adjacent to.
+        let target = if caret.abs_diff(open_ci) <= caret.abs_diff(close_ci) {
+            close_ci
+        } else {
+            open_ci
+        };
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(target),
+            )));
+        state.store(ctx, id);
+    }
+
+    /// Insert a UTC ISO-8601 timestamp at the caret, replacing any selection.
+    fn insert_datetime_at_caret(&mut self, ctx: &egui::Context, id: egui::Id, active: usize) {
+        let ts = crate::datetime::now_iso8601_utc();
+        let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+            return;
+        };
+        let Some(range) = state.cursor.char_range() else {
+            return;
+        };
+        let lo = range.primary.index.min(range.secondary.index);
+        let hi = range.primary.index.max(range.secondary.index);
+        let text = &self.tabs[active].text;
+        let lo_b = char_to_byte(text, lo);
+        let hi_b = char_to_byte(text, hi);
+        let mut new_text = String::with_capacity(text.len() + ts.len());
+        new_text.push_str(&text[..lo_b]);
+        new_text.push_str(&ts);
+        new_text.push_str(&text[hi_b..]);
+        self.tabs[active].set_text(new_text);
+        let new_caret = lo + ts.chars().count();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(new_caret),
+            )));
+        state.store(ctx, id);
+        self.status = format!("inserted {ts}");
+    }
+
+    /// Duplicate the current selection (or the caret's line when there is no
+    /// selection), inserting the copy immediately after and moving the caret
+    /// onto the copy.
+    fn duplicate_selection(&mut self, ctx: &egui::Context, id: egui::Id, active: usize) {
+        let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+            return;
+        };
+        let Some(range) = state.cursor.char_range() else {
+            return;
+        };
+        let (prim, sec) = (range.primary.index, range.secondary.index);
+        let text = &self.tabs[active].text;
+        let (insert_at_b, copy, new_caret) = if prim != sec {
+            // Selection: insert a copy of [lo,hi) right after hi; caret ends
+            // after the inserted copy.
+            let lo = prim.min(sec);
+            let hi = prim.max(sec);
+            let lo_b = char_to_byte(text, lo);
+            let hi_b = char_to_byte(text, hi);
+            (hi_b, text[lo_b..hi_b].to_string(), hi + (hi - lo))
+        } else {
+            // Collapsed caret: duplicate the whole line below, keeping the
+            // caret's column on the new copy.
+            let caret_b = char_to_byte(text, prim);
+            let start_b = text[..caret_b].rfind('\n').map_or(0, |i| i + 1);
+            let end_b = text[caret_b..]
+                .find('\n')
+                .map_or(text.len(), |i| caret_b + i);
+            let line = text[start_b..end_b].to_string();
+            // New caret = same column, one line down. Column in chars:
+            let col = text[start_b..caret_b].chars().count();
+            let dup_line_start_chars = prim + (line.chars().count() - col) + 1;
+            (end_b, format!("\n{line}"), dup_line_start_chars + col)
+        };
+        let mut new_text = String::with_capacity(text.len() + copy.len());
+        new_text.push_str(&text[..insert_at_b]);
+        new_text.push_str(&copy);
+        new_text.push_str(&text[insert_at_b..]);
+        self.tabs[active].set_text(new_text);
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(new_caret),
+            )));
+        state.store(ctx, id);
     }
 
     /// Render one quick-access toolbar entry by action id and apply its effect.
@@ -2348,8 +2472,11 @@ impl ScribeApp {
             BuiltinCommand::OpenFolder => {
                 if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                     self.status = format!("folder: {}", folder.display());
-                    self.file_tree_root = Some(folder);
+                    self.open_folder_root(folder);
                 }
+            }
+            BuiltinCommand::OpenRecentFolder => {
+                self.recent_folders_open = true;
             }
             BuiltinCommand::Save => self.save_active(),
             BuiltinCommand::ConvertToMarkdown => self.convert_to_markdown_active(),
@@ -2522,6 +2649,11 @@ impl ScribeApp {
                     None => self.toast = Some("This tab has no saved file path.".to_string()),
                 }
             }
+            // These three need the egui TextEditState (ctx), unavailable here;
+            // set a flag that frame_tick drains (see the act.* keyboard path).
+            BuiltinCommand::JumpMatchingBracket => self.pending_jump_bracket = true,
+            BuiltinCommand::InsertDateTime => self.pending_insert_datetime = true,
+            BuiltinCommand::DuplicateSelection => self.pending_dup_selection = true,
             // Clipboard / history actions: record the request; `frame_tick`
             // drains it into the focused editor as a native egui event.
             BuiltinCommand::Copy => self.pending_editor_action = Some(EditorAction::Copy),
@@ -2817,6 +2949,17 @@ impl ScribeApp {
                 Err(e) => self.toast = Some(format!("save failed: {e}")),
             }
         }
+    }
+
+    /// Open `folder` as the file-tree root and record it in the recent-folders
+    /// MRU (persisted), mirroring the recent-files discipline.
+    fn open_folder_root(&mut self, folder: PathBuf) {
+        scribe_core::config::record_recent_file(
+            &mut self.config.editor.recent_folders,
+            folder.clone(),
+        );
+        self.file_tree_root = Some(folder);
+        self.save_config();
     }
 
     /// Apply a whole-buffer `&str -> String` transform to the active tab,
@@ -4368,6 +4511,7 @@ struct Pending {
     move_line_up: bool,
     move_line_down: bool,
     duplicate_line: bool,
+    jump_bracket: bool,
     join_lines: bool,
     /// Wave-3 (docs/audits/overlooked-surfaces-2026-05-29.md): F-018 theme
     /// cycle keyboard chord + F-031 minimap-toggle keyboard chord.
@@ -4605,6 +4749,7 @@ pub(crate) enum BuiltinCommand {
     NewFile,
     OpenFile,
     OpenFolder,
+    OpenRecentFolder,
     Save,
     CloseActiveTab,
     CloseAllTabs,
@@ -4640,6 +4785,9 @@ pub(crate) enum BuiltinCommand {
     ConvertIndentToTabs,
     RevealInExplorer,
     CopyFilePath,
+    JumpMatchingBracket,
+    InsertDateTime,
+    DuplicateSelection,
     Copy,
     Cut,
     Paste,
@@ -4780,6 +4928,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         action: BuiltinCommand::OpenFolder,
     },
     BuiltinEntry {
+        label: "Open recent folder",
+        shortcut: "",
+        action: BuiltinCommand::OpenRecentFolder,
+    },
+    BuiltinEntry {
         label: "Open settings",
         shortcut: "",
         action: BuiltinCommand::OpenSettings,
@@ -4848,6 +5001,21 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Copy file path",
         shortcut: "",
         action: BuiltinCommand::CopyFilePath,
+    },
+    BuiltinEntry {
+        label: "Jump to matching bracket",
+        shortcut: "Ctrl+M",
+        action: BuiltinCommand::JumpMatchingBracket,
+    },
+    BuiltinEntry {
+        label: "Insert date/time (UTC, ISO-8601)",
+        shortcut: "",
+        action: BuiltinCommand::InsertDateTime,
+    },
+    BuiltinEntry {
+        label: "Duplicate selection (or line)",
+        shortcut: "",
+        action: BuiltinCommand::DuplicateSelection,
     },
     BuiltinEntry {
         label: "Start language server for current file",
@@ -6277,6 +6445,11 @@ impl ScribeApp {
             if cmd && i.key_pressed(egui::Key::Slash) {
                 act.toggle_comment = true;
             }
+            // Jump to the matching bracket. !shift so it never collides with a
+            // potential Ctrl+Shift+M binding.
+            if cmd && !i.modifiers.shift && i.key_pressed(egui::Key::M) {
+                act.jump_bracket = true;
+            }
             if i.key_pressed(egui::Key::F11) {
                 act.toggle_fullscreen = true;
             }
@@ -6425,6 +6598,7 @@ impl ScribeApp {
                     self.goto_open = false;
                     self.goto_symbol_open = false;
                     self.recent_open = false;
+                    self.recent_folders_open = false;
                     self.welcome_open = false;
                     self.fuzzy_open = false;
                 }
@@ -7412,6 +7586,61 @@ impl ScribeApp {
             }
         }
 
+        // ---- Recent folders modal ----
+        // Mirrors the recent-files modal for folders opened as the file-tree
+        // root. Click an entry → set it as the root (and re-record it MRU-front
+        // via open_folder_root). The list is owned by EditorConfig::recent_folders.
+        if self.recent_folders_open {
+            let mut chosen: Option<PathBuf> = None;
+            let mut still_open = true;
+            egui::Window::new(
+                RichText::new(format!(
+                    "{}  recent folders",
+                    egui_phosphor::thin::CLOCK_COUNTER_CLOCKWISE
+                ))
+                .color(accent)
+                .monospace(),
+            )
+            .open(&mut still_open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(520.0)
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 100.0])
+            .show(ctx, |ui| {
+                if self.config.editor.recent_folders.is_empty() {
+                    ui.label(
+                        RichText::new("no recent folders yet — open a folder first")
+                            .color(muted)
+                            .small(),
+                    );
+                } else {
+                    egui::ScrollArea::vertical()
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            for p in &self.config.editor.recent_folders {
+                                let label = RichText::new(p.display().to_string()).monospace();
+                                if ui.selectable_label(false, label).clicked() {
+                                    chosen = Some(p.clone());
+                                }
+                            }
+                        });
+                }
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("press Esc to close")
+                        .color(muted)
+                        .small()
+                        .monospace(),
+                );
+            });
+            if let Some(p) = chosen {
+                self.open_folder_root(p);
+                self.recent_folders_open = false;
+            } else if !still_open {
+                self.recent_folders_open = false;
+            }
+        }
+
         // ---- Welcome modal (F-013) ----
         //
         // First-launch greeter: open file, open folder, pick from recent,
@@ -7886,6 +8115,7 @@ impl ScribeApp {
                 || self.goto_open
                 || self.goto_symbol_open
                 || self.recent_open
+                || self.recent_folders_open
                 || self.cheatsheet_open
                 || self.settings_open
                 || self.welcome_open;
@@ -8249,6 +8479,22 @@ impl ScribeApp {
                     ctx.input_mut(|i| {
                         i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
                     });
+                }
+
+                // Caret commands from the keyboard (`act.*`) or the command
+                // palette (`self.pending_*`). They need the egui TextEditState,
+                // so they run here — after the editor stored its state this
+                // frame — and `store` takes effect next frame.
+                if !read_only {
+                    if act.jump_bracket || std::mem::take(&mut self.pending_jump_bracket) {
+                        self.jump_matching_bracket(ctx, editor_id, active);
+                    }
+                    if std::mem::take(&mut self.pending_insert_datetime) {
+                        self.insert_datetime_at_caret(ctx, editor_id, active);
+                    }
+                    if std::mem::take(&mut self.pending_dup_selection) {
+                        self.duplicate_selection(ctx, editor_id, active);
+                    }
                 }
 
                 // #78 — misspellings for the active buffer, computed (memoized)

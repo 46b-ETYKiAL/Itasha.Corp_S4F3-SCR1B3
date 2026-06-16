@@ -336,6 +336,10 @@ pub struct EditorConfig {
     /// duplicates collapse to the front position.
     #[serde(default)]
     pub recent_files: Vec<PathBuf>,
+    /// MRU of folders opened as the file-tree root. Same MRU discipline as
+    /// `recent_files` (front-push, dedup, capped) via `record_recent_file`.
+    #[serde(default)]
+    pub recent_folders: Vec<PathBuf>,
     /// F-013 from docs/audits/overlooked-surfaces-2026-05-29.md: set true
     /// after the welcome modal is dismissed. Used to suppress the welcome
     /// modal on subsequent launches.
@@ -547,6 +551,7 @@ impl Default for EditorConfig {
             grid_enabled: false,
             grid_layout: None,
             recent_files: Vec::new(),
+            recent_folders: Vec::new(),
             first_run_completed: false,
             scroll_positions: std::collections::HashMap::new(),
             experimental_rope_editor: false,
@@ -1541,6 +1546,23 @@ show_dropdown = false
         let back: Config = toml::from_str(&s).expect("config TOML round-trip");
         assert_eq!(back.editor.recent_files.len(), 2);
         assert_eq!(back.editor.recent_files[0], PathBuf::from("/x/y.rs"));
+    }
+
+    #[test]
+    fn recent_folders_round_trip_and_default_empty() {
+        // Default is empty (a missing key must not error or invent entries).
+        assert!(Config::default().editor.recent_folders.is_empty());
+        let mut c = Config::default();
+        c.editor.recent_folders = vec![PathBuf::from("/proj/a"), PathBuf::from("/proj/b")];
+        let back: Config = toml::from_str(&c.to_toml_string()).expect("config TOML round-trip");
+        assert_eq!(back.editor.recent_folders.len(), 2);
+        assert_eq!(back.editor.recent_folders[0], PathBuf::from("/proj/a"));
+        // MRU discipline is shared with recent_files via record_recent_file:
+        // front-push + dedup.
+        let mut list = vec![PathBuf::from("/x")];
+        record_recent_file(&mut list, PathBuf::from("/y"));
+        record_recent_file(&mut list, PathBuf::from("/x")); // re-touch -> front
+        assert_eq!(list, vec![PathBuf::from("/x"), PathBuf::from("/y")]);
     }
 
     /// F-013: first_run_completed defaults false + round-trips.
