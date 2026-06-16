@@ -8287,9 +8287,12 @@ impl ScribeApp {
                                 _ => None,
                             };
                             if let Some(col) = col {
+                                // 3.5px stripe flush to the gutter's right edge
+                                // (Notepad++/VS Code use ~3px; a touch wider here
+                                // so it reads clearly at the gutter boundary).
                                 painter.rect_filled(
                                     egui::Rect::from_min_max(
-                                        egui::pos2(bar_r - 2.5, y),
+                                        egui::pos2(bar_r - 3.5, y),
                                         egui::pos2(bar_r, y + gutter_row_h),
                                     ),
                                     0.0,

@@ -245,3 +245,32 @@ fn scene_highlight_occurrences() {
         img.height()
     );
 }
+
+/// Spell-check scoping on a REAL `.rs` file: language_hint = "rust" →
+/// `SpellScope` restricts the check to comments/strings (check_identifiers
+/// defaults false), so keywords (`fn`/`let`/`println`) must NOT be squiggled —
+/// only the typos in the comment + the string. (The earlier scratch-tab QA
+/// scene had no extension → whole-text fallback → keywords got flagged; this
+/// scene proves real-file behavior.)
+#[test]
+#[ignore = "GPU render"]
+fn scene_spellcheck_code() {
+    use std::io::Write as _;
+    let mut f = tempfile::Builder::new()
+        .suffix(".rs")
+        .tempfile()
+        .expect("temp .rs");
+    write!(
+        f,
+        "fn main() {{\n    // ths sentnce has speling typoz\n    let x = 1;\n    println!(\"helllo wrld\");\n}}\n"
+    )
+    .unwrap();
+    let path = f.path().to_path_buf();
+    let mut app = ScribeApp::new_test(qa_config());
+    app.tabs.clear();
+    let tab = EditorTab::from_path(path).expect("open temp .rs");
+    app.tabs.push(tab);
+    app.active = 0;
+    render_scene("spellcheck_code", 1100.0, 400.0, app);
+    drop(f); // keep the temp file alive until after the render
+}
