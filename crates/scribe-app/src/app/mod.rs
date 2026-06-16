@@ -286,6 +286,18 @@ struct EditorTab {
     /// prompted to update to the on-disk version instead of silently clobbering
     /// it on save. A CLEAN tab is reloaded silently and never sets this.
     external_change: bool,
+    /// Change-bar baseline: the buffer text at session/open time, frozen until
+    /// the tab is reloaded from disk. A line matching this shows no indicator.
+    session_baseline: String,
+    /// Change-bar baseline: the buffer text at the last save. A line that
+    /// changed vs `session_baseline` but matches this is shown as "saved".
+    saved_baseline: String,
+    /// Derived per-line change state (Notepad++-style gutter bar). Recomputed
+    /// lazily by `ensure_change_states` when `edit_gen` moves past `change_gen`.
+    change_states: Vec<crate::change_bar::LineChange>,
+    /// `Some(edit_gen)` the `change_states` cache was computed for, or `None`
+    /// to force a recompute (initial, post-save, post-reload).
+    change_gen: Option<u64>,
 }
 
 /// A recently-closed tab kept on the reopen stack (Ctrl+Shift+T), so an
@@ -318,6 +330,10 @@ impl EditorTab {
             bookmarks: std::collections::BTreeSet::new(),
             edit_gen: 0,
             external_change: false,
+            session_baseline: String::new(),
+            saved_baseline: String::new(),
+            change_states: Vec::new(),
+            change_gen: None,
         }
     }
 
@@ -331,12 +347,18 @@ impl EditorTab {
             doc_id: crate::grid::DocId(0),
             pinned: false,
             disk_mtime,
-            disk_text: text,
+            disk_text: text.clone(),
             rope_state: None,
             rope_buf: None,
             bookmarks: std::collections::BTreeSet::new(),
             edit_gen: 0,
             external_change: false,
+            // Just opened: both baselines are the on-disk content, so no line
+            // is marked until the user edits.
+            session_baseline: text.clone(),
+            saved_baseline: text,
+            change_states: Vec::new(),
+            change_gen: None,
         })
     }
 
@@ -356,12 +378,18 @@ impl EditorTab {
                     doc_id: crate::grid::DocId(0),
                     pinned: false,
                     disk_mtime,
+                    // Baselines are the on-disk (saved) content; restored
+                    // unsaved edits in `content` show as "unsaved" until saved.
+                    session_baseline: disk_text.clone(),
+                    saved_baseline: disk_text.clone(),
                     disk_text,
                     rope_state: None,
                     rope_buf: None,
                     bookmarks: std::collections::BTreeSet::new(),
                     edit_gen: 0,
                     external_change: false,
+                    change_states: Vec::new(),
+                    change_gen: None,
                 };
             }
         }
@@ -381,6 +409,22 @@ impl EditorTab {
         self.text = new;
         self.rope_buf = None;
         self.edit_gen = self.edit_gen.wrapping_add(1);
+    }
+
+    /// Change-bar: record the current text as the saved baseline (called after
+    /// a successful save). The session baseline stays frozen, so a line edited
+    /// then saved transitions from "unsaved" to "saved" rather than to "none".
+    fn mark_change_saved(&mut self) {
+        self.saved_baseline = self.text.clone();
+        self.change_gen = None; // force recompute (edit_gen is unchanged by a save)
+    }
+
+    /// Change-bar: reset BOTH baselines to the current text (called after a
+    /// reload from disk, where the new content becomes the clean reference).
+    fn reset_change_baselines(&mut self) {
+        self.session_baseline = self.text.clone();
+        self.saved_baseline = self.text.clone();
+        self.change_gen = None;
     }
 
     fn title(&self) -> String {
@@ -2369,6 +2413,10 @@ impl ScribeApp {
                 self.config.editor.show_line_numbers = !self.config.editor.show_line_numbers;
                 self.save_config();
             }
+            BuiltinCommand::ToggleChangeBar => {
+                self.config.editor.show_change_bar = !self.config.editor.show_change_bar;
+                self.save_config();
+            }
             BuiltinCommand::OpenSettings => {
                 self.settings_open = true;
             }
@@ -2532,6 +2580,9 @@ impl ScribeApp {
                         self.tabs[active].disk_mtime = Some(m);
                     }
                 }
+                // Change-bar: lines edited this session flip from unsaved to
+                // saved (the saved baseline now includes them).
+                self.tabs[active].mark_change_saved();
                 self.fire_save_hooks(active);
             }
             Err(e) => self.toast = Some(format!("save failed: {e}")),
@@ -2660,6 +2711,8 @@ impl ScribeApp {
                     self.tabs[i].disk_mtime = Some(m);
                 }
                 self.tabs[i].external_change = false;
+                // Change-bar: the reloaded content is the new clean reference.
+                self.tabs[i].reset_change_baselines();
                 self.status = format!("reloaded {} (external edit)", path.display());
             }
         }
@@ -2705,10 +2758,41 @@ impl ScribeApp {
                             self.tabs[active].doc.encoding().name
                         ));
                     }
+                    // Change-bar: the saved baseline now includes this session's
+                    // edits, so they flip from unsaved to saved.
+                    self.tabs[active].mark_change_saved();
                 }
                 Err(e) => self.toast = Some(format!("save failed: {e}")),
             }
         }
+    }
+
+    /// Recompute the active tab's per-line change-bar states if the buffer
+    /// moved since the cache was last built. A cheap no-op when nothing
+    /// changed (keyed off the monotonic `edit_gen`). The O(n) line diff is
+    /// skipped above a size cap — large files are low-value for a change bar
+    /// and the diff would cost a frame.
+    fn ensure_change_states(&mut self, active: usize) {
+        /// Max buffer size for which the change-bar diff runs.
+        const CHANGE_BAR_MAX_BYTES: usize = 2 * 1024 * 1024;
+        if !self.config.editor.show_change_bar || active >= self.tabs.len() {
+            return;
+        }
+        let tab = &mut self.tabs[active];
+        if tab.change_gen == Some(tab.edit_gen) {
+            return; // cache is current
+        }
+        if tab.text.len() > CHANGE_BAR_MAX_BYTES {
+            tab.change_states.clear();
+            tab.change_gen = Some(tab.edit_gen);
+            return;
+        }
+        tab.change_states = crate::change_bar::compute_change_states(
+            &tab.session_baseline,
+            &tab.saved_baseline,
+            &tab.text,
+        );
+        tab.change_gen = Some(tab.edit_gen);
     }
 
     /// Convert the active buffer to Markdown (by file type) and save it as a
@@ -4472,6 +4556,7 @@ pub(crate) enum BuiltinCommand {
     ToggleSpellcheck,
     ToggleWordWrap,
     ToggleLineNumbers,
+    ToggleChangeBar,
     OpenSettings,
     OpenFind,
     OpenPalette,
@@ -4669,6 +4754,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Toggle line numbers",
         shortcut: "",
         action: BuiltinCommand::ToggleLineNumbers,
+    },
+    BuiltinEntry {
+        label: "Toggle change bar (edited-line markers)",
+        shortcut: "",
+        action: BuiltinCommand::ToggleChangeBar,
     },
     BuiltinEntry {
         label: "Toggle diff vs disk",
@@ -6653,6 +6743,8 @@ impl ScribeApp {
                         if let Some(m) = file_mtime(&path) {
                             self.tabs[i].disk_mtime = Some(m);
                         }
+                        // Change-bar: reloaded content is the new clean baseline.
+                        self.tabs[i].reset_change_baselines();
                         self.status = format!("reloaded {} from disk", path.display());
                     }
                 }
@@ -7804,11 +7896,25 @@ impl ScribeApp {
         // skip this one there (and avoid the O(n) `lines().count()` on a
         // 256 MiB+ buffer).
         if show_line_numbers && !self.fold_view && !read_only && !chrome_hidden {
+            // Change-bar: refresh the per-line state cache before borrowing it.
+            self.ensure_change_states(active);
             let total = self.tabs[active].text.lines().count().max(1);
             let digits = total.to_string().len().max(2);
             let gutter_w = digits as f32 * (font.size * 0.62) + 16.0;
             let rows = &self.line_gutter;
             let bookmarks = &self.tabs[active].bookmarks;
+            let show_change_bar = self.config.editor.show_change_bar;
+            let change_states = &self.tabs[active].change_states;
+            let cb_unsaved = ui_color(
+                &self.theme,
+                "change_bar_unsaved",
+                Rgba::new(0xf2, 0xb3, 0x3d, 255),
+            );
+            let cb_saved = ui_color(
+                &self.theme,
+                "change_bar_saved",
+                Rgba::new(0x6f, 0xb8, 0x9a, 255),
+            );
             egui::SidePanel::left("line-gutter")
                 .exact_width(gutter_w)
                 .resizable(false)
@@ -7818,10 +7924,32 @@ impl ScribeApp {
                     let clip = ui.clip_rect();
                     let rx = ui.max_rect().right() - 8.0;
                     let lx = ui.max_rect().left() + 4.0;
+                    // Change bar sits flush against the gutter's right edge
+                    // (between the numbers and the text), Notepad++-style.
+                    let bar_r = ui.max_rect().right();
                     let nfont = FontId::monospace((font.size * 0.92).max(8.0));
                     for (i, &y) in rows.iter().enumerate() {
                         if y < clip.top() - gutter_row_h || y > clip.bottom() {
                             continue;
+                        }
+                        // Change-bar stripe: amber for edited-unsaved lines,
+                        // green for edited-then-saved; untouched lines have none.
+                        if show_change_bar {
+                            let col = match change_states.get(i) {
+                                Some(crate::change_bar::LineChange::Unsaved) => Some(cb_unsaved),
+                                Some(crate::change_bar::LineChange::Saved) => Some(cb_saved),
+                                _ => None,
+                            };
+                            if let Some(col) = col {
+                                painter.rect_filled(
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(bar_r - 2.5, y),
+                                        egui::pos2(bar_r, y + gutter_row_h),
+                                    ),
+                                    0.0,
+                                    col,
+                                );
+                            }
                         }
                         // Bookmark marker: a small filled dot at the gutter's
                         // left edge for each bookmarked (0-based) line.
@@ -8975,6 +9103,9 @@ mod jp_glyph_tests;
 
 #[cfg(test)]
 mod tab_reorder_tests;
+
+#[cfg(test)]
+mod change_bar_tests;
 
 #[cfg(test)]
 mod update_reminder_tests;
