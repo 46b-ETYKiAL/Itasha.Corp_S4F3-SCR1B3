@@ -5,6 +5,21 @@
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Read, Write};
 
+/// Upper bound on a single LSP message body, in bytes. A language server's
+/// stdout is untrusted: a malicious, MITM'd, or simply buggy server can send
+/// `Content-Length: 999999999999`, and `vec![0u8; len]` would attempt the full
+/// allocation up front — under the release profile's `panic = "abort"` an
+/// allocation failure is a hard crash, not a recoverable error. 64 MiB is far
+/// above any real LSP message (the largest are full-document syncs) while
+/// keeping a hostile length from sizing an OOM. Mirrors the updater's
+/// "never trust a declared length for a raw allocation" discipline.
+const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Upper bound on the accumulated header section, in bytes. Bounds the
+/// `read_line` growth so a server that never emits the blank header terminator
+/// cannot grow the header `String` without limit.
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+
 /// Encode a JSON-RPC payload with the LSP `Content-Length` header.
 pub fn encode(message: &Value) -> Vec<u8> {
     let body = serde_json::to_vec(message).unwrap_or_default();
@@ -22,11 +37,21 @@ pub fn write_message<W: Write>(w: &mut W, message: &Value) -> io::Result<()> {
 /// Read one framed message from a buffered stream. Returns `Ok(None)` at EOF.
 pub fn read_message<R: BufRead>(r: &mut R) -> io::Result<Option<Value>> {
     let mut content_length: Option<usize> = None;
+    let mut header_bytes: usize = 0;
     loop {
         let mut line = String::new();
         let n = r.read_line(&mut line)?;
         if n == 0 {
             return Ok(None); // EOF
+        }
+        // Bound the header section so a server that floods headers without ever
+        // emitting the blank terminator cannot grow memory without limit.
+        header_bytes = header_bytes.saturating_add(n);
+        if header_bytes > MAX_HEADER_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "LSP header section exceeds maximum size",
+            ));
         }
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
@@ -38,6 +63,15 @@ pub fn read_message<R: BufRead>(r: &mut R) -> io::Result<Option<Value>> {
     }
     let len = content_length
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing Content-Length"))?;
+    // Reject an oversized declared length BEFORE allocating: `vec![0u8; len]`
+    // would otherwise size the full (attacker-chosen) buffer up front, and an
+    // allocation failure aborts under `panic = "abort"`.
+    if len > MAX_MESSAGE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "LSP Content-Length exceeds maximum message size",
+        ));
+    }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
     let value =
@@ -191,6 +225,31 @@ mod tests {
         let mut bytes = header.into_bytes();
         bytes.extend_from_slice(body);
         let mut cur = Cursor::new(bytes);
+        let err = read_message(&mut cur).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_message_errs_on_oversized_content_length() {
+        // A hostile/buggy/MITM'd server declares a body far larger than
+        // MAX_MESSAGE_BYTES. read_message must reject it BEFORE the
+        // `vec![0u8; len]` allocation (no OOM/abort), and crucially without the
+        // giant body even being present on the wire.
+        let header = format!("Content-Length: {}\r\n\r\n", MAX_MESSAGE_BYTES + 1);
+        let mut cur = Cursor::new(header.into_bytes());
+        let err = read_message(&mut cur).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_message_errs_on_flooded_headers() {
+        // A server that streams headers and never emits the blank terminator
+        // must be bounded by MAX_HEADER_BYTES rather than growing unbounded.
+        let mut flood = Vec::new();
+        while flood.len() <= MAX_HEADER_BYTES {
+            flood.extend_from_slice(b"X-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n");
+        }
+        let mut cur = Cursor::new(flood);
         let err = read_message(&mut cur).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }

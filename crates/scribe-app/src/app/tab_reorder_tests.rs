@@ -181,3 +181,33 @@ fn find_navigate_cycles_through_matches_and_wraps() {
     app.find_navigate(true);
     assert!(app.find_matches_active().is_empty());
 }
+
+/// "Close Others" (close_all_tabs_except) must FOCUS the kept tab, not merely
+/// clamp `active`. With a pinned tab positioned BELOW the kept index, the
+/// surviving copy of `keep` shifts left as the unpinned tabs before it are
+/// removed; `active` must track to it. Regression for the prior clamp-only
+/// fallback that left focus on the pinned tab.
+#[test]
+fn close_all_tabs_except_focuses_the_kept_tab() {
+    let mut app = ScribeApp::new_test(Config::default());
+    app.tabs.clear();
+    for n in 0..5u64 {
+        let mut t = EditorTab::scratch();
+        t.doc_id = crate::grid::DocId(n);
+        app.tabs.push(t);
+    }
+    // Pin tab 1 (an index below the kept tab). Keep tab 3. The user was
+    // focused elsewhere (tab 0) when invoking "Close Others".
+    app.tabs[1].pinned = true;
+    app.active = 0;
+    app.close_all_tabs_except(3);
+
+    // Survivors: the pinned tab (id 1) + the kept tab (id 3), order [1, 3].
+    let ids: Vec<u64> = app.tabs.iter().map(|t| t.doc_id.0).collect();
+    assert_eq!(ids, vec![1, 3], "kept tab + pinned tab survive");
+    // active must be the kept tab (id 3 at new index 1), NOT the pinned tab.
+    assert_eq!(
+        app.tabs[app.active].doc_id.0, 3,
+        "active focuses the kept tab, not the surviving pinned tab"
+    );
+}
