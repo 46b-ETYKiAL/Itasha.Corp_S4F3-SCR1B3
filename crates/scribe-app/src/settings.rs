@@ -855,6 +855,25 @@ fn render_sections(
             changed |= grid_bool(
                 ui,
                 q,
+                "highlight selection occurrences",
+                "Highlight occurrences",
+                "When text is selected, box every other matching run in view.",
+                &mut config.editor.highlight_selection_occurrences,
+                &def.editor.highlight_selection_occurrences,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "trailing whitespace highlight",
+                "Trailing whitespace",
+                "Tint trailing spaces/tabs on each line (distinct from \
+                 \"render whitespace\", which shows all whitespace).",
+                &mut config.editor.highlight_trailing_whitespace,
+                &def.editor.highlight_trailing_whitespace,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
                 "smooth scroll wheel easing",
                 "Smooth scrolling",
                 "Ease wheel scrolling. Turn off for snappier, discrete-notch scrolling.",
@@ -2687,6 +2706,8 @@ mod wiring_guard {
         "editor.current_line_highlight",
         "editor.indent_guides",
         "editor.bracket_match",
+        "editor.highlight_selection_occurrences",
+        "editor.highlight_trailing_whitespace",
         "editor.smooth_scroll",
         "editor.caret_style",
         "editor.caret_width",

@@ -8711,6 +8711,71 @@ impl ScribeApp {
                                 }
                             }
                         }
+                        // Trailing-whitespace tint: faintly mark the trailing
+                        // space/tab run on each line (distinct from
+                        // render_whitespace, which marks ALL whitespace).
+                        if self.config.editor.highlight_trailing_whitespace {
+                            let painter = ui.painter();
+                            let tint = ui_color(
+                                &self.theme,
+                                "trailing_whitespace",
+                                Rgba::new(0xd0, 0x6e, 0x6e, 28),
+                            );
+                            let origin = out.galley_pos.to_vec2();
+                            for row in &out.galley.rows {
+                                let row_off = origin + row.pos.to_vec2();
+                                let mut run_start: Option<f32> = None;
+                                let mut run_end = 0.0;
+                                for g in &row.glyphs {
+                                    if g.chr == ' ' || g.chr == '\t' {
+                                        if run_start.is_none() {
+                                            run_start = Some(row_off.x + g.pos.x);
+                                        }
+                                        run_end = row_off.x + g.pos.x + g.advance_width;
+                                    } else {
+                                        run_start = None;
+                                    }
+                                }
+                                if let Some(sx) = run_start {
+                                    painter.rect_filled(
+                                        egui::Rect::from_min_max(
+                                            egui::pos2(sx, row_off.y),
+                                            egui::pos2(run_end, row_off.y + row.size.y),
+                                        ),
+                                        0.0,
+                                        tint,
+                                    );
+                                }
+                            }
+                        }
+                        // Column rulers: thin vertical guides at the configured
+                        // 1-based columns (monospace; most meaningful without wrap).
+                        if !self.config.editor.rulers.is_empty() {
+                            let painter = ui.painter();
+                            let cell_w = out
+                                .galley
+                                .rows
+                                .iter()
+                                .flat_map(|r| r.glyphs.iter())
+                                .map(|g| g.advance_width)
+                                .find(|w| *w > 0.0)
+                                .unwrap_or(self.config.fonts.clamped_editor_size() * 0.6);
+                            let ruler = ui_color(
+                                &self.theme,
+                                "ruler",
+                                Rgba::new(muted.r(), muted.g(), muted.b(), 40),
+                            );
+                            let top = out.galley_pos.y;
+                            let bot =
+                                out.galley_pos.y + out.galley.size().y.max(ui.available_height());
+                            for &col in &self.config.editor.rulers {
+                                let x = out.galley_pos.x + cell_w * col as f32;
+                                painter.line_segment(
+                                    [egui::pos2(x, top), egui::pos2(x, bot)],
+                                    egui::Stroke::new(1.0, ruler),
+                                );
+                            }
+                        }
                         if let Some(range) = out.cursor_range {
                             // egui 0.34: CursorRange.primary is a CCursor directly
                             // (no nested .ccursor); Galley::pos_from_ccursor was
@@ -8749,6 +8814,62 @@ impl ScribeApp {
                                 }
                             }
                             let collapsed = range.primary.index == range.secondary.index;
+                            // Highlight every OTHER occurrence of the current
+                            // selection (VS Code style). Single-line,
+                            // non-whitespace selections only; bounded like
+                            // bracket_match to stay cheap on huge files.
+                            if self.config.editor.highlight_selection_occurrences
+                                && !collapsed
+                                && self.tabs[active].text.len() <= 500_000
+                            {
+                                let text_ref = &self.tabs[active].text;
+                                let lo_ci = range.primary.index.min(range.secondary.index);
+                                let hi_ci = range.primary.index.max(range.secondary.index);
+                                let lo_b = char_to_byte(text_ref, lo_ci);
+                                let hi_b = char_to_byte(text_ref, hi_ci);
+                                let selected = &text_ref[lo_b..hi_b];
+                                if !selected.trim().is_empty() && !selected.contains('\n') {
+                                    let q = scribe_core::search::Query {
+                                        pattern: selected.to_string(),
+                                        case_sensitive: true,
+                                        ..Default::default()
+                                    };
+                                    if let Ok(hits) = scribe_core::search::find_all(text_ref, &q) {
+                                        let painter = ui.painter();
+                                        let occ = ui_color(
+                                            &self.theme,
+                                            "selection_occurrence",
+                                            Rgba::new(accent.r(), accent.g(), accent.b(), 130),
+                                        );
+                                        for m in &hits {
+                                            if m.start == lo_b {
+                                                continue; // skip the active selection itself
+                                            }
+                                            let c0 = byte_to_char_index(text_ref, m.start);
+                                            let c1 = byte_to_char_index(text_ref, m.end);
+                                            let r0 = out
+                                                .galley
+                                                .pos_from_cursor(egui::text::CCursor::new(c0));
+                                            let r1 = out
+                                                .galley
+                                                .pos_from_cursor(egui::text::CCursor::new(c1));
+                                            if (r0.min.y - r1.min.y).abs() > 0.5 {
+                                                continue; // wrapped span; skip
+                                            }
+                                            let bx = egui::Rect::from_min_max(
+                                                out.galley_pos + egui::vec2(r0.min.x, r0.min.y),
+                                                out.galley_pos + egui::vec2(r1.min.x, r0.max.y),
+                                            );
+                                            painter.rect_stroke(
+                                                bx,
+                                                2.0,
+                                                egui::Stroke::new(1.0, occ),
+                                                egui::StrokeKind::Inside,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             // Wave-6 current-line highlight: a faint full-width band
                             // across the caret's galley row. Low alpha so it reads as
                             // a tint behind the (opaque) glyphs. Skipped on selection.
