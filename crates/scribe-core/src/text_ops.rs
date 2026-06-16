@@ -54,6 +54,83 @@ pub fn to_case(text: &str, upper: bool) -> String {
     }
 }
 
+/// Sort lines lexicographically (stable) AND drop exact duplicate lines,
+/// keeping one of each. Preserves a trailing newline if present.
+pub fn sort_lines_unique(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let had_final_nl = text.ends_with('\n');
+    let mut lines: Vec<&str> = text.lines().collect();
+    lines.sort();
+    lines.dedup(); // adjacent dups after sort == all dups
+    let mut out = lines.join("\n");
+    if had_final_nl {
+        out.push('\n');
+    }
+    out
+}
+
+/// Apply `f` to the leading-whitespace run of every line, leaving the rest of
+/// each line untouched. Leading whitespace is ASCII space/tab, so the byte
+/// split is always on a char boundary. Preserves a trailing newline.
+fn convert_indent(text: &str, f: impl Fn(&str) -> String) -> String {
+    let had_final_nl = text.ends_with('\n');
+    let mapped: Vec<String> = text
+        .lines()
+        .map(|line| {
+            let lead_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+            let (lead, rest) = line.split_at(lead_len);
+            let mut s = f(lead);
+            s.push_str(rest);
+            s
+        })
+        .collect();
+    let mut out = mapped.join("\n");
+    if had_final_nl {
+        out.push('\n');
+    }
+    out
+}
+
+/// Convert leading-indentation tabs to `width` spaces each (indentation only;
+/// tabs elsewhere in the line are left alone). `width` is clamped to >= 1.
+pub fn tabs_to_spaces(text: &str, width: usize) -> String {
+    let spaces = " ".repeat(width.max(1));
+    convert_indent(text, |lead| lead.replace('\t', &spaces))
+}
+
+/// Convert each run of `width` leading spaces to a tab (indentation only).
+/// Leftover spaces that do not fill a full `width`-group are kept as spaces;
+/// existing leading tabs are preserved. `width` is clamped to >= 1.
+pub fn spaces_to_tabs(text: &str, width: usize) -> String {
+    let w = width.max(1);
+    convert_indent(text, |lead| {
+        let mut out = String::with_capacity(lead.len());
+        let mut run = 0usize;
+        for ch in lead.chars() {
+            if ch == ' ' {
+                run += 1;
+                if run == w {
+                    out.push('\t');
+                    run = 0;
+                }
+            } else {
+                // A tab in the leading run: flush pending partial spaces, keep it.
+                for _ in 0..run {
+                    out.push(' ');
+                }
+                run = 0;
+                out.push('\t');
+            }
+        }
+        for _ in 0..run {
+            out.push(' ');
+        }
+        out
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +169,44 @@ mod tests {
     fn to_case_upper_lower() {
         assert_eq!(to_case("aB c", true), "AB C");
         assert_eq!(to_case("aB c", false), "ab c");
+    }
+
+    #[test]
+    fn sort_unique_dedups_and_keeps_trailing_newline() {
+        assert_eq!(sort_lines_unique("b\na\nb\nc\na\n"), "a\nb\nc\n");
+        assert_eq!(sort_lines_unique("b\na"), "a\nb"); // no trailing nl preserved
+        assert_eq!(sort_lines_unique(""), "");
+        // All-identical collapses to one line.
+        assert_eq!(sort_lines_unique("x\nx\nx"), "x");
+    }
+
+    #[test]
+    fn tabs_to_spaces_only_touches_leading_indent() {
+        // Leading tab -> width spaces; a tab AFTER content is untouched.
+        assert_eq!(tabs_to_spaces("\tx\ty\n", 4), "    x\ty\n");
+        assert_eq!(tabs_to_spaces("\t\tz", 2), "    z");
+        // No indent -> unchanged.
+        assert_eq!(tabs_to_spaces("plain\n", 4), "plain\n");
+        // width clamped to >= 1.
+        assert_eq!(tabs_to_spaces("\tx", 0), " x");
+    }
+
+    #[test]
+    fn spaces_to_tabs_groups_leading_runs() {
+        assert_eq!(spaces_to_tabs("    x\n", 4), "\tx\n");
+        // Partial trailing group stays as spaces.
+        assert_eq!(spaces_to_tabs("      y", 4), "\t  y"); // 4->tab, 2 leftover
+                                                           // Spaces after content untouched.
+        assert_eq!(spaces_to_tabs("    a  b", 4), "\ta  b");
+        // Mixed existing tab in the indent is preserved.
+        assert_eq!(spaces_to_tabs("\t    z", 4), "\t\tz");
+    }
+
+    #[test]
+    fn indent_conversions_round_trip_for_clean_indent() {
+        let src = "\tline\n\t\tnested\n";
+        let spaced = tabs_to_spaces(src, 4);
+        assert_eq!(spaced, "    line\n        nested\n");
+        assert_eq!(spaces_to_tabs(&spaced, 4), src);
     }
 }

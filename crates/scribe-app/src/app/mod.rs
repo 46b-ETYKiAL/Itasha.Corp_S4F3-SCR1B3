@@ -2470,6 +2470,58 @@ impl ScribeApp {
                     }
                 }
             }
+            BuiltinCommand::SortLinesUnique => self.apply_buffer_transform(
+                "sorted lines (unique)",
+                scribe_core::text_ops::sort_lines_unique,
+            ),
+            BuiltinCommand::TrimTrailingWhitespace => self.apply_buffer_transform(
+                "trimmed trailing whitespace",
+                scribe_core::text_ops::trim_trailing_whitespace,
+            ),
+            BuiltinCommand::EnsureFinalNewline => self.apply_buffer_transform(
+                "ensured a final newline",
+                scribe_core::text_ops::ensure_final_newline,
+            ),
+            BuiltinCommand::ConvertIndentToSpaces => {
+                let w = self.config.editor.tab_width;
+                self.apply_buffer_transform("converted indentation to spaces", |t| {
+                    scribe_core::text_ops::tabs_to_spaces(t, w)
+                });
+            }
+            BuiltinCommand::ConvertIndentToTabs => {
+                let w = self.config.editor.tab_width;
+                self.apply_buffer_transform("converted indentation to tabs", |t| {
+                    scribe_core::text_ops::spaces_to_tabs(t, w)
+                });
+            }
+            BuiltinCommand::RevealInExplorer => {
+                let active = self.active.min(self.tabs.len().saturating_sub(1));
+                let dir = self
+                    .tabs
+                    .get(active)
+                    .and_then(|t| t.doc.path())
+                    .and_then(|p| p.parent())
+                    .map(|d| d.to_path_buf());
+                match dir {
+                    Some(d) => open_in_file_manager(&d),
+                    None => self.toast = Some("This tab has no saved file to reveal.".to_string()),
+                }
+            }
+            BuiltinCommand::CopyFilePath => {
+                let active = self.active.min(self.tabs.len().saturating_sub(1));
+                let path = self
+                    .tabs
+                    .get(active)
+                    .and_then(|t| t.doc.path())
+                    .map(|p| p.display().to_string());
+                match path {
+                    Some(p) => match write_clipboard_text(&p) {
+                        Ok(()) => self.status = format!("copied path: {p}"),
+                        Err(e) => self.toast = Some(format!("could not copy path: {e}")),
+                    },
+                    None => self.toast = Some("This tab has no saved file path.".to_string()),
+                }
+            }
             // Clipboard / history actions: record the request; `frame_tick`
             // drains it into the focused editor as a native egui event.
             BuiltinCommand::Copy => self.pending_editor_action = Some(EditorAction::Copy),
@@ -2763,6 +2815,21 @@ impl ScribeApp {
                     self.tabs[active].mark_change_saved();
                 }
                 Err(e) => self.toast = Some(format!("save failed: {e}")),
+            }
+        }
+    }
+
+    /// Apply a whole-buffer `&str -> String` transform to the active tab,
+    /// skipping read-only-large buffers and no-op results. Shared by the
+    /// line-operation commands (sort, trim, indent conversion, …).
+    fn apply_buffer_transform(&mut self, status: &str, f: impl Fn(&str) -> String) {
+        let active = self.active.min(self.tabs.len().saturating_sub(1));
+        if active < self.tabs.len() && !self.tabs[active].doc.is_read_only_large() {
+            let new = f(&self.tabs[active].text);
+            if new != self.tabs[active].text {
+                self.tabs[active].set_text(new);
+                self.tabs[active].doc.mark_dirty();
+                self.status = status.to_string();
             }
         }
     }
@@ -4566,6 +4633,13 @@ pub(crate) enum BuiltinCommand {
     ExpandAll,
     OpenPluginManager,
     SortLines,
+    SortLinesUnique,
+    TrimTrailingWhitespace,
+    EnsureFinalNewline,
+    ConvertIndentToSpaces,
+    ConvertIndentToTabs,
+    RevealInExplorer,
+    CopyFilePath,
     Copy,
     Cut,
     Paste,
@@ -4739,6 +4813,41 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Sort lines (A-Z)",
         shortcut: "",
         action: BuiltinCommand::SortLines,
+    },
+    BuiltinEntry {
+        label: "Sort lines (A-Z, unique)",
+        shortcut: "",
+        action: BuiltinCommand::SortLinesUnique,
+    },
+    BuiltinEntry {
+        label: "Trim trailing whitespace",
+        shortcut: "",
+        action: BuiltinCommand::TrimTrailingWhitespace,
+    },
+    BuiltinEntry {
+        label: "Ensure final newline",
+        shortcut: "",
+        action: BuiltinCommand::EnsureFinalNewline,
+    },
+    BuiltinEntry {
+        label: "Convert indentation to spaces",
+        shortcut: "",
+        action: BuiltinCommand::ConvertIndentToSpaces,
+    },
+    BuiltinEntry {
+        label: "Convert indentation to tabs",
+        shortcut: "",
+        action: BuiltinCommand::ConvertIndentToTabs,
+    },
+    BuiltinEntry {
+        label: "Reveal file in explorer",
+        shortcut: "",
+        action: BuiltinCommand::RevealInExplorer,
+    },
+    BuiltinEntry {
+        label: "Copy file path",
+        shortcut: "",
+        action: BuiltinCommand::CopyFilePath,
     },
     BuiltinEntry {
         label: "Start language server for current file",
@@ -4987,6 +5096,13 @@ fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
 fn read_clipboard_text() -> Result<String, String> {
     let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
     cb.get_text().map_err(|e| e.to_string())
+}
+
+/// Write `text` to the OS clipboard (used by "Copy file path"). Returns an
+/// error string rather than panicking so the caller can surface a toast.
+fn write_clipboard_text(text: &str) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    cb.set_text(text.to_string()).map_err(|e| e.to_string())
 }
 
 /// Open `dir` in the OS file manager (Explorer / Finder / xdg-open).
