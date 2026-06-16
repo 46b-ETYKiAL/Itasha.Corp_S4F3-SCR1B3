@@ -77,13 +77,13 @@ pub fn syntax_color32(rgb: [u8; 3]) -> Color32 {
 }
 
 /// Lower the alpha of the surface fills so a translucent/glass window reveals
-/// what is behind it. `opacity` is clamped to [0.02, 1.0] — the 0.02 floor
-/// matches the settings slider minimum so the whole slider travel is live
-/// (a previous 0.30 floor made the bottom quarter of the slider a no-op; #24
-/// dropped 0.05 → 0.02 so the lowest setting is genuinely near-glass), while
-/// staying just above fully-invisible so the window can never be lost (the
-/// editor text itself is painted opaque on top, so it stays legible even at the
-/// floor — only the chrome/background fills go translucent).
+/// what is behind it. `opacity` is clamped to [0.0, 1.0]; at the 0.0 floor the
+/// chrome/background fills become fully transparent (maximum see-through). The
+/// window can never be truly "lost" even at 0.0 because the editor text itself
+/// is painted opaque on top, so it stays legible — only the chrome/background
+/// fills go translucent. (History: a previous 0.30 floor made the bottom of the
+/// slider a no-op; the floor was later dropped to 0.0 so the lowest setting is
+/// genuinely near-glass.)
 pub fn apply_window_opacity(v: &mut Visuals, opacity: f32) {
     // Floor at 0.0 so the window can be made FULLY transparent (max see-through).
     // The editor text itself is painted opaque on top, so it stays legible even

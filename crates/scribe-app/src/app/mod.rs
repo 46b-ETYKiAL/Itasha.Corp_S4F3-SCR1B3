@@ -3481,6 +3481,11 @@ impl ScribeApp {
         if keep >= self.tabs.len() {
             return;
         }
+        // The kept tab's index AFTER removal equals the number of pinned tabs
+        // that precede it: those survive and stay to its left, while every
+        // other tab before `keep` is removed. Compute it before mutating so we
+        // can focus the surviving copy of `keep` (not a clamped fallback).
+        let new_keep = (0..keep).filter(|&i| self.tabs[i].pinned).count();
         // Walk back-to-front so swap-remove indices stay valid; never remove
         // the kept index or any pinned tab.
         let mut i = self.tabs.len();
@@ -3490,13 +3495,8 @@ impl ScribeApp {
                 self.tabs.remove(i);
             }
         }
-        // Active retargets to the surviving copy of `keep` (its index may
-        // have shifted left as pinned tabs above were preserved).
-        // Simplest: find the kept tab's new index by pointer-equality
-        // proxy. Since we never removed `keep`, count surviving tabs
-        // before it.
-        // Conservative fallback: clamp.
-        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        // Focus the tab the user chose to keep.
+        self.active = new_keep.min(self.tabs.len().saturating_sub(1));
     }
 
     /// Close every tab after `after` (exclusive) that is not pinned (F-044).
@@ -6015,7 +6015,9 @@ impl ScribeApp {
         ctx.input(|i| {
             let cmd = i.modifiers.command;
             act.new = cmd && i.key_pressed(egui::Key::N);
-            act.open = cmd && i.key_pressed(egui::Key::O);
+            // Exclude shift so Ctrl+Shift+O (go-to-symbol, below) does not ALSO
+            // fire the open-file dialog. Mirrors the Ctrl+F / Ctrl+P guards.
+            act.open = cmd && !i.modifiers.shift && i.key_pressed(egui::Key::O);
             act.save = cmd && i.key_pressed(egui::Key::S);
             if cmd && !i.modifiers.shift && i.key_pressed(egui::Key::F) {
                 if !self.find_open {
@@ -6173,8 +6175,9 @@ impl ScribeApp {
                 self.goto_symbol_open = true;
                 self.goto_symbol_query.clear();
             }
-            // F-012 — Ctrl+R opens the recent-files modal.
-            if cmd && i.key_pressed(egui::Key::R) {
+            // F-012 — Ctrl+R opens the recent-files modal. Exclude shift so
+            // Ctrl+Shift+R (reopen-closed-tab, above) does not ALSO open it.
+            if cmd && !i.modifiers.shift && i.key_pressed(egui::Key::R) {
                 self.recent_open = true;
             }
             // Line bookmarks: Ctrl+F2 toggles on the cursor line; F2 jumps to
@@ -8794,9 +8797,20 @@ impl ScribeApp {
                     if let Some(parent) = p.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    let _ = std::fs::write(&p, self.config.to_toml_string());
+                    if let Err(e) = std::fs::write(&p, self.config.to_toml_string()) {
+                        // Surface the failure instead of swallowing it and then
+                        // opening a file that does not exist (confusing empty
+                        // buffer). Mirrors save_config's error handling.
+                        let msg = format!("could not create config file: {e}");
+                        crate::action_log::record("error", &msg);
+                        self.toast = Some(msg);
+                    }
                 }
-                self.open_path(p);
+                // Only open if the file is actually present (it pre-existed, or
+                // the seed write above succeeded).
+                if p.exists() {
+                    self.open_path(p);
+                }
             }
         }
         if want_restore_cfg {
