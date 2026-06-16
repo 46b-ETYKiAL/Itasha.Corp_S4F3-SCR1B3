@@ -297,6 +297,13 @@ struct ClosedTab {
     cursor: usize,
 }
 
+/// Last-modified time of `path`, or `None` if it cannot be stat'd or the
+/// platform does not expose an mtime. Centralises the disk-fingerprint stat
+/// used by tab construction, save, and the external-change poll (F-022).
+fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 impl EditorTab {
     fn scratch() -> Self {
         Self {
@@ -317,10 +324,7 @@ impl EditorTab {
     fn from_path(path: PathBuf) -> Result<Self, String> {
         let doc = Document::open(&path).map_err(|e| e.to_string())?;
         let text = doc.text();
-        let disk_mtime = doc
-            .path()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
+        let disk_mtime = doc.path().and_then(file_mtime);
         Ok(Self {
             doc,
             text: text.clone(),
@@ -345,10 +349,7 @@ impl EditorTab {
         if let Some(p) = path {
             if let Ok(doc) = Document::open(&p) {
                 let disk_text = doc.text();
-                let disk_mtime = doc
-                    .path()
-                    .and_then(|p| std::fs::metadata(p).ok())
-                    .and_then(|m| m.modified().ok());
+                let disk_mtime = doc.path().and_then(file_mtime);
                 return Self {
                     doc,
                     text: content,
@@ -2527,7 +2528,7 @@ impl ScribeApp {
                 // save so the next poll doesn't false-positive.
                 self.tabs[active].disk_text = self.tabs[active].text.clone();
                 if let Some(p) = self.tabs[active].doc.path() {
-                    if let Ok(m) = std::fs::metadata(p).and_then(|m| m.modified()) {
+                    if let Some(m) = file_mtime(p) {
                         self.tabs[active].disk_mtime = Some(m);
                     }
                 }
@@ -2636,7 +2637,7 @@ impl ScribeApp {
         let mut to_warn: Vec<usize> = Vec::new();
         for (i, tab) in self.tabs.iter().enumerate() {
             let Some(path) = tab.doc.path() else { continue };
-            let Ok(m) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+            let Some(m) = file_mtime(path) else {
                 continue;
             };
             if Some(m) != tab.disk_mtime {
@@ -2655,7 +2656,7 @@ impl ScribeApp {
                 self.tabs[i].set_text(fresh.clone());
                 self.tabs[i].doc.set_text(&fresh);
                 self.tabs[i].disk_text = fresh;
-                if let Ok(m) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                if let Some(m) = file_mtime(&path) {
                     self.tabs[i].disk_mtime = Some(m);
                 }
                 self.tabs[i].external_change = false;
@@ -6643,7 +6644,7 @@ impl ScribeApp {
                         self.tabs[i].set_text(fresh.clone());
                         self.tabs[i].doc.set_text(&fresh);
                         self.tabs[i].disk_text = fresh;
-                        if let Ok(m) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                        if let Some(m) = file_mtime(&path) {
                             self.tabs[i].disk_mtime = Some(m);
                         }
                         self.status = format!("reloaded {} from disk", path.display());
@@ -6656,7 +6657,7 @@ impl ScribeApp {
                 // but keep the buffer + its unsaved edits (a later save overwrites
                 // the disk file).
                 if let Some(path) = self.tabs[i].doc.path().map(|p| p.to_path_buf()) {
-                    if let Ok(m) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                    if let Some(m) = file_mtime(&path) {
                         self.tabs[i].disk_mtime = Some(m);
                     }
                 }
