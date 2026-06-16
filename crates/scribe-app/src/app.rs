@@ -280,6 +280,12 @@ struct EditorTab {
     /// content hash — its cached galley bakes in the text, so a lagging
     /// counter would render stale TEXT. See wave3-perf-plan.md.)
     edit_gen: u64,
+    /// F-022b — set by `poll_external_disk_changes` when this file changed on
+    /// disk WHILE the tab has unsaved local edits. Drives a persistent,
+    /// actionable banner ([Reload (discard mine)] / [Keep mine]) so the user is
+    /// prompted to update to the on-disk version instead of silently clobbering
+    /// it on save. A CLEAN tab is reloaded silently and never sets this.
+    external_change: bool,
 }
 
 /// A recently-closed tab kept on the reopen stack (Ctrl+Shift+T), so an
@@ -304,6 +310,7 @@ impl EditorTab {
             rope_buf: None,
             bookmarks: std::collections::BTreeSet::new(),
             edit_gen: 0,
+            external_change: false,
         }
     }
 
@@ -325,6 +332,7 @@ impl EditorTab {
             rope_buf: None,
             bookmarks: std::collections::BTreeSet::new(),
             edit_gen: 0,
+            external_change: false,
         })
     }
 
@@ -352,6 +360,7 @@ impl EditorTab {
                     rope_buf: None,
                     bookmarks: std::collections::BTreeSet::new(),
                     edit_gen: 0,
+                    external_change: false,
                 };
             }
         }
@@ -2649,19 +2658,18 @@ impl ScribeApp {
                 if let Ok(m) = std::fs::metadata(&path).and_then(|m| m.modified()) {
                     self.tabs[i].disk_mtime = Some(m);
                 }
+                self.tabs[i].external_change = false;
                 self.status = format!("reloaded {} (external edit)", path.display());
             }
         }
         for i in to_warn {
-            if let Some(name) = self.tabs[i].doc.path().map(|p| p.display().to_string()) {
-                self.toast = Some(format!(
-                    "{} {name} changed on disk while you have local edits. Save will overwrite.",
-                    egui_phosphor::thin::WARNING
-                ));
-                // Don't refresh disk_mtime — keep showing the warning until
-                // the user explicitly saves (which sets a fresh mtime) or
-                // closes/reopens the tab.
-            }
+            // The tab has unsaved local edits AND the file changed on disk — set
+            // the persistent flag that drives the actionable banner (Reload /
+            // Keep mine), so the user is prompted to update instead of getting a
+            // fleeting toast and silently overwriting the newer disk version on
+            // save. We do NOT refresh `disk_mtime` here, so the flag stays set
+            // until the user resolves it via the banner (or saves / reopens).
+            self.tabs[i].external_change = true;
         }
     }
 
@@ -6578,6 +6586,81 @@ impl ScribeApp {
             }
             if want_dismiss {
                 self.update_notice = None;
+            }
+        }
+
+        // ---- External-change banner (F-022b) ----
+        // A file open here was modified on disk WHILE it holds unsaved local
+        // edits. Prompt the user to update to the saved version (or keep theirs)
+        // instead of silently overwriting the newer file on save. A CLEAN tab is
+        // reloaded silently by `poll_external_disk_changes` and never reaches here.
+        if self.active < self.tabs.len() && self.tabs[self.active].external_change {
+            let name = self.tabs[self.active].doc.file_name();
+            let warn = egui::Color32::from_rgb(0xE0, 0x9A, 0x20);
+            let mut want_reload = false;
+            let mut want_keep = false;
+            egui::TopBottomPanel::top("external-change-notice")
+                .frame(
+                    egui::Frame::default()
+                        .fill(warn.linear_multiply(0.20))
+                        .inner_margin(egui::Margin::symmetric(10, 7)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{}  \"{name}\" was changed on disk, and you have unsaved edits here.",
+                                egui_phosphor::thin::WARNING
+                            ))
+                            .color(warn)
+                            .strong(),
+                        );
+                        ui.add_space(8.0);
+                        if ui
+                            .button(RichText::new("Reload from disk").strong())
+                            .on_hover_text(
+                                "Discard your unsaved edits and load the current saved version.",
+                            )
+                            .clicked()
+                        {
+                            want_reload = true;
+                        }
+                        if ui
+                            .button("Keep my version")
+                            .on_hover_text(
+                                "Keep your edits — the next save will overwrite the disk version.",
+                            )
+                            .clicked()
+                        {
+                            want_keep = true;
+                        }
+                    });
+                });
+            let i = self.active;
+            if want_reload {
+                if let Some(path) = self.tabs[i].doc.path().map(|p| p.to_path_buf()) {
+                    if let Ok(fresh) = std::fs::read_to_string(&path) {
+                        self.tabs[i].set_text(fresh.clone());
+                        self.tabs[i].doc.set_text(&fresh);
+                        self.tabs[i].disk_text = fresh;
+                        if let Ok(m) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                            self.tabs[i].disk_mtime = Some(m);
+                        }
+                        self.status = format!("reloaded {} from disk", path.display());
+                    }
+                }
+                self.tabs[i].external_change = false;
+            }
+            if want_keep {
+                // Accept the current disk mtime as known so we stop re-prompting,
+                // but keep the buffer + its unsaved edits (a later save overwrites
+                // the disk file).
+                if let Some(path) = self.tabs[i].doc.path().map(|p| p.to_path_buf()) {
+                    if let Ok(m) = std::fs::metadata(&path).and_then(|m| m.modified()) {
+                        self.tabs[i].disk_mtime = Some(m);
+                    }
+                }
+                self.tabs[i].external_change = false;
             }
         }
 
@@ -11768,16 +11851,19 @@ def";
         );
     }
 
-    /// F-022 — external edit + dirty buffer: do NOT reload; surface a toast.
+    /// F-022b — external edit + dirty buffer: do NOT reload; raise the
+    /// persistent `external_change` flag that drives the actionable banner
+    /// ([Reload] / [Keep mine]) so the user is prompted, not silently clobbered.
     #[test]
-    fn external_disk_change_warns_when_buffer_dirty() {
+    fn external_disk_change_prompts_when_buffer_dirty() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("note.txt");
         std::fs::write(&path, "first").expect("write seed");
         let mut app = ScribeApp::new_test(Config::default());
         app.open_path(path.clone());
         let opened_idx = app.tabs.len() - 1;
-        // Make local edits.
+        assert!(!app.tabs[opened_idx].external_change);
+        // Make local edits, then an external write.
         app.tabs[opened_idx].text = "local edits".to_string();
         std::thread::sleep(std::time::Duration::from_millis(1200));
         std::fs::write(&path, "second").expect("write update");
@@ -11787,11 +11873,8 @@ def";
             "dirty buffer must NOT be silently overwritten"
         );
         assert!(
-            app.toast
-                .as_deref()
-                .unwrap_or("")
-                .contains("changed on disk"),
-            "toast should warn about external change"
+            app.tabs[opened_idx].external_change,
+            "a dirty buffer whose file changed on disk must flag the reload prompt"
         );
     }
 
