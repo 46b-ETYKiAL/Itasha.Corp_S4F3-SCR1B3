@@ -67,18 +67,24 @@ jobs:
         run: cargo llvm-cov report --lcov --output-path lcov.info
       - name: Coverage summary
         # `report --summary-only` prints the per-file / total percentages from
-        # the same cached profdata. No `--fail-under-*` threshold is set — the
-        # repo has no coverage baseline yet, so this job is informational only
-        # and must never fail the build on a coverage number. Tee it into the
-        # job summary so the numbers surface on the run page.
+        # the same cached profdata. Informational — the gating happens in the
+        # "Coverage floor" step below. Tee it into the job summary so the numbers
+        # surface on the run page.
         run: |
           {
-            echo '## Code coverage (report-only)'
+            echo '## Code coverage'
             echo ''
             echo '```'
             cargo llvm-cov report --summary-only
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Coverage floor (ratchet)
+        # Baseline measured 2026-06 at ~76% lines / ~79% regions. This floor
+        # gates at 70% lines — a ratchet that catches a CATASTROPHIC coverage
+        # regression (a whole module's tests deleted) while tolerating normal
+        # fluctuation. RAISE it as coverage climbs; never lower it to make a red
+        # build pass. Renders from the same cached profdata (no second run).
+        run: cargo llvm-cov report --fail-under-lines 70
       - name: Upload lcov report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
