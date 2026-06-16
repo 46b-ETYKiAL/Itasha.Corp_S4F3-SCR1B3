@@ -12,6 +12,7 @@
 
 mod action_log;
 mod app;
+mod change_bar;
 mod cli;
 mod diff_view;
 mod editor_features;

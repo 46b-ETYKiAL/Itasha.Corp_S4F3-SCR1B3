@@ -778,6 +778,16 @@ fn render_sections(
             changed |= grid_bool(
                 ui,
                 q,
+                "change bar",
+                "Change bar",
+                "Mark edited lines in the gutter: amber for unsaved edits, green \
+                 once saved, none for untouched lines (Notepad++ style).",
+                &mut config.editor.show_change_bar,
+                &def.editor.show_change_bar,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
                 "word wrap",
                 "Word wrap",
                 "Wrap long lines to the editor width instead of scrolling horizontally.",
@@ -2669,6 +2679,7 @@ mod wiring_guard {
         "editor.tab_width",
         "editor.insert_spaces",
         "editor.show_line_numbers",
+        "editor.show_change_bar",
         "editor.word_wrap",
         "editor.show_minimap",
         "editor.render_whitespace",

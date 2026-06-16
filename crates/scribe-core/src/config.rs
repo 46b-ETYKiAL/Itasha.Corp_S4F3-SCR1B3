@@ -294,6 +294,10 @@ pub struct EditorConfig {
     pub tab_width: usize,
     pub insert_spaces: bool,
     pub show_line_numbers: bool,
+    /// When true (default), draw a Notepad++-style change bar in the gutter:
+    /// lines edited this session but unsaved get one colour, edited-then-saved
+    /// lines another, untouched lines none.
+    pub show_change_bar: bool,
     pub show_minimap: bool,
     pub word_wrap: bool,
     pub auto_save: bool,
@@ -532,6 +536,7 @@ impl Default for EditorConfig {
             tab_width: 4,
             insert_spaces: true,
             show_line_numbers: true,
+            show_change_bar: true,
             show_minimap: true,
             word_wrap: true,
             auto_save: false,

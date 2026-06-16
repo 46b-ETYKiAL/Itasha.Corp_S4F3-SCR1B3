@@ -28,6 +28,7 @@ All settings are grouped into six tables: `[editor]`, `[appearance]`, `[fonts]`,
 | `tab_width` | integer | `4` | Width of a tab stop, in columns. |
 | `insert_spaces` | boolean | `true` | Insert spaces instead of a tab character when pressing Tab. |
 | `show_line_numbers` | boolean | `true` | Show the line-number gutter. |
+| `show_change_bar` | boolean | `true` | Notepad++-style change bar in the gutter: amber marks lines edited but unsaved, green marks edited-then-saved lines, untouched lines have none. |
 | `show_minimap` | boolean | `true` | Show the minimap. |
 | `word_wrap` | boolean | `false` | Soft-wrap long lines to the viewport width. |
 | `auto_save` | boolean | `false` | Automatically save dirty buffers. |
@@ -97,6 +98,7 @@ This is the complete default configuration written out explicitly. Copy it as a 
 tab_width = 4
 insert_spaces = true
 show_line_numbers = true
+show_change_bar = true
 show_minimap = true
 word_wrap = false
 auto_save = false
