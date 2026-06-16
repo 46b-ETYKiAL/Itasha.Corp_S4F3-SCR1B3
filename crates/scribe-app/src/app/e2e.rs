@@ -1593,7 +1593,7 @@ fn builtin_commands_registry_is_populated_and_unique() {
     let unique_len = labels
         .iter()
         .fold(Vec::<&'static str>::new(), |mut acc, l| {
-            if !acc.last().is_some_and(|p| *p == *l) {
+            if acc.last().is_none_or(|p| *p != *l) {
                 acc.push(l);
             }
             acc

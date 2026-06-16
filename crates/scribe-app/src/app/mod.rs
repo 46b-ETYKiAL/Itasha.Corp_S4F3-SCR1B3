@@ -3220,7 +3220,7 @@ impl ScribeApp {
                 let mut best: Option<(usize, f32)> = None;
                 for (j, rect) in &rects {
                     let d = (pos.y - rect.center().y).abs();
-                    if best.map_or(true, |(_, bd)| d < bd) {
+                    if best.is_none_or(|(_, bd)| d < bd) {
                         best = Some((*j, d));
                     }
                 }
@@ -3545,7 +3545,7 @@ impl ScribeApp {
                     } else {
                         (pos.y - rect.center().y).abs()
                     };
-                    if best.map_or(true, |(_, bd)| d < bd) {
+                    if best.is_none_or(|(_, bd)| d < bd) {
                         best = Some((*j, d));
                     }
                 }
@@ -8494,7 +8494,7 @@ impl ScribeApp {
                                 let moved = self
                                     .caret_trail
                                     .back()
-                                    .map_or(true, |(r, _)| r.min.distance(caret_rect.min) > 1.0);
+                                    .is_none_or(|(r, _)| r.min.distance(caret_rect.min) > 1.0);
                                 if moved {
                                     self.caret_trail.push_back((caret_rect, t));
                                     while self.caret_trail.len() > 24 {
