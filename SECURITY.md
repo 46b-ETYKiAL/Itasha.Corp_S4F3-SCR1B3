@@ -53,7 +53,7 @@ Optional language servers run as **child processes** under your user identity, n
 
 - The server binary path is taken directly from your config (a single executable name or absolute path).
 - Arguments pass to the child via `std::process::Command::args(&[...])` — one Rust array, not a shell string. Argv is delivered to the child unmodified.
-- The toolchain pin is `rust-version = "1.80"` in `Cargo.toml`, well above the **1.77.2** floor that mitigates [CVE-2024-24576 ("BatBadBut")](https://nvd.nist.gov/vuln/detail/CVE-2024-24576) — the bug where Windows `.bat` / `.cmd` arguments could be reinterpreted by `cmd.exe`'s tokeniser. Newer rustc escapes them safely; our MSRV makes that escaping unconditional.
+- The declared MSRV is `rust-version = "1.92"` in `Cargo.toml` (the floor the egui stack imposes; enforced by the `msrv` CI job), and every published binary is built with the pinned **`1.95.0`** release toolchain. Both are well above the **1.77.2** floor that mitigates [CVE-2024-24576 ("BatBadBut")](https://nvd.nist.gov/vuln/detail/CVE-2024-24576) — the bug where Windows `.bat` / `.cmd` arguments could be reinterpreted by `cmd.exe`'s tokeniser. Newer rustc escapes them safely, so for any conforming build (≥ MSRV) and for every shipped release that escaping is unconditional.
 - The child's stdin / stdout are wired as pipes; stderr is **dropped** so a chatty language server cannot pollute the editor's own log channel.
 - A missing or unspawnable server **degrades gracefully** to "no LSP for this language" rather than aborting — the editor is the trust boundary, not the language server.
 

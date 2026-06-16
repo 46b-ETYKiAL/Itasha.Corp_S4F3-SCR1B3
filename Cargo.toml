@@ -15,7 +15,11 @@ exclude = ["fuzz"]
 [workspace.package]
 version = "0.4.41"
 edition = "2021"
-rust-version = "1.80"
+# True floor: the egui 0.34 stack (egui/eframe/egui_tiles/epaint…) declares
+# rust-version 1.92, so the workspace cannot build below it. Verified with
+# `cargo +1.92.0 check --workspace`. Enforced by the `msrv` CI job; bump both
+# together when a dependency raises the floor.
+rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3"
 homepage = "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3"
