@@ -78,6 +78,40 @@ pub fn set_main_hwnd(hwnd: isize) {
 #[cfg(not(windows))]
 pub fn set_main_hwnd(_hwnd: isize) {}
 
+/// Hand THIS process's foreground right to any process about to be spawned, so a
+/// just-launched child (the self-updater's relaunched binary, or the elevated
+/// `setup.exe` started via PowerShell) is permitted to call
+/// `SetForegroundWindow` on its own window and come to the FRONT instead of
+/// flashing in the taskbar behind us.
+///
+/// ## Root cause (deep-researched, primary-sourced)
+///
+/// Windows enforces a foreground lock (`SPI_GETFOREGROUNDLOCKTIMEOUT`): a process
+/// may set the foreground window only if it currently OWNS the foreground, or a
+/// foreground-owning process called `AllowSetForegroundWindow` to delegate that
+/// right to a target. When SCR1B3 spawns the installer/new binary it IS the
+/// foreground process (the `ViewportCommand::Close` is queued, drained on the
+/// next egui frame), but it never delegates the right — so the child's
+/// `SetForegroundWindow` is silently demoted to a taskbar flash and the window
+/// lands BEHIND. (MS docs: "SetForegroundWindow", "AllowSetForegroundWindow".)
+///
+/// Pass `ASFW_ANY` (`u32::MAX`), not a specific PID: on the elevated path the
+/// real installer is a GRANDCHILD (PowerShell → UAC `consent.exe` → `setup.exe`),
+/// so the PID SCR1B3 gets back from spawning `powershell` is not the installer's.
+/// `ASFW_ANY` is the only grant that reaches it.
+///
+/// MUST be called BEFORE the spawn, while SCR1B3 still owns the foreground (the
+/// API no-ops once the caller is no longer foreground). Windows-only; a no-op
+/// everywhere else.
+#[cfg(windows)]
+pub fn allow_foreground_handoff() {
+    imp::allow_foreground_handoff();
+}
+
+/// No-op on non-Windows platforms (the foreground-lock is Windows-specific).
+#[cfg(not(windows))]
+pub fn allow_foreground_handoff() {}
+
 #[cfg(windows)]
 mod imp {
     use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -91,10 +125,10 @@ mod imp {
         DefSubclassProc, SHAppBarMessage, SetWindowSubclass, ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClientRect, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
-        IsWindowVisible, SetWindowLongPtrW, SetWindowPos, GWL_STYLE, NCCALCSIZE_PARAMS,
-        SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_NCCALCSIZE,
-        WS_CAPTION, WS_MAXIMIZE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
+        AllowSetForegroundWindow, EnumWindows, GetClientRect, GetWindowLongPtrW, GetWindowRect,
+        GetWindowThreadProcessId, IsWindowVisible, SetWindowLongPtrW, SetWindowPos, GWL_STYLE,
+        NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        WM_NCCALCSIZE, WS_CAPTION, WS_MAXIMIZE, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU,
     };
 
     /// The window-style bits that make DWM draw the native min/max/close caption
@@ -136,6 +170,21 @@ mod imp {
     pub fn set_main_hwnd(hwnd: isize) {
         if hwnd != 0 {
             CACHED_HWND.store(hwnd, Ordering::Relaxed);
+        }
+    }
+
+    /// `ASFW_ANY`: grant the foreground-set right to ANY process. Required
+    /// because the elevated installer is a grandchild (PowerShell → UAC →
+    /// setup.exe), so a PID-specific grant would target the wrong process.
+    const ASFW_ANY: u32 = 0xFFFF_FFFF;
+
+    /// Delegate this (currently-foreground) process's right to set the foreground
+    /// window to any soon-to-be-spawned process. See the public wrapper.
+    pub fn allow_foreground_handoff() {
+        // SAFETY: a single Win32 call with a constant `u32` argument (no pointers,
+        // no handles). No-ops harmlessly if this process is not the foreground.
+        unsafe {
+            AllowSetForegroundWindow(ASFW_ANY);
         }
     }
 
