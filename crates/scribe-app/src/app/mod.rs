@@ -400,6 +400,24 @@ impl EditorTab {
         tab
     }
 
+    /// Collapse a second restored entry for an already-open file into the one
+    /// existing tab — the one-tab-per-file invariant that prevents the
+    /// "same note opened twice on restore" duplication. Keeps whichever copy
+    /// carries unsaved content so the user's edits are never dropped (a clean
+    /// from-disk copy is redundant with what's already on disk). If the kept
+    /// copy's content diverges from the file now on disk, raises
+    /// `external_change` so the F-022 "Reload from disk / Keep my version"
+    /// banner makes the divergence explicit — a stale restored snapshot vs a
+    /// newer saved file — instead of surfacing as a confusing second tab.
+    fn merge_restored_duplicate(existing: &mut EditorTab, candidate: EditorTab) {
+        if candidate.is_dirty() && !existing.is_dirty() {
+            *existing = candidate;
+        }
+        if existing.is_dirty() {
+            existing.external_change = true;
+        }
+    }
+
     /// Replace the editable text from an EXTERNAL source (reload, plugin,
     /// find-replace, sort-lines) and invalidate the experimental rope cache so
     /// the next frame rebuilds the persistent rope from the new content. The
@@ -1463,6 +1481,23 @@ impl ScribeApp {
 
     /// Open a file path in a new tab (or surface an error toast).
     fn open_path(&mut self, path: PathBuf) {
+        // One-tab-per-file: if this file is already open, focus that tab rather
+        // than opening a second copy. An un-deduped open was the upstream cause
+        // of the "same note opened twice" duplication — once two tabs shared a
+        // path they were both persisted to the session manifest and reappeared
+        // every restart. Match by canonical path (separator/case-insensitive on
+        // Windows), falling back to the raw path when canonicalize fails.
+        let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if let Some(idx) = self.tabs.iter().position(|t| {
+            t.doc
+                .path()
+                .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()) == canon)
+                .unwrap_or(false)
+        }) {
+            self.active = idx;
+            self.status = format!("already open: {}", path.display());
+            return;
+        }
         match EditorTab::from_path(path.clone()) {
             Ok(t) => {
                 self.tabs.push(t);
@@ -2835,30 +2870,77 @@ impl ScribeApp {
         let dir = Config::config_dir()?;
         let manifest = session::load_manifest(&dir)?;
         let bdir = session::backup_dir(&dir);
-        let mut tabs = Vec::new();
-        for snap in &manifest.tabs {
+        let mut tabs: Vec<EditorTab> = Vec::new();
+        // Enforce the one-tab-per-file invariant on restore: a file must NEVER be
+        // reopened into two tabs. The manifest can legitimately carry two entries
+        // for the same path — a stale unsaved-backup entry coexisting with a
+        // clean one — once a prior session opened the file twice (the un-deduped
+        // `open_path` allowed that). Without this guard the duplicate persists and
+        // COMPOUNDS every restart, the two copies silently diverging (restored
+        // snapshot vs current disk) — exactly the "same note opened twice, the
+        // second a newer saved version" report. Key by canonical path (falling
+        // back to the raw path when the file has vanished).
+        let mut seen: std::collections::HashMap<PathBuf, usize> = std::collections::HashMap::new();
+        // Map each manifest entry index → the tab index it resolved to, so the
+        // active-tab pointer stays coherent after dedup collapses entries.
+        let mut snap_to_tab: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
+        for (si, snap) in manifest.tabs.iter().enumerate() {
             let path = snap.path.as_ref().map(PathBuf::from);
-            if let Some(name) = &snap.backup {
-                if let Ok(content) = session::read_backup(&bdir, name) {
-                    tabs.push(EditorTab::from_backup(path, content));
-                    continue;
+            // Build the candidate tab for this entry, or skip it (None) — keeping
+            // the original gating: a backup restores unsaved content always; a
+            // clean file-backed tab reopens only when `restore_session` is on.
+            let candidate: Option<EditorTab> = if let Some(name) = &snap.backup {
+                match session::read_backup(&bdir, name) {
+                    Ok(content) => Some(EditorTab::from_backup(path.clone(), content)),
+                    // Backup unreadable → fall back to the clean-file rule below.
+                    Err(_) if restore_session => {
+                        path.clone().and_then(|p| EditorTab::from_path(p).ok())
+                    }
+                    Err(_) => None,
                 }
-            }
-            // Clean file-backed tab: only reopen when the user opted into session
-            // restore. Otherwise it is dropped (unchecking the toggle takes effect).
-            if !restore_session {
-                continue;
-            }
-            if let Some(p) = path {
-                if let Ok(tab) = EditorTab::from_path(p) {
-                    tabs.push(tab);
+            } else if restore_session {
+                path.clone().and_then(|p| EditorTab::from_path(p).ok())
+            } else {
+                None
+            };
+            let Some(candidate) = candidate else { continue };
+
+            // Dedup key = the restored tab's OWN canonical path (a vanished file
+            // restores as a pathless scratch buffer, which we never dedup).
+            let key = candidate
+                .doc
+                .path()
+                .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+            match key.and_then(|k| seen.get(&k).copied().map(|j| (k, j))) {
+                Some((_, j)) => {
+                    // A second entry for an already-restored file: collapse into
+                    // the one existing tab instead of opening a duplicate.
+                    EditorTab::merge_restored_duplicate(&mut tabs[j], candidate);
+                    snap_to_tab.insert(si, j);
+                }
+                None => {
+                    let idx = tabs.len();
+                    if let Some(p) = candidate.doc.path() {
+                        seen.insert(
+                            std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()),
+                            idx,
+                        );
+                    }
+                    tabs.push(candidate);
+                    snap_to_tab.insert(si, idx);
                 }
             }
         }
         if tabs.is_empty() {
             return None;
         }
-        let active = manifest.active.min(tabs.len() - 1);
+        // Remap the persisted active index through dedup; clamp defensively.
+        let active = snap_to_tab
+            .get(&manifest.active)
+            .copied()
+            .unwrap_or(0)
+            .min(tabs.len() - 1);
         Some((tabs, active))
     }
 
@@ -3619,11 +3701,20 @@ impl ScribeApp {
             // Insertion gap: the boundary nearest the pointer along the main
             // axis. We draw the line on the leading edge of the first tab whose
             // center is past the pointer (or the trailing edge of the last).
+            //
+            // On a VERTICAL side strip the indicator must span the FULL column
+            // width and sit in the inter-row GAP — not `rect.x_range()` (the
+            // chip's narrow content width) at `rect.top()`, which painted the
+            // hairline ACROSS the tab's own grip/label/close widgets so it read
+            // as a mark INSIDE the tab. Mirror `draw_rotated_side_tabs`: full
+            // `ui.max_rect()` width, y at the midpoint of the gap between rows.
+            // (Captured before the painter borrow to avoid aliasing `ui`.)
+            let strip_x_range = ui.max_rect().x_range();
             let painter = ui.painter();
             let accent_line = egui::Stroke::new(2.0, accent);
             if let Some((_, last_rect)) = rects.last().copied().map(|r| (r.0, r.1)) {
                 let mut drawn = false;
-                for (_, rect) in &rects {
+                for (idx, (_, rect)) in rects.iter().enumerate() {
                     let past = if horizontal {
                         pointer.x < rect.center().x
                     } else {
@@ -3633,7 +3724,12 @@ impl ScribeApp {
                         if horizontal {
                             painter.vline(rect.left(), rect.y_range(), accent_line);
                         } else {
-                            painter.hline(rect.x_range(), rect.top(), accent_line);
+                            // Gap above this row: midpoint between the previous
+                            // row's bottom and this row's top (or just above the
+                            // first row), spanning the full column width.
+                            let prev_bottom = (idx > 0).then(|| rects[idx - 1].1.bottom());
+                            let y = side_tab_insertion_y(idx, rect.top(), prev_bottom);
+                            painter.hline(strip_x_range, y, accent_line);
                         }
                         drawn = true;
                         break;
@@ -3644,7 +3740,7 @@ impl ScribeApp {
                     if horizontal {
                         painter.vline(last_rect.right(), last_rect.y_range(), accent_line);
                     } else {
-                        painter.hline(last_rect.x_range(), last_rect.bottom(), accent_line);
+                        painter.hline(strip_x_range, last_rect.bottom() + 1.0, accent_line);
                     }
                 }
             }
@@ -9553,6 +9649,26 @@ use effects::{
     paint_boot_glitch, paint_caret_trail, paint_crt_scanlines, paint_flicker, paint_tint_overlay,
     paint_vhs_tracking, paint_wired_mesh,
 };
+
+/// PURE geometry for the drop-insertion line on a VERTICAL side-tab strip.
+///
+/// Returns the y at which to draw the full-column-width insertion hairline for a
+/// drop landing *before* the row at `idx` (whose top edge is `row_top`).
+/// `prev_bottom` is the bottom edge of the row above (`None` for the first row).
+/// The line sits in the inter-row GAP — the midpoint between the previous row's
+/// bottom and this row's top — so it reads as a separator BETWEEN tabs. The bug
+/// it fixes drew the line at `row_top` across the chip's own grip/label/close
+/// widgets (with only the chip's narrow width), so it appeared INSIDE the tab.
+fn side_tab_insertion_y(idx: usize, row_top: f32, prev_bottom: Option<f32>) -> f32 {
+    match prev_bottom {
+        Some(pb) if idx > 0 => (pb + row_top) * 0.5,
+        // First row (or no predecessor): just above its top edge.
+        _ => row_top - 1.0,
+    }
+}
+
+#[cfg(test)]
+mod restore_dedup_tests;
 
 #[cfg(test)]
 mod resize_tests;

@@ -90,6 +90,12 @@ fn launch_installer_elevated(installer: &std::path::Path) -> std::io::Result<()>
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let script = powershell_runas_script(installer);
+    // Hand our foreground right to the about-to-spawn process tree BEFORE the
+    // spawn (while we still own the foreground), so the elevated installer — a
+    // grandchild via PowerShell + UAC — can bring its window to the FRONT instead
+    // of flashing behind us. ASFW_ANY is required because the real installer's PID
+    // is not the PowerShell child's. See `allow_foreground_handoff`.
+    scribe_win32_chrome::allow_foreground_handoff();
     std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .creation_flags(CREATE_NO_WINDOW)
@@ -377,6 +383,11 @@ impl Updater {
                 // current_exe() now resolves to the freshly-swapped binary;
                 // relaunch it. Do NOT discard the spawn result — if the relaunch
                 // fails we must not close the app into nothing (the prior bug).
+                // Hand our foreground right to the relaunched binary first (while
+                // we still own the foreground) so it comes to the FRONT rather
+                // than opening behind us as the close is processed.
+                #[cfg(windows)]
+                scribe_win32_chrome::allow_foreground_handoff();
                 match std::env::current_exe()
                     .and_then(|exe| std::process::Command::new(exe).spawn())
                 {
