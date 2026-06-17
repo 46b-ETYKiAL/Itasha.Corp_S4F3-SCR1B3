@@ -18,9 +18,11 @@ SVG_DIR="$SCRIPT_DIR/assets/svg"
 OUT_DIR="$SCRIPT_DIR/assets/icons"
 MASTER="$SVG_DIR/app-icon.svg"
 SMALL="$SVG_DIR/app-icon-small.svg"
-# Monochrome caret-in-circle sigil — single white foreground on transparent.
-# This is the source the Windows .exe resource (build.rs) and the runtime
-# eframe window icon are built from. The shell/taskbar tints + plates it.
+# Transparent monochrome daemon-sigil core (white-on-transparent, no plate) for
+# tinting contexts (in-app SigilMark, README). The Windows .exe resource
+# (build.rs) and the runtime eframe window icon are built from the PLATED tiers
+# ($SMALL <=48, $MASTER >=64) so the app icon carries its own void plate and is
+# visible on any taskbar — see the .ico + crate-mirror sections below.
 SIGIL="$SVG_DIR/icon-sigil.svg"
 
 [ -f "$MASTER" ] || { echo "scr1b3 gen-icons: missing $MASTER" >&2; exit 1; }
@@ -58,21 +60,24 @@ for sz in 16 22 24 32 48 64 96 128 192 256 384 512 1024; do
 done
 cp "$MASTER" "$OUT_DIR/hicolor/scalable/apps/scr1b3.svg"
 
-# Windows .ico: monochrome caret-in-circle sigil at 16/24/32/48/64/256.
-# Rendered from the dedicated $SIGIL source (white-on-transparent) so the .exe
-# resource (build.rs embeds $OUT_DIR/scr1b3.ico -> crates/scribe-app/assets/)
-# matches the runtime window icon. The shell tints/plates the white form.
+# Windows .ico: the PLATED daemon-sigil scribe seal at 16/24/32/48/64/128/256.
+# Tiered source per frame so the seal survives the squint test: sizes <=48 use
+# the distilled $SMALL (plate + ring + filled nib), >=64 the full $MASTER seal.
+# The .exe resource (build.rs embeds $OUT_DIR/scr1b3.ico -> crates/scribe-app/
+# assets/) and the runtime window icon thus share one plated identity that is
+# visible on any taskbar (it carries its own void plate). Mirrors gen_icons.py.
 SIGIL_TMP="$OUT_DIR/.sigil-png"
 mkdir -p "$SIGIL_TMP"
-ICO_SIZES="16 24 32 48 64 256"
+ICO_SIZES="16 24 32 48 64 128 256"
 for sz in $ICO_SIZES; do
-  render_png "$SIGIL" "$sz" "$SIGIL_TMP/icon-$sz.png"
+  src="$MASTER"; [ "$sz" -le 48 ] && src="$SMALL"
+  render_png "$src" "$sz" "$SIGIL_TMP/icon-$sz.png"
 done
 if command -v magick >/dev/null 2>&1; then
   ICO_INPUTS=()
   for sz in $ICO_SIZES; do ICO_INPUTS+=("$SIGIL_TMP/icon-$sz.png"); done
   magick "${ICO_INPUTS[@]}" "$OUT_DIR/scr1b3.ico"
-  echo "scr1b3 gen-icons: wrote $OUT_DIR/scr1b3.ico (mono sigil, ${ICO_SIZES})"
+  echo "scr1b3 gen-icons: wrote $OUT_DIR/scr1b3.ico (daemon-sigil seal, ${ICO_SIZES})"
 elif command -v python3 >/dev/null 2>&1; then
   # Pure-Python (Pillow) multi-size ICO assembly — deterministic, repo-aligned.
   python3 - "$SIGIL_TMP" "$OUT_DIR/scr1b3.ico" $ICO_SIZES <<'PY'
@@ -97,7 +102,7 @@ for s, blob in blobs:
     entries += struct.pack("<BBBBHHII", d, d, 0, 0, 1, 32, len(blob), off)
     data += blob; off += len(blob)
 Path(out).write_bytes(hdr + entries + data)
-print(f"scr1b3 gen-icons: wrote {out} (mono sigil, Pillow, {len(blobs)} frames)")
+print(f"scr1b3 gen-icons: wrote {out} (daemon-sigil seal, Pillow, {len(blobs)} frames)")
 PY
 else
   echo "scr1b3 gen-icons: skipping .ico (needs ImageMagick \`magick\` or python3+Pillow)." >&2
@@ -108,7 +113,7 @@ if [ -f "$OUT_DIR/scr1b3.ico" ]; then
   CRATE_ASSETS="$SCRIPT_DIR/../crates/scribe-app/assets"
   if [ -d "$CRATE_ASSETS" ] || mkdir -p "$CRATE_ASSETS"; then
     cp "$OUT_DIR/scr1b3.ico" "$CRATE_ASSETS/scr1b3.ico"
-    render_png "$SIGIL" 256 "$CRATE_ASSETS/scr1b3-256.png"
+    render_png "$MASTER" 256 "$CRATE_ASSETS/scr1b3-256.png"
     echo "scr1b3 gen-icons: mirrored .ico + scr1b3-256.png to crates/scribe-app/assets/"
   fi
 fi
