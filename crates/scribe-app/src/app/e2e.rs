@@ -2039,3 +2039,62 @@ fn perf_large_buffer_edit_is_bounded() {
         "5k edits on a 50k-line rope took {elapsed:?}"
     );
 }
+
+/// Render-smoke (e2e, no GPU): the "Report an issue" dialog draws when opened
+/// and is dismissable. Opening it via `open_fresh()` (the path the command
+/// palette takes) must render the heading and buttons without panicking, and
+/// clicking Cancel by its label must close it — the test that catches "the
+/// dialog never draws" / "Cancel does nothing".
+#[test]
+fn report_issue_dialog_renders_and_cancels() {
+    let mut app = fresh_app();
+    app.issue_intake.open_fresh();
+    let mut h = ui_harness(app);
+    h.run();
+    assert!(
+        h.state().issue_intake.open,
+        "the report-issue dialog should be open after open_fresh()"
+    );
+    // The modal heading + the three action buttons must be present (rendered).
+    let _ = h.get_by_label("Report an issue");
+    let _ = h.get_by_label("Open on GitHub");
+    let _ = h.get_by_label("Cancel");
+    // Cancel the way a user does.
+    h.get_by_label("Cancel").click();
+    h.run();
+    assert!(
+        !h.state().issue_intake.open,
+        "clicking Cancel must close the report-issue dialog"
+    );
+}
+
+/// Render-smoke (e2e, no GPU): ticking the diagnostics checkbox makes the
+/// non-identifying diagnostics block appear in the live preview body. Asserts
+/// the privacy contract at the UI layer: OFF by default, visible-when-on.
+#[test]
+fn report_issue_diagnostics_toggle_drives_preview() {
+    let mut app = fresh_app();
+    app.issue_intake.open_fresh();
+    app.issue_intake.description = "something broke".into();
+    // OFF by default → preview carries no diagnostics line.
+    assert!(
+        !app.issue_intake
+            .preview_body(crate::issue_intake::RENDERER)
+            .contains("App version:"),
+        "diagnostics must be OFF by default (no preview line)"
+    );
+    let mut h = ui_harness(app);
+    h.run();
+    // Tick the diagnostics checkbox by its label, like a user.
+    h.get_by_label("Include non-identifying diagnostics (app version, OS, renderer)")
+        .click();
+    h.run();
+    let preview = h
+        .state()
+        .issue_intake
+        .preview_body(crate::issue_intake::RENDERER);
+    assert!(
+        preview.contains("App version:") && preview.contains("Renderer: wgpu"),
+        "ticking diagnostics must make the diagnostics block appear in the preview"
+    );
+}
