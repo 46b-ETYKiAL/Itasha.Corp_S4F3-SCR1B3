@@ -753,6 +753,11 @@ impl ScribeApp {
         cli_path: Option<String>,
     ) -> Self {
         let mut app = Self::build(config, config_err, cli_path, true);
+        // W1TN3SS opt-in crash reporting: drain the local spool of any reports
+        // captured by a prior session's panic hook. PRODUCTION-only — `new_test`
+        // never calls this, so a unit test that builds the app never touches the
+        // real config dir's spool (the documented test-pollution leak).
+        app.drain_crash_spool();
         // Phase 16 T16.3: register the egui-phosphor Thin icon font so toolbar
         // glyphs (Save / Find / Palette / etc.) render when appearance.toolbar_icons
         // is on. The icon font is inserted as the #2 entry in Proportional, so
@@ -991,12 +996,7 @@ impl ScribeApp {
         // Built from `config` before the struct literal moves `config` in.
         let spell = build_spell_engine(&config);
 
-        // Read the opt-in crash-report posture before `config` is moved, so the
-        // post-construction step can drain the local spool: auto-send when the
-        // user chose "Always", or queue the ask-each-time consent dialog.
-        let crash_mode = config.reporting.crash_reports;
-
-        let mut app = Self {
+        let app = Self {
             config,
             config_dir: Config::config_dir(),
             theme,
@@ -1099,22 +1099,34 @@ impl ScribeApp {
             last_selection_chars: 0,
         };
 
-        // W1TN3SS opt-in crash reporting: drain the local spool of any reports
-        // captured by a prior session's panic hook. The capture only ever spools
-        // when the user opted IN (so an Off user has an empty spool and nothing
-        // happens). `Always` auto-sends through the consent-gated path with no
-        // prompt; `AskEachTime` queues the consent dialog (rendered each frame).
-        match crash_mode {
+        app
+    }
+
+    /// Drain the local crash-report spool per the user's opt-in posture. This is
+    /// the PRODUCTION-only step (called from [`ScribeApp::new`], never from
+    /// `new_test`) so a unit test that builds the app never reads/writes the real
+    /// config dir's spool — the test-pollution leak this isolates. The spool is
+    /// rooted at the app's per-instance resolved `config_dir` (the same dir all
+    /// other config/session I/O uses), NEVER the global `Config::config_dir()`.
+    ///
+    /// The capture only ever spools when the user opted IN (so an `Off` user has
+    /// an empty spool and nothing happens). `Always` auto-sends through the
+    /// consent-gated path with no prompt; `AskEachTime` queues the consent dialog
+    /// (rendered each frame). A `None` config dir means nowhere to spool — a no-op.
+    fn drain_crash_spool(&mut self) {
+        let Some(dir) = self.config_dir.clone() else {
+            return;
+        };
+        match self.config.reporting.crash_reports {
             crate::reporting::ReportingMode::Always => {
-                crate::reporting::auto_send_spooled_crashes();
+                crate::reporting::auto_send_spooled_crashes(&dir);
             }
             crate::reporting::ReportingMode::AskEachTime => {
-                app.crash_consent.load_from_spool();
+                self.crash_consent.set_config_dir(Some(dir));
+                self.crash_consent.load_from_spool();
             }
             crate::reporting::ReportingMode::Off => {}
         }
-
-        app
     }
 
     /// Phase 18 T18.2 — render the egui_tiles grid as the central

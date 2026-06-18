@@ -23,6 +23,8 @@
 //! - the panic `&'static str` discipline (a `String` payload — which could embed
 //!   buffer text or a path — is deliberately suppressed at capture).
 
+use std::path::{Path, PathBuf};
+
 use itasha_report_core::backend::{IngestBackend, LeanPipelineBackend, SendOutcome, TransportConfig};
 use itasha_report_core::consent::ConsentToken;
 use itasha_report_core::preview::Preview;
@@ -51,9 +53,6 @@ pub enum ReportOutcome {
     Spooled,
     /// A consented report was transmitted and accepted by the endpoint.
     Sent,
-    /// A send was attempted without consent — refused. (Should be unreachable
-    /// given the type-level gate, but surfaced for defense-in-depth + logging.)
-    RefusedNoConsent,
     /// Consent was present but no endpoint is configured — the report stays
     /// spooled for a later, configured send.
     RefusedNoEndpoint,
@@ -67,7 +66,6 @@ impl ReportOutcome {
         match self {
             ReportOutcome::Spooled => "spooled".to_string(),
             ReportOutcome::Sent => "sent".to_string(),
-            ReportOutcome::RefusedNoConsent => "refused-no-consent".to_string(),
             ReportOutcome::RefusedNoEndpoint => "refused-no-endpoint".to_string(),
             ReportOutcome::Failed(_) => "failed".to_string(),
         }
@@ -197,10 +195,13 @@ fn endpoint_from_env() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Open the local spool (if a config dir exists) so the host can drain pending
-/// crash reports into the consent dialog on the next launch.
-pub fn open_spool() -> Option<Spool> {
-    Config::config_dir().and_then(|dir| Spool::open(&dir).ok())
+/// Open the local spool rooted at an EXPLICIT config dir so the host can drain
+/// pending crash reports into the consent dialog on the next launch. The dir is
+/// always passed by the caller (the app's per-instance resolved `config_dir`, a
+/// temp dir under test) so no spool I/O ever silently hits the GLOBAL
+/// `Config::config_dir()` — that was the test-pollution leak this isolates.
+pub fn open_spool_in(dir: &Path) -> Option<Spool> {
+    Spool::open(dir).ok()
 }
 
 /// What the user chose to remember for the crash stream after a per-event
@@ -237,6 +238,12 @@ impl RememberChoice {
 /// presented report + its editable preview text, and the user's remember choice.
 #[derive(Debug, Default)]
 pub struct CrashConsentState {
+    /// The EXPLICIT config dir this dialog's spool I/O is rooted at — the app's
+    /// per-instance resolved `config_dir` (a temp dir under test). `None` until
+    /// the host binds it via [`CrashConsentState::set_config_dir`]; while `None`
+    /// every spool operation is a no-op (so a default-constructed state — e.g. a
+    /// `new_test` app that never binds a dir — touches NO real config dir).
+    config_dir: Option<PathBuf>,
     /// Remaining spooled report paths to present (oldest first).
     queue: Vec<std::path::PathBuf>,
     /// The report currently shown in the dialog (loaded from `queue`'s head).
@@ -248,13 +255,26 @@ pub struct CrashConsentState {
 }
 
 impl CrashConsentState {
+    /// Bind the explicit config dir whose `reports/` spool this dialog drains.
+    /// The host calls this with the app's per-instance resolved `config_dir`
+    /// before loading the spool, so the dialog never falls back to the GLOBAL
+    /// `Config::config_dir()`.
+    pub fn set_config_dir(&mut self, dir: Option<PathBuf>) {
+        self.config_dir = dir;
+    }
+
+    /// Open this dialog's spool at its bound config dir, if any is set.
+    fn spool(&self) -> Option<Spool> {
+        self.config_dir.as_deref().and_then(open_spool_in)
+    }
+
     /// Load the spooled CRASH reports into the dialog queue. Returns the number
     /// queued. Manual-issue reports (a sibling plan's intake) are not presented
     /// by this crash dialog. Best-effort: a spool error yields an empty queue.
     pub fn load_from_spool(&mut self) -> usize {
         self.queue.clear();
         self.current = None;
-        if let Some(spool) = open_spool() {
+        if let Some(spool) = self.spool() {
             if let Ok(paths) = spool.list() {
                 for path in paths {
                     if let Ok(report) = spool.load(&path) {
@@ -295,7 +315,7 @@ impl CrashConsentState {
             return;
         }
         let path = self.queue.remove(0);
-        if let Some(spool) = open_spool() {
+        if let Some(spool) = self.spool() {
             if let Ok(report) = spool.load(&path) {
                 self.edited_text = preview_text(&report);
                 self.current = Some((path, report));
@@ -319,7 +339,7 @@ impl CrashConsentState {
         let token = ConsentToken::granted();
         let outcome = send_report(&edited, &token);
         if outcome == ReportOutcome::Sent {
-            if let Some(spool) = open_spool() {
+            if let Some(spool) = self.spool() {
                 let _ = spool.remove(&path);
             }
         } else {
@@ -336,7 +356,7 @@ impl CrashConsentState {
     /// has_pending.
     pub fn decline_and_discard(&mut self) {
         if let Some((path, _)) = self.current.take() {
-            if let Some(spool) = open_spool() {
+            if let Some(spool) = self.spool() {
                 let _ = spool.remove(&path);
             }
         }
@@ -350,8 +370,13 @@ impl CrashConsentState {
 /// first and transmitted only via a freshly-minted [`ConsentToken`]; a
 /// successful send removes the spooled file, a failure leaves it for retry.
 /// Returns the number of reports for which a send was ATTEMPTED.
-pub fn auto_send_spooled_crashes() -> usize {
-    let Some(spool) = open_spool() else {
+///
+/// The spool is rooted at the EXPLICIT `config_dir` the caller passes (the app's
+/// per-instance resolved dir, a temp dir under test) — never the GLOBAL
+/// `Config::config_dir()`, so an auto-send drain never touches the real config
+/// dir from a test.
+pub fn auto_send_spooled_crashes(config_dir: &Path) -> usize {
+    let Some(spool) = open_spool_in(config_dir) else {
         return 0;
     };
     let Ok(paths) = spool.list() else {
@@ -498,10 +523,6 @@ mod tests {
     fn outcome_log_details_are_stable_and_non_identifying() {
         assert_eq!(ReportOutcome::Spooled.log_detail(), "spooled");
         assert_eq!(ReportOutcome::Sent.log_detail(), "sent");
-        assert_eq!(
-            ReportOutcome::RefusedNoConsent.log_detail(),
-            "refused-no-consent"
-        );
         assert_eq!(
             ReportOutcome::RefusedNoEndpoint.log_detail(),
             "refused-no-endpoint"
