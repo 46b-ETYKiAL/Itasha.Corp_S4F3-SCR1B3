@@ -28,6 +28,12 @@ use itasha_report_core::intake::{
     clipboard_fallback_body, mailto_url, IssueFormRequest, GITHUB_URL_LENGTH_THRESHOLD,
 };
 
+/// The non-identifying renderer name reported in the optional diagnostics block.
+/// SCR1B3's eframe stack is always the wgpu backend (see the `eframe` features in
+/// the workspace manifest), so this is a static, non-identifying string — never a
+/// GPU device name, vendor ID, or any host-specific value.
+pub const RENDERER: &str = "wgpu";
+
 /// The kind of issue the user is filing. Each maps to a shared Issue-Form
 /// template filename in the public W1TN3SS repo and the server-side label that
 /// template applies. The template/label names match
@@ -152,7 +158,12 @@ pub fn build_body(description: &str, include_diagnostics: bool, renderer: &str) 
 /// current state. The title is the kind's prefix + the first line of the
 /// description (trimmed); the body is the previewed/edited text verbatim.
 #[must_use]
-pub fn build_request(repo: &str, kind: IssueKind, title_tail: &str, body: &str) -> IssueFormRequest {
+pub fn build_request(
+    repo: &str,
+    kind: IssueKind,
+    title_tail: &str,
+    body: &str,
+) -> IssueFormRequest {
     let title = format!("{}{}", kind.title_prefix(), title_tail.trim());
     IssueFormRequest {
         repo: repo.to_string(),
@@ -185,7 +196,7 @@ pub fn title_tail_from(description: &str) -> String {
 ///
 /// This holds NO transport state and never transmits anything — it builds a URL
 /// / clipboard body / mailto and hands off to the OS on an explicit user click.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct IssueIntakeState {
     /// Whether the modal is currently shown.
     pub open: bool,
@@ -199,19 +210,6 @@ pub struct IssueIntakeState {
     pub include_diagnostics: bool,
     /// The last outcome (for a small status line / action-log), if any.
     pub last_outcome: Option<IntakeOutcome>,
-}
-
-impl Default for IssueIntakeState {
-    fn default() -> Self {
-        Self {
-            open: false,
-            kind: IssueKind::default(),
-            // Diagnostics OFF by default — the privacy-conservative posture.
-            include_diagnostics: false,
-            description: String::new(),
-            last_outcome: None,
-        }
-    }
 }
 
 impl IssueIntakeState {
@@ -303,8 +301,22 @@ pub fn open_mailto(alias: &str, subject: &str, body: &str) -> IntakeOutcome {
     }
 }
 
+/// Record the intake outcome to SCR1B3's existing action-log under the
+/// `issue-intake` category (counts/enums only — the stable `log_detail`, NEVER
+/// the body text, the URL, the repo, or any persistent identifier). Honours
+/// `S4F3_DISABLE_TELEMETRY=1` by emitting nothing. Best-effort; never blocks.
+pub fn log_outcome(outcome: &IntakeOutcome) {
+    if std::env::var_os("S4F3_DISABLE_TELEMETRY").is_some() {
+        return;
+    }
+    crate::action_log::record("issue-intake", outcome.log_detail());
+}
+
 #[cfg(test)]
 mod tests {
+    // Test fixtures build IssueFormRequest via default-then-assign for readability;
+    // these are intentional and not amenable to clippy's struct-update autofix.
+    #![allow(clippy::field_reassign_with_default)]
     use super::*;
 
     /// A string that must NEVER appear in any built URL or body — a stand-in for
@@ -406,7 +418,10 @@ mod tests {
 
     #[test]
     fn title_tail_takes_first_nonempty_line_capped() {
-        assert_eq!(title_tail_from("\n\n  hello world  \nsecond"), "hello world");
+        assert_eq!(
+            title_tail_from("\n\n  hello world  \nsecond"),
+            "hello world"
+        );
         assert_eq!(title_tail_from(""), "");
         let long = "x".repeat(200);
         assert_eq!(title_tail_from(&long).chars().count(), 80);

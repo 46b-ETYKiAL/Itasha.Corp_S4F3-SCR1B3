@@ -21,6 +21,7 @@ mod filetree;
 mod find_in_files;
 mod fuzzy;
 mod grid;
+mod issue_intake;
 mod md_preview;
 mod plugin_manager;
 mod reporting;

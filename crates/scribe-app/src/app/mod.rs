@@ -648,6 +648,12 @@ pub struct ScribeApp {
     /// local spool when the crash stream is AskEachTime; the modal presents each
     /// spooled report with an editable preview + equal-weight Send/Don't-send.
     crash_consent: crate::reporting::CrashConsentState,
+    /// W1TN3SS user-initiated "Report an issue" dialog state. Inert until the
+    /// user opens it via the command palette; it transmits nothing on its own —
+    /// it builds a prefilled GitHub Issue-Form deep link (or a clipboard / mailto
+    /// fallback) and hands off to the OS on an explicit click, with a previewable
+    /// + editable body and diagnostics OFF by default.
+    issue_intake: crate::issue_intake::IssueIntakeState,
     /// LSP: per-language server registry + the active server connection.
     lsp_registry: LspRegistry,
     lsp: Option<LspClient>,
@@ -998,6 +1004,7 @@ impl ScribeApp {
 
         let app = Self {
             config,
+            issue_intake: crate::issue_intake::IssueIntakeState::default(),
             config_dir: Config::config_dir(),
             theme,
             last_os_theme: None,
@@ -2683,6 +2690,7 @@ impl ScribeApp {
                 self.recent_folders_open = true;
             }
             BuiltinCommand::Save => self.save_active(),
+            BuiltinCommand::ReportIssue => self.issue_intake.open_fresh(),
             BuiltinCommand::ConvertToMarkdown => self.convert_to_markdown_active(),
             BuiltinCommand::ExportAsHtml => self.export_html_active(),
             BuiltinCommand::SetLineEndingsLf => self.set_active_eol(scribe_core::eol::Eol::Lf),
@@ -5035,6 +5043,7 @@ pub(crate) enum BuiltinCommand {
     ToggleLineNumbers,
     ToggleChangeBar,
     OpenSettings,
+    ReportIssue,
     OpenFind,
     OpenPalette,
     CycleTheme,
@@ -5216,6 +5225,11 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Redo",
         shortcut: "Ctrl+Shift+Z",
         action: BuiltinCommand::Redo,
+    },
+    BuiltinEntry {
+        label: "Report an issue…",
+        shortcut: "",
+        action: BuiltinCommand::ReportIssue,
     },
     BuiltinEntry {
         label: "Save",
