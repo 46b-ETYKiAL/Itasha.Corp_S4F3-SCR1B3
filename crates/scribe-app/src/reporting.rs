@@ -25,7 +25,9 @@
 
 use std::path::{Path, PathBuf};
 
-use itasha_report_core::backend::{IngestBackend, LeanPipelineBackend, SendOutcome, TransportConfig};
+use itasha_report_core::backend::{
+    IngestBackend, LeanPipelineBackend, SendOutcome, TransportConfig,
+};
 use itasha_report_core::consent::ConsentToken;
 use itasha_report_core::preview::Preview;
 use itasha_report_core::report::{Report, Stream};

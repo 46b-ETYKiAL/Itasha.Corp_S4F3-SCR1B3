@@ -142,11 +142,7 @@ pub fn reporting_mode_label(mode: ReportingMode) -> &'static str {
 /// rendered as three equal-weight radio choices in consent language. Returns
 /// `true` if the mode changed. The three options carry IDENTICAL affordance —
 /// no pre-emphasis on "Always" (GDPR "freely given" + no dark pattern).
-fn reporting_mode_selector(
-    ui: &mut egui::Ui,
-    id: &str,
-    mode: &mut ReportingMode,
-) -> bool {
+fn reporting_mode_selector(ui: &mut egui::Ui, id: &str, mode: &mut ReportingMode) -> bool {
     let before = *mode;
     ui.horizontal(|ui| {
         // The three choices are equal-weight radios laid out in the same row;
@@ -1934,11 +1930,8 @@ fn render_sections(
                 .weak()
                 .small(),
             );
-            changed |= reporting_mode_selector(
-                ui,
-                "reporting-crash",
-                &mut config.reporting.crash_reports,
-            );
+            changed |=
+                reporting_mode_selector(ui, "reporting-crash", &mut config.reporting.crash_reports);
             ui.add_space(8.0);
         }
         if row_visible(
