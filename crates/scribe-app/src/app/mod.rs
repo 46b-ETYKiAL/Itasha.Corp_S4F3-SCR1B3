@@ -2475,6 +2475,191 @@ impl ScribeApp {
         }
     }
 
+    /// W1TN3SS user-initiated "Report an issue" modal. Opened from the command
+    /// palette (`BuiltinCommand::ReportIssue` → `issue_intake.open_fresh()`);
+    /// renders only when `issue_intake.open`. Mirrors `render_crash_consent`'s
+    /// deferred-decision pattern so the mutating launch/log runs past the
+    /// `&mut self` borrow held by the modal closure.
+    ///
+    /// Privacy invariants this UI upholds (the logic is unit-tested in
+    /// `crate::issue_intake`): nothing leaves until the user clicks a button;
+    /// the previewed body is the exact text that is sent; diagnostics are OFF by
+    /// default and only ever appear in the preview when explicitly ticked.
+    fn render_report_issue(&mut self, ctx: &egui::Context) {
+        if !self.issue_intake.open {
+            return;
+        }
+
+        // The repo + mailto alias are config-injected (operator-editable), so
+        // no prod values are baked unalterably into the binary.
+        let repo = self.config.reporting.issue_intake.repo.clone();
+        let alias = self.config.reporting.issue_intake.mailto_alias.clone();
+        let renderer = crate::issue_intake::RENDERER;
+
+        // Decisions deferred past the closure borrow (like render_crash_consent).
+        enum Decision {
+            Submit,
+            Email,
+            Cancel,
+        }
+        let mut decision: Option<Decision> = None;
+
+        egui::Modal::new(egui::Id::new("scr1b3_report_issue")).show(ctx, |ui| {
+            ui.set_max_width(560.0);
+            ui.heading("Report an issue");
+            ui.add_space(6.0);
+            ui.label(
+                "Tell us what happened or what you'd like. Nothing is sent until you click \
+                 a button below — and you can read and edit the exact text first.",
+            );
+            ui.add_space(10.0);
+
+            // Kind selector (Bug / Feature / Other).
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Kind:").strong());
+                for kind in crate::issue_intake::IssueKind::ALL {
+                    ui.radio_value(&mut self.issue_intake.kind, kind, kind.display());
+                }
+            });
+            ui.add_space(8.0);
+
+            // Free-form description.
+            ui.label(egui::RichText::new("Description:").strong());
+            ui.add_space(2.0);
+            egui::ScrollArea::vertical()
+                .id_salt("scr1b3_report_issue_desc")
+                .max_height(140.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.issue_intake.description)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(5)
+                            .hint_text("Describe the bug, request, or question…"),
+                    );
+                });
+            ui.add_space(8.0);
+
+            // Diagnostics opt-in — OFF by default; the toggled-in text shows up
+            // in the preview below so the user always sees what it adds.
+            ui.checkbox(
+                &mut self.issue_intake.include_diagnostics,
+                "Include non-identifying diagnostics (app version, OS, renderer)",
+            );
+            ui.add_space(10.0);
+
+            // Preview of the EXACT body that will be sent — driven by the live
+            // description + diagnostics toggle.
+            ui.label(egui::RichText::new("This is exactly what will be sent:").strong());
+            ui.add_space(2.0);
+            let preview = self.issue_intake.preview_body(renderer);
+            egui::ScrollArea::vertical()
+                .id_salt("scr1b3_report_issue_preview")
+                .max_height(140.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    // Read-only view of the rendered body (the editable source is
+                    // the description field above; the preview reflects it +
+                    // diagnostics). `&mut &str` makes TextEdit non-editable.
+                    let mut shown = preview.as_str();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut shown)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(5)
+                            .interactive(false)
+                            .code_editor(),
+                    );
+                });
+            ui.add_space(12.0);
+
+            // Faithful UX hint: tell the user up front whether "Open on GitHub"
+            // will open a prefilled browser link or fall back to the clipboard
+            // (the report is too long for a GitHub deep link — the HTTP-414
+            // ceiling). This is the same length decision `open_or_copy` makes.
+            if !self.issue_intake.fits_url_length(&repo, renderer) {
+                ui.label(
+                    egui::RichText::new(
+                        "This report is long, so \"Open on GitHub\" will copy it to your \
+                         clipboard to paste into a new issue.",
+                    )
+                    .weak()
+                    .small(),
+                );
+                ui.add_space(6.0);
+            }
+
+            // Buttons: Open on GitHub (deep-link, with clipboard fallback) /
+            // Email instead (mailto) / Cancel. The mailto button is disabled when
+            // no support alias is configured.
+            let btn = egui::vec2(150.0, 28.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_sized(btn, egui::Button::new("Open on GitHub"))
+                    .clicked()
+                {
+                    decision = Some(Decision::Submit);
+                }
+                if ui
+                    .add_enabled(!alias.is_empty(), egui::Button::new("Email instead"))
+                    .clicked()
+                {
+                    decision = Some(Decision::Email);
+                }
+                if ui.add_sized(btn, egui::Button::new("Cancel")).clicked() {
+                    decision = Some(Decision::Cancel);
+                }
+            });
+
+            // A small status line reflecting the last outcome.
+            if let Some(outcome) = &self.issue_intake.last_outcome {
+                ui.add_space(8.0);
+                let msg = match outcome {
+                    crate::issue_intake::IntakeOutcome::OpenedDeepLink => {
+                        "Opened a prefilled issue in your browser.".to_string()
+                    }
+                    crate::issue_intake::IntakeOutcome::CopiedToClipboard => {
+                        "The report was copied to your clipboard — paste it into a new \
+                         GitHub issue."
+                            .to_string()
+                    }
+                    crate::issue_intake::IntakeOutcome::OpenedMailto => {
+                        "Opened your mail client.".to_string()
+                    }
+                    crate::issue_intake::IntakeOutcome::Failed(_) => {
+                        "Could not complete the action — please try Email instead.".to_string()
+                    }
+                };
+                ui.label(egui::RichText::new(msg).weak().small());
+            }
+        });
+
+        match decision {
+            Some(Decision::Submit) => {
+                let req = self.issue_intake.request(&repo, renderer);
+                let outcome = crate::issue_intake::open_or_copy(&req);
+                crate::issue_intake::log_outcome(&outcome);
+                self.issue_intake.last_outcome = Some(outcome);
+                self.issue_intake.open = false;
+            }
+            Some(Decision::Email) => {
+                let req = self.issue_intake.request(&repo, renderer);
+                let outcome = crate::issue_intake::open_mailto(&alias, &req.title, &req.body);
+                crate::issue_intake::log_outcome(&outcome);
+                self.issue_intake.last_outcome = Some(outcome);
+                self.issue_intake.open = false;
+            }
+            Some(Decision::Cancel) => {
+                self.issue_intake.open = false;
+            }
+            None => {
+                // Esc closes the modal (mirrors the other dialogs' close-on-Esc).
+                if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.issue_intake.open = false;
+                }
+            }
+        }
+    }
+
     /// `auto`-mode on-launch update modal. When the launch check finds a newer
     /// release it asks yes/no; the SAME modal then follows the flow through
     /// download → verify → "Restart to finish", so the whole Auto update is
@@ -6561,6 +6746,11 @@ impl ScribeApp {
         // prior session spooled a crash report AND the user opted into
         // AskEachTime; presents an editable preview + equal-weight Send/Don't-send.
         self.render_crash_consent(ctx);
+        // W1TN3SS user-initiated "Report an issue" modal. Renders only when the
+        // user has opened it from the command palette; previews the exact body,
+        // diagnostics OFF by default, and launches the GitHub deep-link / mailto
+        // only on an explicit button click.
+        self.render_report_issue(ctx);
         // Keep egui's animation time + caret style in sync with the motion
         // preferences every frame (cheap; also covers startup before any
         // theme reapply).
