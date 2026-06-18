@@ -117,7 +117,7 @@ impl ReportingMode {
 /// stream and the user-initiated **manual-issue** stream each carry their own
 /// posture, both defaulting `Off`. Usage telemetry is explicitly out of scope —
 /// these two streams are the ONLY consented channels.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ReportingConfig {
     /// Consent posture for the crash-report stream (panic backtrace; the
@@ -127,6 +127,13 @@ pub struct ReportingConfig {
     /// user-initiated). Default: `Off`. (The manual-issue intake UI itself is a
     /// sibling plan; this field is the consent posture it will read.)
     pub manual_issues: ReportingMode,
+    /// Where the user-initiated "Report an issue" dialog sends its deep links and
+    /// mailto fallback. Config-injected (no hardcoded prod values baked
+    /// unalterably): an operator can repoint the repo or the support alias by
+    /// editing the config. `#[serde(default)]` means a config written before this
+    /// field reads it as [`IssueIntakeConfig::default`].
+    #[serde(default)]
+    pub issue_intake: IssueIntakeConfig,
 }
 
 impl Default for ReportingConfig {
@@ -135,6 +142,37 @@ impl Default for ReportingConfig {
         Self {
             crash_reports: ReportingMode::Off,
             manual_issues: ReportingMode::Off,
+            issue_intake: IssueIntakeConfig::default(),
+        }
+    }
+}
+
+/// Destinations for the user-initiated "Report an issue" dialog. This path opens
+/// a browser / mail client out-of-band — it has NO consent posture of its own
+/// (it transmits nothing autonomously; the user clicks Open), so it lives here
+/// purely as config-injected destinations rather than as a [`ReportingMode`].
+///
+/// These are deliberately editable so the GitHub repo and the support alias are
+/// not baked unalterably into the binary (`dev_prod_isolation`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct IssueIntakeConfig {
+    /// The `owner/repo` slug the prefilled GitHub Issue-Form deep link targets,
+    /// e.g. `46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS`.
+    pub repo: String,
+    /// The `mailto:` support alias used by the "Email feedback instead"
+    /// fallback (a self-controlled Cloudflare Email-Routing alias). Empty
+    /// disables the mailto fallback.
+    pub mailto_alias: String,
+}
+
+impl Default for IssueIntakeConfig {
+    /// Point at the public W1TN3SS repo's shared Issue-Form templates and a
+    /// self-controlled support alias. Both are operator-editable in the config.
+    fn default() -> Self {
+        Self {
+            repo: "46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS".to_string(),
+            mailto_alias: "support@witness.itasha.example".to_string(),
         }
     }
 }
