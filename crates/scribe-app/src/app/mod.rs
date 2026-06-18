@@ -644,6 +644,10 @@ pub struct ScribeApp {
     /// F-039 + F-040: the plugin-manager modal (Loaded / Registry / Install).
     /// Surfaces the Phase-20 plugin foundation that was built but unwired.
     plugin_manager: crate::plugin_manager::PluginManagerState,
+    /// W1TN3SS opt-in crash-consent dialog state. Populated on launch from the
+    /// local spool when the crash stream is AskEachTime; the modal presents each
+    /// spooled report with an editable preview + equal-weight Send/Don't-send.
+    crash_consent: crate::reporting::CrashConsentState,
     /// LSP: per-language server registry + the active server connection.
     lsp_registry: LspRegistry,
     lsp: Option<LspClient>,
@@ -987,7 +991,12 @@ impl ScribeApp {
         // Built from `config` before the struct literal moves `config` in.
         let spell = build_spell_engine(&config);
 
-        Self {
+        // Read the opt-in crash-report posture before `config` is moved, so the
+        // post-construction step can drain the local spool: auto-send when the
+        // user chose "Always", or queue the ask-each-time consent dialog.
+        let crash_mode = config.reporting.crash_reports;
+
+        let mut app = Self {
             config,
             config_dir: Config::config_dir(),
             theme,
@@ -1057,6 +1066,7 @@ impl ScribeApp {
             file_tree_root: None,
             file_tree_state: crate::filetree::FileTreeState::default(),
             plugin_manager: crate::plugin_manager::PluginManagerState::default(),
+            crash_consent: crate::reporting::CrashConsentState::default(),
             lsp_registry: LspRegistry::with_defaults(),
             lsp: None,
             lsp_lang: None,
@@ -1087,7 +1097,24 @@ impl ScribeApp {
             grid_close_queue: Vec::new(),
             last_cursor_line_col: None,
             last_selection_chars: 0,
+        };
+
+        // W1TN3SS opt-in crash reporting: drain the local spool of any reports
+        // captured by a prior session's panic hook. The capture only ever spools
+        // when the user opted IN (so an Off user has an empty spool and nothing
+        // happens). `Always` auto-sends through the consent-gated path with no
+        // prompt; `AskEachTime` queues the consent dialog (rendered each frame).
+        match crash_mode {
+            crate::reporting::ReportingMode::Always => {
+                crate::reporting::auto_send_spooled_crashes();
+            }
+            crate::reporting::ReportingMode::AskEachTime => {
+                app.crash_consent.load_from_spool();
+            }
+            crate::reporting::ReportingMode::Off => {}
         }
+
+        app
     }
 
     /// Phase 18 T18.2 — render the egui_tiles grid as the central
@@ -2297,6 +2324,136 @@ impl ScribeApp {
             self.save_config();
         }
         self.updater.start_check(ctx, kind);
+    }
+
+    /// W1TN3SS opt-in crash-consent modal (ask-each-time). Renders only when a
+    /// prior session's panic hook spooled a crash report AND the user opted the
+    /// crash stream into AskEachTime. It shows the LITERAL, EDITABLE Tier-1 text
+    /// payload (the user can read + redact exactly what would be sent), a "what
+    /// is never included" note, a remember-my-choice selector (Always / Never /
+    /// Just this time), and EQUAL-WEIGHT Send / Don't-send buttons (identical
+    /// affordance, no dark-pattern asymmetry, no pre-selected default — GDPR
+    /// "freely given"). The panic hook never auto-sends; transmission happens
+    /// ONLY here, on the user's affirmative Send.
+    fn render_crash_consent(&mut self, ctx: &egui::Context) {
+        if !self.crash_consent.has_pending() {
+            return;
+        }
+        // Defer the mutating send/decline past the borrow inside the closure.
+        enum Decision {
+            Send,
+            Dont,
+        }
+        let mut decision: Option<Decision> = None;
+        egui::Modal::new(egui::Id::new("scr1b3_crash_consent")).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.heading("Send a crash report?");
+            ui.add_space(6.0);
+            ui.label(
+                "SCR1B3 closed unexpectedly last time. You can send the report below to help \
+                 fix it — or not. Nothing is sent unless you choose to send it, and you can \
+                 edit the text first.",
+            );
+            ui.add_space(8.0);
+
+            ui.label(egui::RichText::new("This is exactly what would be sent:").strong());
+            ui.add_space(2.0);
+            // The literal, EDITABLE Tier-1 payload. A multiline TextEdit binds the
+            // preview text so the user can read AND redact it before sending.
+            egui::ScrollArea::vertical()
+                .max_height(180.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(self.crash_consent.edited_text_mut())
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(6)
+                            .code_editor(),
+                    )
+                    .on_hover_text(
+                        "Edit or delete anything here before sending. Only this text is sent.",
+                    );
+                });
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(
+                    "Never included: your documents, file paths, username, computer name, or any \
+                     tracking ID.",
+                )
+                .weak()
+                .small(),
+            );
+            ui.add_space(10.0);
+
+            // Remember-my-choice: Always / Never / Just this time (equal-weight
+            // radios; default is Just-this-time, so neither Always nor Never is
+            // privileged).
+            ui.label(egui::RichText::new("For future crashes:").small());
+            let remember = self.crash_consent.remember_mut();
+            ui.horizontal(|ui| {
+                ui.radio_value(
+                    remember,
+                    Some(crate::reporting::RememberChoice::JustThisTime),
+                    "Ask me each time",
+                );
+                ui.radio_value(
+                    remember,
+                    Some(crate::reporting::RememberChoice::Always),
+                    "Always send",
+                );
+                ui.radio_value(
+                    remember,
+                    Some(crate::reporting::RememberChoice::Never),
+                    "Never send",
+                );
+            });
+            ui.add_space(12.0);
+
+            // EQUAL-WEIGHT Send / Don't-send: both are plain Buttons sized to the
+            // SAME explicit width, laid out side by side, neither pre-focused or
+            // colour-emphasised. This is both a GDPR "freely given" requirement
+            // and a WCAG no-dark-pattern affordance.
+            let btn_size = egui::vec2(150.0, 28.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_sized(btn_size, egui::Button::new("Send report"))
+                    .clicked()
+                {
+                    decision = Some(Decision::Send);
+                }
+                if ui
+                    .add_sized(btn_size, egui::Button::new("Don't send"))
+                    .clicked()
+                {
+                    decision = Some(Decision::Dont);
+                }
+            });
+        });
+
+        match decision {
+            Some(Decision::Send) => {
+                // Persist a remembered Always/Never choice to the v3 config BEFORE
+                // sending, so the next launch honours it. Just-this-time leaves the
+                // mode at AskEachTime.
+                if let Some(choice) = *self.crash_consent.remember_mut() {
+                    if let Some(mode) = choice.persisted_mode() {
+                        self.config.reporting.crash_reports = mode;
+                        self.save_config();
+                    }
+                }
+                self.crash_consent.consent_and_send();
+            }
+            Some(Decision::Dont) => {
+                if let Some(choice) = *self.crash_consent.remember_mut() {
+                    if let Some(mode) = choice.persisted_mode() {
+                        self.config.reporting.crash_reports = mode;
+                        self.save_config();
+                    }
+                }
+                self.crash_consent.decline_and_discard();
+            }
+            None => {}
+        }
     }
 
     /// `auto`-mode on-launch update modal. When the launch check finds a newer
@@ -6374,6 +6531,10 @@ impl ScribeApp {
         }
         // `auto`-mode found-an-update yes/no modal.
         self.render_update_prompt(ctx);
+        // W1TN3SS opt-in crash-consent modal (ask-each-time). Renders only when a
+        // prior session spooled a crash report AND the user opted into
+        // AskEachTime; presents an editable preview + equal-weight Send/Don't-send.
+        self.render_crash_consent(ctx);
         // Keep egui's animation time + caret style in sync with the motion
         // preferences every frame (cheap; also covers startup before any
         // theme reapply).
