@@ -37,7 +37,7 @@ pub mod text_ops;
 pub mod theme;
 pub mod update;
 
-pub use config::Config;
+pub use config::{Config, ReportingConfig, ReportingMode};
 pub use document::Document;
 pub use error::{CoreError, Result};
 pub use theme::Theme;

@@ -81,3 +81,8 @@ deny = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The W1TN3SS reporting SDK (itasha-report-core) is a FIRST-PARTY git dependency
+# pinned to an exact tag. It is the only allowed non-crates.io source — a public,
+# auditable, `#![forbid(unsafe_code)]` Itasha.Corp crate. cargo-vet audits the
+# pinned revision separately (supply-chain/audits.toml).
+allow-git = ["https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS"]

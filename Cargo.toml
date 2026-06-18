@@ -57,6 +57,13 @@ scribe-core = { path = "crates/scribe-core" }
 scribe-render = { path = "crates/scribe-render" }
 # Isolated Win32 chrome FFI (the only `unsafe` crate besides scribe-core's mmap).
 scribe-win32-chrome = { path = "crates/scribe-win32-chrome" }
+# W1TN3SS fleet reporting SDK — the safe, opt-in crash/error reporting spine
+# (two-stream config model, sanitizer, local spool, hardened transport, preview
+# API, consent-gated IngestBackend). Consumed via an EXACT-tag git pin (no
+# version range) per dependency-management.md; it is itself
+# `#![forbid(unsafe_code)]` and binds NO vendor SaaS/telemetry SDK (AES Clause
+# 5). SCR1B3 calls it; it transmits nothing without a host-minted ConsentToken.
+itasha-report-core = { git = "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS", tag = "itasha-report-core-v0.1.0" }
 
 [profile.release]
 opt-level = 3

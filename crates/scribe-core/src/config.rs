@@ -10,7 +10,13 @@ use std::path::PathBuf;
 /// needed (see [`Config::migrate`]). A config written before schema versioning
 /// deserializes with `schema_version == 0` (the serde default for a missing
 /// field) and is migrated up on load.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+///
+/// - v3 (W1TN3SS opt-in reporting): adds the [`ReportingConfig`] section. The
+///   migration is purely ADDITIVE — both reporting streams default `Off`, so an
+///   existing config that has never seen the section upgrades with reporting
+///   fully OFF and with NO stored value overwritten (the opt-in, never-opt-out
+///   invariant).
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Root config. `#[serde(default)]` everywhere so a partial user file merges
 /// onto defaults rather than failing.
@@ -37,6 +43,12 @@ pub struct Config {
     pub motion: MotionConfig,
     #[serde(default)]
     pub scroll: ScrollConfig,
+    /// W1TN3SS opt-in crash/error reporting (schema v3). BOTH streams default
+    /// `Off` — SCR1B3 stays telemetry-free by default; nothing is ever
+    /// transmitted without an explicit per-event consent. `#[serde(default)]`
+    /// means a config written before v3 reads the whole section as `Off`.
+    #[serde(default)]
+    pub reporting: ReportingConfig,
 }
 
 impl Default for Config {
@@ -57,6 +69,72 @@ impl Default for Config {
             toolbar: ToolbarConfig::default(),
             motion: MotionConfig::default(),
             scroll: ScrollConfig::default(),
+            reporting: ReportingConfig::default(),
+        }
+    }
+}
+
+/// Per-stream consent posture for W1TN3SS opt-in reporting.
+///
+/// Mirrors `itasha_report_core::config::ReportingMode` but is owned by
+/// `scribe-core` so the config crate carries NO SDK dependency (the SDK lives
+/// only in the `scribe-app` binary, which maps this enum onto the SDK's at the
+/// capture/consent boundary). The default is [`ReportingMode::Off`] — there is
+/// no constructor that yields an on-by-default mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportingMode {
+    /// Never report for this stream (the default, opt-in posture).
+    #[default]
+    Off,
+    /// Ask the user each time a report is available (per-event consent).
+    AskEachTime,
+    /// Always report for this stream — the user previously chose "Always" in
+    /// the consent dialog. Even then, the report is captured + spooled locally
+    /// and the SDK still requires a host-minted consent token to transmit.
+    Always,
+}
+
+impl ReportingMode {
+    /// Whether this mode permits transmission **without** a fresh per-event
+    /// prompt. Only [`ReportingMode::Always`] does; `Off` and `AskEachTime`
+    /// both require an explicit per-event consent decision.
+    pub fn is_always(self) -> bool {
+        matches!(self, ReportingMode::Always)
+    }
+
+    /// Whether this mode permits *any* transmission at all (i.e. not `Off`).
+    pub fn permits_reporting(self) -> bool {
+        !matches!(self, ReportingMode::Off)
+    }
+}
+
+/// W1TN3SS opt-in reporting configuration: one [`ReportingMode`] per
+/// independent data stream.
+///
+/// The two streams are NEVER bundled under one toggle (the cardinal privacy
+/// rule from the consent research): the high-sensitivity **crash-report**
+/// stream and the user-initiated **manual-issue** stream each carry their own
+/// posture, both defaulting `Off`. Usage telemetry is explicitly out of scope —
+/// these two streams are the ONLY consented channels.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReportingConfig {
+    /// Consent posture for the crash-report stream (panic backtrace; the
+    /// previewable Tier-1 text payload). Default: `Off`.
+    pub crash_reports: ReportingMode,
+    /// Consent posture for the manual issue/feedback stream (user-typed, always
+    /// user-initiated). Default: `Off`. (The manual-issue intake UI itself is a
+    /// sibling plan; this field is the consent posture it will read.)
+    pub manual_issues: ReportingMode,
+}
+
+impl Default for ReportingConfig {
+    /// Both streams `Off` — the privacy-default, opt-in posture.
+    fn default() -> Self {
+        Self {
+            crash_reports: ReportingMode::Off,
+            manual_issues: ReportingMode::Off,
         }
     }
 }
@@ -1020,6 +1098,20 @@ impl Config {
             changed = true;
         }
 
+        // v2 → v3: the W1TN3SS opt-in reporting section landed. The step is
+        // PURELY ADDITIVE and re-applies NOTHING — `reporting` is a brand-new
+        // `#[serde(default)]` section, so a config that predates it already
+        // deserialized with BOTH streams `Off` (the opt-in, never-opt-out
+        // invariant). We deliberately do NOT touch `self.reporting` here: there
+        // is no "good default we need to push onto old users" — the privacy
+        // default IS `Off`, and forcing any value would be the exact default-on
+        // anti-pattern the consent contract forbids. The step only stamps the
+        // version so the additive section is recorded as migrated.
+        if self.schema_version < 3 {
+            self.schema_version = 3;
+            changed = true;
+        }
+
         // Migration invariants (debug-only): it must never LOWER the version,
         // and any config that started below the current schema must end exactly
         // at it. A FORWARD-version config (`original > CURRENT`, e.g. a file
@@ -1204,6 +1296,112 @@ show_dropdown = false
         let mut off = Config::from_toml_str("[updates]\nmode = \"off\"\n").unwrap();
         assert!(off.migrate());
         assert_eq!(off.updates.mode, UpdateMode::Off);
+    }
+
+    #[test]
+    fn reporting_defaults_to_off_for_both_streams() {
+        // The privacy default: a fresh config has BOTH reporting streams Off.
+        // There is no constructor that yields an on-by-default reporting mode.
+        let c = Config::default();
+        assert_eq!(c.reporting.crash_reports, ReportingMode::Off);
+        assert_eq!(c.reporting.manual_issues, ReportingMode::Off);
+        assert!(!c.reporting.crash_reports.permits_reporting());
+        assert!(!c.reporting.manual_issues.permits_reporting());
+    }
+
+    #[test]
+    fn v2_config_migrates_to_v3_with_reporting_off_and_stored_values_preserved() {
+        // The exact opt-in invariant: an EXISTING v2 config (one that predates
+        // the reporting section) upgrades to v3 with BOTH reporting streams Off
+        // AND with every previously-stored value untouched. A default-on migrate
+        // or a clobbered user value would breach the privacy contract.
+        let toml = "\
+schema_version = 2
+
+[editor]
+tab_width = 8
+show_line_numbers = false
+
+[updates]
+mode = \"off\"
+";
+        let mut c = Config::from_toml_str(toml).unwrap();
+        assert_eq!(c.schema_version, 2, "fixture loads as a v2 config");
+        // The reporting section is absent in the v2 TOML, so it reads as Off.
+        assert_eq!(c.reporting.crash_reports, ReportingMode::Off);
+        assert_eq!(c.reporting.manual_issues, ReportingMode::Off);
+
+        assert!(c.migrate(), "a v2 config must report a change to reach v3");
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(c.schema_version, 3);
+
+        // Reporting stayed OFF (additive, never default-on).
+        assert_eq!(
+            c.reporting.crash_reports,
+            ReportingMode::Off,
+            "v2->v3 migrate must leave the crash stream OFF (opt-in only)"
+        );
+        assert_eq!(
+            c.reporting.manual_issues,
+            ReportingMode::Off,
+            "v2->v3 migrate must leave the manual stream OFF (opt-in only)"
+        );
+
+        // Every stored value the user had on a v2 config survives the migrate
+        // (stored-value-wins — the v2->v3 step touches nothing but the version).
+        assert_eq!(c.editor.tab_width, 8, "stored tab_width preserved");
+        assert!(
+            !c.editor.show_line_numbers,
+            "a stored-false experience toggle on an ALREADY-v2 config is the \
+             user's choice and survives — the v0->v1 re-assert never re-runs"
+        );
+        assert_eq!(
+            c.updates.mode,
+            UpdateMode::Off,
+            "stored update mode preserved"
+        );
+
+        // Idempotent: a second pass changes nothing.
+        assert!(!c.migrate(), "an already-v3 config must not migrate again");
+    }
+
+    #[test]
+    fn reporting_modes_round_trip_through_toml() {
+        // A user who has opted a stream into Always/AskEachTime must have that
+        // choice persist across save/load — and the v2->v3 migrate must NOT
+        // clobber it. Build a v3 config with explicit reporting modes, serialize,
+        // reload, and assert the modes survive AND migrate() is a no-op.
+        let toml = "\
+schema_version = 3
+
+[reporting]
+crash_reports = \"always\"
+manual_issues = \"ask_each_time\"
+";
+        let mut c = Config::from_toml_str(toml).unwrap();
+        assert_eq!(c.reporting.crash_reports, ReportingMode::Always);
+        assert_eq!(c.reporting.manual_issues, ReportingMode::AskEachTime);
+        assert!(
+            !c.migrate(),
+            "a v3 config must not migrate (no clobber of an opted-in choice)"
+        );
+        assert_eq!(c.reporting.crash_reports, ReportingMode::Always);
+        assert_eq!(c.reporting.manual_issues, ReportingMode::AskEachTime);
+
+        // Full save/load round-trip preserves the modes.
+        let back = Config::from_toml_str(&c.to_toml_string()).unwrap();
+        assert_eq!(back.reporting.crash_reports, ReportingMode::Always);
+        assert_eq!(back.reporting.manual_issues, ReportingMode::AskEachTime);
+    }
+
+    #[test]
+    fn reporting_mode_predicates() {
+        assert!(ReportingMode::Always.is_always());
+        assert!(!ReportingMode::AskEachTime.is_always());
+        assert!(!ReportingMode::Off.is_always());
+        assert!(ReportingMode::Always.permits_reporting());
+        assert!(ReportingMode::AskEachTime.permits_reporting());
+        assert!(!ReportingMode::Off.permits_reporting());
     }
 
     #[test]

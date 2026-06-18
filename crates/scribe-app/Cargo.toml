@@ -16,6 +16,7 @@ path = "src/main.rs"
 scribe-core.workspace = true
 scribe-render.workspace = true
 scribe-win32-chrome.workspace = true           # isolated Win32 caption-button strip (double-caption fix)
+itasha-report-core.workspace = true            # W1TN3SS opt-in crash-report SDK (consent-gated; default-OFF; no vendor SDK)
 semver.workspace = true        # parse env!(CARGO_PKG_VERSION) for the self-updater version compare
 eframe.workspace = true
 egui.workspace = true

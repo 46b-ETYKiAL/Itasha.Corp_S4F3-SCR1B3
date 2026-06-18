@@ -23,6 +23,7 @@ mod fuzzy;
 mod grid;
 mod md_preview;
 mod plugin_manager;
+mod reporting;
 mod settings;
 mod theme_editor;
 mod to_markdown;
@@ -73,12 +74,26 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .try_init();
 
+    // Load config BEFORE installing the panic hook so the hook knows the
+    // opt-in crash-report posture (default OFF). Load is pure + idempotent.
+    let (config, config_err) = scribe_core::Config::load_or_default();
+
     // Content-free panic hook (privacy). A panic must never leak document text
     // or a user's file path to stderr. We surface ONLY a static `&str` payload
     // (a source-code literal — e.g. an `expect("…")` message, never runtime
     // content) plus the panic SITE (our own `file:line`). A `String` payload may
     // embed buffer text or a path, so it is deliberately suppressed.
-    std::panic::set_hook(Box::new(|info| {
+    //
+    // W1TN3SS opt-in capture: when the user has opted the crash stream IN
+    // (AskEachTime or Always — never the default Off), we ALSO capture the same
+    // content-free `&'static str` message + SITE into the LOCAL spool via
+    // `reporting::capture_panic`. This transmits NOTHING — it is a local-first
+    // staging write (same privacy class as the on-disk session-restore copies);
+    // consent for any SEND is sought on the NEXT launch (ask-each-time) or
+    // honoured automatically (Always), never inside the panic hook. When the
+    // stream is Off (the default), the hook prints only — nothing is captured.
+    let crash_mode = config.reporting.crash_reports;
+    std::panic::set_hook(Box::new(move |info| {
         let loc = info
             .location()
             .map(|l| format!("{}:{}", l.file(), l.line()))
@@ -92,9 +107,13 @@ fn main() -> ExitCode {
             "scr1b3: {msg} (at {loc}) — the app will now close. \
              No document contents are included in this message."
         );
+        // Capture to the local spool ONLY if the user opted the crash stream in.
+        // `msg` is a `&'static str` (a source literal), preserving the no-runtime-
+        // content discipline through to the report body.
+        if crash_mode.permits_reporting() {
+            let _ = reporting::capture_panic(msg, &loc);
+        }
     }));
-
-    let (config, config_err) = scribe_core::Config::load_or_default();
 
     // Window geometry (position + size) is persisted natively by eframe via
     // `NativeOptions.persist_window` + the `persistence` feature (stored under

@@ -12,7 +12,7 @@
 
 use eframe::egui;
 use scribe_core::config::{ToolbarConfig, UpdateMode};
-use scribe_core::Config;
+use scribe_core::{Config, ReportingMode};
 
 /// Left-nav categories, in display order. Look-and-feel groups first
 /// (Appearance, Fonts, Window, Toolbar, Motion), then editing behaviour
@@ -125,6 +125,52 @@ fn reset_to_default<T: PartialEq + Clone>(ui: &mut egui::Ui, cur: &mut T, def: &
         return true;
     }
     false
+}
+
+/// The human label for a W1TN3SS reporting mode, in CONSENT language (never
+/// surveillance/telemetry/always-on copy). Shared by the settings selector and
+/// the consent dialog so the wording stays one source of truth.
+pub fn reporting_mode_label(mode: ReportingMode) -> &'static str {
+    match mode {
+        ReportingMode::Off => "Never (off)",
+        ReportingMode::AskEachTime => "Ask each time",
+        ReportingMode::Always => "Always send",
+    }
+}
+
+/// A per-stream reporting-mode selector (Off / Ask each time / Always),
+/// rendered as three equal-weight radio choices in consent language. Returns
+/// `true` if the mode changed. The three options carry IDENTICAL affordance —
+/// no pre-emphasis on "Always" (GDPR "freely given" + no dark pattern).
+fn reporting_mode_selector(ui: &mut egui::Ui, id: &str, mode: &mut ReportingMode) -> bool {
+    let before = *mode;
+    ui.horizontal(|ui| {
+        // The three choices are equal-weight radios laid out in the same row;
+        // none is visually privileged. `Off` is first because it is the default
+        // and the most privacy-conservative reading.
+        for choice in [
+            ReportingMode::Off,
+            ReportingMode::AskEachTime,
+            ReportingMode::Always,
+        ] {
+            ui.radio_value(mode, choice, reporting_mode_label(choice))
+                .on_hover_text(match choice {
+                    ReportingMode::Off => {
+                        "Never capture or send anything for this stream (the default)."
+                    }
+                    ReportingMode::AskEachTime => {
+                        "Capture locally, then ask you each time before anything is sent — \
+                         with an editable preview of the exact report."
+                    }
+                    ReportingMode::Always => {
+                        "Send automatically after a crash. Even then the report is captured \
+                         and spooled locally first, and you can review what is collected here."
+                    }
+                });
+        }
+    });
+    let _ = id; // id reserved for a future grid layout; radios key off the value.
+    *mode != before
 }
 
 /// Human label for a toolbar action id (`"sep"` → separator).
@@ -1856,6 +1902,86 @@ fn render_sections(
                     .weak(),
                 );
             }
+        }
+
+        // ---- Opt-in crash & issue reporting (W1TN3SS) ----
+        // Two INDEPENDENT streams, each default OFF, each with its own consent
+        // posture — never bundled under one toggle. The copy is deliberately
+        // consent-framed: "a report you choose to send", never beacon/telemetry/
+        // always-on/tracking language.
+        group(
+            ui,
+            "Crash & issue reporting (opt-in)",
+            "Off by default. Nothing is ever sent without your say-so. Each report is captured \
+             on your device first; you see and can edit the exact text before it leaves, and \
+             you choose whether to send it.",
+        );
+        if row_visible(
+            q,
+            "crash report reporting opt-in send error panic diagnostics",
+        ) {
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new("Crash reports").strong());
+            ui.label(
+                egui::RichText::new(
+                    "When SCR1B3 closes unexpectedly, capture a short technical report (the \
+                     error message and where in our code it happened) so it can be fixed.",
+                )
+                .weak()
+                .small(),
+            );
+            changed |=
+                reporting_mode_selector(ui, "reporting-crash", &mut config.reporting.crash_reports);
+            ui.add_space(8.0);
+        }
+        if row_visible(
+            q,
+            "manual issue feedback reporting opt-in send report problem",
+        ) {
+            ui.label(egui::RichText::new("Manual issue reports").strong());
+            ui.label(
+                egui::RichText::new(
+                    "When you choose to report a problem yourself, this controls whether that \
+                     report may be sent. You always write and review it first.",
+                )
+                .weak()
+                .small(),
+            );
+            changed |= reporting_mode_selector(
+                ui,
+                "reporting-manual",
+                &mut config.reporting.manual_issues,
+            );
+            ui.add_space(8.0);
+        }
+        if row_visible(q, "what we never collect privacy explainer reporting") {
+            // The "what we never collect" panel — the single highest-trust
+            // artifact a privacy-first app ships (privacy-consent.md §3).
+            egui::CollapsingHeader::new("What a report never contains")
+                .id_salt("scr1b3_reporting_never_collect")
+                .default_open(true)
+                .show(ui, |ui| {
+                    for line in [
+                        "Your documents, notes, or any file contents — never included.",
+                        "Your file paths or folder names — stripped before you ever see the report.",
+                        "Your username, computer name, or home-directory path — removed.",
+                        "Any device, install, or tracking ID — there is none; reports are not \
+                         linkable to you or to each other.",
+                        "Your IP address is never stored by us beyond the moment of upload.",
+                    ] {
+                        ui.label(egui::RichText::new(format!("• {line}")).small());
+                    }
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(
+                            "A report carries only a short, sanitized error message, where in \
+                             OUR code it happened, and your OS + app version — and only if you \
+                             send it.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                });
         }
         space(ui);
     }
