@@ -1098,6 +1098,20 @@ impl Config {
             changed = true;
         }
 
+        // v2 → v3: the W1TN3SS opt-in reporting section landed. The step is
+        // PURELY ADDITIVE and re-applies NOTHING — `reporting` is a brand-new
+        // `#[serde(default)]` section, so a config that predates it already
+        // deserialized with BOTH streams `Off` (the opt-in, never-opt-out
+        // invariant). We deliberately do NOT touch `self.reporting` here: there
+        // is no "good default we need to push onto old users" — the privacy
+        // default IS `Off`, and forcing any value would be the exact default-on
+        // anti-pattern the consent contract forbids. The step only stamps the
+        // version so the additive section is recorded as migrated.
+        if self.schema_version < 3 {
+            self.schema_version = 3;
+            changed = true;
+        }
+
         // Migration invariants (debug-only): it must never LOWER the version,
         // and any config that started below the current schema must end exactly
         // at it. A FORWARD-version config (`original > CURRENT`, e.g. a file
@@ -1282,6 +1296,112 @@ show_dropdown = false
         let mut off = Config::from_toml_str("[updates]\nmode = \"off\"\n").unwrap();
         assert!(off.migrate());
         assert_eq!(off.updates.mode, UpdateMode::Off);
+    }
+
+    #[test]
+    fn reporting_defaults_to_off_for_both_streams() {
+        // The privacy default: a fresh config has BOTH reporting streams Off.
+        // There is no constructor that yields an on-by-default reporting mode.
+        let c = Config::default();
+        assert_eq!(c.reporting.crash_reports, ReportingMode::Off);
+        assert_eq!(c.reporting.manual_issues, ReportingMode::Off);
+        assert!(!c.reporting.crash_reports.permits_reporting());
+        assert!(!c.reporting.manual_issues.permits_reporting());
+    }
+
+    #[test]
+    fn v2_config_migrates_to_v3_with_reporting_off_and_stored_values_preserved() {
+        // The exact opt-in invariant: an EXISTING v2 config (one that predates
+        // the reporting section) upgrades to v3 with BOTH reporting streams Off
+        // AND with every previously-stored value untouched. A default-on migrate
+        // or a clobbered user value would breach the privacy contract.
+        let toml = "\
+schema_version = 2
+
+[editor]
+tab_width = 8
+show_line_numbers = false
+
+[updates]
+mode = \"off\"
+";
+        let mut c = Config::from_toml_str(toml).unwrap();
+        assert_eq!(c.schema_version, 2, "fixture loads as a v2 config");
+        // The reporting section is absent in the v2 TOML, so it reads as Off.
+        assert_eq!(c.reporting.crash_reports, ReportingMode::Off);
+        assert_eq!(c.reporting.manual_issues, ReportingMode::Off);
+
+        assert!(c.migrate(), "a v2 config must report a change to reach v3");
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(c.schema_version, 3);
+
+        // Reporting stayed OFF (additive, never default-on).
+        assert_eq!(
+            c.reporting.crash_reports,
+            ReportingMode::Off,
+            "v2->v3 migrate must leave the crash stream OFF (opt-in only)"
+        );
+        assert_eq!(
+            c.reporting.manual_issues,
+            ReportingMode::Off,
+            "v2->v3 migrate must leave the manual stream OFF (opt-in only)"
+        );
+
+        // Every stored value the user had on a v2 config survives the migrate
+        // (stored-value-wins — the v2->v3 step touches nothing but the version).
+        assert_eq!(c.editor.tab_width, 8, "stored tab_width preserved");
+        assert!(
+            !c.editor.show_line_numbers,
+            "a stored-false experience toggle on an ALREADY-v2 config is the \
+             user's choice and survives — the v0->v1 re-assert never re-runs"
+        );
+        assert_eq!(
+            c.updates.mode,
+            UpdateMode::Off,
+            "stored update mode preserved"
+        );
+
+        // Idempotent: a second pass changes nothing.
+        assert!(!c.migrate(), "an already-v3 config must not migrate again");
+    }
+
+    #[test]
+    fn reporting_modes_round_trip_through_toml() {
+        // A user who has opted a stream into Always/AskEachTime must have that
+        // choice persist across save/load — and the v2->v3 migrate must NOT
+        // clobber it. Build a v3 config with explicit reporting modes, serialize,
+        // reload, and assert the modes survive AND migrate() is a no-op.
+        let toml = "\
+schema_version = 3
+
+[reporting]
+crash_reports = \"always\"
+manual_issues = \"ask_each_time\"
+";
+        let mut c = Config::from_toml_str(toml).unwrap();
+        assert_eq!(c.reporting.crash_reports, ReportingMode::Always);
+        assert_eq!(c.reporting.manual_issues, ReportingMode::AskEachTime);
+        assert!(
+            !c.migrate(),
+            "a v3 config must not migrate (no clobber of an opted-in choice)"
+        );
+        assert_eq!(c.reporting.crash_reports, ReportingMode::Always);
+        assert_eq!(c.reporting.manual_issues, ReportingMode::AskEachTime);
+
+        // Full save/load round-trip preserves the modes.
+        let back = Config::from_toml_str(&c.to_toml_string()).unwrap();
+        assert_eq!(back.reporting.crash_reports, ReportingMode::Always);
+        assert_eq!(back.reporting.manual_issues, ReportingMode::AskEachTime);
+    }
+
+    #[test]
+    fn reporting_mode_predicates() {
+        assert!(ReportingMode::Always.is_always());
+        assert!(!ReportingMode::AskEachTime.is_always());
+        assert!(!ReportingMode::Off.is_always());
+        assert!(ReportingMode::Always.permits_reporting());
+        assert!(ReportingMode::AskEachTime.permits_reporting());
+        assert!(!ReportingMode::Off.permits_reporting());
     }
 
     #[test]
