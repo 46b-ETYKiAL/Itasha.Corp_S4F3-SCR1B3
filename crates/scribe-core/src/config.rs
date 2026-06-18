@@ -10,7 +10,13 @@ use std::path::PathBuf;
 /// needed (see [`Config::migrate`]). A config written before schema versioning
 /// deserializes with `schema_version == 0` (the serde default for a missing
 /// field) and is migrated up on load.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+///
+/// - v3 (W1TN3SS opt-in reporting): adds the [`ReportingConfig`] section. The
+///   migration is purely ADDITIVE — both reporting streams default `Off`, so an
+///   existing config that has never seen the section upgrades with reporting
+///   fully OFF and with NO stored value overwritten (the opt-in, never-opt-out
+///   invariant).
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 /// Root config. `#[serde(default)]` everywhere so a partial user file merges
 /// onto defaults rather than failing.
@@ -37,6 +43,12 @@ pub struct Config {
     pub motion: MotionConfig,
     #[serde(default)]
     pub scroll: ScrollConfig,
+    /// W1TN3SS opt-in crash/error reporting (schema v3). BOTH streams default
+    /// `Off` — SCR1B3 stays telemetry-free by default; nothing is ever
+    /// transmitted without an explicit per-event consent. `#[serde(default)]`
+    /// means a config written before v3 reads the whole section as `Off`.
+    #[serde(default)]
+    pub reporting: ReportingConfig,
 }
 
 impl Default for Config {
@@ -57,6 +69,72 @@ impl Default for Config {
             toolbar: ToolbarConfig::default(),
             motion: MotionConfig::default(),
             scroll: ScrollConfig::default(),
+            reporting: ReportingConfig::default(),
+        }
+    }
+}
+
+/// Per-stream consent posture for W1TN3SS opt-in reporting.
+///
+/// Mirrors `itasha_report_core::config::ReportingMode` but is owned by
+/// `scribe-core` so the config crate carries NO SDK dependency (the SDK lives
+/// only in the `scribe-app` binary, which maps this enum onto the SDK's at the
+/// capture/consent boundary). The default is [`ReportingMode::Off`] — there is
+/// no constructor that yields an on-by-default mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportingMode {
+    /// Never report for this stream (the default, opt-in posture).
+    #[default]
+    Off,
+    /// Ask the user each time a report is available (per-event consent).
+    AskEachTime,
+    /// Always report for this stream — the user previously chose "Always" in
+    /// the consent dialog. Even then, the report is captured + spooled locally
+    /// and the SDK still requires a host-minted consent token to transmit.
+    Always,
+}
+
+impl ReportingMode {
+    /// Whether this mode permits transmission **without** a fresh per-event
+    /// prompt. Only [`ReportingMode::Always`] does; `Off` and `AskEachTime`
+    /// both require an explicit per-event consent decision.
+    pub fn is_always(self) -> bool {
+        matches!(self, ReportingMode::Always)
+    }
+
+    /// Whether this mode permits *any* transmission at all (i.e. not `Off`).
+    pub fn permits_reporting(self) -> bool {
+        !matches!(self, ReportingMode::Off)
+    }
+}
+
+/// W1TN3SS opt-in reporting configuration: one [`ReportingMode`] per
+/// independent data stream.
+///
+/// The two streams are NEVER bundled under one toggle (the cardinal privacy
+/// rule from the consent research): the high-sensitivity **crash-report**
+/// stream and the user-initiated **manual-issue** stream each carry their own
+/// posture, both defaulting `Off`. Usage telemetry is explicitly out of scope —
+/// these two streams are the ONLY consented channels.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReportingConfig {
+    /// Consent posture for the crash-report stream (panic backtrace; the
+    /// previewable Tier-1 text payload). Default: `Off`.
+    pub crash_reports: ReportingMode,
+    /// Consent posture for the manual issue/feedback stream (user-typed, always
+    /// user-initiated). Default: `Off`. (The manual-issue intake UI itself is a
+    /// sibling plan; this field is the consent posture it will read.)
+    pub manual_issues: ReportingMode,
+}
+
+impl Default for ReportingConfig {
+    /// Both streams `Off` — the privacy-default, opt-in posture.
+    fn default() -> Self {
+        Self {
+            crash_reports: ReportingMode::Off,
+            manual_issues: ReportingMode::Off,
         }
     }
 }
