@@ -1,30 +1,32 @@
 # Privacy
 
-SCR1B3 is **telemetry-free by construction**. This document is the full
-transparency record: exactly which network calls the app makes, exactly
-what it sends, what it doesn't, how to disable the one optional call,
-where state is stored, and how to clear it.
+SCR1B3 is **telemetry-free by default**. It ships **no** background analytics and
+**no** usage counters. The two network surfaces that exist — the optional update
+version-check, and **opt-in, default-OFF** crash/error reporting — are both under
+your explicit control and previewable before anything is sent. This document is
+the full transparency record: exactly which network calls the app can make,
+exactly what each sends, what it never sends, how to disable them, where state is
+stored, and how to clear it.
 
 ## Summary
 
 | Question | Answer |
 |---|---|
-| Does SCR1B3 ship telemetry? | **No.** Not analytics, not usage counters, not crash beacons. |
+| Does SCR1B3 ship usage analytics? | **No.** No analytics, no usage counters, no background reporting of any kind. Usage telemetry is out of scope. |
+| Does SCR1B3 report crashes? | **Only if you opt in.** Crash/error reporting is **off by default**, per-stream, and nothing is captured for transmission until you turn it on **and** consent to a specific report. See [Opt-in reporting](#opt-in-crash--error-reporting). |
 | Does SCR1B3 have an account system? | **No.** There is no account, no sign-in, no profile. |
-| Does SCR1B3 phone home? | **One optional network call only** — the update version-check (described below). The default mode makes **no** call at startup. |
-| Does SCR1B3 collect a unique identifier? | **No** install-id, no fingerprint, no per-session ID. |
-| Where is my data stored? | **Locally only.** On your machine. Nothing leaves the device. |
-| Can I run fully offline? | **Yes.** The default mode (`manual`) makes no network call until you click *Check for updates*; `[updates] mode = "off"` removes the check entirely. |
+| Does SCR1B3 phone home on its own? | **No.** The update check is opt-in-by-action (default `manual`), and reporting is default-OFF. A default install makes **no** network call at startup. |
+| Does SCR1B3 collect a unique identifier? | **No** install-id, no fingerprint, no per-session ID — for either the update check or a report. |
+| Where is my data stored? | **Locally only.** Reports are spooled on your machine and leave it **only** on your explicit consent. |
+| Can I run fully offline? | **Yes.** With `[updates] mode = "off"` and reporting left off (the default), SCR1B3 makes zero outbound connections. |
 
-## The single network surface
+## Network surface 1 — the optional update version-check
 
-The **only** outbound network call SCR1B3 ever makes is the optional
-update version-check. It:
+The update version-check:
 
 - Asks the GitHub Releases API for the latest release tag of this repo.
-- Sends **zero PII** — it is an unauthenticated HTTPS GET that asks
-  "what is the latest release?" and nothing else. No identifiers, no
-  telemetry, no shipped token.
+- Sends **zero PII** — an unauthenticated HTTPS GET asking "what is the latest
+  release?" and nothing else. No identifiers, no shipped token.
 - Receives a JSON document describing the latest release.
 - Is **fully user-controllable** via `[updates] mode` in your config:
 
@@ -35,27 +37,84 @@ update version-check. It:
   | `notify` | Check once at startup; if a newer version exists, show a passive notification. Never auto-download. |
   | `auto` | Check once at startup; if newer, ask yes/no before downloading + verifying + installing. |
 
-  Default: `manual` — no network at startup. Change in
-  [`CONFIG.md`](CONFIG.md); the change takes effect on next start (or
+  Change in [`CONFIG.md`](CONFIG.md); the change takes effect on next start (or
   instantly via live-reload).
 
-- When a signed update is fetched (in `auto` mode, or when you click
-  *Update now*), it is **cryptographically verified** via minisign /
-  ed25519 against the pinned signing key embedded in the binary before
-  any file is touched on disk. A failed verification aborts the update;
-  the staging area is wiped and no partial state is left.
+- When a signed update is fetched (in `auto` mode, or when you click *Update
+  now*), it is **cryptographically verified** via minisign / ed25519 against the
+  pinned signing key embedded in the binary before any file is touched on disk. A
+  failed verification aborts the update; the staging area is wiped and no partial
+  state is left.
 
-That's it. There is no other outbound surface.
+## Opt-in crash / error reporting
+
+SCR1B3 can help us fix the bugs that crash it — but **only with your explicit,
+per-stream consent**. Reporting is provided by the in-house
+[W1TN3SS](https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS) SDK
+(`itasha-report-core`, pinned by exact git tag — no third-party crash-reporting
+SaaS, no vendor SDK). SCR1B3 implements no reporting behavior itself; it calls the
+audited SDK at a few thin seams.
+
+**The posture, accurate to what SCR1B3 ships today:**
+
+- **Off by default, per stream.** Crash/error reporting and manual issue
+  reporting are two separate consented streams, each defaulting to off
+  (`ReportingMode::Off`). A config written before this feature upgrades with
+  reporting fully off and nothing overwritten. There is no on-by-default path and
+  no opt-out default.
+- **Local-first, consent-gated.** When reporting is on, a fault is captured into a
+  sanitized text report and written to a **local spool**. It transmits
+  **nothing** on its own — transmission requires a consent token that exists only
+  after you explicitly agree (enforced at the type level by the SDK, so a
+  consent-free send cannot even compile).
+- **Previewable + redactable.** The consent dialog shows you the **literal,
+  editable** report text so you can review and redact it before anything leaves
+  the machine.
+- **Sanitized.** Backtraces are stripped by the SDK's allowlist sanitizer: home
+  directory normalized to `<HOME>`, username and hostname dropped, environment
+  values scrubbed, fields size-capped. The panic path captures only the
+  `&'static str` message and our own `file:line` site — a `String` payload that
+  could embed buffer text or a path is deliberately suppressed at capture, so
+  **your note content is never read into a report**.
+- **No persistent identifier.** A report carries no install-id, no fingerprint,
+  no per-session ID — only an ephemeral per-report nonce that is never stored.
+- **No hardcoded endpoint.** SCR1B3 ships **no** report endpoint and no default
+  URL. A build with none configured can spool locally but can **never** transmit;
+  a consented send with no endpoint stays spooled and returns a structured
+  `no-endpoint` outcome — never a silent drop, never a fake success.
+- **Pseudonymous, not anonymous.** A stack trace can carry indirect identifiers,
+  so we label report data honestly as **pseudonymous** under GDPR — never
+  marketed as "anonymous." The full legal classification is in the W1TN3SS
+  [privacy policy](https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS/blob/main/docs/privacy-policy.md).
+
+For the canonical, fleet-wide detail — the GDPR privacy policy, the concrete
+"what we collect / what we never collect" page, and the end-to-end-encryption
+(developer-key) model — see the W1TN3SS docs:
+
+- [W1TN3SS privacy policy](https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS/blob/main/docs/privacy-policy.md)
+- [What we collect / never collect](https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS/blob/main/docs/what-we-collect.md)
+
+## Manual issue reporting
+
+SCR1B3's in-app **Report an issue** dialog is always user-initiated and
+per-submission. It deep-links into the fleet's shared GitHub Issue-Form templates
+in your browser (with a clipboard fallback when the prefilled URL would be too
+long). Nothing is submitted in the background — you fill out and submit the form
+yourself.
 
 ## What is NOT sent
 
-- ❌ No PII (name, email, account)
-- ❌ No machine identifier (install-id, hardware ID, MAC)
-- ❌ No telemetry payload (usage counters, command-frequency, error pings)
-- ❌ No filesystem path or file-content
-- ❌ No referrer / locale / timezone (beyond what the OS HTTPS stack
-  itself signals — User-Agent is set to `scr1b3-updater/<version>` only)
-- ❌ No crash reports
+Across every surface above, SCR1B3 never sends:
+
+- ❌ No usage analytics (usage counters, command-frequency, error "pings")
+- ❌ No machine identifier (install-id, hardware ID, MAC, fingerprint)
+- ❌ No persistent or per-session ID (a report carries only an ephemeral nonce)
+- ❌ No retained client IP (the W1TN3SS ingest service drops it at the edge)
+- ❌ No raw note / buffer / file content
+- ❌ No PII (name, email, account — there is no account)
+- ❌ No referrer / locale / timezone beyond what the OS HTTPS stack itself signals
+  (User-Agent is `scr1b3-updater/<version>` for the update check, or
+  `itasha-report-core/<version>` for a consented report)
 
 ## Local state
 
@@ -67,10 +126,12 @@ SCR1B3 stores state in standard per-OS directories (resolved via the
 | Config (TOML) | `%APPDATA%\scr1b3\config.toml` | `~/Library/Application Support/scr1b3/config.toml` | `~/.config/scr1b3/config.toml` |
 | Themes | `…\scr1b3\themes\` | `…/scr1b3/themes/` | `~/.config/scr1b3/themes/` |
 | Plugin pinned keys (TOFU) | `…\scr1b3\plugin-keys\` | `…/scr1b3/plugin-keys/` | `~/.config/scr1b3/plugin-keys/` |
+| Crash/error report spool | `…\scr1b3\reports\` | `…/scr1b3/reports/` | `~/.config/scr1b3/reports/` |
 | Recent files / session | `%LOCALAPPDATA%\scr1b3\session.toml` | `~/Library/Caches/scr1b3/session.toml` | `~/.cache/scr1b3/session.toml` |
 | Logs | `%LOCALAPPDATA%\scr1b3\logs\` | `~/Library/Logs/scr1b3/` | `~/.cache/scr1b3/logs/` |
 
-No data is written outside these directories.
+A spooled report stays in `reports/` until you consent to send it or you clear
+local state. No data is written outside these directories.
 
 ## Plugins
 
@@ -93,7 +154,7 @@ boundary.
 
 ## Clearing local state
 
-To erase everything SCR1B3 ever wrote on disk:
+To erase everything SCR1B3 ever wrote on disk (including any spooled reports):
 
 ```bash
 # Windows (PowerShell)
@@ -114,25 +175,28 @@ The editor will start fresh on next launch.
 
 You don't have to take this document at its word:
 
-- Read the source. The single update-check call lives in
-  [`crates/scribe-core/src/update/`](crates/scribe-core/src/update/);
-  the network-shape is one HTTPS GET, no body, no payload.
-- Read [`SECURITY.md`](SECURITY.md) for the threat model and signed-
-  update integrity story.
-- Audit the binary with your favorite traffic monitor. With
-  `[updates] mode = "off"`, SCR1B3 makes zero outbound connections.
+- Read the source. The update-check call lives in
+  [`crates/scribe-core/src/update/`](crates/scribe-core/src/update/); the
+  reporting host glue is in
+  [`crates/scribe-app/src/reporting.rs`](crates/scribe-app/src/reporting.rs); the
+  sanitizer, spool, preview, and consent gate live in the public W1TN3SS SDK and
+  are auditable there.
+- Read [`SECURITY.md`](SECURITY.md) for the threat model and signed-update
+  integrity story.
+- Audit the binary with your favorite traffic monitor. With `[updates] mode =
+  "off"` and reporting left off (the default), SCR1B3 makes zero outbound
+  connections.
 
 ## Changes to this document
 
-Any change to the network surface, the storage layout, or the
-plugin-sandbox boundary is a breaking change to this privacy posture
-and will be called out in the [`CHANGELOG`](https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/releases)
+Any change to a network surface, the storage layout, the reporting posture, or
+the plugin-sandbox boundary is a change to this privacy posture and will be
+called out in the [`CHANGELOG`](https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/releases)
 under a "Privacy-relevant change" heading.
 
 ## Reporting concerns
 
-If you find a discrepancy between this document and SCR1B3's actual
-behavior — including the network surface, what data it stores, where
-it stores it, or what a plugin can reach — please follow the
-disclosure process in [`SECURITY.md`](SECURITY.md). Privacy issues
-are treated as security-severity.
+If you find a discrepancy between this document and SCR1B3's actual behavior —
+including the network surface, what data it stores, where it stores it, or what a
+plugin can reach — please follow the disclosure process in
+[`SECURITY.md`](SECURITY.md). Privacy issues are treated as security-severity.
