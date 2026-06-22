@@ -1187,6 +1187,15 @@ pub fn apply_event(
     out
 }
 
+/// WU-5 coverage: specific-assertion tests over the pure text-geometry,
+/// selection/cursor, key-dispatch, and span-tiling math. Kept in a sibling
+/// file (`text_geometry_tests.rs`) but compiled as a child module so it can
+/// reach the crate-private helpers (`pos_to_char_offset`, `digit_count`,
+/// `build_line_job`, `try_expand_snippet`, `TextGeom`).
+#[cfg(test)]
+#[path = "text_geometry_tests.rs"]
+mod text_geometry_tests;
+
 #[cfg(test)]
 #[allow(deprecated)] // egui 0.34 deprecated Context::run + CentralPanel::show
                      // for non-test paths; the run_ui replacement is for the live render loop,
