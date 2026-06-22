@@ -3295,3 +3295,139 @@ mod pane_render {
         );
     }
 }
+
+#[cfg(test)]
+mod update_status_states {
+    //! Render `render_update_status` for EACH non-trivial `UpdateState` and
+    //! assert the user-facing status label for that state. We only RENDER each
+    //! state (no button clicks) — the action arms (`Update now` / `Restart` /
+    //! `Install` / `Retry`) spawn network/thread work, so those `clicked()`
+    //! bodies stay intentionally uncovered; the label-emission lines for every
+    //! state get covered. The wrapped no-asset / failed layouts are covered by
+    //! the sibling `update_status_layout` module.
+    use super::render_update_status;
+    use crate::updater::{current_version, UpdateState, Updater};
+    use egui_kittest::kittest::Queryable as _;
+    use scribe_core::update::ReleaseInfo;
+    use std::path::PathBuf;
+
+    fn release(version: &str) -> ReleaseInfo {
+        ReleaseInfo {
+            version: semver::Version::parse(version).unwrap(),
+            tag: format!("v{version}"),
+            asset_url: "https://example.invalid/a.tar.gz".to_string(),
+            sig_url: "https://example.invalid/a.tar.gz.minisig".to_string(),
+            sha_url: "https://example.invalid/a.tar.gz.sha256".to_string(),
+            html_url: "https://example.invalid/releases/tag".to_string(),
+            installer: None,
+        }
+    }
+
+    /// Render one update state and return the harness for label queries.
+    fn render_state(state: UpdateState) -> egui_kittest::Harness<'static> {
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(600.0, 300.0))
+            .build_ui(move |ui| {
+                let mut updater = Updater::default();
+                updater.state = state.clone();
+                render_update_status(ui, &mut updater);
+            });
+        h.run();
+        h
+    }
+
+    #[test]
+    fn checking_shows_a_spinner_label() {
+        // The spinner requests a repaint every frame, so `run()` (which loops to
+        // a steady state) would exceed max_steps. A single step is enough to
+        // render — and assert — the "Checking…" label beside the spinner.
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(600.0, 300.0))
+            .build_ui(|ui| {
+                let mut updater = Updater::default();
+                updater.state = UpdateState::Checking;
+                render_update_status(ui, &mut updater);
+            });
+        h.run_steps(1);
+        assert!(h.query_by_label("Checking…").is_some());
+    }
+
+    #[test]
+    fn up_to_date_shows_current_and_latest_versions() {
+        let h = render_state(UpdateState::UpToDate {
+            latest: "9.9.9".to_string(),
+        });
+        let expected = format!(
+            "Up to date — you're on v{} (latest release: v9.9.9).",
+            current_version()
+        );
+        assert!(
+            h.query_by_label(expected.as_str()).is_some(),
+            "up-to-date label must name both the running version and the latest release",
+        );
+    }
+
+    #[test]
+    fn available_shows_version_with_update_and_changelog_affordances() {
+        let h = render_state(UpdateState::Available(release("1.2.3")));
+        assert!(h.query_by_label("v1.2.3 is available.").is_some());
+        // The action affordances render (we do NOT click them — that spawns a
+        // download); their presence proves the Available arm rendered fully.
+        assert!(h.query_by_label("Update now").is_some());
+        assert!(h.query_by_label("changelog").is_some());
+    }
+
+    #[test]
+    fn downloading_renders_a_progress_bar_without_panicking() {
+        // The progress bar has no text label; rendering it (incl. the >0 total
+        // fraction branch) exercises the Downloading arm. A zero total takes the
+        // 0.0 fallback branch — render that too.
+        let _h = render_state(UpdateState::Downloading {
+            received: 50,
+            total: 100,
+        });
+        let _h0 = render_state(UpdateState::Downloading {
+            received: 0,
+            total: 0,
+        });
+    }
+
+    #[test]
+    fn ready_to_apply_shows_restart_affordance() {
+        let h = render_state(UpdateState::ReadyToApply {
+            staged: PathBuf::from("/srv/x/staged-binary"),
+            version: "2.0.0".to_string(),
+        });
+        assert!(h.query_by_label("v2.0.0 downloaded + verified.").is_some());
+        assert!(h.query_by_label("Restart to finish update").is_some());
+    }
+
+    #[test]
+    fn ready_to_run_installer_shows_install_affordance() {
+        let h = render_state(UpdateState::ReadyToRunInstaller {
+            installer: PathBuf::from("/srv/x/setup.exe"),
+            version: "2.0.0".to_string(),
+        });
+        assert!(h.query_by_label("v2.0.0 downloaded + verified.").is_some());
+        assert!(h
+            .query_by_label("Install update (asks for admin)")
+            .is_some());
+    }
+
+    #[test]
+    fn applied_shows_restarting_message() {
+        let h = render_state(UpdateState::Applied {
+            version: "3.1.4".to_string(),
+        });
+        assert!(h
+            .query_by_label("Updated to v3.1.4 — restarting…")
+            .is_some());
+    }
+
+    #[test]
+    fn idle_renders_nothing_but_does_not_panic() {
+        // The Idle arm is an empty match body; rendering it must be a clean no-op.
+        let h = render_state(UpdateState::Idle);
+        assert!(h.query_by_label("Checking…").is_none());
+    }
+}
