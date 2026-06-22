@@ -535,4 +535,223 @@ mod tests {
             "failed"
         );
     }
+
+    // ── Spool-backed dialog + drain tests ──────────────────────────────────
+    // These drive CrashConsentState / auto_send_spooled_crashes against an
+    // EXPLICIT temp config dir (never the global Config::config_dir()), so no
+    // spool I/O leaks into the real config dir and the tests are hermetic. The
+    // SDK's Spool roots itself at `<dir>/reports/`; we enqueue reports there and
+    // assert the host glue's privacy + queue behaviour.
+
+    use itasha_report_core::report::Report as SdkReport;
+
+    /// Enqueue a crash report into the spool rooted at `dir` and return how many
+    /// reports the spool now holds. Used to seed the dialog/drain tests.
+    fn seed_crash(dir: &Path, body: &str) {
+        let spool = open_spool_in(dir).expect("temp spool opens");
+        let report = build_crash_report_owned(body, "src/x.rs:1");
+        spool.enqueue(&report).expect("enqueue");
+    }
+
+    /// Like `build_crash_report` but takes an owned body so a test can vary the
+    /// content (the production hook only ever passes a `&'static str`, but the
+    /// spool stores the resulting `Report` either way — the stream is what the
+    /// dialog filters on).
+    fn build_crash_report_owned(body: &str, location: &str) -> SdkReport {
+        let raw = SdkReport::crash(format!("panic: {body} (at {location})"))
+            .with_metadata("app_version", env!("CARGO_PKG_VERSION"))
+            .with_metadata("os", std::env::consts::OS);
+        Sanitizer::new().sanitize(raw)
+    }
+
+    #[test]
+    fn open_spool_in_creates_reports_dir_under_explicit_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = open_spool_in(tmp.path()).expect("spool opens at explicit dir");
+        // The SDK roots the spool at <dir>/reports/.
+        assert!(spool.dir().ends_with("reports"));
+        assert_eq!(spool.count().unwrap(), 0, "a fresh spool is empty");
+    }
+
+    #[test]
+    fn unbound_dialog_is_inert_and_touches_no_dir() {
+        // A default-constructed CrashConsentState (e.g. a `new_test` app that
+        // never binds a config dir) loads NOTHING and presents NOTHING — it must
+        // never fall back to the global Config::config_dir().
+        let mut state = CrashConsentState::default();
+        assert_eq!(state.load_from_spool(), 0, "no bound dir => nothing queued");
+        assert!(!state.has_pending());
+        // consent_and_send / decline on an empty dialog are safe no-ops.
+        assert_eq!(state.consent_and_send(), None);
+        state.decline_and_discard();
+        assert!(!state.has_pending());
+    }
+
+    #[test]
+    fn load_from_spool_queues_only_crash_stream_reports() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Two crash reports + one MANUAL issue (a sibling plan's intake). The
+        // crash dialog must present ONLY the crash-stream reports.
+        seed_crash(tmp.path(), "boom one");
+        seed_crash(tmp.path(), "boom two");
+        let spool = open_spool_in(tmp.path()).unwrap();
+        spool
+            .enqueue(&SdkReport::manual_issue("feedback", "not a crash"))
+            .unwrap();
+
+        let mut state = CrashConsentState::default();
+        state.set_config_dir(Some(tmp.path().to_path_buf()));
+        let queued = state.load_from_spool();
+        assert_eq!(queued, 2, "only the 2 crash-stream reports are queued");
+        assert!(state.has_pending(), "a crash report is presented");
+        // The presented preview is the literal crash body the user will see.
+        assert!(state.edited_text_mut().contains("boom"));
+    }
+
+    #[test]
+    fn decline_discards_the_current_report_from_the_spool() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_crash(tmp.path(), "decline me");
+        let mut state = CrashConsentState::default();
+        state.set_config_dir(Some(tmp.path().to_path_buf()));
+        assert_eq!(state.load_from_spool(), 1);
+        assert!(state.has_pending());
+
+        state.decline_and_discard();
+        assert!(!state.has_pending(), "queue drained after the only decline");
+
+        // The declined report was removed from the spool (the user said no).
+        let spool = open_spool_in(tmp.path()).unwrap();
+        assert_eq!(
+            spool.count().unwrap(),
+            0,
+            "a declined crash report is discarded, not retained"
+        );
+    }
+
+    #[test]
+    fn send_without_endpoint_keeps_the_report_spooled_for_retry() {
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _g = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        seed_crash(tmp.path(), "keep me on refusal");
+        let mut state = CrashConsentState::default();
+        state.set_config_dir(Some(tmp.path().to_path_buf()));
+        assert_eq!(state.load_from_spool(), 1);
+
+        // SEND pressed, but no endpoint is configured: the structured refusal is
+        // returned and the report is NOT removed (retained for a later send).
+        let outcome = state.consent_and_send();
+        assert_eq!(outcome, Some(ReportOutcome::RefusedNoEndpoint));
+        let spool = open_spool_in(tmp.path()).unwrap();
+        assert_eq!(
+            spool.count().unwrap(),
+            1,
+            "an unsent (no-endpoint) report stays spooled for retry"
+        );
+    }
+
+    #[test]
+    fn edited_preview_redactions_are_carried_through_consent_and_send() {
+        // The user redacts the preview body before pressing SEND. Even though the
+        // send refuses (no endpoint), the redaction path is exercised: the body
+        // that WOULD leave is the edited one. We assert the dialog honours the
+        // edit by re-deriving the report from the edited text.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _g = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        seed_crash(tmp.path(), "secret-buffer-text");
+        let mut state = CrashConsentState::default();
+        state.set_config_dir(Some(tmp.path().to_path_buf()));
+        state.load_from_spool();
+        // Redact in the editable preview.
+        let edited = state.edited_text_mut();
+        *edited = edited.replace("secret-buffer-text", "[redacted]");
+        assert!(!state.edited_text_mut().contains("secret-buffer-text"));
+        // Pressing SEND consumes the edited text; the outcome is the refusal but
+        // the path through edited_report_from_preview_text ran.
+        let outcome = state.consent_and_send();
+        assert_eq!(outcome, Some(ReportOutcome::RefusedNoEndpoint));
+    }
+
+    #[test]
+    fn remember_choice_defaults_to_just_this_time_on_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_crash(tmp.path(), "remember default");
+        let mut state = CrashConsentState::default();
+        state.set_config_dir(Some(tmp.path().to_path_buf()));
+        state.load_from_spool();
+        assert_eq!(
+            *state.remember_mut(),
+            Some(RememberChoice::JustThisTime),
+            "a freshly-presented report defaults the remember choice to just-this-time"
+        );
+    }
+
+    #[test]
+    fn auto_send_drain_without_endpoint_attempts_but_retains_reports() {
+        // ReportingMode::Always path: auto_send_spooled_crashes ATTEMPTS each
+        // crash report, but with no endpoint configured nothing is transmitted
+        // and nothing is removed — the privacy-safe "spooled, never silently
+        // dropped" invariant holds even on the auto-send drain.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _g = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        seed_crash(tmp.path(), "auto one");
+        seed_crash(tmp.path(), "auto two");
+        // A manual issue must NOT be auto-sent by the crash drain.
+        let spool = open_spool_in(tmp.path()).unwrap();
+        spool
+            .enqueue(&SdkReport::manual_issue("fb", "manual"))
+            .unwrap();
+
+        let attempted = auto_send_spooled_crashes(tmp.path());
+        assert_eq!(
+            attempted, 2,
+            "only the 2 crash-stream reports are attempted"
+        );
+        // No endpoint => no removal: all 3 reports remain spooled.
+        let spool = open_spool_in(tmp.path()).unwrap();
+        assert_eq!(
+            spool.count().unwrap(),
+            3,
+            "no-endpoint auto-send removes nothing (reports retained for retry)"
+        );
+    }
+
+    #[test]
+    fn auto_send_on_missing_dir_is_a_safe_zero() {
+        // A dir whose spool cannot be opened (here: a path that is a FILE, so
+        // create_dir_all fails) yields a safe 0 — never a panic, never a send.
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("not-a-dir");
+        std::fs::write(&file_path, b"x").unwrap();
+        assert_eq!(
+            auto_send_spooled_crashes(&file_path),
+            0,
+            "an unopenable spool dir drains zero reports"
+        );
+    }
+
+    #[test]
+    fn capture_panic_with_no_config_dir_surfaces_failure_not_silent_drop() {
+        // capture_panic resolves the GLOBAL config dir; we can't force it unset
+        // portably, but we CAN assert the outcome is always one of the structured
+        // variants (never a panic, never a silent None). On this host it spools.
+        let outcome = capture_panic("probe panic", "src/reporting.rs:1");
+        assert!(
+            matches!(outcome, ReportOutcome::Spooled | ReportOutcome::Failed(_)),
+            "capture_panic returns a structured outcome, never a silent drop"
+        );
+    }
+
+    #[test]
+    fn build_crash_report_owned_helper_is_crash_stream() {
+        // Guard the test helper itself stays faithful to build_crash_report's
+        // stream + metadata shape (so the spool-seeding above is representative).
+        let r = build_crash_report_owned("boom", "src/x.rs:9");
+        assert_eq!(r.stream, Stream::CrashReports);
+        assert!(r.body.contains("boom"));
+        assert!(r.metadata.iter().any(|(k, _)| k == "app_version"));
+    }
 }

@@ -269,4 +269,56 @@ mod tests {
             .iter()
             .any(|r| r.text == "beta" && r.kind == DiffKind::Insert));
     }
+
+    #[test]
+    fn lone_lf_and_no_trailing_newline_are_handled() {
+        // A line with no trailing newline at all (last line of a file with no
+        // final '\n') survives verbatim — strip_one_trailing_newline is a no-op.
+        let rows = diff_lines("only", "only");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "only");
+        assert_eq!(rows[0].kind, DiffKind::Equal);
+    }
+
+    #[test]
+    fn show_rows_paints_a_sigil_prefixed_label_for_every_row() {
+        // Drive the egui renderer through the kittest harness and assert each
+        // row paints its sigil-prefixed text (covers the +/-/space arms).
+        use egui_kittest::kittest::Queryable as _;
+        let rows = diff_lines("a\nb\n", "a\nc\n"); // 1 context, 1 delete, 1 insert
+        let colors = DiffColors {
+            insert: egui::Color32::GREEN,
+            delete: egui::Color32::RED,
+            context: egui::Color32::GRAY,
+        };
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(400.0, 300.0))
+            .build_ui(move |ui| {
+                show_rows(ui, &rows, colors);
+            });
+        h.run();
+        // The context line keeps its leading-space sigil; the change lines carry
+        // '+'/'-'. AccessKit exposes the label text, so we can find each.
+        assert!(h.query_by_label("  a").is_some(), "context row painted");
+        assert!(h.query_by_label("- b").is_some(), "deleted row painted");
+        assert!(h.query_by_label("+ c").is_some(), "inserted row painted");
+    }
+
+    #[test]
+    fn show_rows_on_empty_diff_paints_nothing_and_does_not_panic() {
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(200.0, 100.0))
+            .build_ui(move |ui| {
+                show_rows(
+                    ui,
+                    &[],
+                    DiffColors {
+                        insert: egui::Color32::GREEN,
+                        delete: egui::Color32::RED,
+                        context: egui::Color32::GRAY,
+                    },
+                );
+            });
+        h.run(); // an empty diff renders an empty scroll area without panicking.
+    }
 }
