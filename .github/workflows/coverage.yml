@@ -22,6 +22,17 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Structurally-uncoverable-headless whole files, excluded from the coverage
+  # denominator so the measured % reflects the TESTABLE surface (see
+  # docs/adr/0007-coverage-exclusions-and-floor.md). Each is 0%-or-near-0%
+  # coverable in CI by construction, NOT for lack of tests:
+  #   - app/visual_qa.rs : GPU render-QA harness (#[ignore], needs a wgpu adapter)
+  #   - app/effects.rs   : ctx-layer painters → GPU pixels, nothing to assert
+  #   - main.rs          : eframe::run_native boot; owns the event loop, never returns
+  #   - win32-chrome/lib.rs : live Win32 FFI (HWND/DWM); #[cfg(windows)] dead on Linux CI
+  # The [/\\] separator classes make the regex match both the Linux (CI) and
+  # Windows (local) path forms. Full-path-anchored so it can't swallow a new file.
+  COVERAGE_IGNORE_REGEX: 'scribe-app[/\\]src[/\\]app[/\\](visual_qa|effects)\.rs$|scribe-app[/\\]src[/\\]main\.rs$|scribe-win32-chrome[/\\]src[/\\]lib\.rs$'
 
 jobs:
   coverage:
@@ -65,8 +76,10 @@ jobs:
             --test-threads=1
       - name: Generate lcov report
         # Render lcov from the cached profdata produced above (no second
-        # instrumented run).
-        run: cargo llvm-cov report --lcov --output-path lcov.info
+        # instrumented run). The same exclusion regex is applied to every
+        # `report` invocation so the lcov artifact, the summary, and the floor
+        # gate all describe the identical (testable) surface.
+        run: cargo llvm-cov report --lcov --output-path lcov.info --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
       - name: Coverage summary
         # `report --summary-only` prints the per-file / total percentages from
         # the same cached profdata. Informational — the gating happens in the
@@ -77,16 +90,21 @@ jobs:
             echo '## Code coverage'
             echo ''
             echo '```'
-            cargo llvm-cov report --summary-only
+            cargo llvm-cov report --summary-only --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Coverage floor (ratchet)
-        # Baseline measured 2026-06 at ~76% lines / ~79% regions. This floor
-        # gates at 74% lines — a tightened ratchet (~2pt headroom under the
-        # ~76% actual) that catches a real regression while tolerating normal
-        # fluctuation. RAISE it as coverage climbs; never lower it to make a red
-        # build pass. Renders from the same cached profdata (no second run).
-        run: cargo llvm-cov report --fail-under-lines 74
+        # After the WU-1..WU-7 coverage initiative, the TESTABLE surface (with
+        # the four structurally-uncoverable-headless whole files excluded via
+        # COVERAGE_IGNORE_REGEX above) measures ~84.6% lines. This floor gates
+        # at 83% lines — a ~1.6pt safety margin under the measured 84.6% that
+        # catches a real regression while tolerating normal fluctuation. RAISE
+        # it as coverage climbs (e.g. when the app/mod.rs testing backlog lands);
+        # never lower it to make a red build pass. The exclusion regex MUST match
+        # the one used for the summary/lcov steps so the gated number is the
+        # testable number. See docs/adr/0007-coverage-exclusions-and-floor.md.
+        # Renders from the same cached profdata (no second run).
+        run: cargo llvm-cov report --fail-under-lines 83 --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
       - name: Upload lcov report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
