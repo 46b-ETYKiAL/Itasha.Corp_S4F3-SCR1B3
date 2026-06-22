@@ -504,4 +504,99 @@ mod tests {
         assert!(url.contains("body="));
         assert_no_persistent_id(&url);
     }
+
+    #[test]
+    fn diagnostics_block_is_non_identifying_and_host_provided_only() {
+        let block = diagnostics_block(RENDERER);
+        // The block carries ONLY compile-time + std::env::consts values: app
+        // version, OS, renderer. No persistent identifier may appear.
+        assert!(block.contains("App version:"));
+        assert!(block.contains("OS:"));
+        assert!(block.contains("Renderer: wgpu"));
+        assert!(
+            block.starts_with("\n\n---\n"),
+            "block is a clearly-delimited tail"
+        );
+        assert_no_persistent_id(&block);
+    }
+
+    #[test]
+    fn renderer_constant_is_the_static_non_identifying_backend_name() {
+        // RENDERER must be the static backend string, never a GPU device/vendor.
+        assert_eq!(RENDERER, "wgpu");
+        assert_no_persistent_id(RENDERER);
+    }
+
+    #[test]
+    fn request_uses_renderer_in_diagnostics_when_opted_in() {
+        // The request body, when diagnostics are on, carries the renderer the
+        // caller passes (so the preview is faithful end-to-end).
+        let mut st = IssueIntakeState::default();
+        st.description = "a bug".into();
+        st.include_diagnostics = true;
+        let req = st.request("o/r", RENDERER);
+        assert!(req.body.contains("Renderer: wgpu"));
+    }
+
+    #[test]
+    fn over_length_request_takes_the_clipboard_fallback_not_the_browser() {
+        // open_or_copy on an over-length URL must NEVER call launch() (no browser)
+        // — it goes straight to the clipboard path. We assert the non-deep-link
+        // outcome (CopiedToClipboard on a host with a clipboard, or a structured
+        // Failed where none is present — never OpenedDeepLink/OpenedMailto).
+        let mut st = IssueIntakeState::default();
+        st.description = "z".repeat(GITHUB_URL_LENGTH_THRESHOLD + 1000);
+        let req = st.request("o/r", RENDERER);
+        let outcome = open_or_copy(&req);
+        assert!(
+            matches!(
+                outcome,
+                IntakeOutcome::CopiedToClipboard | IntakeOutcome::Failed(_)
+            ),
+            "over-length never opens a browser: got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn log_outcome_is_suppressed_when_telemetry_disabled() {
+        // With S4F3_DISABLE_TELEMETRY set, log_outcome must early-return and emit
+        // nothing — the explicit opt-out of any local diagnostic logging. We can't
+        // observe the action-log sink directly here, but we CAN assert the call is
+        // a safe no-op (never panics) under the disable flag, exercising the guard.
+        struct TelemetryGuard {
+            prev: Option<std::ffi::OsString>,
+        }
+        impl Drop for TelemetryGuard {
+            fn drop(&mut self) {
+                match &self.prev {
+                    Some(v) => std::env::set_var("S4F3_DISABLE_TELEMETRY", v),
+                    None => std::env::remove_var("S4F3_DISABLE_TELEMETRY"),
+                }
+            }
+        }
+        let _g = TelemetryGuard {
+            prev: std::env::var_os("S4F3_DISABLE_TELEMETRY"),
+        };
+        std::env::set_var("S4F3_DISABLE_TELEMETRY", "1");
+        // Exercises the early-return guard for every outcome variant.
+        log_outcome(&IntakeOutcome::OpenedDeepLink);
+        log_outcome(&IntakeOutcome::CopiedToClipboard);
+        log_outcome(&IntakeOutcome::OpenedMailto);
+        log_outcome(&IntakeOutcome::Failed("clipboard unavailable".into()));
+    }
+
+    #[test]
+    fn all_kinds_have_distinct_display_and_title_prefixes() {
+        // IssueKind::ALL drives the dialog selector; each kind's display + title
+        // prefix must be present (covers the display()/title_prefix() arms).
+        let mut prefixes = Vec::new();
+        for kind in IssueKind::ALL {
+            assert!(!kind.display().is_empty());
+            prefixes.push(kind.title_prefix());
+        }
+        // Prefixes are distinct so a deep-linked title reads per-kind.
+        assert_eq!(prefixes, vec!["bug: ", "feat: ", "other: "]);
+        // Default kind is Bug.
+        assert_eq!(IssueKind::default(), IssueKind::Bug);
+    }
 }
