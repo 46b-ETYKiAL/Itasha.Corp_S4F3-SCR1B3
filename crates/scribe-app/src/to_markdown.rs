@@ -611,4 +611,89 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn ext_to_lang_maps_every_known_extension() {
+        // Exercise every arm of the ext→lang table so a future edit that breaks a
+        // mapping is caught. Each entry must produce a fence tagged with the lang.
+        let cases: &[(&str, &str)] = &[
+            ("rs", "rust"),
+            ("py", "python"),
+            ("js", "javascript"),
+            ("mjs", "javascript"),
+            ("cjs", "javascript"),
+            ("ts", "typescript"),
+            ("tsx", "tsx"),
+            ("jsx", "jsx"),
+            ("sh", "bash"),
+            ("bash", "bash"),
+            ("ps1", "powershell"),
+            ("c", "c"),
+            ("h", "c"),
+            ("cpp", "cpp"),
+            ("cc", "cpp"),
+            ("cxx", "cpp"),
+            ("hpp", "cpp"),
+            ("cs", "csharp"),
+            ("go", "go"),
+            ("rb", "ruby"),
+            ("java", "java"),
+            ("kt", "kotlin"),
+            ("kts", "kotlin"),
+            ("swift", "swift"),
+            ("php", "php"),
+            ("sql", "sql"),
+            ("xml", "xml"),
+            ("css", "css"),
+            ("scss", "scss"),
+            ("lua", "lua"),
+            ("dart", "dart"),
+            ("scala", "scala"),
+            ("hs", "haskell"),
+            ("ml", "ocaml"),
+            ("ex", "elixir"),
+            ("exs", "elixir"),
+            ("erl", "erlang"),
+            ("clj", "clojure"),
+            ("zig", "zig"),
+            ("nim", "nim"),
+            ("vim", "vim"),
+            ("dockerfile", "dockerfile"),
+            ("ini", "ini"),
+            ("diff", "diff"),
+            ("patch", "diff"),
+        ];
+        for (ext, lang) in cases {
+            // These exts are NOT special-cased in to_markdown, so they all take
+            // the code_fence(ext_to_lang) path and emit a `lang`-tagged fence.
+            let md = to_markdown("body line\n", Some(ext));
+            assert!(
+                md.starts_with(&format!("```{lang}\n")),
+                ".{ext} must fence as `{lang}`, got:\n{md}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_malformed_degrades_to_raw_json_fence() {
+        // Invalid JSON must not error — it degrades to the raw text in a json
+        // fence (the converter is honest and lossless).
+        let md = to_markdown("{not: valid, json", Some("json"));
+        assert!(md.starts_with("```json\n"), "got:\n{md}");
+        assert!(
+            md.contains("{not: valid, json"),
+            "raw bytes preserved:\n{md}"
+        );
+    }
+
+    #[test]
+    fn csv_empty_input_falls_back_to_fence_not_a_table() {
+        // Empty / whitespace-only CSV has no usable rows → fenced block, never an
+        // empty table.
+        for src in ["", "\n", "\n\n"] {
+            let md = to_markdown(src, Some("csv"));
+            assert!(md.starts_with("```csv"), "empty CSV must fence, got:\n{md}");
+            assert!(!md.contains("| --- |"), "no table for empty CSV:\n{md}");
+        }
+    }
 }
