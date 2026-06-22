@@ -136,8 +136,10 @@ fn session_signature_is_order_independent() {
 
 #[test]
 fn path_to_uri_unix_absolute_gets_double_slash() {
-    let uri = path_to_uri(std::path::Path::new("/home/u/x.rs"));
-    assert_eq!(uri, "file:///home/u/x.rs");
+    // An absolute POSIX path already starts with '/', so it becomes file:// +
+    // the path (a `file://<authority-empty>/abs` style triple-slash URI).
+    let uri = path_to_uri(std::path::Path::new("/srv/notes/x.rs"));
+    assert_eq!(uri, "file:///srv/notes/x.rs");
 }
 
 #[test]
