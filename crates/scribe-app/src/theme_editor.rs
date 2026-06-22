@@ -557,4 +557,232 @@ mod tests {
             );
         }
     }
+
+    // ── Colour-lookup helpers ──────────────────────────────────────────────
+
+    #[test]
+    fn ui_color_returns_theme_value_when_present_and_default_when_absent() {
+        let theme = Theme::itasha_corp();
+        // `background` exists in every built-in: the helper returns the stored
+        // colour, NOT the supplied default.
+        let sentinel = Color32::from_rgb(1, 2, 3);
+        let got = ui_color(&theme, "background", sentinel);
+        assert_ne!(got, sentinel, "present key must return the theme's colour");
+        // A key the theme does not carry falls back to the supplied default.
+        assert_eq!(
+            ui_color(&theme, "no-such-ui-token", sentinel),
+            sentinel,
+            "absent key must fall back to the default"
+        );
+    }
+
+    #[test]
+    fn syntax_color_returns_theme_value_when_present_and_default_when_absent() {
+        let theme = Theme::itasha_corp();
+        let sentinel = Color32::from_rgb(4, 5, 6);
+        assert_ne!(syntax_color(&theme, "keyword", sentinel), sentinel);
+        assert_eq!(
+            syntax_color(&theme, "no-such-syntax-token", sentinel),
+            sentinel
+        );
+    }
+
+    // ── Seed / save round-trips (hermetic via SCR1B3_CONFIG_DIR) ────────────
+
+    /// Scoped env guard so the config-dir override is restored on drop and the
+    /// seed/save tests never touch the real config dir. Serialised by the lock
+    /// below because `SCR1B3_CONFIG_DIR` is process-global.
+    struct ConfigDirGuard {
+        prev: Option<std::ffi::OsString>,
+    }
+    impl ConfigDirGuard {
+        fn set(dir: &std::path::Path) -> Self {
+            let prev = std::env::var_os("SCR1B3_CONFIG_DIR");
+            std::env::set_var("SCR1B3_CONFIG_DIR", dir);
+            Self { prev }
+        }
+    }
+    impl Drop for ConfigDirGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("SCR1B3_CONFIG_DIR", v),
+                None => std::env::remove_var("SCR1B3_CONFIG_DIR"),
+            }
+        }
+    }
+
+    use std::sync::Mutex;
+    static CONFIG_DIR_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the config-dir lock, tolerating a prior test's panic that
+    /// poisoned it (the data is `()`; a poisoned lock carries no broken state).
+    fn lock_config_dir() -> std::sync::MutexGuard<'static, ()> {
+        CONFIG_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn seed_theme_uses_builtin_for_known_active() {
+        let _lock = lock_config_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = ConfigDirGuard::set(tmp.path());
+        // A known built-in with NO user TOML => the compiled-in built-in is
+        // seeded (branch 2 of seed_theme).
+        let mut config = Config::default();
+        config.appearance.theme = "wired-noir".to_string();
+        let seeded = seed_theme(&config);
+        let builtin = Theme::builtin("wired-noir").unwrap();
+        assert_eq!(seeded.ui, builtin.ui, "known active seeds its built-in");
+    }
+
+    #[test]
+    fn seed_theme_prefers_user_toml_over_builtin() {
+        let _lock = lock_config_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = ConfigDirGuard::set(tmp.path());
+        // Write a user TOML that SHADOWS a built-in name with a distinct accent so
+        // we can prove the user file wins (branch 1 of seed_theme).
+        let mut custom = Theme::itasha_corp();
+        custom
+            .ui
+            .insert("accent".to_string(), Rgba::new(1, 2, 3, 255));
+        let themes_dir = tmp.path().join("themes");
+        std::fs::create_dir_all(&themes_dir).unwrap();
+        std::fs::write(themes_dir.join("wired-noir.toml"), custom.to_toml_string()).unwrap();
+
+        let mut config = Config::default();
+        config.appearance.theme = "wired-noir".to_string();
+        let seeded = seed_theme(&config);
+        assert_eq!(
+            seeded.ui.get("accent").copied(),
+            Some(Rgba::new(1, 2, 3, 255)),
+            "the user TOML must win over the built-in of the same name"
+        );
+    }
+
+    #[test]
+    fn save_theme_writes_user_toml_that_reparses() {
+        let _lock = lock_config_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = ConfigDirGuard::set(tmp.path());
+        let mut theme = Theme::itasha_corp();
+        theme.name = "my-saved".to_string();
+        theme
+            .ui
+            .insert("accent".to_string(), Rgba::new(9, 8, 7, 255));
+
+        save_theme(&theme, "my-saved").expect("save succeeds with a writable config dir");
+
+        // The file landed under <config_dir>/themes/<slug>.toml and reparses to
+        // the same theme (round-trip through the on-disk TOML).
+        let path = tmp.path().join("themes").join("my-saved.toml");
+        let text = std::fs::read_to_string(&path).expect("saved file exists");
+        let back = Theme::from_toml_str(&text).expect("saved TOML reparses");
+        assert_eq!(
+            back.ui.get("accent").copied(),
+            Some(Rgba::new(9, 8, 7, 255))
+        );
+    }
+
+    // ── GUI drive-through (egui_kittest) ───────────────────────────────────
+
+    use egui_kittest::kittest::Queryable as _;
+
+    /// Drive `show` once through the kittest harness against a temp config dir,
+    /// then a second frame after clicking Save, asserting the save status and the
+    /// changed-config signal. This exercises live_preview, the token grids
+    /// (token_grid_row), and the Save/Reset/New buttons.
+    #[test]
+    fn show_renders_preview_saves_and_reports_changed_config() {
+        let _lock = lock_config_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = ConfigDirGuard::set(tmp.path());
+
+        let mut config = Config::default();
+        config.appearance.theme = "wired-noir".to_string();
+
+        // `show` returns true only on the exact frame Save is clicked; `h.run()`
+        // may settle over several frames, so accumulate "ever returned true"
+        // rather than reading only the last frame's value.
+        let changed_ever = std::cell::Cell::new(false);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 800.0))
+            .build_ui(|ui| {
+                if show(ui, &mut config) {
+                    changed_ever.set(true);
+                }
+            });
+        // First frame: render the editor (seeds working theme + live preview).
+        h.run();
+        // The preview's status-bar label and the preview header render — proves
+        // live_preview + the section labels painted.
+        assert!(
+            h.query_by_label("● READY").is_some(),
+            "live preview painted"
+        );
+        assert!(
+            h.query_by_label("preview").is_some(),
+            "preview header rendered"
+        );
+
+        // Click Save: it slugifies the name, writes the user TOML, sets it active,
+        // and returns true (changed config) on the click frame.
+        h.get_by_label("Save theme").click();
+        h.run();
+        // Drop the harness so the `&mut config` borrow it holds is released
+        // before we inspect `config` directly.
+        drop(h);
+        assert!(
+            changed_ever.get(),
+            "Save reported a changed config on its click frame"
+        );
+        // Durable side effects: the active theme was set to the saved slug and
+        // the user theme TOML exists on disk.
+        assert_eq!(
+            config.appearance.theme, "wired-noir",
+            "Save set the saved slug active"
+        );
+        assert!(
+            tmp.path().join("themes").join("wired-noir.toml").exists(),
+            "Save wrote the user theme TOML"
+        );
+    }
+
+    #[test]
+    fn show_reset_button_reseeds_without_changing_config() {
+        let _lock = lock_config_dir();
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = ConfigDirGuard::set(tmp.path());
+        let mut config = Config::default();
+        config.appearance.theme = "wired-noir".to_string();
+
+        // Reset only re-seeds the working copy; `show` must NEVER return true on
+        // a Reset click (no config change). Accumulate to catch any frame.
+        let changed_ever = std::cell::Cell::new(false);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 800.0))
+            .build_ui(|ui| {
+                if show(ui, &mut config) {
+                    changed_ever.set(true);
+                }
+            });
+        h.run();
+        h.get_by_label("Reset").click();
+        h.run();
+        assert!(
+            !changed_ever.get(),
+            "Reset must NOT report a changed config (it only re-seeds the working copy)"
+        );
+        assert!(
+            h.query_by_label("reset to the active theme").is_some(),
+            "Reset shows its status"
+        );
+        // No theme file was written by a Reset (it does not save).
+        assert!(
+            !tmp.path().join("themes").exists()
+                || std::fs::read_dir(tmp.path().join("themes"))
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true),
+            "Reset must not write any theme file"
+        );
+    }
 }
