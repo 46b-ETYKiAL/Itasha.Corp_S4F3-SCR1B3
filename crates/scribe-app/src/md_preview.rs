@@ -503,4 +503,208 @@ mod tests {
         let _ = parse("");
         let _ = parse("###### h6 only");
     }
+
+    #[test]
+    fn parses_all_six_heading_levels_to_u8() {
+        // Covers the H4/H5/H6 arms of heading_to_u8 that the 1-3 test missed.
+        let b = parse("#### Four\n\n##### Five\n\n###### Six\n");
+        assert!(matches!(&b[0], MdBlock::Heading { level: 4, text } if text == "Four"));
+        assert!(matches!(&b[1], MdBlock::Heading { level: 5, text } if text == "Five"));
+        assert!(matches!(&b[2], MdBlock::Heading { level: 6, text } if text == "Six"));
+    }
+
+    #[test]
+    fn heading_to_u8_maps_every_level() {
+        assert_eq!(heading_to_u8(HeadingLevel::H1), 1);
+        assert_eq!(heading_to_u8(HeadingLevel::H2), 2);
+        assert_eq!(heading_to_u8(HeadingLevel::H3), 3);
+        assert_eq!(heading_to_u8(HeadingLevel::H4), 4);
+        assert_eq!(heading_to_u8(HeadingLevel::H5), 5);
+        assert_eq!(heading_to_u8(HeadingLevel::H6), 6);
+    }
+
+    #[test]
+    fn fenced_code_info_string_keeps_only_first_word() {
+        // `rust ignore` is a real CommonMark info-string; only `rust` is the lang.
+        let b = parse("```rust ignore\nlet x = 1;\n```\n");
+        match &b[0] {
+            MdBlock::CodeBlock { lang, code } => {
+                assert_eq!(lang.as_deref(), Some("rust"));
+                assert!(code.contains("let x = 1;"));
+            }
+            other => panic!("expected code block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fenced_code_without_lang_has_none() {
+        // Bare fence: info-string empty => lang None (the `first.is_empty()` arm).
+        let b = parse("```\nplain\n```\n");
+        match &b[0] {
+            MdBlock::CodeBlock { lang, code } => {
+                assert_eq!(*lang, None);
+                assert_eq!(code, "plain");
+            }
+            other => panic!("expected code block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn indented_code_block_has_no_lang() {
+        // A 4-space indented block is CodeBlockKind::Indented => lang None.
+        let b = parse("    indented code line\n");
+        let has_indented = b.iter().any(|blk| {
+            matches!(blk, MdBlock::CodeBlock { lang, code }
+                if lang.is_none() && code.contains("indented code line"))
+        });
+        assert!(has_indented, "expected an indented code block, got {b:?}");
+    }
+
+    #[test]
+    fn code_block_preserves_internal_newlines_but_trims_trailing() {
+        // Exercises the multi-line buffer + the single trailing-newline pop.
+        let b = parse("```\na\nb\nc\n```\n");
+        match &b[0] {
+            MdBlock::CodeBlock { code, .. } => {
+                assert_eq!(code, "a\nb\nc");
+                assert!(!code.ends_with('\n'));
+            }
+            other => panic!("expected code block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_list_flushes_parent_item_before_children() {
+        // The parent item's own text must be emitted BEFORE its nested children
+        // (the `flushed` flag path in Start(Tag::List)). Parent appears first.
+        let b = parse("- parent text\n    - child a\n    - child b\n");
+        let items: Vec<(&u8, &str, String)> = b
+            .iter()
+            .filter_map(|blk| match blk {
+                MdBlock::ListItem {
+                    depth,
+                    marker,
+                    runs,
+                } => Some((depth, marker.as_str(), runs_text(runs))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(items.len(), 3, "got {items:?}");
+        // Parent (depth 0) emitted first, then the two depth-1 children.
+        assert_eq!(*items[0].0, 0);
+        assert_eq!(items[0].2, "parent text");
+        assert_eq!(*items[1].0, 1);
+        assert_eq!(items[1].2, "child a");
+        assert_eq!(*items[2].0, 1);
+        assert_eq!(items[2].2, "child b");
+    }
+
+    #[test]
+    fn ordered_list_ordinals_increment_from_custom_start() {
+        // pulldown-cmark passes the list start index; markers must reflect it.
+        let b = parse("5. five\n6. six\n7. seven\n");
+        let markers: Vec<&str> = b
+            .iter()
+            .filter_map(|blk| match blk {
+                MdBlock::ListItem { marker, .. } => Some(marker.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(markers, vec!["5.", "6.", "7."]);
+    }
+
+    #[test]
+    fn nested_blockquote_paragraph_is_a_quote() {
+        // quote_depth > 0 at paragraph-end routes runs to MdBlock::Quote.
+        let b = parse("> outer\n>\n> still quoted\n");
+        assert!(
+            b.iter().any(|blk| matches!(blk, MdBlock::Quote(_))),
+            "expected a Quote block, got {b:?}"
+        );
+        // After the quote closes, a plain paragraph is NOT a quote.
+        let b2 = parse("> quoted\n\nplain after\n");
+        assert!(matches!(&b2[0], MdBlock::Quote(_)));
+        assert!(
+            b2.iter().any(|blk| matches!(blk, MdBlock::Paragraph(_))),
+            "expected a trailing Paragraph, got {b2:?}"
+        );
+    }
+
+    #[test]
+    fn soft_break_joins_lines_with_space() {
+        // A soft line break inside a paragraph becomes a single space run.
+        let b = parse("line one\nline two\n");
+        match &b[0] {
+            MdBlock::Paragraph(runs) => {
+                assert_eq!(runs_text(runs), "line one line two");
+            }
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hard_break_inside_code_block_keeps_newline() {
+        // Inside a fence, a break is a literal newline, not a space.
+        let b = parse("```\nfirst\nsecond\n```\n");
+        match &b[0] {
+            MdBlock::CodeBlock { code, .. } => assert_eq!(code, "first\nsecond"),
+            other => panic!("expected code block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trailing_runs_from_truncated_paragraph_are_flushed() {
+        // A document that ends mid-paragraph (no blank-line close) still emits
+        // the dangling runs via the post-loop flush.
+        let b = parse("dangling text with no trailing newline close");
+        assert!(
+            b.iter().any(|blk| matches!(blk, MdBlock::Paragraph(runs)
+                if runs_text(runs).contains("dangling text"))),
+            "expected the dangling paragraph to be flushed, got {b:?}"
+        );
+    }
+
+    #[test]
+    fn to_html_renders_lists_and_code() {
+        let html = to_html("- a\n- b\n\n```\ncode\n```\n");
+        assert!(html.contains("<ul>"));
+        assert!(html.contains("<li>a</li>"));
+        assert!(html.contains("<pre><code>"));
+        // The embedded stylesheet is always present.
+        assert!(html.contains("font-family:ui-monospace"));
+    }
+
+    /// Render the full block model through the real egui `show` path so the
+    /// per-variant widget arms (heading sizes, quote indent, code frame, list
+    /// indent, rule, links, bold/italic/code runs) are all executed. Headless
+    /// via egui_kittest — no GPU. We assert the rendered AccessKit tree exposes
+    /// the heading + link text, proving `show`/`render_runs` ran end to end.
+    #[test]
+    fn show_renders_every_block_variant_headlessly() {
+        use egui_kittest::kittest::Queryable as _;
+        let md = "# Big Heading\n\n#### Small Heading\n\n\
+                  Para with **bold** *italic* and `code` and [a link](https://e.com)\n\n\
+                  > a quote\n\n\
+                  ```rust\nfn main() {}\n```\n\n\
+                  - bullet one\n    - nested two\n\n\
+                  1. ordinal one\n\n\
+                  ---\n";
+        let accent = Color32::from_rgb(0x00, 0xd0, 0xa0);
+        let muted = Color32::from_rgb(0x80, 0x80, 0x80);
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(600.0, 800.0))
+            .build_ui(move |ui| show(ui, md, accent, muted));
+        h.run();
+        // The heading text and the link text reached the accessibility tree.
+        assert!(h.query_by_label("Big Heading").is_some());
+        assert!(h.query_by_label("Small Heading").is_some());
+        assert!(h.query_by_label("a link").is_some());
+    }
+
+    #[test]
+    fn show_empty_source_renders_nothing_without_panic() {
+        let mut h = egui_kittest::Harness::builder()
+            .build_ui(|ui| show(ui, "", Color32::WHITE, Color32::GRAY));
+        h.run();
+    }
 }
