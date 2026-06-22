@@ -173,4 +173,68 @@ mod tests {
         assert!(search_project(&dir, &q("")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn skips_hidden_entries_and_skip_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        // A hidden file and a file under a SKIP_DIR must NOT be searched; a normal
+        // sibling file must be.
+        std::fs::write(dir.path().join(".hidden.txt"), "TODO in hidden").unwrap();
+        let skip = dir.path().join("node_modules");
+        std::fs::create_dir_all(&skip).unwrap();
+        std::fs::write(skip.join("dep.txt"), "TODO in node_modules").unwrap();
+        std::fs::write(dir.path().join("real.txt"), "TODO in real file").unwrap();
+
+        let hits = search_project(dir.path(), &q("TODO"));
+        assert_eq!(hits.len(), 1, "only the visible, non-skipped file matches");
+        assert!(hits[0].path.ends_with("real.txt"));
+    }
+
+    #[test]
+    fn skips_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // A file just over the 8 MiB cap is skipped even though it contains the
+        // pattern; a small file is searched.
+        let mut big = "x".repeat((MAX_FILE_BYTES as usize) + 16);
+        big.push_str("\nTODO big\n");
+        std::fs::write(dir.path().join("big.txt"), big).unwrap();
+        std::fs::write(dir.path().join("small.txt"), "TODO small").unwrap();
+
+        let hits = search_project(dir.path(), &q("TODO"));
+        assert_eq!(hits.len(), 1, "the oversized file is skipped");
+        assert!(hits[0].path.ends_with("small.txt"));
+    }
+
+    #[test]
+    fn reports_one_based_line_and_column() {
+        let dir = tempfile::tempdir().unwrap();
+        // A match NOT at column 1 on a later line exercises the line/col mapping.
+        std::fs::write(dir.path().join("c.txt"), "first\nab TODO cd\n").unwrap();
+        let hits = search_project(dir.path(), &q("TODO"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, 2, "1-based line");
+        assert_eq!(hits[0].col, 4, "1-based column past 'ab '");
+        assert_eq!(hits[0].line_text, "ab TODO cd");
+    }
+
+    #[test]
+    fn truncates_very_long_match_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        // A line far longer than MAX_LINE_DISPLAY with a match is truncated with
+        // an ellipsis so the results pane stays bounded.
+        let mut long = String::from("TODO");
+        long.push_str(&"-".repeat(MAX_LINE_DISPLAY + 100));
+        std::fs::write(dir.path().join("long.txt"), long).unwrap();
+        let hits = search_project(dir.path(), &q("TODO"));
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].line_text.ends_with('…'),
+            "an over-long line is ellipsis-truncated"
+        );
+        assert_eq!(
+            hits[0].line_text.chars().count(),
+            MAX_LINE_DISPLAY + 1,
+            "truncated to the display cap plus the ellipsis"
+        );
+    }
 }
