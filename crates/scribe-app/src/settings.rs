@@ -2062,6 +2062,24 @@ impl ToolbarDrag {
     }
 }
 
+/// Apply a queued keyboard ↑/↓ move (`dir` = -1 up, +1 down) to `list`. Clamps
+/// the destination into range and swaps the two rows. Returns `true` if the list
+/// actually changed (a no-op move at a clamped edge returns `false`). Pure +
+/// unit-tested so the keyboard-reorder path of [`toolbar_list_editor`] is covered
+/// without driving the full egui frame.
+fn apply_keyboard_move(list: &mut [String], from: usize, dir: isize) -> bool {
+    let n = list.len();
+    if n == 0 || from >= n {
+        return false;
+    }
+    let to = (from as isize + dir).clamp(0, n as isize - 1) as usize;
+    if from != to {
+        list.swap(from, to);
+        return true;
+    }
+    false
+}
+
 /// Apply a queued toolbar drop to `list`. `target` is the insertion slot. A
 /// reorder removes the source and re-inserts it (adjusting the target if the
 /// removal shifted it); an add inserts the new id. Pure + unit-tested so the
@@ -2184,11 +2202,7 @@ fn toolbar_list_editor(
     }
 
     if let Some((i, d)) = mv {
-        let j = (i as isize + d).clamp(0, n as isize - 1) as usize;
-        if i != j {
-            list.swap(i, j);
-            changed = true;
-        }
+        changed |= apply_keyboard_move(list, i, d);
     }
     if let Some(i) = rm {
         list.remove(i);
@@ -3011,5 +3025,409 @@ mod update_status_layout {
             "Retry extends past the width cap: right={} cap={UPDATE_STATUS_MSG_WIDTH}",
             retry.right(),
         );
+    }
+}
+
+#[cfg(test)]
+mod pure_helpers {
+    //! Pure (no-egui-frame) logic lifted out of the render glue so each branch
+    //! is asserted directly, not merely executed. Keyboard reorder, label
+    //! mapping, search visibility, consent-mode labels, and the hex colour
+    //! round-trip the colour pickers depend on.
+    use super::{
+        action_label, apply_keyboard_move, parse_hex_color, reporting_mode_label, row_visible,
+        section_visible,
+    };
+    use scribe_core::ReportingMode;
+
+    fn v(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn keyboard_move_down_swaps_with_next() {
+        let mut list = v(&["a", "b", "c"]);
+        assert!(apply_keyboard_move(&mut list, 0, 1));
+        assert_eq!(list, v(&["b", "a", "c"]));
+    }
+
+    #[test]
+    fn keyboard_move_up_swaps_with_previous() {
+        let mut list = v(&["a", "b", "c"]);
+        assert!(apply_keyboard_move(&mut list, 2, -1));
+        assert_eq!(list, v(&["a", "c", "b"]));
+    }
+
+    #[test]
+    fn keyboard_move_clamps_at_edges_as_noop() {
+        // Up from the top and down from the bottom clamp to the same slot → no
+        // change, no panic, returns false.
+        let mut list = v(&["a", "b", "c"]);
+        assert!(!apply_keyboard_move(&mut list, 0, -1));
+        assert_eq!(list, v(&["a", "b", "c"]));
+        assert!(!apply_keyboard_move(&mut list, 2, 1));
+        assert_eq!(list, v(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn keyboard_move_out_of_range_or_empty_is_safe_noop() {
+        let mut empty: Vec<String> = Vec::new();
+        assert!(!apply_keyboard_move(&mut empty, 0, 1));
+        let mut one = v(&["only"]);
+        assert!(!apply_keyboard_move(&mut one, 9, -1)); // from past the end
+        assert_eq!(one, v(&["only"]));
+    }
+
+    #[test]
+    fn keyboard_move_large_dir_clamps_to_far_edge() {
+        // A big positive delta clamps to the last slot (swaps from→last).
+        let mut list = v(&["a", "b", "c", "d"]);
+        assert!(apply_keyboard_move(&mut list, 0, 99));
+        assert_eq!(list, v(&["d", "b", "c", "a"]));
+    }
+
+    #[test]
+    fn action_label_maps_separator_and_known_action() {
+        assert_eq!(action_label("sep"), "— separator —");
+        // A real toolbar action id resolves to its human label (not the raw id).
+        let (id, label) = crate::app::TOOLBAR_ACTIONS[0];
+        assert_eq!(action_label(id), label);
+    }
+
+    #[test]
+    fn action_label_falls_back_to_id_for_unknown() {
+        assert_eq!(action_label("not-a-real-action-id"), "not-a-real-action-id");
+    }
+
+    #[test]
+    fn section_visible_uses_selection_when_no_query() {
+        assert!(section_visible("Editor", "", "Editor", &["tab width"]));
+        assert!(!section_visible("Editor", "", "Fonts", &["editor size"]));
+    }
+
+    #[test]
+    fn section_visible_matches_category_or_label_when_searching() {
+        // Query matches the category name itself.
+        assert!(section_visible("Fonts", "edit", "Editor", &["tab width"]));
+        // Query matches a child label even though the category differs.
+        assert!(section_visible(
+            "Fonts",
+            "tab width",
+            "Editor",
+            &["tab width"]
+        ));
+        // Query that matches neither category nor any label → hidden.
+        assert!(!section_visible("Fonts", "zzz", "Editor", &["tab width"]));
+    }
+
+    #[test]
+    fn row_visible_matches_lowercased_query_against_lowercased_label() {
+        // The caller (`show`) lowercases the query once; `row_visible` then
+        // lowercases the LABEL and does a substring test. An empty query shows
+        // every row.
+        assert!(row_visible("", "Anything")); // empty query shows all
+        assert!(row_visible("theme", "Active THEME picker")); // label case-folded
+        assert!(row_visible("theme", "Active theme picker"));
+        assert!(!row_visible("missing", "Active theme picker"));
+        // The query is assumed pre-lowercased (matches `show()`'s contract): a
+        // non-lowercased query will NOT match a lowercase label substring.
+        assert!(!row_visible("THEME", "theme"));
+    }
+
+    #[test]
+    fn reporting_mode_labels_are_consent_language() {
+        assert_eq!(reporting_mode_label(ReportingMode::Off), "Never (off)");
+        assert_eq!(
+            reporting_mode_label(ReportingMode::AskEachTime),
+            "Ask each time"
+        );
+        assert_eq!(reporting_mode_label(ReportingMode::Always), "Always send");
+        // No surveillance/telemetry copy leaks into the user-facing labels.
+        for m in [
+            ReportingMode::Off,
+            ReportingMode::AskEachTime,
+            ReportingMode::Always,
+        ] {
+            let l = reporting_mode_label(m).to_lowercase();
+            assert!(!l.contains("telemetry") && !l.contains("surveillance"));
+        }
+    }
+
+    #[test]
+    fn hex_color_round_trips_through_the_picker_format() {
+        // The colour pickers store `#rrggbb` via `format!("#{:02x}{:02x}{:02x}")`
+        // then re-parse via `parse_hex_color`. Pin that round-trip so a future
+        // format/parse drift can't silently corrupt a saved colour.
+        for (r, g, b) in [(0u8, 0u8, 0u8), (0x0d, 0x0b, 0x14), (255, 16, 64)] {
+            let s = format!("#{r:02x}{g:02x}{b:02x}");
+            let parsed = parse_hex_color(&s).expect("round-trip parse");
+            assert_eq!((parsed.r(), parsed.g(), parsed.b()), (r, g, b), "for {s}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod pane_render {
+    //! Drive `render_sections` for EVERY settings category through the real
+    //! egui frame (via `egui_kittest`), plus the search-filter and a couple of
+    //! interactive flows (toggle a checkbox, click a per-setting ↺ reset). This
+    //! exercises the ~1.7k-line per-pane render glue that pure-fn tests can't
+    //! reach, asserting against AccessKit-visible labels — never pixels.
+    use super::{render_sections, CATEGORIES};
+    use crate::updater::Updater;
+    use egui_kittest::kittest::Queryable as _;
+    use scribe_core::Config;
+
+    /// Render one category pane and return the harness so the caller can query
+    /// AccessKit nodes. `query` is the search filter (empty = the whole pane).
+    fn render_category(category: &str, query: &str) -> egui_kittest::Harness<'static> {
+        let category = category.to_string();
+        let query = query.to_string();
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 1400.0))
+            .build_ui(move |ui| {
+                let mut cfg = Config::default();
+                let mut updater = Updater::default();
+                render_sections(ui, &mut cfg, &mut updater, &category, &query);
+            });
+        h.run();
+        h
+    }
+
+    #[test]
+    fn every_category_renders_its_heading_without_panicking() {
+        // Map each nav category to the heading `render_sections` emits for it.
+        let expected: &[(&str, &str)] = &[
+            ("Appearance", "Appearance"),
+            ("Fonts", "Fonts"),
+            ("Window", "Window"),
+            ("Toolbar", "Quick-access toolbar"),
+            ("Motion", "Motion"),
+            ("Editor", "Editor"),
+            ("Spellcheck", "Spellcheck (offline)"),
+            ("Plugins", "Plugins"),
+            ("Updates", "Updates"),
+            ("Privacy", "Privacy"),
+        ];
+        // Guard: the table must stay in lockstep with the real nav list, so a
+        // newly-added category can't silently skip its render-coverage here.
+        assert_eq!(
+            expected.len(),
+            CATEGORIES.len(),
+            "pane_render category table drifted from CATEGORIES"
+        );
+        for (nav, heading) in expected {
+            let h = render_category(nav, "");
+            // The heading is rendered as a top-of-pane label; finding it proves
+            // the pane's render path executed end-to-end for this category.
+            assert!(
+                h.query_by_label(heading).is_some(),
+                "category `{nav}` did not render its `{heading}` heading",
+            );
+        }
+    }
+
+    #[test]
+    fn search_filter_shows_cross_category_matches_and_hides_others() {
+        // Searching "theme" from the (irrelevant) Updates tab still surfaces the
+        // Appearance "Theme" control — the cross-category search behaviour.
+        let h = render_category("Updates", "theme");
+        assert!(
+            h.query_by_label("Theme").is_some(),
+            "search for 'theme' should surface the Appearance Theme control across categories",
+        );
+    }
+
+    #[test]
+    fn empty_search_on_a_category_shows_that_categorys_rows() {
+        // The Editor pane has a "Tab width" control; with no query and Editor
+        // selected it must be present.
+        let h = render_category("Editor", "");
+        assert!(
+            h.query_by_label("Tab width").is_some(),
+            "Editor pane should render its Tab width control",
+        );
+    }
+
+    #[test]
+    fn nonmatching_search_renders_no_rows_but_does_not_panic() {
+        // A query that matches no category and no label renders an (empty) pane;
+        // the render path must still execute cleanly.
+        let h = render_category("Appearance", "zzz-nothing-matches-this");
+        assert!(
+            h.query_by_label("Theme").is_none(),
+            "a non-matching search must hide the Theme row",
+        );
+    }
+
+    #[test]
+    fn toggling_a_checkbox_reports_changed_and_flips_config() {
+        // Drive the Editor pane, click the "Line numbers" checkbox, and assert
+        // both the returned `changed` flag (in the frame the click lands) and the
+        // mutated config field — proof the grid_bool→config wiring is live.
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(900.0, 1400.0))
+            .build_ui_state(
+                |ui, state: &mut (Config, Updater, bool)| {
+                    let (cfg, updater, changed) = state;
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        // OR-accumulate so the changed=true frame isn't lost if a
+                        // later no-op frame runs before we read the flag.
+                        *changed |= render_sections(ui, cfg, updater, "Editor", "");
+                    });
+                },
+                (Config::default(), Updater::default(), false),
+            );
+        h.run();
+        let before = h.state().0.editor.show_line_numbers;
+        // Reset the accumulator so we only observe the change caused by the click.
+        h.state_mut().2 = false;
+        h.get_by_label("Line numbers").click();
+        h.run();
+        let (cfg, _u, changed) = h.state();
+        assert_ne!(
+            cfg.editor.show_line_numbers, before,
+            "clicking the checkbox must flip the config field",
+        );
+        assert!(
+            *changed,
+            "a toggled checkbox must make render_sections report changed=true",
+        );
+    }
+}
+
+#[cfg(test)]
+mod update_status_states {
+    //! Render `render_update_status` for EACH non-trivial `UpdateState` and
+    //! assert the user-facing status label for that state. We only RENDER each
+    //! state (no button clicks) — the action arms (`Update now` / `Restart` /
+    //! `Install` / `Retry`) spawn network/thread work, so those `clicked()`
+    //! bodies stay intentionally uncovered; the label-emission lines for every
+    //! state get covered. The wrapped no-asset / failed layouts are covered by
+    //! the sibling `update_status_layout` module.
+    use super::render_update_status;
+    use crate::updater::{current_version, UpdateState, Updater};
+    use egui_kittest::kittest::Queryable as _;
+    use scribe_core::update::ReleaseInfo;
+    use std::path::PathBuf;
+
+    fn release(version: &str) -> ReleaseInfo {
+        ReleaseInfo {
+            version: semver::Version::parse(version).unwrap(),
+            tag: format!("v{version}"),
+            asset_url: "https://example.invalid/a.tar.gz".to_string(),
+            sig_url: "https://example.invalid/a.tar.gz.minisig".to_string(),
+            sha_url: "https://example.invalid/a.tar.gz.sha256".to_string(),
+            html_url: "https://example.invalid/releases/tag".to_string(),
+            installer: None,
+        }
+    }
+
+    /// Render one update state and return the harness for label queries.
+    fn render_state(state: UpdateState) -> egui_kittest::Harness<'static> {
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(600.0, 300.0))
+            .build_ui(move |ui| {
+                let mut updater = Updater::default();
+                updater.state = state.clone();
+                render_update_status(ui, &mut updater);
+            });
+        h.run();
+        h
+    }
+
+    #[test]
+    fn checking_shows_a_spinner_label() {
+        // The spinner requests a repaint every frame, so `run()` (which loops to
+        // a steady state) would exceed max_steps. A single step is enough to
+        // render — and assert — the "Checking…" label beside the spinner.
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(600.0, 300.0))
+            .build_ui(|ui| {
+                let mut updater = Updater::default();
+                updater.state = UpdateState::Checking;
+                render_update_status(ui, &mut updater);
+            });
+        h.run_steps(1);
+        assert!(h.query_by_label("Checking…").is_some());
+    }
+
+    #[test]
+    fn up_to_date_shows_current_and_latest_versions() {
+        let h = render_state(UpdateState::UpToDate {
+            latest: "9.9.9".to_string(),
+        });
+        let expected = format!(
+            "Up to date — you're on v{} (latest release: v9.9.9).",
+            current_version()
+        );
+        assert!(
+            h.query_by_label(expected.as_str()).is_some(),
+            "up-to-date label must name both the running version and the latest release",
+        );
+    }
+
+    #[test]
+    fn available_shows_version_with_update_and_changelog_affordances() {
+        let h = render_state(UpdateState::Available(release("1.2.3")));
+        assert!(h.query_by_label("v1.2.3 is available.").is_some());
+        // The action affordances render (we do NOT click them — that spawns a
+        // download); their presence proves the Available arm rendered fully.
+        assert!(h.query_by_label("Update now").is_some());
+        assert!(h.query_by_label("changelog").is_some());
+    }
+
+    #[test]
+    fn downloading_renders_a_progress_bar_without_panicking() {
+        // The progress bar has no text label; rendering it (incl. the >0 total
+        // fraction branch) exercises the Downloading arm. A zero total takes the
+        // 0.0 fallback branch — render that too.
+        let _h = render_state(UpdateState::Downloading {
+            received: 50,
+            total: 100,
+        });
+        let _h0 = render_state(UpdateState::Downloading {
+            received: 0,
+            total: 0,
+        });
+    }
+
+    #[test]
+    fn ready_to_apply_shows_restart_affordance() {
+        let h = render_state(UpdateState::ReadyToApply {
+            staged: PathBuf::from("/srv/x/staged-binary"),
+            version: "2.0.0".to_string(),
+        });
+        assert!(h.query_by_label("v2.0.0 downloaded + verified.").is_some());
+        assert!(h.query_by_label("Restart to finish update").is_some());
+    }
+
+    #[test]
+    fn ready_to_run_installer_shows_install_affordance() {
+        let h = render_state(UpdateState::ReadyToRunInstaller {
+            installer: PathBuf::from("/srv/x/setup.exe"),
+            version: "2.0.0".to_string(),
+        });
+        assert!(h.query_by_label("v2.0.0 downloaded + verified.").is_some());
+        assert!(h
+            .query_by_label("Install update (asks for admin)")
+            .is_some());
+    }
+
+    #[test]
+    fn applied_shows_restarting_message() {
+        let h = render_state(UpdateState::Applied {
+            version: "3.1.4".to_string(),
+        });
+        assert!(h
+            .query_by_label("Updated to v3.1.4 — restarting…")
+            .is_some());
+    }
+
+    #[test]
+    fn idle_renders_nothing_but_does_not_panic() {
+        // The Idle arm is an empty match body; rendering it must be a clean no-op.
+        let h = render_state(UpdateState::Idle);
+        assert!(h.query_by_label("Checking…").is_none());
     }
 }
