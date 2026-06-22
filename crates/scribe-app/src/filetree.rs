@@ -291,6 +291,219 @@ mod tests {
         );
     }
 
+    /// Build a `RawInput` carrying a single key-down press for `key`, the way
+    /// egui receives it from the windowing layer. `handle_input` consumes the
+    /// press via `consume_key`, so one event per frame is what we drive.
+    fn key_input(key: egui::Key) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Drive a single key through `handle_input` against a state with a known
+    /// visible list, returning the focused path after the press (and any
+    /// Enter-open result). Runs one real egui frame so `consume_key` fires.
+    fn press(state: &mut FileTreeState, key: egui::Key) -> (Option<PathBuf>, Option<PathBuf>) {
+        let ctx = egui::Context::default();
+        let mut opened = None;
+        let _ = ctx.run_ui(key_input(key), |ui| {
+            opened = state.handle_input(ui.ctx());
+        });
+        (state.focused.clone(), opened)
+    }
+
+    /// A synthetic visible list of plain paths (no filesystem needed) — the
+    /// keyboard handler is pure over `visible`/`focused`.
+    fn seed_visible(state: &mut FileTreeState, paths: &[&str]) {
+        state.visible = paths.iter().map(PathBuf::from).collect();
+    }
+
+    #[test]
+    fn handle_input_noop_on_empty_visible_list() {
+        let mut s = FileTreeState::default();
+        // No visible entries → every key is a no-op, focus stays None.
+        let (focused, opened) = press(&mut s, egui::Key::ArrowDown);
+        assert!(focused.is_none());
+        assert!(opened.is_none());
+    }
+
+    #[test]
+    fn handle_input_arrow_down_from_none_lands_on_first() {
+        let mut s = FileTreeState::default();
+        seed_visible(&mut s, &["/srv/x/root", "/srv/x/a.txt", "/srv/x/b.txt"]);
+        let (focused, _) = press(&mut s, egui::Key::ArrowDown);
+        assert_eq!(focused.unwrap(), PathBuf::from("/srv/x/root"));
+    }
+
+    #[test]
+    fn handle_input_arrow_down_advances_and_clamps_at_bottom() {
+        let mut s = FileTreeState::default();
+        seed_visible(&mut s, &["/srv/x/root", "/srv/x/a.txt", "/srv/x/b.txt"]);
+        s.focused = Some(PathBuf::from("/srv/x/a.txt")); // index 1
+        let (focused, _) = press(&mut s, egui::Key::ArrowDown);
+        assert_eq!(focused.unwrap(), PathBuf::from("/srv/x/b.txt")); // index 2
+                                                                     // Already at the last entry → Down clamps, stays put.
+        let (focused, _) = press(&mut s, egui::Key::ArrowDown);
+        assert_eq!(focused.unwrap(), PathBuf::from("/srv/x/b.txt"));
+    }
+
+    #[test]
+    fn handle_input_arrow_up_retreats_and_clamps_at_top() {
+        let mut s = FileTreeState::default();
+        seed_visible(&mut s, &["/srv/x/root", "/srv/x/a.txt", "/srv/x/b.txt"]);
+        s.focused = Some(PathBuf::from("/srv/x/b.txt")); // index 2
+        let (focused, _) = press(&mut s, egui::Key::ArrowUp);
+        assert_eq!(focused.unwrap(), PathBuf::from("/srv/x/a.txt")); // index 1
+        let (focused, _) = press(&mut s, egui::Key::ArrowUp);
+        assert_eq!(focused.unwrap(), PathBuf::from("/srv/x/root")); // index 0
+                                                                    // At the top → Up clamps to 0.
+        let (focused, _) = press(&mut s, egui::Key::ArrowUp);
+        assert_eq!(focused.unwrap(), PathBuf::from("/srv/x/root"));
+    }
+
+    #[test]
+    fn handle_input_arrow_up_from_none_lands_on_first() {
+        let mut s = FileTreeState::default();
+        seed_visible(&mut s, &["/srv/x/root", "/srv/x/a.txt"]);
+        // focused None → the `Some(0) | None => 0` arm picks index 0.
+        let (focused, _) = press(&mut s, egui::Key::ArrowUp);
+        assert_eq!(focused.unwrap(), PathBuf::from("/srv/x/root"));
+    }
+
+    #[test]
+    fn handle_input_home_and_end_jump_to_bounds() {
+        let mut s = FileTreeState::default();
+        seed_visible(&mut s, &["/srv/x/root", "/srv/x/a.txt", "/srv/x/b.txt"]);
+        s.focused = Some(PathBuf::from("/srv/x/a.txt"));
+        let (focused, _) = press(&mut s, egui::Key::End);
+        assert_eq!(focused.unwrap(), PathBuf::from("/srv/x/b.txt"));
+        let (focused, _) = press(&mut s, egui::Key::Home);
+        assert_eq!(focused.unwrap(), PathBuf::from("/srv/x/root"));
+    }
+
+    #[test]
+    fn handle_input_enter_opens_a_focused_file() {
+        // Enter returns Some(path) only when the focused entry is a real file.
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("real.txt");
+        File::create(&file).unwrap();
+        let mut s = FileTreeState {
+            visible: vec![file.clone()],
+            focused: Some(file.clone()),
+        };
+        let (_, opened) = press(&mut s, egui::Key::Enter);
+        assert_eq!(opened.unwrap(), file);
+    }
+
+    #[test]
+    fn handle_input_enter_ignores_a_focused_directory() {
+        // Enter on a directory does NOT open (dirs are toggled by header click).
+        let dir = tempdir().unwrap();
+        let mut s = FileTreeState {
+            visible: vec![dir.path().to_path_buf()],
+            focused: Some(dir.path().to_path_buf()),
+        };
+        let (_, opened) = press(&mut s, egui::Key::Enter);
+        assert!(opened.is_none(), "directories must not open via Enter");
+    }
+
+    #[test]
+    fn handle_input_enter_with_no_focus_is_noop() {
+        let mut s = FileTreeState {
+            visible: vec![PathBuf::from("/srv/x/a.txt")],
+            ..Default::default()
+        };
+        // focused stays None.
+        let (_, opened) = press(&mut s, egui::Key::Enter);
+        assert!(opened.is_none());
+    }
+
+    /// `show` rebuilds the visible list every frame and seeds the root header
+    /// into it. Drive the real render headlessly and assert the root + its
+    /// children landed in `visible` (covers the `show` body + CollapsingHeader).
+    #[test]
+    fn show_builds_visible_list_with_root_first() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        create_dir(root.join("subdir")).unwrap();
+        File::create(root.join("note.txt")).unwrap();
+
+        let mut state = FileTreeState::default();
+        let ctx = egui::Context::default();
+        // Two frames: a CollapsingHeader body only runs once the header has been
+        // laid out, so the default-open root reads its children on frame 2.
+        for _ in 0..2 {
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                let _ = state.show(ui, root);
+            });
+        }
+        // Root is element 0; the subdir + file appear after it.
+        assert_eq!(state.visible[0], root.to_path_buf());
+        assert!(state.visible.iter().any(|p| p.ends_with("subdir")));
+        assert!(state.visible.iter().any(|p| p.ends_with("note.txt")));
+    }
+
+    /// An unreadable directory path renders the "(unreadable)" leaf rather than
+    /// panicking — covers the `read_dir` Err arm of `dir_children`.
+    #[test]
+    fn dir_children_handles_unreadable_dir() {
+        // Point at a path that is a FILE, not a dir: read_dir errors on it.
+        let dir = tempdir().unwrap();
+        let not_a_dir = dir.path().join("plain.txt");
+        File::create(&not_a_dir).unwrap();
+        let mut visible = Vec::<PathBuf>::new();
+        let mut clicked: Option<PathBuf> = None;
+        let mut visited = HashSet::new();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            dir_children(
+                ui,
+                &not_a_dir,
+                &mut clicked,
+                &mut visible,
+                None,
+                0,
+                &mut visited,
+            );
+        });
+        // No children pushed; the function returned cleanly via the Err arm.
+        assert!(visible.is_empty());
+    }
+
+    /// A focused file in the rendered tree gets `selectable_label(selected=true)`
+    /// — drive a frame with focus set and confirm the file is still listed
+    /// (covers the `selected` branch of the file arm).
+    #[test]
+    fn dir_children_marks_focused_file_selected() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("focused.txt");
+        File::create(&file).unwrap();
+        let mut visible = Vec::<PathBuf>::new();
+        let mut clicked: Option<PathBuf> = None;
+        let mut visited = HashSet::new();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            dir_children(
+                ui,
+                root,
+                &mut clicked,
+                &mut visible,
+                Some(file.as_path()),
+                0,
+                &mut visited,
+            );
+        });
+        assert!(visible.iter().any(|p| p.ends_with("focused.txt")));
+    }
+
     /// The depth cap halts recursion on a pathologically deep REAL tree even
     /// when no symlink is involved (covers platforms where symlink creation is
     /// unavailable).
