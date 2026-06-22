@@ -1894,4 +1894,142 @@ manual_issues = \"ask_each_time\"
             Some(250.0)
         );
     }
+
+    // ---- MotionConfig clamps (previously uncovered) ----
+
+    #[test]
+    fn motion_flicker_and_mesh_density_clamp_to_their_bands() {
+        // A hand-edited TOML could drive these out of their design band; the
+        // clamps keep flicker within the accessibility-safe 0.20 ceiling and the
+        // mesh density within [0, 1], regardless of the stored value.
+        let wild = MotionConfig {
+            flicker_strength: 5.0,
+            mesh_density: 9.0,
+            ..Default::default()
+        };
+        assert_eq!(wild.clamped_flicker_strength(), 0.20, "flicker ceiling");
+        assert_eq!(wild.clamped_mesh_density(), 1.0, "mesh density ceiling");
+        let neg = MotionConfig {
+            flicker_strength: -1.0,
+            mesh_density: -1.0,
+            ..Default::default()
+        };
+        assert_eq!(neg.clamped_flicker_strength(), 0.0, "flicker floor");
+        assert_eq!(neg.clamped_mesh_density(), 0.0, "mesh density floor");
+        // An in-band value passes through untouched.
+        let ok = MotionConfig {
+            flicker_strength: 0.1,
+            mesh_density: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(ok.clamped_flicker_strength(), 0.1);
+        assert_eq!(ok.clamped_mesh_density(), 0.5);
+    }
+
+    // ---- save_to refuse-empty + parent creation (previously uncovered) ----
+
+    #[test]
+    fn save_to_creates_missing_parent_directories() {
+        // `save_to` must `create_dir_all` the parent so a first-run write into a
+        // not-yet-existing config dir succeeds rather than erroring on ENOENT.
+        let base = std::env::temp_dir().join(format!("scr1b3-mkdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("a").join("b").join("scr1b3.toml");
+        assert!(
+            !nested.parent().unwrap().exists(),
+            "parent absent before save"
+        );
+        Config::default()
+            .save_to(&nested)
+            .expect("save_to must create the parent chain and write");
+        assert!(nested.exists(), "config written into the created dir tree");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- load_or_default end-to-end via SCR1B3_CONFIG_DIR (previously uncovered) ----
+
+    /// Run `body` with `SCR1B3_CONFIG_DIR` pointed at `dir`, restoring the prior
+    /// value afterwards. Safe because the suite runs `--test-threads=1` (serial),
+    /// so no concurrent test observes the temporary env mutation.
+    fn with_config_dir(dir: &std::path::Path, body: impl FnOnce()) {
+        let prev = std::env::var_os("SCR1B3_CONFIG_DIR");
+        std::env::set_var("SCR1B3_CONFIG_DIR", dir);
+        body();
+        match prev {
+            Some(v) => std::env::set_var("SCR1B3_CONFIG_DIR", v),
+            None => std::env::remove_var("SCR1B3_CONFIG_DIR"),
+        }
+    }
+
+    #[test]
+    fn load_or_default_returns_defaults_when_no_file_present() {
+        // An empty (but existing) config dir has no scr1b3.toml → defaults, no
+        // error message, and nothing written.
+        let dir = std::env::temp_dir().join(format!("scr1b3-load-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        with_config_dir(&dir, || {
+            let (cfg, err) = Config::load_or_default();
+            assert_eq!(cfg, Config::default(), "absent file => defaults");
+            assert!(err.is_none(), "absent file is silent, not an error");
+        });
+        assert!(
+            !dir.join("scr1b3.toml").exists(),
+            "load must not create a file when none existed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_or_default_reads_existing_and_migrates_it_durably() {
+        // A pre-migration file (schema_version 0, the serde default for a missing
+        // key) is loaded, migrated up to the current schema, and the upgraded
+        // baseline is persisted so the one-time migration never re-runs.
+        let dir = std::env::temp_dir().join(format!("scr1b3-load-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scr1b3.toml");
+        // A minimal legacy file: no schema_version, line numbers explicitly off.
+        std::fs::write(&path, "[editor]\nshow_line_numbers = false\n").unwrap();
+        with_config_dir(&dir, || {
+            let (cfg, err) = Config::load_or_default();
+            assert!(err.is_none(), "a well-formed file loads cleanly");
+            assert_eq!(
+                cfg.schema_version, CURRENT_SCHEMA_VERSION,
+                "load_or_default must migrate up to the current schema"
+            );
+            // v0→v1 re-asserts the line-number baseline on a pre-migration file.
+            assert!(cfg.editor.show_line_numbers, "v0->v1 re-asserts the toggle");
+        });
+        // The migration was persisted (so it runs exactly once): re-reading the
+        // on-disk file now shows the bumped schema version.
+        let persisted = Config::from_toml_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            persisted.schema_version, CURRENT_SCHEMA_VERSION,
+            "the migrated config must be written back to disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_or_default_backs_up_a_malformed_file_and_falls_back() {
+        // A corrupt config must NOT block startup: load_or_default returns
+        // defaults + an error message AND preserves the original as a `.bak` so
+        // the user's real settings are recoverable.
+        let dir = std::env::temp_dir().join(format!("scr1b3-load-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scr1b3.toml");
+        std::fs::write(&path, "this is = = not valid toml [[[").unwrap();
+        with_config_dir(&dir, || {
+            let (cfg, err) = Config::load_or_default();
+            assert_eq!(cfg, Config::default(), "malformed => safe defaults");
+            assert!(err.is_some(), "the parse error is surfaced, not swallowed");
+        });
+        assert!(
+            path.with_extension("toml.bak").exists(),
+            "the malformed original must be preserved as a .bak"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

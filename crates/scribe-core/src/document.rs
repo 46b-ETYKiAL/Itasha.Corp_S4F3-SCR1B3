@@ -433,4 +433,76 @@ mod tests {
             proptest::prop_assert_eq!(reread, content.as_bytes());
         }
     }
+
+    // ---- accessors + error paths (previously uncovered) ----
+
+    #[test]
+    fn save_without_path_errors_directing_to_save_as() {
+        // A scratch buffer has no path: `save()` must surface a clear error
+        // rather than panic or silently no-op, so the caller routes to `save_as`.
+        let mut doc = Document::scratch();
+        doc.set_text("orphan\n");
+        let err = doc.save().expect_err("a pathless buffer cannot save()");
+        assert!(
+            err.to_string().contains("save_as"),
+            "error should direct the caller to save_as, got: {err}"
+        );
+    }
+
+    #[test]
+    fn save_as_sets_path_and_subsequent_save_reuses_it() {
+        // `save_as` on a scratch buffer persists AND records the path, so a
+        // following bare `save()` (no args) round-trips to the same file.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("named.txt");
+        let mut doc = Document::scratch();
+        doc.set_text("first\n");
+        let lossy = doc.save_as(&p).unwrap();
+        assert!(!lossy);
+        assert_eq!(doc.path().unwrap(), p.as_path());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "first\n");
+        // The path is now sticky — a plain save() rewrites the same file.
+        doc.set_text("second\n");
+        doc.save().unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "second\n");
+    }
+
+    #[test]
+    fn rope_and_len_accessors_reflect_content() {
+        // `rope()`, `len_bytes()`, and `len_lines()` are thin accessors over the
+        // backing rope; assert they report the buffer's real shape.
+        let mut doc = Document::scratch();
+        doc.set_text("ab\ncd\n");
+        assert_eq!(doc.len_bytes(), 6, "two 2-char lines + two newlines");
+        assert_eq!(doc.len_lines(), 3, "trailing newline yields a 3rd slot");
+        // The borrowed rope agrees with the owned-String view.
+        assert_eq!(doc.rope().to_string(), doc.text());
+    }
+
+    #[test]
+    fn mark_clean_clears_the_dirty_flag() {
+        // `mark_clean` is the inverse of `mark_dirty`; an externally-persisted
+        // buffer can be reset to clean without re-saving through Document.
+        let mut doc = Document::scratch();
+        doc.mark_dirty();
+        assert!(doc.is_dirty());
+        doc.mark_clean();
+        assert!(!doc.is_dirty(), "mark_clean must clear the dirty flag");
+    }
+
+    #[test]
+    fn language_hint_lowercases_extension_and_is_none_without_path() {
+        // The hint feeds syntax + spell; it must be the lowercased extension, or
+        // None for a pathless scratch buffer (no extension to derive from).
+        assert!(Document::scratch().language_hint().is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("Module.RS"); // mixed-case extension
+        std::fs::write(&p, b"fn main() {}\n").unwrap();
+        let doc = Document::open(&p).unwrap();
+        assert_eq!(
+            doc.language_hint().as_deref(),
+            Some("rs"),
+            "extension must be lowercased for case-insensitive routing"
+        );
+    }
 }
