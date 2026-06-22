@@ -1158,4 +1158,132 @@ mod tests {
             "must equal full after a deep edit (snapshot-stride resume)"
         );
     }
+
+    // ---- tile_into_lines: the pure absolute-span → per-line-span splitter ----
+    // (driven directly so the line-segmentation + cross-line-span split logic is
+    // exercised independently of which highlight engine produced the spans.)
+
+    const RED: [u8; 3] = [0xff, 0, 0];
+    const GRN: [u8; 3] = [0, 0xff, 0];
+
+    #[test]
+    fn tile_empty_text_yields_no_lines() {
+        assert!(tile_into_lines("", &[]).is_empty());
+    }
+
+    #[test]
+    fn tile_single_line_no_trailing_newline_is_one_line() {
+        // "abc" with a span over "ab": one line, one relative span 0..2.
+        let out = tile_into_lines("abc", &[(0, 2, RED)]);
+        assert_eq!(out.len(), 1, "a final line without \\n is its own line");
+        assert_eq!(out[0].len(), 1);
+        assert_eq!(out[0][0].range, 0..2);
+        assert_eq!(out[0][0].color, RED);
+    }
+
+    #[test]
+    fn tile_relativizes_spans_to_each_line_start() {
+        // "ab\ncd\n" → two lines at absolute [0,3) and [3,6). A span over the
+        // second line's "cd" (absolute 3..5) must become relative 0..2 on line 1.
+        let out = tile_into_lines("ab\ncd\n", &[(3, 5, GRN)]);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].is_empty(), "line 0 has no span");
+        assert_eq!(out[1].len(), 1);
+        assert_eq!(out[1][0].range, 0..2, "absolute 3..5 -> line-relative 0..2");
+        assert_eq!(out[1][0].color, GRN);
+    }
+
+    #[test]
+    fn tile_splits_a_span_that_crosses_a_line_boundary() {
+        // A single absolute span 1..5 over "ab\ncd\n" straddles the newline: it
+        // must be clipped into a piece on line 0 (1..3 incl. the \n) and a piece
+        // on line 1 (0..2), each relative to its own line.
+        let out = tile_into_lines("ab\ncd\n", &[(1, 5, RED)]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0].len(),
+            1,
+            "line 0 carries the head of the crossing span"
+        );
+        assert_eq!(out[0][0].range, 1..3, "1..3 = 'b' + the trailing newline");
+        assert_eq!(out[1].len(), 1, "line 1 carries the tail");
+        assert_eq!(out[1][0].range, 0..2, "tail relative to line 1 start");
+    }
+
+    #[test]
+    fn tile_drops_degenerate_and_empty_spans() {
+        // s >= e spans contribute nothing (the `if s >= e { continue }` guard).
+        let out = tile_into_lines("abc\n", &[(2, 2, RED), (3, 1, GRN)]);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].is_empty(),
+            "zero-width / inverted spans produce no output"
+        );
+    }
+
+    #[test]
+    fn tile_spans_in_final_line_without_newline() {
+        // "x\nyz" → line 0 "x\n" [0,2), line 1 "yz" [2,4) with NO trailing \n.
+        // A span over the last line's "z" (absolute 3..4) lands on line 1 at 1..2.
+        let out = tile_into_lines("x\nyz", &[(3, 4, GRN)]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1][0].range, 1..2);
+    }
+
+    // ---- pure helpers around the incremental cache (previously uncovered) ----
+
+    #[test]
+    fn incremental_state_clear_resets_and_a_fresh_pass_rebuilds() {
+        // `clear()` drops cached lines, snapshots, and the (ext, theme) key so the
+        // next pass is a full rebuild. We prove the post-clear pass still matches
+        // a full syntect pass (the cache's correctness contract holds after a
+        // reset, not just on first build).
+        let h = Highlighter::new();
+        let ext = Some("py");
+        let mut cache = IncrementalHighlightState::default();
+        let t = "a = 1\nb = 2\n";
+        let _ = h.highlight_document_incremental(t, ext, &mut cache);
+        cache.clear();
+        assert!(cache.lines.is_empty(), "clear empties the line cache");
+        assert!(cache.snapshots.is_empty(), "clear empties the snapshots");
+        assert!(
+            cache.key.is_none(),
+            "clear forgets the (ext, theme) identity"
+        );
+        // A pass after clear rebuilds and equals a full pass.
+        assert_eq!(
+            h.highlight_document_incremental(t, ext, &mut cache),
+            h.highlight_syntect(t, ext),
+            "a post-clear pass is byte-identical to a full pass"
+        );
+    }
+
+    #[test]
+    fn incremental_skips_and_clears_above_the_size_cap() {
+        // Above MAX_HIGHLIGHT_BYTES the incremental path skips highlighting
+        // entirely (returns empty) AND clears the cache so stale spans can't leak
+        // into a later under-cap pass.
+        let h = Highlighter::new();
+        let ext = Some("py");
+        let mut cache = IncrementalHighlightState::default();
+        // Prime the cache with a small pass first.
+        let _ = h.highlight_document_incremental("x = 1\n", ext, &mut cache);
+        assert!(!cache.lines.is_empty(), "primed cache is non-empty");
+        // Now feed an over-cap buffer.
+        let huge = "a\n".repeat(MAX_HIGHLIGHT_BYTES); // ~2x the cap in bytes
+        let out = h.highlight_document_incremental(&huge, ext, &mut cache);
+        assert!(out.is_empty(), "over-cap input is not highlighted");
+        assert!(cache.lines.is_empty(), "the cache is cleared on the skip");
+    }
+
+    #[test]
+    fn highlighter_default_equals_new() {
+        // `Default for Highlighter` must construct the same wired highlighter as
+        // `new()` — same bundled languages + selectable brand themes.
+        let d = Highlighter::default();
+        let n = Highlighter::new();
+        assert_eq!(d.language_count(), n.language_count());
+        assert_eq!(d.theme_name(), n.theme_name());
+        assert!(d.theme_names().contains(&"Operator Violet".to_string()));
+    }
 }
