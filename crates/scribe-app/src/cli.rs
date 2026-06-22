@@ -286,4 +286,54 @@ mod tests {
         let v = version_text();
         assert!(v.starts_with("scr1b3 "));
     }
+
+    #[test]
+    fn short_dash_flag_is_unknown_not_a_path() {
+        // A single-char unknown short flag (len > 1 after the dash check) is an
+        // error, not a positional path.
+        match parse_strs(&["-x"]) {
+            Action::Error(msg) => assert!(msg.contains("-x"), "{msg}"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_dash_is_treated_as_a_path_not_a_flag() {
+        // A lone "-" (len == 1) is NOT a flag — it falls through to a positional
+        // (the conventional stdin sentinel). It parses as a plain path here.
+        match parse_strs(&["-"]) {
+            Action::Launch {
+                path: Some(p),
+                jump: None,
+            } => assert_eq!(p, PathBuf::from("-")),
+            other => panic!("expected Launch with '-' path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn three_colon_pieces_with_non_numeric_tail_is_whole_path() {
+        // Three ':'-pieces where the tail is NOT numeric => the whole arg is a
+        // path (covers the 3-piece non-numeric fall-through).
+        let (path, jump) = split_path_jump("a:b:c");
+        assert_eq!(path, PathBuf::from("a:b:c"));
+        assert_eq!(jump, None);
+    }
+
+    #[test]
+    fn three_colon_pieces_only_tail_numeric_rejoins_head_and_mid() {
+        // tail numeric but mid not => only :line, and head:mid rejoin as the path
+        // (covers the `format!("{head}:{mid}")` reconstruction branch).
+        let (path, jump) = split_path_jump("C:weird:42");
+        assert_eq!(path, PathBuf::from("C:weird"));
+        assert_eq!(jump, Some((42, None)));
+    }
+
+    #[test]
+    fn two_colon_pieces_with_non_numeric_tail_is_whole_path() {
+        // Two ':'-pieces where the tail is not numeric => the whole arg is a path
+        // (covers the 2-piece non-numeric fall-through, e.g. a Windows drive).
+        let (path, jump) = split_path_jump("C:notnum");
+        assert_eq!(path, PathBuf::from("C:notnum"));
+        assert_eq!(jump, None);
+    }
 }
