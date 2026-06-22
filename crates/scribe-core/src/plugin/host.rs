@@ -368,6 +368,60 @@ mod tests {
     }
 
     #[test]
+    fn change_event_hook_registers_and_fires() {
+        // Exercises the `"change"` arm of HookEvent::parse (registered via
+        // on_event) and firing the Change event end-to-end.
+        let h = host_with(
+            r#"
+            fn on_change() { notify("changed"); }
+            on_event("change", "on_change");
+            "#,
+        );
+        let mut ctx = PluginContext::new("doc");
+        h.fire_event(HookEvent::Change, &mut ctx).unwrap();
+        assert_eq!(ctx.notifications, vec!["changed"]);
+    }
+
+    #[test]
+    fn unknown_event_name_registers_nothing() {
+        // on_event with an unrecognised name yields HookEvent::parse == None, so
+        // no hook is registered and no event ever fires it.
+        let h = host_with(
+            r#"
+            fn handler() { notify("should-never-run"); }
+            on_event("not-an-event", "handler");
+            "#,
+        );
+        for ev in [HookEvent::Open, HookEvent::Save, HookEvent::Change] {
+            let mut ctx = PluginContext::new("doc");
+            h.fire_event(ev, &mut ctx).unwrap();
+            assert!(ctx.notifications.is_empty(), "no hook bound for {ev:?}");
+        }
+    }
+
+    #[test]
+    fn log_builtin_is_callable_from_a_plugin() {
+        // The `log` host fn is a no-op sink (routes to tracing) but MUST be a
+        // registered, callable builtin — a script calling it runs without error.
+        let h = host_with(
+            r#"
+            fn cmd_log() { log("hello from plugin"); set_buffer_text("done"); }
+            register_command("logcmd", "Log", "cmd_log");
+            "#,
+        );
+        let mut ctx = PluginContext::new("x");
+        h.run_command("logcmd", &mut ctx).unwrap();
+        assert_eq!(ctx.text, "done", "the command ran past the log() call");
+    }
+
+    #[test]
+    fn plugin_host_default_equals_new() {
+        // `Default for PluginHost` constructs a usable host with no plugins.
+        let h = PluginHost::default();
+        assert!(h.commands().is_empty(), "a fresh host has no commands");
+    }
+
+    #[test]
     fn sandbox_has_no_file_access() {
         // Rhai has no `open`/`read_file`/`import fs` — such a script fails to
         // compile/run, proving no ambient filesystem capability.

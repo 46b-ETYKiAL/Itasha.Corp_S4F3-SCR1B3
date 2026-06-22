@@ -218,6 +218,35 @@ mod tests {
     }
 
     #[test]
+    fn at_points_the_store_at_an_explicit_file() {
+        // `at()` is the test/tools constructor — it stores keys at the exact path
+        // given (not a config-dir-derived one), and a first pin persists there.
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("custom-keys.toml");
+        let mut s = PinnedKeyStore::at(path.clone());
+        assert_eq!(s.pin_or_match("p.id", "K1").unwrap(), PinOutcome::New);
+        assert!(path.exists(), "pin persists to the explicit `at` path");
+    }
+
+    #[test]
+    fn load_surfaces_a_non_notfound_io_error() {
+        // When the store path is itself a DIRECTORY, read_to_string fails with a
+        // NON-NotFound error — the generic `Err(e) => Err(e)` arm must propagate
+        // it (not swallow it as an empty store), so a pin attempt errors.
+        let dir = tempdir().expect("tempdir");
+        // Use the directory path directly as the "store file".
+        let mut s = PinnedKeyStore::at(dir.path().to_path_buf());
+        let err = s
+            .pin_or_match("p.id", "K1")
+            .expect_err("reading a dir must err");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "a directory read is a real IO error, not a missing-file fallback"
+        );
+    }
+
+    #[test]
     fn first_pin_returns_new_and_persists() {
         let (_dir, mut s) = fresh_store();
         let outcome = s

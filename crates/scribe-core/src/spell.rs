@@ -602,4 +602,63 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].word, "commz");
     }
+
+    // ---- dictionary helpers (previously uncovered) ----
+
+    #[test]
+    fn bundled_en_us_loads_a_real_dictionary() {
+        // The compiled-in en_US word list must load with a substantial vocabulary
+        // and recognise common words (guards the include_str! asset wiring).
+        let e = HashSetEngine::bundled_en_us();
+        assert!(
+            e.word_count() > 1000,
+            "bundled dictionary should hold thousands of words, got {}",
+            e.word_count()
+        );
+        assert!(e.is_correct("the"));
+        assert!(e.is_correct("function"));
+    }
+
+    #[test]
+    fn word_count_sums_base_and_user_words() {
+        // word_count is base words + user words; adding a NEW user word bumps it.
+        let mut e = HashSetEngine::from_word_list("alpha\nbeta\n");
+        assert_eq!(e.word_count(), 2);
+        e.add_user_word("gamma");
+        assert_eq!(e.word_count(), 3, "a new user word raises the count");
+    }
+
+    #[test]
+    fn load_user_words_ingests_trimmed_nonblank_lines() {
+        // load_user_words splits on lines, trims, and drops blanks — a pasted
+        // user-dictionary blob with padding + empty lines loads cleanly and the
+        // words then pass spellcheck.
+        let mut e = HashSetEngine::from_word_list("known\n");
+        e.load_user_words("  custom1  \n\n\t\nCUSTOM2\n");
+        assert_eq!(e.word_count(), 3, "two non-blank user words ingested");
+        assert!(e.is_correct("custom1"), "trimmed user word is accepted");
+        assert!(e.is_correct("custom2"), "case-folded user word is accepted");
+        assert!(!e.is_correct("blank"));
+    }
+
+    #[test]
+    fn split_identifier_skips_empty_parts_from_separators() {
+        // Leading/trailing/double separators produce empty split parts that the
+        // `continue` guard drops, so the word list never contains "".
+        assert_eq!(split_identifier("_lead"), vec!["lead"]);
+        assert_eq!(split_identifier("trail_"), vec!["trail"]);
+        assert_eq!(split_identifier("a__b"), vec!["a", "b"]);
+        assert!(
+            split_identifier("___").is_empty(),
+            "all-separator => no words"
+        );
+    }
+
+    #[test]
+    fn damerau_levenshtein_empty_string_guards() {
+        // The empty-input early returns: distance to/from "" is the other length.
+        assert_eq!(damerau_levenshtein("", "abc"), 3);
+        assert_eq!(damerau_levenshtein("abcd", ""), 4);
+        assert_eq!(damerau_levenshtein("", ""), 0);
+    }
 }
