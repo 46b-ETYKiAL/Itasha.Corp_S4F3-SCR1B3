@@ -9392,6 +9392,9 @@ mod wrap_tests;
 mod indent_tests;
 
 #[cfg(test)]
+mod text_ops_tests;
+
+#[cfg(test)]
 mod foreground_area_guard;
 
 #[cfg(test)]
