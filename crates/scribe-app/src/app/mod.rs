@@ -9395,6 +9395,9 @@ mod indent_tests;
 mod text_ops_tests;
 
 #[cfg(test)]
+mod execute_builtin_tests;
+
+#[cfg(test)]
 mod foreground_area_guard;
 
 #[cfg(test)]
