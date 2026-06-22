@@ -576,4 +576,408 @@ mod tests {
             r"Start-Process -FilePath 'C:\o''brien\scr1b3-setup.exe' -Verb RunAs"
         );
     }
+
+    // ----------------------------------------------------------------------
+    // The update-decision reducer: handle_update_msg + state-transition logic.
+    //
+    // The on-launch routing here is the surface of the prior "Notify-default +
+    // update-mode" bug — `LaunchKind` decides whether a found update opens the
+    // yes/no modal (Auto), queues a passive toast (Notify), or shows inline
+    // state only (Manual). These tests pin every arm so a refactor can never
+    // again silently route a Notify launch to a modal (or vice-versa), and so
+    // the per-session "I declined this version" suppression (`skipped_version`)
+    // can never regress into a re-prompt loop.
+    //
+    // `egui::Context::default()` is headless (no GPU, no window) — the same
+    // construction the e2e/kittest suites use — so `request_repaint` /
+    // `send_viewport_cmd` are inert no-ops and the reducer is fully testable.
+    // ----------------------------------------------------------------------
+
+    /// A minimal `ReleaseInfo` fixture at `version` with no installer — enough
+    /// to drive the reducer's `Available` arm without touching the network.
+    fn fake_release(version: &str) -> ReleaseInfo {
+        ReleaseInfo {
+            version: semver::Version::parse(version).unwrap(),
+            tag: format!("v{version}"),
+            asset_url: "https://dl/scr1b3.tar.gz".to_string(),
+            sig_url: "https://dl/scr1b3.tar.gz.minisig".to_string(),
+            sha_url: "https://dl/scr1b3.tar.gz.sha256".to_string(),
+            html_url: "https://github.com/o/r/releases/tag/x".to_string(),
+            installer: None,
+        }
+    }
+
+    /// Feed `msg` to the reducer with a fresh `Updater` whose `launch_kind` is
+    /// pre-set to `kind` (mimicking the state a real `start_check(kind)` leaves
+    /// behind), and return the mutated updater for assertions.
+    fn reduce_with_kind(kind: LaunchKind, msg: UpdateMsg) -> Updater {
+        let ctx = egui::Context::default();
+        let mut u = Updater {
+            launch_kind: kind,
+            ..Default::default()
+        };
+        u.handle_update_msg(msg, &ctx);
+        u
+    }
+
+    fn available_msg(version: &str) -> UpdateMsg {
+        UpdateMsg::CheckResult(Ok(update::UpdateOutcome::Available(fake_release(version))))
+    }
+
+    #[test]
+    fn available_under_auto_opens_modal_not_toast() {
+        let u = reduce_with_kind(LaunchKind::Auto, available_msg("9.9.9"));
+        assert!(u.show_prompt, "Auto launch must open the yes/no modal");
+        assert!(
+            u.toast_pending.is_none(),
+            "Auto must NOT also queue a toast"
+        );
+        assert!(matches!(u.state, UpdateState::Available(_)));
+        // launch_kind is reset to Manual after consuming the result so a later
+        // manual "Check for updates" press shows inline state only.
+        assert_eq!(u.launch_kind, LaunchKind::Manual);
+    }
+
+    #[test]
+    fn available_under_notify_queues_toast_not_modal() {
+        let u = reduce_with_kind(LaunchKind::Notify, available_msg("9.9.9"));
+        assert_eq!(
+            u.toast_pending.as_deref(),
+            Some("9.9.9"),
+            "Notify launch must queue a passive toast carrying the version"
+        );
+        assert!(
+            !u.show_prompt,
+            "Notify must NOT open the modal — that was the prior bug"
+        );
+        assert!(matches!(u.state, UpdateState::Available(_)));
+        assert_eq!(u.launch_kind, LaunchKind::Manual);
+    }
+
+    #[test]
+    fn available_under_manual_shows_inline_only() {
+        let u = reduce_with_kind(LaunchKind::Manual, available_msg("9.9.9"));
+        assert!(!u.show_prompt, "Manual must not open the modal");
+        assert!(u.toast_pending.is_none(), "Manual must not queue a toast");
+        assert!(matches!(u.state, UpdateState::Available(_)));
+    }
+
+    #[test]
+    fn skipped_version_suppresses_auto_modal() {
+        // The user declined v9.9.9 earlier this session; a re-check that finds
+        // the SAME version must not re-open the modal (no re-prompt loop), even
+        // though the state still advances to Available so the inline pane shows.
+        let ctx = egui::Context::default();
+        let mut u = Updater {
+            launch_kind: LaunchKind::Auto,
+            skipped_version: Some("9.9.9".to_string()),
+            ..Default::default()
+        };
+        u.handle_update_msg(available_msg("9.9.9"), &ctx);
+        assert!(
+            !u.show_prompt,
+            "a skipped version must never re-open the modal"
+        );
+        assert!(matches!(u.state, UpdateState::Available(_)));
+    }
+
+    #[test]
+    fn skipped_version_suppresses_notify_toast() {
+        let ctx = egui::Context::default();
+        let mut u = Updater {
+            launch_kind: LaunchKind::Notify,
+            skipped_version: Some("9.9.9".to_string()),
+            ..Default::default()
+        };
+        u.handle_update_msg(available_msg("9.9.9"), &ctx);
+        assert!(
+            u.toast_pending.is_none(),
+            "a skipped version must never re-queue the toast"
+        );
+        assert!(matches!(u.state, UpdateState::Available(_)));
+    }
+
+    #[test]
+    fn skipped_version_does_not_suppress_a_different_version() {
+        // Declined v9.9.9, but a NEWER v10.0.0 appears — the prompt MUST fire
+        // (the suppression is version-specific, not a blanket mute).
+        let ctx = egui::Context::default();
+        let mut u = Updater {
+            launch_kind: LaunchKind::Auto,
+            skipped_version: Some("9.9.9".to_string()),
+            ..Default::default()
+        };
+        u.handle_update_msg(available_msg("10.0.0"), &ctx);
+        assert!(
+            u.show_prompt,
+            "a different (newer) version must still open the modal"
+        );
+    }
+
+    #[test]
+    fn up_to_date_sets_state_and_resets_kind() {
+        let ctx = egui::Context::default();
+        let mut u = Updater {
+            launch_kind: LaunchKind::Auto,
+            ..Default::default()
+        };
+        u.handle_update_msg(
+            UpdateMsg::CheckResult(Ok(update::UpdateOutcome::UpToDate {
+                latest: semver::Version::parse("1.2.3").unwrap(),
+            })),
+            &ctx,
+        );
+        match &u.state {
+            UpdateState::UpToDate { latest } => assert_eq!(latest, "1.2.3"),
+            other => panic!("expected UpToDate, got {other:?}"),
+        }
+        assert!(!u.show_prompt);
+        assert_eq!(u.launch_kind, LaunchKind::Manual);
+    }
+
+    #[test]
+    fn newer_but_no_asset_maps_to_platform_state() {
+        let ctx = egui::Context::default();
+        let mut u = Updater::default();
+        u.handle_update_msg(
+            UpdateMsg::CheckResult(Ok(update::UpdateOutcome::NewerButNoAsset {
+                latest: semver::Version::parse("2.0.0").unwrap(),
+                target: "x86_64-pc-windows-msvc".to_string(),
+                html_url: "https://github.com/o/r/releases".to_string(),
+            })),
+            &ctx,
+        );
+        match &u.state {
+            UpdateState::NoAssetForPlatform {
+                latest,
+                target,
+                html_url,
+            } => {
+                assert_eq!(latest, "2.0.0");
+                assert_eq!(target, "x86_64-pc-windows-msvc");
+                assert_eq!(html_url, "https://github.com/o/r/releases");
+            }
+            other => panic!("expected NoAssetForPlatform, got {other:?}"),
+        }
+        assert!(
+            !u.show_prompt,
+            "a no-asset result must never open the modal"
+        );
+    }
+
+    #[test]
+    fn check_error_maps_to_failed_state() {
+        let ctx = egui::Context::default();
+        let mut u = Updater {
+            launch_kind: LaunchKind::Auto,
+            ..Default::default()
+        };
+        u.handle_update_msg(
+            UpdateMsg::CheckResult(Err("rate limited".to_string())),
+            &ctx,
+        );
+        match &u.state {
+            UpdateState::Failed(e) => assert_eq!(e, "rate limited"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(!u.show_prompt);
+        assert_eq!(u.launch_kind, LaunchKind::Manual);
+    }
+
+    #[test]
+    fn progress_message_advances_downloading_bytes() {
+        let ctx = egui::Context::default();
+        let mut u = Updater::default();
+        u.handle_update_msg(
+            UpdateMsg::Progress {
+                received: 512,
+                total: 2048,
+            },
+            &ctx,
+        );
+        match u.state {
+            UpdateState::Downloading { received, total } => {
+                assert_eq!(received, 512);
+                assert_eq!(total, 2048);
+            }
+            other => panic!("expected Downloading, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn download_error_maps_to_failed() {
+        let ctx = egui::Context::default();
+        let mut u = Updater::default();
+        u.handle_update_msg(
+            UpdateMsg::Downloaded(Err("verify failed".to_string())),
+            &ctx,
+        );
+        assert!(matches!(u.state, UpdateState::Failed(e) if e == "verify failed"));
+    }
+
+    #[test]
+    fn installer_ready_error_maps_to_failed() {
+        let ctx = egui::Context::default();
+        let mut u = Updater::default();
+        u.handle_update_msg(
+            UpdateMsg::InstallerReady(Err("no installer for platform".to_string())),
+            &ctx,
+        );
+        assert!(matches!(u.state, UpdateState::Failed(e) if e == "no installer for platform"));
+    }
+
+    #[test]
+    fn is_busy_only_for_in_flight_states() {
+        let mut u = Updater::default();
+        // Idle, Available, terminal states are NOT busy.
+        assert!(!u.is_busy());
+        u.state = UpdateState::Available(fake_release("9.9.9"));
+        assert!(!u.is_busy());
+        u.state = UpdateState::UpToDate {
+            latest: "1.0.0".to_string(),
+        };
+        assert!(!u.is_busy());
+        u.state = UpdateState::Applied {
+            version: "9.9.9".to_string(),
+        };
+        assert!(!u.is_busy());
+        u.state = UpdateState::Failed("x".to_string());
+        assert!(!u.is_busy());
+        // Checking + Downloading ARE busy (so a second click can't double-spawn).
+        u.state = UpdateState::Checking;
+        assert!(u.is_busy());
+        u.state = UpdateState::Downloading {
+            received: 1,
+            total: 2,
+        };
+        assert!(u.is_busy());
+    }
+
+    #[test]
+    fn run_installer_is_noop_when_not_in_installer_ready_state() {
+        // Guard arm: calling run_installer from a non-ReadyToRunInstaller state
+        // must change nothing (the `let-else` early return).
+        let ctx = egui::Context::default();
+        let mut u = Updater {
+            state: UpdateState::Idle,
+            ..Default::default()
+        };
+        u.run_installer(&ctx);
+        assert!(matches!(u.state, UpdateState::Idle));
+    }
+
+    #[test]
+    fn apply_and_restart_is_noop_when_not_ready_to_apply() {
+        let ctx = egui::Context::default();
+        let mut u = Updater {
+            state: UpdateState::Checking,
+            ..Default::default()
+        };
+        u.apply_and_restart(&ctx);
+        assert!(matches!(u.state, UpdateState::Checking));
+    }
+
+    #[test]
+    fn run_installer_refuses_downgrade_at_apply_time() {
+        // Anti-downgrade guard: a staged installer whose version is NOT strictly
+        // newer than the running build is refused at apply time (TUF rollback
+        // defense) and lands in Failed, never launching anything.
+        let ctx = egui::Context::default();
+        let mut u = Updater {
+            state: UpdateState::ReadyToRunInstaller {
+                installer: std::path::PathBuf::from("/nonexistent/scr1b3-setup.exe"),
+                version: "0.0.1".to_string(), // older than the running build
+            },
+            ..Default::default()
+        };
+        u.run_installer(&ctx);
+        match &u.state {
+            UpdateState::Failed(e) => assert!(
+                e.contains("downgrade") || e.contains("not newer"),
+                "expected a downgrade-protection failure, got: {e}"
+            ),
+            other => panic!("expected Failed(downgrade), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_and_restart_refuses_downgrade_at_apply_time() {
+        let ctx = egui::Context::default();
+        let mut u = Updater {
+            state: UpdateState::ReadyToApply {
+                staged: std::path::PathBuf::from("/nonexistent/scr1b3"),
+                version: "0.0.1".to_string(),
+            },
+            ..Default::default()
+        };
+        u.apply_and_restart(&ctx);
+        match &u.state {
+            UpdateState::Failed(e) => assert!(
+                e.contains("downgrade") || e.contains("not newer"),
+                "expected a downgrade-protection failure, got: {e}"
+            ),
+            other => panic!("expected Failed(downgrade), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn poll_with_no_channel_is_inert() {
+        // poll() on an updater that never started a worker (rx is None) must not
+        // panic and must leave the state untouched.
+        let ctx = egui::Context::default();
+        let mut u = Updater::default();
+        u.poll(&ctx);
+        assert!(matches!(u.state, UpdateState::Idle));
+    }
+
+    #[test]
+    fn poll_drains_a_queued_message_and_advances_state() {
+        // Inject a channel directly (as start_check would), send a CheckResult,
+        // and confirm poll() drains it into the state — exercising the
+        // try_recv loop + the buffer-then-handle path without spawning a thread.
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut u = Updater {
+            launch_kind: LaunchKind::Notify,
+            rx: Some(rx),
+            ..Default::default()
+        };
+        tx.send(available_msg("9.9.9")).unwrap();
+        u.poll(&ctx);
+        assert!(matches!(u.state, UpdateState::Available(_)));
+        assert_eq!(u.toast_pending.as_deref(), Some("9.9.9"));
+    }
+
+    #[test]
+    fn poll_clears_rx_on_sender_disconnect() {
+        // When every sender is dropped, try_recv yields Disconnected and poll()
+        // releases the receiver so a stale channel is not polled forever.
+        let ctx = egui::Context::default();
+        let (tx, rx) = std::sync::mpsc::channel::<UpdateMsg>();
+        let mut u = Updater {
+            rx: Some(rx),
+            ..Default::default()
+        };
+        drop(tx); // disconnect with no pending messages
+        u.poll(&ctx);
+        assert!(
+            u.rx.is_none(),
+            "a disconnected channel must be released so poll stops draining it"
+        );
+    }
+
+    #[test]
+    fn default_updater_starts_idle_with_no_pending_signals() {
+        let u = Updater::default();
+        assert!(matches!(u.state, UpdateState::Idle));
+        assert!(!u.show_prompt);
+        assert!(u.toast_pending.is_none());
+        assert!(u.skipped_version.is_none());
+        assert_eq!(u.launch_kind, LaunchKind::Manual);
+    }
+
+    #[test]
+    fn launch_kind_default_is_manual() {
+        assert_eq!(LaunchKind::default(), LaunchKind::Manual);
+    }
 }
