@@ -1124,6 +1124,92 @@ mod tests {
         assert!(extract_binary(&archive_bytes, dir.path()).is_err());
     }
 
+    /// Decompression-bomb guard: a `.tar.gz` whose `scr1b3` entry expands to MORE
+    /// than `MAX_EXTRACTED_BINARY_BYTES` is REJECTED and leaves no file behind.
+    /// This directly exercises the cap branch in `extract_binary` (the existing
+    /// round-trip test uses a tiny payload that never reaches it).
+    ///
+    /// The on-disk archive stays tiny (a few KiB) because gzip collapses a
+    /// highly-repetitive payload by ~1000x — that asymmetry IS the bomb: a small
+    /// download inflates to gigabytes on extract. We declare a header `size` just
+    /// over the cap and stream that many zero bytes through the encoder. `take`
+    /// in `extract_binary` stops reading at the cap, the `written >= cap` check
+    /// fires, and the partial output file is removed.
+    #[test]
+    fn extract_binary_rejects_decompression_bomb_over_size_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_name = if cfg!(windows) {
+            "scr1b3.exe"
+        } else {
+            "scr1b3"
+        };
+        // One byte over the cap so the `written >= MAX_EXTRACTED_BINARY_BYTES`
+        // guard is guaranteed to trip.
+        let bomb_size = MAX_EXTRACTED_BINARY_BYTES + 1;
+
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bomb_size);
+            header.set_mode(0o755);
+            header.set_cksum();
+            // Stream the entry body from an all-zero reader (compresses to almost
+            // nothing) rather than allocating `bomb_size` bytes in memory.
+            let zeros = std::io::repeat(0u8).take(bomb_size);
+            builder.append_data(&mut header, bin_name, zeros).unwrap();
+            builder.finish().unwrap();
+        }
+        let archive_bytes = gz.finish().unwrap();
+        // Sanity: the bomb archive itself is tiny on disk (the whole point).
+        assert!(
+            (archive_bytes.len() as u64) < MAX_EXTRACTED_BINARY_BYTES,
+            "the compressed bomb must be far smaller than its expansion"
+        );
+
+        let err = extract_binary(&archive_bytes, dir.path())
+            .expect_err("a >cap expansion must be rejected");
+        assert!(
+            err.contains("safety cap"),
+            "expected the size-cap rejection, got: {err}"
+        );
+        assert!(
+            !dir.path().join(bin_name).exists(),
+            "the over-cap partial output must be removed (no disk-fill artifact left behind)"
+        );
+    }
+
+    /// Hardlink entries are non-regular and must be rejected just like symlinks —
+    /// a hardlink named `scr1b3` is the same TARmageddon link-entry class. (The
+    /// symlink case is covered above; this locks the sibling link type so the
+    /// `EntryType::Regular`-only gate covers the full link family.)
+    #[test]
+    fn extract_binary_rejects_hardlink_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_name = if cfg!(windows) {
+            "scr1b3.exe"
+        } else {
+            "scr1b3"
+        };
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Link);
+            header.set_size(0);
+            header.set_mode(0o777);
+            builder
+                .append_link(&mut header, bin_name, "scr1b3-real")
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let archive_bytes = gz.finish().unwrap();
+        let err = extract_binary(&archive_bytes, dir.path())
+            .expect_err("a hardlink entry must be rejected");
+        assert!(err.contains("non-regular"), "got: {err}");
+        assert!(!dir.path().join(bin_name).exists());
+    }
+
     /// `sha256_hex` over the archive bytes is the same digest the `.sha256`
     /// sidecar carries — a sanity check that the verify input we feed matches
     /// the documented contract (the sidecar's first whitespace token).
