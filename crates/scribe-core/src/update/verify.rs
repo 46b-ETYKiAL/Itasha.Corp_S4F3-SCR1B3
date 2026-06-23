@@ -234,4 +234,77 @@ mod tests {
         // An empty trust set must never accept anything (fail-closed).
         assert!(verify_any_signature(b"x", "untrusted comment: x\nbogus", &[]).is_err());
     }
+
+    #[test]
+    fn verify_artifact_rejects_good_checksum_but_bad_signature() {
+        // The critical supply-chain attack: an attacker who can recompute the
+        // SHA-256 sidecar (trivial — it's just a hash of their payload) but
+        // CANNOT forge the minisign signature. A correct checksum must NEVER be
+        // enough; the signature is the only thing the checksum cannot substitute
+        // for. We sign with one key, then verify against a DIFFERENT trusted key
+        // set so the (well-formed) signature does not verify — checksum passes,
+        // signature fails, artifact REJECTED.
+        let attacker = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let trusted = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let trusted_pk = trusted.pk.to_box().unwrap().to_string();
+
+        let payload = b"malicious 'update' payload with a valid checksum";
+        let good_sha = sha256_hex(payload); // attacker can always produce this
+        let attacker_sig = minisign::sign(
+            Some(&attacker.pk),
+            &attacker.sk,
+            std::io::Cursor::new(&payload[..]),
+            Some("forged"),
+            Some("forged"),
+        )
+        .unwrap()
+        .to_string();
+
+        // Checksum matches the payload, but the signature is from an untrusted
+        // key -> the composite gate must reject.
+        let keys = [trusted_pk.as_str()];
+        let res = verify_artifact(payload, &good_sha, &attacker_sig, &keys);
+        assert!(
+            res.is_err(),
+            "a correct checksum must NOT rescue an untrusted signature, got {res:?}"
+        );
+
+        // Control: the SAME payload+checksum WITH a signature from the trusted
+        // key is accepted — proving the rejection above was the signature, not
+        // an unrelated failure.
+        let good_sig = minisign::sign(
+            Some(&trusted.pk),
+            &trusted.sk,
+            std::io::Cursor::new(&payload[..]),
+            Some("real"),
+            Some("real"),
+        )
+        .unwrap()
+        .to_string();
+        assert!(
+            verify_artifact(payload, &good_sha, &good_sig, &keys).is_ok(),
+            "the trusted-key signature over the same bytes must verify"
+        );
+    }
+
+    #[test]
+    fn verify_artifact_rejects_truncated_or_garbage_signature_text() {
+        // A structurally-malformed `.minisig` (not a real signature at all) must
+        // be rejected at decode time, never silently treated as "no signature ->
+        // ok". Defends the fail-closed contract against a corrupt sidecar.
+        let payload = b"bytes";
+        let good_sha = sha256_hex(payload);
+        for bad_sig in [
+            "",                           // empty sidecar
+            "not a minisign file",        // garbage
+            "untrusted comment: x",       // header only, no sig line
+            "untrusted comment: x\nQUJD", // header + junk base64
+        ] {
+            let res = verify_artifact(payload, &good_sha, bad_sig, EMBEDDED_PUBLIC_KEYS);
+            assert!(
+                res.is_err(),
+                "malformed signature {bad_sig:?} must be rejected, got {res:?}"
+            );
+        }
+    }
 }
