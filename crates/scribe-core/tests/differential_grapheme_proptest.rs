@@ -26,6 +26,7 @@
 //!     by its codepoint length, then back-deleting that many times) removes
 //!     exactly that cluster and nothing else, matching a `unicode-segmentation`
 //!     reference.
+//!
 //! These prove the engine never produces invalid UTF-8 and that grapheme-aware
 //! callers (cursor movement built ON these primitives) have a sound foundation.
 
