@@ -506,6 +506,38 @@ fn extract_binary(archive_bytes: &[u8], dir: &Path) -> Result<PathBuf, String> {
     Err("archive did not contain a scr1b3 / scr1b3.exe binary".to_string())
 }
 
+/// Fuzz/test-only seam exposing the private [`extract_binary`] decompression +
+/// tar-extraction path so the `fuzz/` libFuzzer harness can drive arbitrary
+/// `.tar.gz` bytes through the REAL extraction (decompression-bomb + tar-slip
+/// surface) without the network or signature stages. Extracts into a fresh
+/// system temp directory which is removed before returning, so the fuzz target
+/// asserts only "never panics" — the safety caps (`MAX_EXTRACTED_BINARY_BYTES`,
+/// non-regular-entry reject, basename-only join) live in `extract_binary`
+/// itself and are exercised by the dedicated unit tests above.
+///
+/// `#[doc(hidden)]` + the `fuzzing`-or-`test` gate keep this out of the public
+/// API surface; it is NOT a production entry point.
+#[doc(hidden)]
+#[cfg(any(test, fuzzing))]
+pub fn fuzz_extract_binary(archive_bytes: &[u8]) {
+    let Ok(dir) = std::env::temp_dir()
+        .join(format!("scr1b3-fuzz-extract-{}", std::process::id()))
+        .canonicalize()
+        .or_else(|_| {
+            let d =
+                std::env::temp_dir().join(format!("scr1b3-fuzz-extract-{}", std::process::id()));
+            std::fs::create_dir_all(&d).map(|_| d)
+        })
+    else {
+        return;
+    };
+    let _ = extract_binary(archive_bytes, &dir);
+    // Best-effort cleanup; the fuzzer reuses the same dir across runs and the
+    // extraction overwrites/recreates the single basename, so leftover state is
+    // bounded and harmless.
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Mark `path` executable (`0o755`) on unix; a no-op on other platforms.
 #[cfg(unix)]
 fn set_executable(path: &Path) -> Result<(), String> {

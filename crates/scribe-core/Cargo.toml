@@ -36,3 +36,10 @@ tempfile = "3"
 minisign = "0.9"                                 # sign in tests only (verify path round-trip)
 proptest = "1.8.0"
 unicode-segmentation = "1.13"                    # grapheme-cluster reference oracle (tests only)
+
+[lints.rust]
+# `cfg(fuzzing)` is set automatically by `cargo fuzz build`; the `update::net`
+# `fuzz_extract_binary` seam is gated on `cfg(any(test, fuzzing))`. Declaring the
+# expected cfg here keeps `cargo build`/`clippy` on the lib alone (where the cfg
+# is never set) free of the `unexpected_cfgs` warning under `-D warnings`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
