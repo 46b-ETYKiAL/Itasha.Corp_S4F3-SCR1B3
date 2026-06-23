@@ -929,12 +929,16 @@ pub fn apply_event(
             // duplicating. Runs before `record_before` so a pure skip-over
             // creates no undo checkpoint and leaves `out.mutated` false.
             if state.extra.is_empty() && text.chars().count() == 1 {
-                let ch = text.chars().next().unwrap();
-                if editing::should_skip_over(rope, state.edit.cursor, ch) {
-                    state.edit.cursor += 1;
-                    state.edit.anchor = state.edit.cursor;
-                    out.consumed = true;
-                    return out;
+                // `count() == 1` guarantees exactly one char; use `if let` so an
+                // edit-path input can never panic (defensive — the buffer must
+                // survive any keystroke).
+                if let Some(ch) = text.chars().next() {
+                    if editing::should_skip_over(rope, state.edit.cursor, ch) {
+                        state.edit.cursor += 1;
+                        state.edit.anchor = state.edit.cursor;
+                        out.consumed = true;
+                        return out;
+                    }
                 }
             }
             record_before!(EditKind::Insert);
