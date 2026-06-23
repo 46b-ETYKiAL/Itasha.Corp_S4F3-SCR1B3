@@ -35,3 +35,4 @@ tar = "0.4"                                       # tar archive extraction of th
 tempfile = "3"
 minisign = "0.9"                                 # sign in tests only (verify path round-trip)
 proptest = "1.8.0"
+unicode-segmentation = "1.13"                    # grapheme-cluster reference oracle (tests only)
