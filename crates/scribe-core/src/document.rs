@@ -230,11 +230,26 @@ struct TempPath {
 }
 
 impl TempFile {
+    /// The temp file is `Some` for the whole write phase and only taken in
+    /// `into_temp_path` (which consumes `self`), so this is infallible by
+    /// construction. We still surface a structured `io::Error` instead of
+    /// `.expect()`-panicking: this is the atomic-SAVE path, and a panic here
+    /// would crash the editor and lose the user's unsaved buffer. The error
+    /// propagates through `save_as`'s `?` into `CoreError::Io` and is shown to
+    /// the user, honouring the crate invariant "editor operations never panic".
+    fn file_mut(&mut self) -> std::io::Result<&mut fs::File> {
+        self.file.as_mut().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "internal: temp file handle already taken before write",
+            )
+        })
+    }
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        self.file.as_mut().expect("temp file open").write_all(buf)
+        self.file_mut()?.write_all(buf)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.file.as_mut().expect("temp file open").flush()
+        self.file_mut()?.flush()
     }
     fn into_temp_path(mut self) -> TempPath {
         // Close the file handle so the rename can proceed on Windows.
@@ -504,5 +519,35 @@ mod tests {
             Some("rs"),
             "extension must be lowercased for case-insensitive routing"
         );
+    }
+
+    #[test]
+    fn save_to_unwritable_target_returns_err_without_panic() {
+        // Data-loss hardening: when the atomic-save temp file cannot be created
+        // (target directory does not exist), `save_as` must surface an
+        // `Err(CoreError::Io)` so the UI can warn the user — it must NEVER panic
+        // and lose the in-memory buffer. Regression guard for the `TempFile`
+        // write path (formerly `.expect("temp file open")`).
+        let dir = tempfile::tempdir().unwrap();
+        let bogus = dir.path().join("does-not-exist-subdir").join("out.txt");
+        let mut doc = Document::scratch();
+        doc.set_text("precious unsaved work\n");
+
+        let result = doc.save_as(&bogus);
+        assert!(
+            result.is_err(),
+            "save to a non-existent directory must return Err, not panic"
+        );
+        // The buffer survives the failed save: content is intact and the doc is
+        // still considered dirty (the save did not succeed).
+        assert_eq!(doc.text(), "precious unsaved work\n");
+        assert!(
+            doc.is_dirty(),
+            "a failed save must leave the document dirty so the user can retry"
+        );
+        match result {
+            Err(crate::error::CoreError::Io(_)) => {}
+            other => panic!("expected CoreError::Io on unwritable target, got: {other:?}"),
+        }
     }
 }

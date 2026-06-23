@@ -1948,10 +1948,24 @@ manual_issues = \"ask_each_time\"
 
     // ---- load_or_default end-to-end via SCR1B3_CONFIG_DIR (previously uncovered) ----
 
+    /// Serializes every test that mutates the process-global `SCR1B3_CONFIG_DIR`
+    /// env var. Cargo runs tests in PARALLEL by default, so without this lock two
+    /// `with_config_dir` windows overlap and clobber each other's redirect,
+    /// producing flaky failures (the prior doc comment's `--test-threads=1`
+    /// assumption was false). The mutex makes the env mutation atomic per test.
+    static CONFIG_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Run `body` with `SCR1B3_CONFIG_DIR` pointed at `dir`, restoring the prior
-    /// value afterwards. Safe because the suite runs `--test-threads=1` (serial),
-    /// so no concurrent test observes the temporary env mutation.
+    /// value afterwards. The `CONFIG_DIR_ENV_LOCK` guard guarantees no concurrent
+    /// test observes the temporary env mutation, so this is safe under cargo's
+    /// default parallel test runner.
     fn with_config_dir(dir: &std::path::Path, body: impl FnOnce()) {
+        // Recover from a poisoned lock: a panicking test still left the env in a
+        // restored state (or the next test overwrites it), so the guard's only
+        // job is mutual exclusion, not protecting shared data.
+        let _guard = CONFIG_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let prev = std::env::var_os("SCR1B3_CONFIG_DIR");
         std::env::set_var("SCR1B3_CONFIG_DIR", dir);
         body();
