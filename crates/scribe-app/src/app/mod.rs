@@ -908,7 +908,26 @@ impl ScribeApp {
             }
         }
         if tabs.is_empty() && config.editor.restore_session {
-            for path in load_session() {
+            // R6 / S-04 — the legacy paths-only session file is also a
+            // user-writable on-disk artifact. Apply the same restore guard:
+            // reject UNC / nonexistent / root-escaping paths, self-rooting the
+            // allowed set on the listed paths' own parent directories.
+            let listed = load_session();
+            let legacy_roots = crate::session_path_guard::allowed_roots(
+                listed
+                    .iter()
+                    .filter(|p| !crate::session_path_guard::is_unc_path(p))
+                    .filter_map(|p| p.parent())
+                    .collect::<Vec<_>>(),
+            );
+            for path in listed {
+                if !crate::session_path_guard::is_safe_restore_path(&path, &legacy_roots) {
+                    tracing::warn!(
+                        "session restore (legacy): skipping untrusted path {} — not auto-opening",
+                        path.display()
+                    );
+                    continue;
+                }
                 if let Ok(t) = EditorTab::from_path(path) {
                     tabs.push(t);
                 }
@@ -3278,6 +3297,24 @@ impl ScribeApp {
         let manifest = session::load_manifest(&dir)?;
         let bdir = session::backup_dir(&dir);
         let mut tabs: Vec<EditorTab> = Vec::new();
+
+        // R6 / S-04 — the manifest is a user-writable on-disk artifact; a
+        // tampered `session.json` can point at a `\\attacker\share\…` UNC path
+        // (→ SMB/NTLM credential leak) or a symlink escaping the prior working
+        // set. Derive the ALLOWED ROOTS for this restore from the parent
+        // directories of the manifest's OWN declared paths (the prior session
+        // roots). Only paths that canonicalize to stay under one of these roots
+        // — and are not UNC, and exist — are auto-opened. See
+        // `session_path_guard::is_safe_restore_path` for the fail-closed rules.
+        let root_candidates: Vec<PathBuf> = manifest
+            .tabs
+            .iter()
+            .filter_map(|s| s.path.as_ref().map(PathBuf::from))
+            .filter(|p| !crate::session_path_guard::is_unc_path(p))
+            .filter_map(|p| p.parent().map(|par| par.to_path_buf()))
+            .collect();
+        let allowed_roots =
+            crate::session_path_guard::allowed_roots(root_candidates.iter().map(|p| p.as_path()));
         // Enforce the one-tab-per-file invariant on restore: a file must NEVER be
         // reopened into two tabs. The manifest can legitimately carry two entries
         // for the same path — a stale unsaved-backup entry coexisting with a
@@ -3293,20 +3330,46 @@ impl ScribeApp {
         let mut snap_to_tab: std::collections::HashMap<usize, usize> =
             std::collections::HashMap::new();
         for (si, snap) in manifest.tabs.iter().enumerate() {
-            let path = snap.path.as_ref().map(PathBuf::from);
+            let raw_path = snap.path.as_ref().map(PathBuf::from);
+            // R6 / S-04 — classify this entry's declared path. A path that
+            // FAILS the restore guard (UNC, nonexistent, or escaping the
+            // allowed roots) is NEVER auto-opened from disk and NEVER carried
+            // as the tab's save target. `path` below is the SAFE path used for
+            // disk re-open / save-target; an unsafe path is dropped to `None`.
+            let path: Option<PathBuf> = match &raw_path {
+                Some(p) if crate::session_path_guard::is_safe_restore_path(p, &allowed_roots) => {
+                    Some(p.clone())
+                }
+                Some(p) => {
+                    tracing::warn!(
+                        "session restore: skipping untrusted path {} (UNC / nonexistent / \
+                         escapes the prior session roots) — not auto-opening",
+                        p.display()
+                    );
+                    None
+                }
+                None => None,
+            };
             // Build the candidate tab for this entry, or skip it (None) — keeping
             // the original gating: a backup restores unsaved content always; a
             // clean file-backed tab reopens only when `restore_session` is on.
+            // S-04: a backup whose declared path was unsafe still restores its
+            // UNSAVED CONTENT (never lose the user's work) but as a PATHLESS
+            // scratch buffer — the attacker-chosen path is stripped so it can
+            // neither auto-open nor become a silent save target.
             let candidate: Option<EditorTab> = if let Some(name) = &snap.backup {
                 match session::read_backup(&bdir, name) {
                     Ok(content) => Some(EditorTab::from_backup(path.clone(), content)),
                     // Backup unreadable → fall back to the clean-file rule below.
+                    // Only a SAFE path is re-openable from disk.
                     Err(_) if restore_session => {
                         path.clone().and_then(|p| EditorTab::from_path(p).ok())
                     }
                     Err(_) => None,
                 }
             } else if restore_session {
+                // A clean file-backed tab reopens ONLY from a safe path. An
+                // unsafe path (path == None) is skipped entirely.
                 path.clone().and_then(|p| EditorTab::from_path(p).ok())
             } else {
                 None
