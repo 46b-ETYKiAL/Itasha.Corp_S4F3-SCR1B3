@@ -6369,3 +6369,6 @@ mod theme_editor_tests;
 
 #[cfg(test)]
 mod plugin_manager_tests;
+
+#[cfg(test)]
+mod qa_correctness_workflow_tests;
