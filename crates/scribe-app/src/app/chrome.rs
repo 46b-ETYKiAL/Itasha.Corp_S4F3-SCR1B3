@@ -71,6 +71,21 @@ pub(super) fn caption_btn(
             );
         }
     }
+    // These caption buttons are PAINTED (not text Buttons), so egui gives them no
+    // accessible name — a screen reader (and the kittest e2e harness) cannot reach
+    // them. Attach an explicit AccessKit Button name per icon (WCAG 4.1.2). The
+    // Close name is deliberately distinct from the settings ✕ ("Close window") so a
+    // by-label query is unambiguous; the icon already reads "Restore" while maximized,
+    // so the Restore arm names it "Restore window".
+    let name = match icon {
+        // The app-window close (two-phase hide-before-destroy), distinct from the
+        // settings dialog's ✕ which owns the bare "Close window" label.
+        CaptionIcon::Close => "Close application window",
+        CaptionIcon::Maximize => "Maximize window",
+        CaptionIcon::Restore => "Restore window",
+        CaptionIcon::Minimize => "Minimize window",
+    };
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
     resp
 }
 
