@@ -173,9 +173,34 @@ mod imp {
         }
     }
 
-    /// `ASFW_ANY`: grant the foreground-set right to ANY process. Required
-    /// because the elevated installer is a grandchild (PowerShell → UAC →
-    /// setup.exe), so a PID-specific grant would target the wrong process.
+    /// `ASFW_ANY`: grant the foreground-set right to ANY process.
+    ///
+    /// ## Why `ASFW_ANY` and not a specific PID (S-03 least-privilege review)
+    ///
+    /// `AllowSetForegroundWindow` takes a single PID and MUST be called BEFORE
+    /// the spawn, while THIS process still owns the foreground — once the caller
+    /// loses the foreground the API no-ops (MS docs), and the grant must already
+    /// be in place before the child's `SetForegroundWindow` fires. At every call
+    /// site (`updater.rs` install + relaunch) the eventual foreground-setter's
+    /// PID is therefore NOT yet available:
+    ///
+    /// * Elevated install: the real installer is a GRANDCHILD (PowerShell → UAC
+    ///   `consent.exe` → `setup.exe`); the PID we get from spawning `powershell`
+    ///   is not the installer's, so a PID-specific grant would target the wrong
+    ///   process.
+    /// * In-place relaunch: the child is spawned AFTER this call (it cannot be
+    ///   spawned first — the grant has to precede the child's foreground-set, and
+    ///   this process must still own the foreground when the grant is made), so
+    ///   the child PID does not exist at the moment the grant is needed.
+    ///
+    /// `ASFW_ANY` is the only grant that satisfies the pre-spawn ordering. It is
+    /// an ACCEPTED, time-bounded, narrowly-scoped grant — NOT an always-on one:
+    /// it is issued ONLY from the two `updater.rs` spawn sites, each immediately
+    /// before a `spawn()`, never from the main loop or any per-frame path. Its
+    /// effect is inherently short-lived: Windows consumes the delegated right on
+    /// the next `SetForegroundWindow` (or it lapses when this process loses the
+    /// foreground a moment later as the relaunch/close proceeds). It does not
+    /// persist a standing capability.
     const ASFW_ANY: u32 = 0xFFFF_FFFF;
 
     /// Delegate this (currently-foreground) process's right to set the foreground
