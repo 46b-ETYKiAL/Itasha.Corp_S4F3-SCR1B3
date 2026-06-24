@@ -230,6 +230,12 @@ where
     if carets.is_empty() {
         return;
     }
+    // C-02 / R1 root cause: dispatching to every caret double-edits any region
+    // two carets' selections share. Merge overlapping/adjacent selection
+    // intervals into ONE caret per merged region BEFORE dispatch so the shared
+    // region is edited exactly once. Disjoint carets are untouched, so the
+    // offset bookkeeping below is unchanged for the non-overlapping case.
+    normalize_carets(carets);
     carets.sort_by_key(|c| c.selection().start.min(c.cursor));
     let mut offset: isize = 0;
     for caret in carets.iter_mut() {
@@ -250,8 +256,73 @@ where
     dedupe_carets(carets);
 }
 
+/// Merge carets whose selections OVERLAP or are ADJACENT (touching) into a
+/// single caret per merged region, leaving disjoint carets untouched. This is
+/// the load-bearing invariant that prevents the multi-caret double-edit bug
+/// (C-02 / R1): if two carets' selections share any chars, dispatching the edit
+/// to both applies it twice to the shared region, corrupting the text. Merging
+/// to one caret per union region guarantees each region is edited exactly once.
+///
+/// Semantics:
+/// - Carets are sorted by selection start (then end). Walking left-to-right, a
+///   caret is absorbed into the current run when its selection start is `<=` the
+///   running merged end — i.e. overlapping *or* exactly touching. The merged
+///   region is the interval union `[min(starts), max(ends))`.
+/// - Two collapsed carets at the *same* position merge (they coincide); two
+///   collapsed carets at *different* positions do NOT merge (a zero-width
+///   selection at `p` only touches another zero-width selection also at `p`),
+///   so independent multi-cursor typing is preserved exactly as before.
+/// - Direction is preserved sensibly: the merged caret keeps the orientation of
+///   the run's PRIMARY caret (the first caret of the run in start-sorted order).
+///   A reversed primary (anchor > cursor) yields a reversed merged selection
+///   (anchor at the union end, cursor at the union start); a forward primary
+///   yields a forward merged selection. The goal column is carried from the
+///   primary. The selected char range (`selection()`) is identical either way.
+pub fn normalize_carets(carets: &mut Vec<EditState>) {
+    if carets.len() < 2 {
+        return;
+    }
+    // Sort by selection start, then end — the canonical interval-merge order.
+    carets.sort_by_key(|c| {
+        let r = c.selection();
+        (r.start, r.end)
+    });
+
+    let mut merged: Vec<EditState> = Vec::with_capacity(carets.len());
+    for &caret in carets.iter() {
+        let cur = caret.selection();
+        match merged.last_mut() {
+            // Absorb into the current run when this caret's start touches or
+            // overlaps the running merged end.
+            Some(run) if cur.start <= run.selection().end => {
+                let run_sel = run.selection();
+                let new_start = run_sel.start.min(cur.start);
+                let new_end = run_sel.end.max(cur.end);
+                // Preserve the run primary's orientation. The primary is the
+                // first caret of the run, which already lives in `run`.
+                let reversed = run.anchor > run.cursor;
+                if reversed {
+                    run.anchor = new_end;
+                    run.cursor = new_start;
+                } else {
+                    run.anchor = new_start;
+                    run.cursor = new_end;
+                }
+            }
+            // Disjoint from the previous run (or first caret) → start a new run.
+            _ => merged.push(caret),
+        }
+    }
+    *carets = merged;
+}
+
 /// Merge carets that occupy the same collapsed position (keep one), preserving
 /// ascending order. Selections are compared by `(start, end)`.
+///
+/// `normalize_carets` is the stronger primitive (it also merges overlapping and
+/// adjacent *selections*); `dedupe_carets` only collapses exact coincidence and
+/// is kept for callers that post-process carets after an op has already
+/// collapsed them onto shared positions.
 pub fn dedupe_carets(carets: &mut Vec<EditState>) {
     carets.sort_by_key(|c| (c.selection().start, c.cursor));
     carets.dedup_by_key(|c| (c.cursor, c.anchor));
@@ -1160,6 +1231,185 @@ mod tests {
         );
     }
 
+    /// Build a caret whose selection is `[start, end)` with the cursor on the
+    /// high end (forward selection).
+    fn sel(start: usize, end: usize) -> EditState {
+        EditState {
+            anchor: start,
+            cursor: end,
+            goal_col: None,
+        }
+    }
+
+    /// Reference: apply `f` once to a SINGLE caret covering `[start, end)` and
+    /// return the resulting rope string. This is the ground truth a set of
+    /// overlapping carets covering the same union region must reproduce.
+    fn single_pass(text: &str, start: usize, end: usize, replacement: &str) -> String {
+        let mut r = rope(text);
+        let mut st = sel(start, end);
+        replace_selection(&mut r, &mut st, replacement);
+        r.to_string()
+    }
+
+    #[test]
+    fn for_each_caret_overlapping_selections_edit_once_not_twice() {
+        // C-02 / R1 root-cause proof. Two carets whose selections OVERLAP but
+        // are not identical: A = [0,4) "abcd", B = [3,7) "defg", overlap [3,4).
+        // The union of the two selections is [0,7) "abcdefg". A single-caret
+        // replace of that union with "<<<" yields "<<<h". Because the carets
+        // overlap, the correct multi-caret behaviour is to merge them into one
+        // edit of the union region and apply the replacement exactly ONCE.
+        //
+        // Before the fix `for_each_caret` dispatched to BOTH carets: caret A
+        // edits, the offset drags caret B's clamped range over text caret A
+        // already wrote, and the replacement is applied a SECOND time to the
+        // shared region — producing "<<<<<<h" (the "<<<" doubled).
+        let union_once = single_pass("abcdefgh", 0, 7, "<<<");
+        assert_eq!(union_once, "<<<h", "single-pass oracle");
+
+        let mut r = rope("abcdefgh");
+        let mut carets = vec![sel(0, 4), sel(3, 7)];
+        for_each_caret(&mut r, &mut carets, |rope, st| {
+            replace_selection(rope, st, "<<<");
+        });
+        // The edit must be applied exactly once over the merged union region.
+        assert_eq!(
+            r.to_string(),
+            union_once,
+            "overlapping carets must edit the union region exactly once, not twice"
+        );
+        // The overlapping pair collapses to a single caret.
+        assert_eq!(carets.len(), 1, "overlapping carets merge to one");
+    }
+
+    #[test]
+    fn normalize_carets_merges_nested_selection() {
+        // B = [2,4) is fully nested inside A = [0,6). Union is just A.
+        let mut carets = vec![sel(0, 6), sel(2, 4)];
+        normalize_carets(&mut carets);
+        assert_eq!(carets.len(), 1);
+        assert_eq!(carets[0].selection(), 0..6);
+    }
+
+    #[test]
+    fn normalize_carets_merges_adjacent_touching_selections() {
+        // A = [0,3), B = [3,6): touching at index 3. Merge to one [0,6) so the
+        // boundary char is never double-claimed.
+        let mut carets = vec![sel(0, 3), sel(3, 6)];
+        normalize_carets(&mut carets);
+        assert_eq!(carets.len(), 1);
+        assert_eq!(carets[0].selection(), 0..6);
+    }
+
+    #[test]
+    fn normalize_carets_keeps_disjoint_selections_separate() {
+        // A = [0,2), B = [4,6): a one-char gap at [2,4). They must NOT merge.
+        let mut carets = vec![sel(0, 2), sel(4, 6)];
+        normalize_carets(&mut carets);
+        assert_eq!(carets.len(), 2);
+        assert_eq!(carets[0].selection(), 0..2);
+        assert_eq!(carets[1].selection(), 4..6);
+    }
+
+    #[test]
+    fn normalize_carets_distinct_collapsed_carets_stay_separate() {
+        // Two zero-width carets at different positions are independent
+        // multi-cursors and must survive normalization unchanged.
+        let mut carets = vec![EditState::at(1), EditState::at(5)];
+        normalize_carets(&mut carets);
+        assert_eq!(carets.len(), 2);
+        assert_eq!(
+            carets.iter().map(|c| c.cursor).collect::<Vec<_>>(),
+            vec![1, 5]
+        );
+    }
+
+    #[test]
+    fn normalize_carets_coincident_collapsed_carets_merge() {
+        let mut carets = vec![EditState::at(3), EditState::at(3)];
+        normalize_carets(&mut carets);
+        assert_eq!(carets.len(), 1);
+        assert_eq!(carets[0].cursor, 3);
+    }
+
+    #[test]
+    fn normalize_carets_preserves_reversed_primary_direction() {
+        // Primary (start-sorted first) is reversed: anchor=4 > cursor=0,
+        // selecting [0,4). It overlaps a forward B = [2,6). The merged caret
+        // keeps the primary's reversed orientation: anchor at union end (6),
+        // cursor at union start (0).
+        let mut carets = vec![
+            EditState {
+                anchor: 4,
+                cursor: 0,
+                goal_col: None,
+            },
+            sel(2, 6),
+        ];
+        normalize_carets(&mut carets);
+        assert_eq!(carets.len(), 1);
+        assert_eq!(carets[0].selection(), 0..6);
+        assert!(
+            carets[0].anchor > carets[0].cursor,
+            "reversed orientation kept"
+        );
+        assert_eq!(carets[0].anchor, 6);
+        assert_eq!(carets[0].cursor, 0);
+    }
+
+    #[test]
+    fn for_each_caret_many_overlapping_carets_edit_once() {
+        // A chain of mutually-overlapping selections over "abcdefghij" (len 10):
+        // [0,3) [2,5) [4,7) [6,9) — each overlaps the next. Union is [0,9).
+        let mut r = rope("abcdefghij");
+        let mut carets = vec![sel(0, 3), sel(2, 5), sel(4, 7), sel(6, 9)];
+        for_each_caret(&mut r, &mut carets, |rope, st| {
+            replace_selection(rope, st, "#");
+        });
+        assert_eq!(r.to_string(), single_pass("abcdefghij", 0, 9, "#"));
+        assert_eq!(r.to_string(), "#j");
+        assert_eq!(carets.len(), 1);
+    }
+
+    #[test]
+    fn for_each_caret_disjoint_carets_unchanged_by_normalize() {
+        // Two disjoint selections each get the edit applied independently — the
+        // exact pre-fix behaviour for non-overlapping carets, proving the
+        // offset bookkeeping is untouched for the disjoint case.
+        // "aXXbYYc": A = [1,3) "XX", B = [4,6) "YY".
+        let mut r = rope("aXXbYYc");
+        let mut carets = vec![sel(1, 3), sel(4, 6)];
+        for_each_caret(&mut r, &mut carets, |rope, st| {
+            replace_selection(rope, st, "_");
+        });
+        assert_eq!(r.to_string(), "a_b_c");
+        assert_eq!(carets.len(), 2);
+    }
+
+    #[test]
+    fn for_each_caret_reversed_overlapping_selections_edit_once() {
+        // Both carets reversed (anchor > cursor) but overlapping. Result must
+        // still equal the single-pass union edit, applied once.
+        let mut r = rope("abcdefgh");
+        let mut carets = vec![
+            EditState {
+                anchor: 4,
+                cursor: 0,
+                goal_col: None,
+            },
+            EditState {
+                anchor: 7,
+                cursor: 3,
+                goal_col: None,
+            },
+        ];
+        for_each_caret(&mut r, &mut carets, |rope, st| {
+            replace_selection(rope, st, "<<<");
+        });
+        assert_eq!(r.to_string(), single_pass("abcdefgh", 0, 7, "<<<"));
+        assert_eq!(carets.len(), 1);
+    }
+
     #[test]
     fn add_caret_vertical_below_keeps_column() {
         let r = rope("abcd\nefgh\nijkl\n");
@@ -1338,6 +1588,95 @@ mod proptests {
             for cur in &carets {
                 prop_assert!(cur.cursor <= n && cur.anchor <= n);
             }
+        }
+
+        /// After `normalize_carets`, the resulting selection intervals are
+        /// pairwise NON-touching (each next.start strictly greater than the
+        /// previous end) and their union (set of covered char indices) equals
+        /// the union of the input selections. This is the interval-merge law
+        /// that guarantees no two carets can claim a shared char.
+        #[test]
+        fn normalize_carets_yields_disjoint_intervals_covering_same_union(
+            spans in prop::collection::vec((0usize..40, 0usize..40), 0..16),
+        ) {
+            let input: Vec<EditState> = spans
+                .iter()
+                .map(|&(a, b)| EditState { anchor: a.min(b), cursor: a.max(b), goal_col: None })
+                .collect();
+            // Reference union as a set of covered indices.
+            let mut covered = std::collections::BTreeSet::new();
+            for c in &input {
+                let r = c.selection();
+                covered.extend(r.start..r.end);
+            }
+
+            let mut carets = input.clone();
+            normalize_carets(&mut carets);
+
+            // Merged intervals are pairwise disjoint AND non-touching.
+            let mut sels: Vec<std::ops::Range<usize>> =
+                carets.iter().map(|c| c.selection()).collect();
+            sels.sort_by_key(|r| (r.start, r.end));
+            for w in sels.windows(2) {
+                // Non-empty selections must not touch; collapsed carets at
+                // distinct positions are allowed (they cover no chars).
+                if !w[0].is_empty() && !w[1].is_empty() {
+                    prop_assert!(w[1].start > w[0].end,
+                        "intervals {:?} and {:?} touch/overlap", w[0], w[1]);
+                }
+            }
+
+            // Union of merged intervals equals the input union.
+            let mut merged_covered = std::collections::BTreeSet::new();
+            for r in &sels {
+                merged_covered.extend(r.start..r.end);
+            }
+            prop_assert_eq!(merged_covered, covered);
+        }
+
+        /// THE C-02 INVARIANT: applying a destructive edit through
+        /// `for_each_caret` over ANY set of carets equals deleting the merged
+        /// union intervals exactly once (single-pass oracle). Overlapping
+        /// carets can never double-edit a shared region.
+        #[test]
+        fn for_each_caret_delete_equals_single_pass_over_merged_intervals(
+            // 12-char fixed buffer so spans are always in range.
+            spans in prop::collection::vec((0usize..12, 0usize..12), 0..8),
+        ) {
+            const TEXT: &str = "abcdefghijkl";
+
+            // Subject: dispatch delete_selection through for_each_caret.
+            let mut subject = Rope::from_str(TEXT);
+            let mut carets: Vec<EditState> = spans
+                .iter()
+                .map(|&(a, b)| EditState { anchor: a.min(b), cursor: a.max(b), goal_col: None })
+                .collect();
+            for_each_caret(&mut subject, &mut carets, |rope, st| {
+                delete_selection(rope, st);
+            });
+
+            // Oracle: compute the merged intervals independently, then delete
+            // them from the original buffer from RIGHT to LEFT (so earlier
+            // deletions don't shift later indices) — each region deleted once.
+            let mut intervals: Vec<(usize, usize)> = spans
+                .iter()
+                .map(|&(a, b)| (a.min(b), a.max(b)))
+                .filter(|(s, e)| e > s)
+                .collect();
+            intervals.sort();
+            let mut merged: Vec<(usize, usize)> = Vec::new();
+            for (s, e) in intervals {
+                match merged.last_mut() {
+                    Some(last) if s <= last.1 => last.1 = last.1.max(e),
+                    _ => merged.push((s, e)),
+                }
+            }
+            let mut oracle = Rope::from_str(TEXT);
+            for (s, e) in merged.into_iter().rev() {
+                oracle.remove(s..e);
+            }
+
+            prop_assert_eq!(subject.to_string(), oracle.to_string());
         }
     }
 }
