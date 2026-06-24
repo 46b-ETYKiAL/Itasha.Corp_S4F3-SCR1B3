@@ -6384,3 +6384,6 @@ mod qa_app_workflow_tests;
 
 #[cfg(test)]
 mod qa_find_scale_tests;
+
+#[cfg(test)]
+mod qa_session_scale_tests;
