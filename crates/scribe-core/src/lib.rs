@@ -27,6 +27,7 @@ pub mod encoding;
 pub mod eol;
 pub mod error;
 pub mod lsp;
+pub mod path_norm;
 pub mod plugin;
 pub mod search;
 pub mod session;
