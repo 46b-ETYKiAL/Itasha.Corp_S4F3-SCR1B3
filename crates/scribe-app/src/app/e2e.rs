@@ -218,6 +218,18 @@ fn fresh_app() -> ScribeApp {
     ScribeApp::new_test(cfg)
 }
 
+/// An app whose toolbar renders as a FULL-WIDTH top panel (not folded into the
+/// narrow in-titlebar bar), so every customizable quick-access item is visible
+/// and directly clickable — the right surface for driving the later toolbar
+/// items (minimap / wrap / spellcheck / fold / linenumbers / lsp) that overflow
+/// into the "⋯ more actions" dropdown on the narrow in-titlebar toolbar.
+fn toolbar_app() -> ScribeApp {
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = true;
+    cfg.appearance.toolbar_in_titlebar = false;
+    ScribeApp::new_test(cfg)
+}
+
 // #91 render-coverage: exercise the new render paths headlessly via
 // run_frames so the GUI-heavy code (rotated side tabs, spell underline
 // painter, font-theme reapply, background tint) is actually executed.
@@ -2096,5 +2108,634 @@ fn report_issue_diagnostics_toggle_drives_preview() {
     assert!(
         preview.contains("App version:") && preview.contains("Renderer: wgpu"),
         "ticking diagnostics must make the diagnostics block appear in the preview"
+    );
+}
+
+// ===========================================================================
+// Gap-fill e2e drives (#34): button-click / context-menu / form wiring that
+// the existing suite covered only at the COMMAND or METHOD layer. Each test
+// builds the app in the right state, finds the widget by its REAL render-code
+// label, drives it like a user, and asserts the observable post-state.
+// ===========================================================================
+
+/// Open two tabs, pin one so exactly ONE close ("✕") button renders, then
+/// click that "Close tab (or middle-click)" button like a user → the tab is
+/// removed. (The suite previously only drove middle-click + the `close_tab`
+/// method; the toolbar-style ✕ button click was never exercised.)
+#[test]
+fn close_tab_via_x_button_click_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = dir.path().join("alpha.txt");
+    let beta = dir.path().join("beta.txt");
+    std::fs::write(&alpha, "A\n").unwrap();
+    std::fs::write(&beta, "B\n").unwrap();
+    let mut app = fresh_app();
+    app.open_path(alpha);
+    app.open_path(beta); // beta is active
+                         // Pin the scratch tab AND alpha so they hide their ✕; only the active,
+                         // unpinned beta renders a close button → its label is unambiguous.
+    app.tabs[0].pinned = true; // scratch
+    app.tabs[1].pinned = true; // alpha
+    let mut h = ui_harness(app);
+    h.run();
+    let before = h.state().tabs.len();
+    // The close button is an icon-only Button whose accessible name is its X
+    // glyph; only the one unpinned (beta) tab renders it, so it's unambiguous.
+    h.get_by_label(egui_phosphor::thin::X).click();
+    h.run();
+    assert_eq!(
+        h.state().tabs.len(),
+        before - 1,
+        "clicking the ✕ close button must remove the tab"
+    );
+    assert!(
+        !h.state().tabs.iter().any(|t| t.title() == "beta.txt"),
+        "the closed tab (beta.txt) must be gone"
+    );
+}
+
+/// Click the active tab's pin button ("Pin tab") → it becomes pinned; the
+/// label flips to "Unpin tab" and clicking that unpins it. Drives the pin
+/// TOGGLE button (the pin LOGIC was covered; the button click was not).
+#[test]
+fn pin_button_click_pins_then_unpins_active_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = dir.path().join("alpha.txt");
+    std::fs::write(&alpha, "A\n").unwrap();
+    let mut app = fresh_app();
+    app.open_path(alpha); // alpha becomes the active, selected tab
+    assert!(!app.tabs[app.active].pinned, "alpha starts unpinned");
+    let mut h = ui_harness(app);
+    h.run();
+    // The pin toggle is an icon-only Button on the active tab; its accessible
+    // name is the PUSH_PIN glyph (unpinned) / PUSH_PIN_SLASH glyph (pinned).
+    h.get_by_label(egui_phosphor::thin::PUSH_PIN).click();
+    h.run();
+    let a = h.state().active;
+    assert!(
+        h.state().tabs[a].pinned,
+        "clicking the pin button must pin the active tab"
+    );
+    // Now the glyph flips to PUSH_PIN_SLASH; click it to revert.
+    h.get_by_label(egui_phosphor::thin::PUSH_PIN_SLASH).click();
+    h.run();
+    let a = h.state().active;
+    assert!(
+        !h.state().tabs[a].pinned,
+        "clicking the unpin button must unpin the active tab"
+    );
+}
+
+/// Tab context-menu: right-click a tab → click "Close Others" → only that tab
+/// remains. Drives the menu UI (the close-others LOGIC was covered; the menu
+/// render + secondary-click path was not).
+#[test]
+fn tab_context_menu_close_others_keeps_only_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = dir.path().join("alpha.txt");
+    let beta = dir.path().join("beta.txt");
+    let gamma = dir.path().join("gamma.txt");
+    for (p, c) in [(&alpha, "A\n"), (&beta, "B\n"), (&gamma, "G\n")] {
+        std::fs::write(p, c).unwrap();
+    }
+    let mut app = fresh_app();
+    app.open_path(alpha);
+    app.open_path(beta);
+    app.open_path(gamma);
+    let mut h = ui_harness(app);
+    h.run();
+    // Right-click the beta tab to open its context menu.
+    h.get_by_label("beta.txt").click_secondary();
+    h.run();
+    h.get_by_label("Close Others").click();
+    h.run();
+    let titles: Vec<String> = h.state().tabs.iter().map(|t| t.title()).collect();
+    assert_eq!(
+        titles,
+        vec!["beta.txt".to_string()],
+        "Close Others must keep only the right-clicked tab, got {titles:?}"
+    );
+}
+
+/// Tab context-menu: right-click a tab → click "Close All to the Right" →
+/// tabs after it are removed; it and prior tabs remain.
+#[test]
+fn tab_context_menu_close_all_to_right_trims_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = dir.path().join("alpha.txt");
+    let beta = dir.path().join("beta.txt");
+    let gamma = dir.path().join("gamma.txt");
+    for (p, c) in [(&alpha, "A\n"), (&beta, "B\n"), (&gamma, "G\n")] {
+        std::fs::write(p, c).unwrap();
+    }
+    let mut app = fresh_app();
+    app.open_path(alpha);
+    app.open_path(beta);
+    app.open_path(gamma);
+    let mut h = ui_harness(app);
+    h.run();
+    h.get_by_label("beta.txt").click_secondary();
+    h.run();
+    h.get_by_label("Close All to the Right").click();
+    h.run();
+    let titles: Vec<String> = h.state().tabs.iter().map(|t| t.title()).collect();
+    assert!(
+        titles.contains(&"beta.txt".to_string()) && !titles.contains(&"gamma.txt".to_string()),
+        "Close All to the Right must drop gamma (right of beta), got {titles:?}"
+    );
+}
+
+/// Tab context-menu: "Pin tab" entry pins the right-clicked tab.
+#[test]
+fn tab_context_menu_pin_pins_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = dir.path().join("alpha.txt");
+    std::fs::write(&alpha, "A\n").unwrap();
+    let mut app = fresh_app();
+    app.open_path(alpha);
+    let alpha_idx = app.active;
+    assert!(!app.tabs[alpha_idx].pinned, "alpha starts unpinned");
+    let mut h = ui_harness(app);
+    h.run();
+    h.get_by_label("alpha.txt").click_secondary();
+    h.run();
+    h.get_by_label("Pin tab").click();
+    h.run();
+    let pinned = h
+        .state()
+        .tabs
+        .iter()
+        .find(|t| t.title() == "alpha.txt")
+        .map(|t| t.pinned)
+        .unwrap_or(false);
+    assert!(pinned, "the context-menu 'Pin tab' must pin the target tab");
+}
+
+/// Tab context-menu: "Close All" closes every tab (the app keeps one scratch
+/// tab invariant, so the result is a single fresh scratch tab).
+#[test]
+fn tab_context_menu_close_all_leaves_one_scratch() {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = dir.path().join("alpha.txt");
+    let beta = dir.path().join("beta.txt");
+    std::fs::write(&alpha, "A\n").unwrap();
+    std::fs::write(&beta, "B\n").unwrap();
+    let mut app = fresh_app();
+    app.open_path(alpha);
+    app.open_path(beta);
+    let mut h = ui_harness(app);
+    h.run();
+    h.get_by_label("beta.txt").click_secondary();
+    h.run();
+    h.get_by_label("Close All").click();
+    h.run();
+    assert_eq!(
+        h.state().tabs.len(),
+        1,
+        "Close All must leave exactly one (scratch) tab"
+    );
+    assert!(
+        !h.state().tabs.iter().any(|t| t.title() == "beta.txt"),
+        "Close All must remove the opened files"
+    );
+}
+
+/// Toolbar TOGGLE buttons (default items): clicking the Word-wrap, Spellcheck,
+/// and Minimap buttons each flip their config flag. This closes the
+/// toolbar-button layer over the already-covered command layer.
+#[test]
+fn toolbar_wrap_button_flips_word_wrap() {
+    let mut h = ui_harness(toolbar_app());
+    h.run();
+    let before = h.state().config.editor.word_wrap;
+    // Toolbar buttons default to TEXT mode (appearance.toolbar_icons=false);
+    // the "wrap" item's accessible name is its short text label "wrap".
+    h.get_by_label("wrap").click();
+    h.run();
+    assert_ne!(
+        h.state().config.editor.word_wrap,
+        before,
+        "the Word wrap toolbar button must flip word_wrap"
+    );
+}
+
+#[test]
+fn toolbar_spellcheck_button_flips_spellcheck() {
+    let mut h = ui_harness(toolbar_app());
+    h.run();
+    let before = h.state().config.spellcheck.enabled;
+    h.get_by_label("spell").click();
+    h.run();
+    assert_ne!(
+        h.state().config.spellcheck.enabled,
+        before,
+        "the Spellcheck toolbar button must flip spellcheck.enabled"
+    );
+}
+
+#[test]
+fn toolbar_minimap_button_flips_minimap() {
+    let mut h = ui_harness(toolbar_app());
+    h.run();
+    let before = h.state().config.editor.show_minimap;
+    h.get_by_label("map").click();
+    h.run();
+    assert_ne!(
+        h.state().config.editor.show_minimap,
+        before,
+        "the Minimap toolbar button must flip show_minimap"
+    );
+}
+
+/// Toolbar items not in the default set still wire correctly when present.
+/// Add "fold", "linenumbers" to the bar, then click each → flip its flag.
+#[test]
+fn toolbar_fold_and_linenumbers_buttons_flip_their_flags() {
+    let mut app = toolbar_app();
+    app.config
+        .toolbar
+        .items
+        .extend(["fold".to_string(), "linenumbers".to_string()]);
+    let mut h = ui_harness(app);
+    h.run();
+    let fold_before = h.state().fold_view;
+    h.get_by_label("fold").click();
+    h.run();
+    assert_ne!(
+        h.state().fold_view,
+        fold_before,
+        "the Folded view toolbar button must flip fold_view"
+    );
+    let ln_before = h.state().config.editor.show_line_numbers;
+    h.get_by_label("nums").click();
+    h.run();
+    assert_ne!(
+        h.state().config.editor.show_line_numbers,
+        ln_before,
+        "the Line numbers toolbar button must flip show_line_numbers"
+    );
+}
+
+/// Clicking the LSP toolbar button on a plain scratch tab surfaces a toast
+/// explaining why no server starts — the observable outcome of the button
+/// wiring. A scratch tab has no detectable language, so the toast is the
+/// "no language detected" notice (the path-missing branch fires only once a
+/// language is known).
+#[test]
+fn toolbar_lsp_button_on_scratch_tab_sets_toast() {
+    let mut app = toolbar_app();
+    app.config.toolbar.items.push("lsp".to_string());
+    let mut h = ui_harness(app);
+    h.run();
+    assert!(h.state().toast.is_none(), "no toast before clicking LSP");
+    h.get_by_label("lsp").click();
+    h.run();
+    assert_eq!(
+        h.state().toast.as_deref(),
+        Some("no language detected for this file"),
+        "the LSP button on a scratch tab must explain why it can't start"
+    );
+}
+
+/// Click the "Replace all" button in the find/replace bar → every match in the
+/// active buffer is replaced. (The `replace_in_active` method was covered; the
+/// button wiring in the find-bar second row was not.)
+#[test]
+fn replace_all_button_click_rewrites_buffer() {
+    let mut app = fresh_app();
+    app.tabs[0].text = "alpha alpha alpha".into();
+    app.find_query = "alpha".into();
+    app.replace_query = "beta".into();
+    app.find_open = true;
+    let mut h = ui_harness(app);
+    h.run();
+    h.get_by_label("Replace all").click();
+    h.run();
+    let a = h.state().active;
+    assert_eq!(
+        h.state().tabs[a].text,
+        "beta beta beta",
+        "the Replace all button must replace every match"
+    );
+}
+
+/// Click the "Replace next" button → only the FIRST match is replaced.
+#[test]
+fn replace_next_button_click_replaces_first_only() {
+    let mut app = fresh_app();
+    app.tabs[0].text = "alpha alpha alpha".into();
+    app.find_query = "alpha".into();
+    app.replace_query = "beta".into();
+    app.find_open = true;
+    let mut h = ui_harness(app);
+    h.run();
+    h.get_by_label("Replace next").click();
+    h.run();
+    let a = h.state().active;
+    assert_eq!(
+        h.state().tabs[a].text,
+        "beta alpha alpha",
+        "the Replace next button must replace only the first match"
+    );
+}
+
+/// Command palette: open it, type a filter into the query field, and assert
+/// that a NON-matching entry disappears while a matching one remains — i.e.
+/// the type-to-filter actually filters the rendered command list.
+#[test]
+fn command_palette_type_to_filter_narrows_the_list() {
+    let mut h = ui_harness(fresh_app());
+    h.run();
+    h.get_by_label(">_").click();
+    h.run();
+    // Both commands (shortcut-less => bare label) render with an empty query.
+    let _ = h.get_by_label("Sort lines (A-Z)");
+    // Type a filter that matches "Cycle theme" but not "Sort lines".
+    let q = h.get_by_role(egui::accesskit::Role::TextInput);
+    q.focus();
+    h.run();
+    h.get_by_role(egui::accesskit::Role::TextInput)
+        .type_text("cycle theme");
+    h.run();
+    assert_eq!(
+        h.state().palette_query,
+        "cycle theme",
+        "typing must land in the palette query field"
+    );
+    // A matching entry is still present...
+    let _ = h.get_by_label("Cycle theme");
+    // ...and a non-matching entry is gone (query() returns None).
+    assert!(
+        h.query_by_label("Sort lines (A-Z)").is_none(),
+        "filtering must hide commands that don't match the query"
+    );
+}
+
+/// Command palette: type to filter to a single command, then CLICK that entry
+/// (the app's execute path) → its effect is observable. "Sort lines (A-Z)"
+/// reorders the active buffer's lines.
+#[test]
+fn command_palette_click_entry_executes_it() {
+    let mut app = fresh_app();
+    app.tabs[0].text = "gamma\nalpha\nbeta\n".into();
+    let mut h = ui_harness(app);
+    h.run();
+    h.get_by_label(">_").click();
+    h.run();
+    let q = h.get_by_role(egui::accesskit::Role::TextInput);
+    q.focus();
+    h.run();
+    h.get_by_role(egui::accesskit::Role::TextInput)
+        .type_text("sort lines (a-z)");
+    h.run();
+    // Sort lines has no shortcut, so its palette entry is the bare label.
+    h.get_by_label("Sort lines (A-Z)").click();
+    h.run();
+    let a = h.state().active;
+    assert_eq!(
+        h.state().tabs[a].text,
+        "alpha\nbeta\ngamma\n",
+        "executing Sort lines via the palette must sort the buffer"
+    );
+    assert!(
+        !h.state().palette_open,
+        "executing a palette command closes the palette"
+    );
+}
+
+/// Settings per-setting reset "↺": change a value away from its default, then
+/// click the reset button → the value returns to its default. Uses the Editor
+/// pane's "Line numbers" checkbox (a single, deterministic toggle).
+#[test]
+fn settings_reset_button_restores_default() {
+    // Default show_line_numbers is true; flip it to false so the row's ↺ is
+    // ENABLED (it only enables when cur != default).
+    let mut app = fresh_app();
+    let default_ln = Config::default().editor.show_line_numbers;
+    app.config.editor.show_line_numbers = !default_ln;
+    let mut h = ui_harness(app);
+    h.state_mut().settings_open = true;
+    h.run();
+    h.get_by_label("Editor").click();
+    h.run();
+    assert_ne!(
+        h.state().config.editor.show_line_numbers,
+        default_ln,
+        "precondition: the value is changed away from default"
+    );
+    // Click the FIRST enabled reset button. The Editor pane's first ↺ belongs
+    // to a row whose value differs from default — here, Line numbers. We click
+    // every ↺ to guarantee the differing row is reset (others are disabled
+    // no-ops), then assert the value is back to default.
+    for btn in h.get_all_by_label("↺").collect::<Vec<_>>() {
+        btn.click();
+    }
+    h.run();
+    assert_eq!(
+        h.state().config.editor.show_line_numbers,
+        default_ln,
+        "clicking the per-setting reset (↺) must restore the default"
+    );
+}
+
+/// Settings Fonts pane: clicking the editor-size "+" button increases the
+/// editor font size. The +/- buttons carry visible text ("+"/"-") so their
+/// AccessKit name is that text (the "Smaller"/"Larger" hover is NOT the name),
+/// and "+" also names the tab-strip add button — so we click every "+" in the
+/// Fonts pane frame (the tab-strip + is harmless here) and assert the size grew.
+#[test]
+fn settings_fonts_size_plus_button_increases_size() {
+    let mut h = ui_harness(fresh_app());
+    h.state_mut().settings_open = true;
+    h.run();
+    h.get_by_label("Fonts").click();
+    h.run();
+    let before = h.state().config.fonts.editor_size;
+    // Clamp the start below the max so "+" can move it.
+    h.state_mut().config.fonts.editor_size = 12.0;
+    h.run();
+    let before = before.min(12.0);
+    for btn in h.get_all_by_label("+").collect::<Vec<_>>() {
+        btn.click();
+    }
+    h.run();
+    assert!(
+        h.state().config.fonts.editor_size > before,
+        "clicking the Fonts size '+' must increase editor_size (was {before}, now {})",
+        h.state().config.fonts.editor_size
+    );
+}
+
+/// Settings → Plugins → "Manage plugins…" opens the plugin-manager modal.
+#[test]
+fn settings_manage_plugins_button_opens_manager() {
+    let mut h = ui_harness(fresh_app());
+    h.state_mut().settings_open = true;
+    h.run();
+    h.get_by_label("Plugins").click();
+    h.run();
+    assert!(
+        !h.state().plugin_manager.open,
+        "plugin manager starts closed"
+    );
+    h.get_by_label("Manage plugins…").click();
+    h.run();
+    assert!(
+        h.state().plugin_manager.open,
+        "the 'Manage plugins…' button must open the plugin-manager modal"
+    );
+}
+
+/// Status bar: the encoding, language, and (when present) diagnostics segment
+/// labels render. A scratch tab is UTF-8 / "text"; an injected diagnostic
+/// surfaces the count segment.
+#[test]
+fn status_bar_encoding_language_and_diagnostics_labels_present() {
+    let mut app = fresh_app();
+    app.tabs[0].text = "hi\n".into();
+    // Inject one error diagnostic so the count segment renders.
+    app.diagnostics.push(Diagnostic {
+        uri: "inmemory://scratch".into(),
+        line: 0,
+        character: 0,
+        severity: 1,
+        message: "boom".into(),
+    });
+    let mut h = ui_harness(app);
+    h.run();
+    // Encoding + language segments (scratch tab => UTF-8 / text).
+    let _ = h.get_by_label("UTF-8");
+    let _ = h.get_by_label("text");
+    // Diagnostics segment: "<glyph> 1e / 1".
+    let diag = format!("{} 1e / 1", egui_phosphor::thin::PROHIBIT);
+    assert!(
+        h.query_by_label(&diag).is_some(),
+        "the diagnostics count segment ({diag:?}) must render with one error"
+    );
+}
+
+/// Status bar: clicking the encoding segment opens Settings (→ Editor).
+#[test]
+fn status_bar_encoding_click_opens_settings() {
+    let mut h = ui_harness(fresh_app());
+    h.run();
+    assert!(!h.state().settings_open, "settings starts closed");
+    h.get_by_label("UTF-8").click();
+    h.run();
+    assert!(
+        h.state().settings_open,
+        "clicking the encoding segment must open Settings"
+    );
+}
+
+/// Welcome screen: clicking "New file" creates a tab and dismisses the welcome
+/// modal; "Open Settings" opens Settings.
+#[test]
+fn welcome_new_file_button_adds_tab_and_dismisses() {
+    // first_run_completed=false => the welcome modal opens on launch.
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = false;
+    let app = ScribeApp::new_test(cfg);
+    let mut h = ui_harness(app);
+    h.run();
+    assert!(h.state().welcome_open, "welcome modal opens on first run");
+    let before = h.state().tabs.len();
+    let label = format!("{}  New file (Ctrl+N)", egui_phosphor::thin::FILE_PLUS);
+    h.get_by_label(&label).click();
+    h.run();
+    assert_eq!(
+        h.state().tabs.len(),
+        before + 1,
+        "the welcome 'New file' button must add a tab"
+    );
+    assert!(
+        !h.state().welcome_open,
+        "the welcome 'New file' button must dismiss the welcome modal"
+    );
+}
+
+#[test]
+fn welcome_open_settings_button_opens_settings() {
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = false;
+    let app = ScribeApp::new_test(cfg);
+    let mut h = ui_harness(app);
+    h.run();
+    let label = format!("{}  Open Settings", egui_phosphor::thin::GEAR_SIX);
+    h.get_by_label(&label).click();
+    h.run();
+    assert!(
+        h.state().settings_open,
+        "the welcome 'Open Settings' button must open Settings"
+    );
+    assert!(
+        !h.state().welcome_open,
+        "opening Settings from welcome dismisses the welcome modal"
+    );
+}
+
+/// Fuzzy file finder (Ctrl+P surface): open it with a one-file index, type a
+/// query, and click the ranked result row → the file opens as a tab.
+#[test]
+fn fuzzy_finder_type_and_click_opens_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("widget.rs");
+    std::fs::write(&target, "fn main() {}\n").unwrap();
+    let mut app = fresh_app();
+    app.fuzzy_index = vec![target.clone()];
+    app.fuzzy_open = true;
+    app.focus_fuzzy = true;
+    let mut h = ui_harness(app);
+    h.run();
+    // Type a subsequence that ranks widget.rs.
+    h.get_by_role(egui::accesskit::Role::TextInput)
+        .type_text("widget");
+    h.run();
+    let row = target.display().to_string();
+    h.get_by_label(&row).click();
+    h.run();
+    assert!(
+        h.state().tabs.iter().any(|t| t.title() == "widget.rs"),
+        "clicking a fuzzy-finder result must open that file as a tab"
+    );
+    assert!(
+        !h.state().fuzzy_open,
+        "opening a fuzzy-finder result closes the finder"
+    );
+}
+
+/// Fold panel: with fold view on and a brace region in the buffer, clicking the
+/// "▾ L{n} ({len})" toggle folds that region (adds its start line to `folds`).
+#[test]
+fn fold_toggle_button_click_folds_region() {
+    let mut app = fresh_app();
+    // A single brace region: lines 0..=2, hidden_len = 2.
+    app.tabs[0].text = "fn x() {\n  a\n}\n".into();
+    app.fold_view = true;
+    let mut h = ui_harness(app);
+    h.run();
+    assert!(h.state().folds.is_empty(), "no folds before clicking");
+    // Unfolded label uses ▾; region start_line=0 => "L1", hidden_len=2.
+    h.get_by_label("▾ L1 (2)").click();
+    h.run();
+    assert!(
+        h.state().folds.contains(&0),
+        "clicking the fold toggle must fold region at start line 0"
+    );
+}
+
+/// Toast: with a toast set, clicking its "dismiss" button clears it.
+#[test]
+fn toast_dismiss_button_clears_toast() {
+    let mut app = fresh_app();
+    app.toast = Some("something happened".into());
+    let mut h = ui_harness(app);
+    h.run();
+    assert!(h.state().toast.is_some(), "toast is showing");
+    h.get_by_label("dismiss").click();
+    h.run();
+    assert!(
+        h.state().toast.is_none(),
+        "clicking 'dismiss' must clear the toast"
     );
 }
