@@ -31,3 +31,4 @@ desktop.ini
 # Harness runtime state — must never enter the public repo
 .s4f3-data/
 .claude-data/
+/mutants.out*/

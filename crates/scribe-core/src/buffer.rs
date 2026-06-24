@@ -265,4 +265,50 @@ mod tests {
         let r = Buffer::Rope(Rope::from_str("hi"));
         assert!(r.as_rope().is_some());
     }
+
+    #[test]
+    fn mmap_threshold_is_exactly_16_mib() {
+        // The browse-mode cutover is a load-bearing constant: a wrong value
+        // either loads huge files into a rope (defeating bounded RSS) or
+        // mmap-browses tiny files (read-only-banner surprise). Pin the exact
+        // arithmetic — `16 * 1024 * 1024` mutated to `+`/`/` changes this.
+        assert_eq!(MMAP_THRESHOLD, 16 * 1024 * 1024);
+        assert_eq!(MMAP_THRESHOLD, 16_777_216);
+    }
+
+    #[test]
+    fn is_empty_is_false_for_non_empty_buffer() {
+        // Pins `is_empty` against a mutation that always returns `true`: a
+        // non-empty rope MUST report not-empty (otherwise the editor would
+        // treat a populated file as blank).
+        let b = Buffer::from_text("not empty");
+        assert!(!b.is_empty());
+        assert_eq!(b.len_bytes(), "not empty".len());
+        // And the empty buffer genuinely reports empty.
+        assert!(Buffer::from_text("").is_empty());
+    }
+
+    #[test]
+    fn from_text_builds_editable_rope_with_matching_content() {
+        // Pins `from_text` against a mutation that returns `Default::default()`
+        // (an EMPTY rope): the content and length must match the input.
+        let b = Buffer::from_text("hello world");
+        assert!(matches!(b, Buffer::Rope(_)));
+        assert!(!b.is_read_only());
+        let rope = b.as_rope().expect("rope from from_text");
+        assert_eq!(rope.to_string(), "hello world");
+        assert_eq!(b.len_bytes(), 11);
+    }
+
+    #[test]
+    fn as_rope_mut_yields_writable_rope_on_rope_variant() {
+        // Pins `as_rope_mut` against a mutation returning `None`: a Rope buffer
+        // must hand back a mutable borrow the widget can edit through.
+        let mut b = Buffer::from_text("ab");
+        {
+            let rope = b.as_rope_mut().expect("mutable rope");
+            rope.insert(2, "c");
+        }
+        assert_eq!(b.as_rope().unwrap().to_string(), "abc");
+    }
 }
