@@ -951,6 +951,11 @@ impl ScribeApp {
         // dir auto-executed unsigned, unreviewed code on the next launch.
         let mut plugins = PluginHost::new();
         let mut pending_plugins: Vec<String> = Vec::new();
+        // S-02 — plugins whose pinned author key CHANGED (possible takeover).
+        // These are BLOCKED from loading and surfaced distinctly so the user
+        // can decide whether to approve the new key (key rotation), never a
+        // silent log line.
+        let mut key_changed_plugins: Vec<String> = Vec::new();
         if config.plugins.enabled {
             if let Some(dir) = Config::config_dir() {
                 let (found, errors) = plugin::discover(&dir.join("plugins"));
@@ -978,33 +983,96 @@ impl ScribeApp {
                     };
                     let sha = scribe_core::update::verify::sha256_hex(src.as_bytes());
                     let may_run = if config.plugins.require_signed {
-                        // Strict mode: pinned author key (TOFU) + a valid
-                        // minisign signature over the entry script.
-                        let verified = match (&p.manifest.author_pubkey, &p.manifest.signature) {
+                        // R7 / S-01 + S-02 — strict mode: the author-key trust
+                        // decision is now EXPLICIT (no silent TOFU, no silent
+                        // key-rotation). We first verify the minisign signature
+                        // over the entry script, then route the pinned-key
+                        // outcome through the pure `decide_key_trust` gate:
+                        //   * Match               → Allow (anchor matches)
+                        //   * New + prior consent  → Allow (user already approved
+                        //                            this exact entry script)
+                        //   * New + no consent     → held for approval (pending)
+                        //   * Mismatch (key change)→ BLOCKED; surfaced old→new;
+                        //                            NEVER loads without explicit
+                        //                            `replace_with_consent`.
+                        match (&p.manifest.author_pubkey, &p.manifest.signature) {
                             (Some(pk), Some(sig)) => {
-                                let pinned = matches!(
-                                    key_store.pin_or_match(&p.manifest.id, pk),
-                                    Ok(scribe_core::plugin::PinOutcome::Match
-                                        | scribe_core::plugin::PinOutcome::New)
-                                );
-                                pinned
-                                    && scribe_core::update::verify::verify_signature(
-                                        src.as_bytes(),
-                                        sig,
-                                        pk,
-                                    )
-                                    .is_ok()
+                                let sig_ok = scribe_core::update::verify::verify_signature(
+                                    src.as_bytes(),
+                                    sig,
+                                    pk,
+                                )
+                                .is_ok();
+                                if !sig_ok {
+                                    tracing::warn!(
+                                        "plugin '{}' rejected: require_signed is on but the \
+                                         signature does not verify",
+                                        p.manifest.id
+                                    );
+                                    false
+                                } else {
+                                    // The entry-hash trusted-approvals map is the
+                                    // user's explicit first-contact consent signal.
+                                    let first_consent = scribe_core::plugin::entry_is_trusted(
+                                        &p.manifest.id,
+                                        &sha,
+                                        &config.plugins.trusted,
+                                    );
+                                    let outcome = match key_store.pin_or_match(&p.manifest.id, pk) {
+                                        Ok(o) => o,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "plugin '{}' rejected: pinned-key store \
+                                                     error: {e}",
+                                                p.manifest.id
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    match scribe_core::plugin::pinned_keys::decide_key_trust(
+                                        outcome,
+                                        first_consent,
+                                    ) {
+                                        scribe_core::plugin::pinned_keys::PluginLoadDecision::Allow => true,
+                                        scribe_core::plugin::pinned_keys::PluginLoadDecision::NeedsFirstConsent => {
+                                            tracing::warn!(
+                                                "plugin '{}' held: first-seen author key needs \
+                                                 your explicit approval before it runs",
+                                                p.manifest.id
+                                            );
+                                            pending_plugins.push(p.manifest.id.clone());
+                                            false
+                                        }
+                                        scribe_core::plugin::pinned_keys::PluginLoadDecision::BlockKeyChanged {
+                                            old,
+                                            new,
+                                        } => {
+                                            // S-02 — the pinned author key CHANGED
+                                            // (possible takeover). NEVER load. Surface
+                                            // a BLOCKING old→new warning; rotation
+                                            // requires explicit `replace_with_consent`.
+                                            tracing::warn!(
+                                                "plugin '{}' BLOCKED: author key changed \
+                                                 (old={old} new={new}) — possible takeover; \
+                                                 approve the new key in Settings → Plugins \
+                                                 before it can run",
+                                                p.manifest.id
+                                            );
+                                            key_changed_plugins.push(p.manifest.id.clone());
+                                            false
+                                        }
+                                    }
+                                }
                             }
-                            _ => false,
-                        };
-                        if !verified {
-                            tracing::warn!(
-                                "plugin '{}' rejected: require_signed is on but it is \
-                                 unsigned or fails verification",
-                                p.manifest.id
-                            );
+                            _ => {
+                                tracing::warn!(
+                                    "plugin '{}' rejected: require_signed is on but it is \
+                                     unsigned (no author key / signature)",
+                                    p.manifest.id
+                                );
+                                false
+                            }
                         }
-                        verified
                     } else {
                         // Default mode: trust-on-first-use by entry checksum.
                         scribe_core::plugin::entry_is_trusted(
@@ -1031,6 +1099,17 @@ impl ScribeApp {
                         "{} plugin(s) need your approval before they run — open Settings \
                          → Plugins → Manage plugins",
                         pending_plugins.len()
+                    ));
+                }
+                // S-02 — a CHANGED author key is the highest-severity plugin
+                // event (possible takeover): surface it with priority over the
+                // softer "skipped" / "pending" toasts so the user sees it.
+                if !key_changed_plugins.is_empty() {
+                    toast = Some(format!(
+                        "⚠ {} plugin(s) BLOCKED — author key changed since last run \
+                         (possible takeover). Open Settings → Plugins to review the \
+                         new key before allowing it.",
+                        key_changed_plugins.len()
                     ));
                 }
             }
