@@ -42,7 +42,12 @@ const DEFAULT_FG: [u8; 3] = [0xd3, 0xd0, 0xc8];
 /// text). egui itself lays out + tessellates every row regardless of coloring,
 /// so a multi-MB file is heavy no matter what; this is the safety cap so it can
 /// never stall on the highlight pass.
-const MAX_HIGHLIGHT_BYTES: usize = 4 * 1024 * 1024;
+///
+/// Public so a caller (the rope editor) can branch on the SAME threshold: under
+/// the cap it uses the whole-document incremental path (cross-line correct +
+/// edit-gen cached); over the cap it falls back to a viewport-only approximate
+/// highlight for the huge-file browse view. Single source of truth.
+pub const MAX_HIGHLIGHT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Re-highlighting resumes from the nearest snapshot at/below the edited line.
 /// We snapshot the syntect parse/highlight state every STRIDE lines (not every
