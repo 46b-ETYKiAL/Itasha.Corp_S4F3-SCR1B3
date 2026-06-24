@@ -130,7 +130,7 @@ impl PluginManagerState {
                 }
                 Err(e) => {
                     self.registry = None;
-                    self.registry_error = Some(e);
+                    self.registry_error = Some(e.to_string());
                 }
             },
             Err(e) => {

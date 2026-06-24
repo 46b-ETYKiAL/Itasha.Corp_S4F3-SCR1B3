@@ -17,6 +17,13 @@ pub enum CoreError {
     #[error("invalid regex: {0}")]
     Regex(String),
 
+    // Carries a plugin-subsystem error message verbatim (no category prefix, like
+    // `Other`) so every call site that already frames the text — e.g. the command
+    // toast `format!("plugin error: {e}")` or the discover line `format!("{path}: {e}")`
+    // — renders byte-identically to the pre-A-05 ad-hoc `Result<_, String>`.
+    #[error("{0}")]
+    Plugin(String),
+
     #[error("file too large to edit safely ({0} bytes); opened read-only")]
     FileTooLargeToEdit(u64),
 

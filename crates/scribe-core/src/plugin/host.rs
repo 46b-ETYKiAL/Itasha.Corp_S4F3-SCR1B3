@@ -13,6 +13,7 @@
 //! Rhai grants no ambient filesystem/network/process access, so a script mod is
 //! sandboxed by construction.
 
+use crate::error::CoreError;
 use rhai::{Engine, ImmutableString, AST};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -166,11 +167,11 @@ impl PluginHost {
     /// Compile + load a script plugin. Runs its top-level statements once (which
     /// register commands/hooks), then strips statements so later command calls
     /// re-run only the named function, not the registration block.
-    pub fn load_script(&mut self, plugin_id: &str, source: &str) -> Result<(), String> {
+    pub fn load_script(&mut self, plugin_id: &str, source: &str) -> crate::Result<()> {
         let mut ast = self
             .engine
             .compile(source)
-            .map_err(|e| format!("{plugin_id}: parse: {e}"))?;
+            .map_err(|e| CoreError::Plugin(format!("{plugin_id}: parse: {e}")))?;
         {
             let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.current_plugin = Some(plugin_id.to_string());
@@ -178,7 +179,7 @@ impl PluginHost {
         self.arm_deadline();
         self.engine
             .run_ast(&ast)
-            .map_err(|e| format!("{plugin_id}: load: {e}"))?;
+            .map_err(|e| CoreError::Plugin(format!("{plugin_id}: load: {e}")))?;
         {
             let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.current_plugin = None;
@@ -207,24 +208,25 @@ impl PluginHost {
     /// Invoke a registered command against `ctx`. The plugin's function may read
     /// `buffer_text()` and call `set_buffer_text()` / `notify()`; the results are
     /// written back into `ctx`.
-    pub fn run_command(&self, command_id: &str, ctx: &mut PluginContext) -> Result<(), String> {
+    pub fn run_command(&self, command_id: &str, ctx: &mut PluginContext) -> crate::Result<()> {
         let (plugin_id, fn_name) = {
             let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             let cmd = s
                 .commands
                 .iter()
                 .find(|c| c.id == command_id)
-                .ok_or_else(|| format!("no such command: {command_id}"))?;
+                .ok_or_else(|| CoreError::Plugin(format!("no such command: {command_id}")))?;
             // fn_name is stored in hooks/commands map; commands store label, so
             // we look up the fn via a parallel scan of the registration.
             (cmd.plugin_id.clone(), command_fn_name(&s, command_id))
         };
-        let fn_name = fn_name.ok_or_else(|| format!("command {command_id} has no handler"))?;
+        let fn_name = fn_name
+            .ok_or_else(|| CoreError::Plugin(format!("command {command_id} has no handler")))?;
         self.invoke(&plugin_id, &fn_name, ctx)
     }
 
     /// Fire a lifecycle event to every plugin that hooked it.
-    pub fn fire_event(&self, event: HookEvent, ctx: &mut PluginContext) -> Result<(), String> {
+    pub fn fire_event(&self, event: HookEvent, ctx: &mut PluginContext) -> crate::Result<()> {
         let hooks: Vec<(String, String)> = {
             let s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.hooks
@@ -239,17 +241,12 @@ impl PluginHost {
         Ok(())
     }
 
-    fn invoke(
-        &self,
-        plugin_id: &str,
-        fn_name: &str,
-        ctx: &mut PluginContext,
-    ) -> Result<(), String> {
+    fn invoke(&self, plugin_id: &str, fn_name: &str, ctx: &mut PluginContext) -> crate::Result<()> {
         let plugin = self
             .plugins
             .iter()
             .find(|p| p.id == plugin_id)
-            .ok_or_else(|| format!("plugin not loaded: {plugin_id}"))?;
+            .ok_or_else(|| CoreError::Plugin(format!("plugin not loaded: {plugin_id}")))?;
         {
             let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
             s.buffer_text = ctx.text.clone();
@@ -259,7 +256,7 @@ impl PluginHost {
         self.arm_deadline();
         self.engine
             .call_fn::<()>(&mut scope, &plugin.ast, fn_name, ())
-            .map_err(|e| format!("{plugin_id}.{fn_name}: {e}"))?;
+            .map_err(|e| CoreError::Plugin(format!("{plugin_id}.{fn_name}: {e}")))?;
         let mut s = self.shared.lock().unwrap_or_else(|e| e.into_inner());
         ctx.text = s.buffer_text.clone();
         ctx.notifications.append(&mut s.notifications);

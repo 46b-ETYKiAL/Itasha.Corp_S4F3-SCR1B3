@@ -122,15 +122,16 @@ impl RegistryIndex {
 
     /// Parse a `index.toml` body. Returns `Err(...)` on TOML parse
     /// failure OR when `schema_version > CURRENT_SCHEMA_VERSION`.
-    pub fn from_toml_str(s: &str) -> Result<Self, String> {
-        let idx: RegistryIndex = toml::from_str(s).map_err(|e| e.to_string())?;
+    pub fn from_toml_str(s: &str) -> crate::Result<Self> {
+        let idx: RegistryIndex =
+            toml::from_str(s).map_err(|e| crate::CoreError::Plugin(e.to_string()))?;
         if idx.schema_version > Self::CURRENT_SCHEMA_VERSION {
-            return Err(format!(
+            return Err(crate::CoreError::Plugin(format!(
                 "registry schema_version {} is newer than this build supports (max {}); \
                  update SCR1B3 to read this registry",
                 idx.schema_version,
                 Self::CURRENT_SCHEMA_VERSION
-            ));
+            )));
         }
         Ok(idx)
     }
@@ -259,7 +260,7 @@ author_pubkey = "K2"
         let body = "schema_version = 9999\n";
         let r = RegistryIndex::from_toml_str(body);
         assert!(r.is_err(), "future schema must reject");
-        let msg = r.unwrap_err();
+        let msg = r.unwrap_err().to_string();
         assert!(msg.contains("update SCR1B3"), "got {msg:?}");
     }
 

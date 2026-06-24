@@ -1492,6 +1492,9 @@ impl ScribeApp {
                     self.status = n.clone();
                 }
             }
+            // `e` is a `CoreError::Plugin(msg)` whose `Display` renders the bare
+            // message (no category prefix), so this `format!` reproduces the
+            // pre-A-05 toast text byte-for-byte.
             Err(e) => self.toast = Some(format!("plugin error: {e}")),
         }
     }
