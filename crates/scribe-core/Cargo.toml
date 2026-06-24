@@ -36,6 +36,29 @@ tempfile = "3"
 minisign = "0.9"                                 # sign in tests only (verify path round-trip)
 proptest = "1.8.0"
 unicode-segmentation = "1.13"                    # grapheme-cluster reference oracle (tests only)
+# Micro-benchmarks for the editor hot paths (rope edits, syntax highlight,
+# search, file load). `default-features = false` drops the `plotters`/HTML-report
+# stack so the bench build stays lean and avoids gnuplot at smoke time; the
+# `--save-baseline` / criterion CLI flags still work for regression tracking.
+criterion = { version = "0.5.1", default-features = false }
+
+# Hot-path micro-benchmarks. Each uses `harness = false` so criterion's own
+# `criterion_main!` drives the run instead of libtest.
+[[bench]]
+name = "rope_edits"
+harness = false
+
+[[bench]]
+name = "syntax_highlight"
+harness = false
+
+[[bench]]
+name = "search"
+harness = false
+
+[[bench]]
+name = "file_load"
+harness = false
 
 [lints.rust]
 # `cfg(fuzzing)` is set automatically by `cargo fuzz build`; the `update::net`
