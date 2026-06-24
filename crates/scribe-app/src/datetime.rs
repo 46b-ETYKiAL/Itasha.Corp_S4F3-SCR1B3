@@ -60,6 +60,41 @@ mod tests {
     }
 
     #[test]
+    fn epoch_day_zero_is_1970_01_01() {
+        // Hinnant's `civil_from_days` contract: day 0 == 1970-01-01. This is the
+        // era/epoch anchor the audit flagged as a possible off-by-one. The whole
+        // first day must map to 1970-01-01 (no wrap into 1969 or 1970-01-02).
+        assert_eq!(format_iso8601_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_iso8601_utc(86_399), "1970-01-01T23:59:59Z");
+        assert_eq!(format_iso8601_utc(86_400), "1970-01-02T00:00:00Z");
+    }
+
+    #[test]
+    fn century_leap_day_2000_02_29() {
+        // Year 2000 IS a leap year (divisible by 400) — the case that exercises
+        // the `doe/36524` and `doe/146096` century/era correction terms. An era
+        // off-by-one would shift Feb 29 to Mar 1 or drop the day entirely.
+        assert_eq!(format_iso8601_utc(951_827_445), "2000-02-29T12:30:45Z");
+        // The day immediately after the century leap day.
+        assert_eq!(format_iso8601_utc(951_868_800), "2000-03-01T00:00:00Z");
+    }
+
+    #[test]
+    fn year_boundary_transition() {
+        // Dec 31 -> Jan 1 across a year boundary: the `year + (month <= 2)`
+        // Jan/Feb correction and month/day reconstruction must not slip a day.
+        assert_eq!(format_iso8601_utc(978_307_199), "2000-12-31T23:59:59Z");
+        assert_eq!(format_iso8601_utc(978_307_200), "2001-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn recent_known_date() {
+        // A recent date (2025-06-24) — the kind of value an audit timestamp
+        // actually stamps — verified against an independent reference.
+        assert_eq!(format_iso8601_utc(1_750_723_200), "2025-06-24T00:00:00Z");
+    }
+
+    #[test]
     fn now_has_iso8601_shape() {
         let s = now_iso8601_utc();
         // YYYY-MM-DDTHH:MM:SSZ == 20 chars, ends with Z, has the T separator.
