@@ -27,8 +27,11 @@
 use scribe_core::plugin::{PluginContext, PluginHost};
 
 /// Load a script that registers `cmd`, run it, and return the result. A helper
-/// so each adversarial case stays a single readable assertion.
-fn run_script(register_src: &str, command_id: &str) -> Result<PluginContext, String> {
+/// so each adversarial case stays a single readable assertion. The host now
+/// surfaces `scribe_core::CoreError` (A-05 plugin error-type normalization) — the
+/// adversarial cases below only assert `is_err()`, so the message content is
+/// unchanged.
+fn run_script(register_src: &str, command_id: &str) -> scribe_core::Result<PluginContext> {
     let mut h = PluginHost::new();
     h.load_script("adversary", register_src)?;
     let mut ctx = PluginContext::new("seed buffer text");

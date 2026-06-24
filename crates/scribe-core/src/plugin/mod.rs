@@ -120,8 +120,8 @@ pub struct PluginManifest {
 }
 
 impl PluginManifest {
-    pub fn from_toml_str(s: &str) -> Result<Self, String> {
-        toml::from_str(s).map_err(|e| e.to_string())
+    pub fn from_toml_str(s: &str) -> crate::Result<Self> {
+        toml::from_str(s).map_err(|e| crate::CoreError::Plugin(e.to_string()))
     }
 
     /// Whether this build can load the plugin (api_version not from the future).
