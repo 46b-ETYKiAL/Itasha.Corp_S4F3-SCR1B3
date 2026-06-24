@@ -36,25 +36,52 @@ const SKIP_DIRS: &[&str] = &[
     ".git",
 ];
 
-/// Walk `root` and collect every match of `query`. Hidden entries (basename
-/// starting with `.`) and the `SKIP_DIRS` are pruned; binary/oversized files are
-/// skipped. Stops at the caps above.
+/// Walk `root` and collect every match of `query` synchronously into one Vec.
+/// Hidden entries (basename starting with `.`) and the `SKIP_DIRS` are pruned;
+/// binary/oversized files are skipped; stops at the caps above.
+///
+/// 4-02 — the interactive UI no longer calls this on the frame thread; it drives
+/// the project search OFF-thread via [`spawn_search`], which reuses the shared
+/// [`walk_project`] core with a streaming callback. This synchronous variant is
+/// retained as the test oracle the streaming worker's output is validated
+/// against (so it is `#[cfg(test)]`-only — keeping it in the production binary
+/// would be dead code now that the UI streams).
+#[cfg(test)]
 pub fn search_project(root: &Path, query: &Query) -> Vec<FileMatch> {
     let mut out = Vec::new();
     if query.pattern.is_empty() {
         return out;
     }
+    // Collect every per-file batch into one flat Vec, preserving the caps.
+    walk_project(root, query, &mut |batch| {
+        out.extend(batch);
+        true // keep walking until the caps in `walk_project` stop us
+    });
+    out
+}
+
+/// Core directory walk. For each file with at least one match, the file's match
+/// batch is handed to `on_batch`; the walk continues only while `on_batch`
+/// returns `true` (so a streaming worker can stop early when its receiver is
+/// gone). Hidden entries / `SKIP_DIRS` are pruned; binary/oversized files are
+/// skipped; the `MAX_*` caps bound total work. The per-file batch granularity is
+/// what lets the off-thread search stream partial results to the UI.
+fn walk_project(root: &Path, query: &Query, on_batch: &mut dyn FnMut(Vec<FileMatch>) -> bool) {
+    if query.pattern.is_empty() {
+        return;
+    }
     let mut files_seen = 0usize;
+    let mut total_matches = 0usize;
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if files_seen >= MAX_FILES_SCANNED || out.len() >= MAX_TOTAL_MATCHES {
+        if files_seen >= MAX_FILES_SCANNED || total_matches >= MAX_TOTAL_MATCHES {
             break;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
-            if out.len() >= MAX_TOTAL_MATCHES {
+            if total_matches >= MAX_TOTAL_MATCHES {
                 break;
             }
             let p = entry.path();
@@ -74,11 +101,65 @@ pub fn search_project(root: &Path, query: &Query) -> Vec<FileMatch> {
                     continue;
                 }
                 files_seen += 1;
-                search_one_file(&p, query, &mut out);
+                // Scan one file into a fresh batch; respect the global match cap.
+                let mut batch = Vec::new();
+                let remaining = MAX_TOTAL_MATCHES - total_matches;
+                search_one_file(&p, query, &mut batch);
+                if batch.len() > remaining {
+                    batch.truncate(remaining);
+                }
+                if !batch.is_empty() {
+                    total_matches += batch.len();
+                    if !on_batch(batch) {
+                        return; // consumer asked us to stop (receiver dropped)
+                    }
+                }
             }
         }
     }
-    out
+}
+
+/// A message streamed from the off-thread project-find worker back to the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchMsg {
+    /// A batch of matches from one scanned file. Sent progressively as the walk
+    /// proceeds so the results pane fills in without the UI ever blocking.
+    Batch(Vec<FileMatch>),
+    /// The walk finished (sent exactly once, after the last batch).
+    Done,
+}
+
+/// Spawn the project-wide search on a background thread, streaming
+/// [`SearchMsg`] batches back over the returned receiver and calling
+/// `on_progress` after each send so the caller can request a repaint. The frame
+/// thread NEVER blocks on the fs walk (4-02). Dropping the receiver makes the
+/// next send fail, which stops the walk early — so a superseding search just
+/// drops the old receiver, no cancellation flag needed.
+pub fn spawn_search(
+    root: PathBuf,
+    query: Query,
+    on_progress: impl Fn() + Send + 'static,
+) -> std::sync::mpsc::Receiver<SearchMsg> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("scr1b3-find-in-files".into())
+        .spawn(move || {
+            walk_project(&root, &query, &mut |batch| {
+                // `send` fails iff the receiver was dropped (search superseded /
+                // pane closed) — return false to stop the walk immediately.
+                let alive = tx.send(SearchMsg::Batch(batch)).is_ok();
+                if alive {
+                    on_progress();
+                }
+                alive
+            });
+            // Signal completion (ignore the error if the receiver is gone).
+            if tx.send(SearchMsg::Done).is_ok() {
+                on_progress();
+            }
+        })
+        .expect("spawning the find-in-files worker thread should not fail");
+    rx
 }
 
 /// Read one file as UTF-8 (lossy) and append its matches. Skips files that are
@@ -203,6 +284,71 @@ mod tests {
         let hits = search_project(dir.path(), &q("TODO"));
         assert_eq!(hits.len(), 1, "the oversized file is skipped");
         assert!(hits[0].path.ends_with("small.txt"));
+    }
+
+    // --- 4-02: off-thread streaming worker -----------------------------------
+
+    #[test]
+    fn spawn_search_streams_all_matches_off_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "alpha\nbeta TODO\ngamma").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "no match\nTODO again").unwrap();
+
+        let progress = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let p = progress.clone();
+        let rx = spawn_search(dir.path().to_path_buf(), q("TODO"), move || {
+            p.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        // Collect every streamed batch until Done, off the calling thread.
+        let mut all = Vec::new();
+        let mut saw_done = false;
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                SearchMsg::Batch(b) => all.extend(b),
+                SearchMsg::Done => {
+                    saw_done = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_done, "the worker must emit a terminal Done");
+        assert_eq!(all.len(), 2, "both TODO matches arrive via the channel");
+        // The streamed results equal what the synchronous walk would produce.
+        let sync = search_project(dir.path(), &q("TODO"));
+        assert_eq!(all.len(), sync.len());
+        for m in &sync {
+            assert!(all.contains(m), "streamed results match the sync walk");
+        }
+        assert!(
+            progress.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "on_progress fired at least once (repaint requested)"
+        );
+    }
+
+    #[test]
+    fn spawn_search_dropping_receiver_stops_worker() {
+        // A superseding search drops the old receiver; the worker's next send
+        // then fails and the walk stops. Dropping must not panic; the worker
+        // thread exits cleanly. We can't observe the early stop directly, but we
+        // assert the contract holds (no panic, the new search still works).
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..50 {
+            std::fs::write(dir.path().join(format!("f{i}.txt")), "TODO line").unwrap();
+        }
+        let rx = spawn_search(dir.path().to_path_buf(), q("TODO"), || {});
+        drop(rx); // supersede immediately
+
+        // A fresh search after the drop still returns correct results.
+        let rx2 = spawn_search(dir.path().to_path_buf(), q("TODO"), || {});
+        let mut count = 0;
+        while let Ok(msg) = rx2.recv() {
+            match msg {
+                SearchMsg::Batch(b) => count += b.len(),
+                SearchMsg::Done => break,
+            }
+        }
+        assert_eq!(count, 50, "the second search streams all 50 matches");
     }
 
     #[test]

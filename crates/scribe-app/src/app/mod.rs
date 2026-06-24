@@ -539,6 +539,16 @@ pub struct ScribeApp {
     find_in_files_results: Vec<crate::find_in_files::FileMatch>,
     find_in_files_error: Option<String>,
     focus_find_in_files: bool,
+    /// 4-02 — receiver for the off-thread project-find worker. The fs walk +
+    /// per-file scan run on a spawned `std::thread`, streaming `FileMatch`
+    /// batches back over this channel so the egui frame thread NEVER blocks on a
+    /// big tree. `None` when no search is in flight. A new search drops the old
+    /// receiver (the orphaned worker's sends then no-op), so the latest query
+    /// always supersedes the old one — no cancellation flag needed.
+    find_in_files_rx: Option<std::sync::mpsc::Receiver<crate::find_in_files::SearchMsg>>,
+    /// True while a project-find worker is running (drives a "searching…" hint
+    /// and keeps the UI repainting so streamed results land promptly).
+    find_in_files_running: bool,
     /// Wave-5 P1: distraction-free "zen" mode. Hides toolbar, tab strip, status
     /// bar, minimap, and gutter, centering the editor. Runtime session state
     /// (not persisted) — toggled with Ctrl+. and exited first by Esc.
@@ -1048,6 +1058,8 @@ impl ScribeApp {
             find_in_files_results: Vec::new(),
             find_in_files_error: None,
             focus_find_in_files: false,
+            find_in_files_rx: None,
+            find_in_files_running: false,
             zen_mode: false,
             snippets: load_snippets(),
             md_preview_open: false,
@@ -4439,11 +4451,22 @@ impl ScribeApp {
         self.tabs[i].edit_gen = self.tabs[i].edit_gen.wrapping_add(1);
     }
 
-    /// Wave-5: run the project-wide search over the open folder into the
+    /// Wave-5 / 4-02: run the project-wide search over the open folder into the
     /// results pane. Reuses the in-buffer find engine + the open file-tree root.
-    fn run_find_in_files(&mut self) {
+    ///
+    /// 4-02 — the fs walk + per-file scan runs OFF the egui frame thread on a
+    /// spawned worker (`find_in_files::spawn_search`), streaming results back
+    /// over `find_in_files_rx`. The UI shows partial results as they arrive and
+    /// never blocks on a big tree. Starting a new search drops the previous
+    /// receiver (assigning `Some(rx)` over the old one), which makes the orphaned
+    /// worker's next send fail and stop the walk — the latest query supersedes
+    /// the old one without an explicit cancellation flag.
+    fn run_find_in_files(&mut self, ctx: &egui::Context) {
         self.find_in_files_error = None;
         self.find_in_files_results.clear();
+        // Dropping any in-flight receiver supersedes the previous search.
+        self.find_in_files_rx = None;
+        self.find_in_files_running = false;
         let Some(root) = self.file_tree_root.clone() else {
             self.find_in_files_error = Some("open a folder first".into());
             return;
@@ -4454,6 +4477,9 @@ impl ScribeApp {
             case_sensitive: false,
             whole_word: false,
         };
+        if query.pattern.is_empty() {
+            return;
+        }
         // Surface a bad regex once (the per-file search swallows it silently).
         if query.regex {
             if let Err(e) = scribe_core::search::find_all("", &query) {
@@ -4461,8 +4487,46 @@ impl ScribeApp {
                 return;
             }
         }
-        self.find_in_files_results = crate::find_in_files::search_project(&root, &query);
-        self.status = format!("{} match(es)", self.find_in_files_results.len());
+        // Spawn the walk off-thread; each streamed batch requests a repaint so
+        // the partial results land promptly even while the user is idle.
+        let ctx = ctx.clone();
+        self.find_in_files_rx = Some(crate::find_in_files::spawn_search(root, query, move || {
+            ctx.request_repaint();
+        }));
+        self.find_in_files_running = true;
+        self.status = "searching…".into();
+    }
+
+    /// 4-02 — drain any batches the off-thread project-find worker streamed back,
+    /// appending them to the results pane. Called once per frame from
+    /// `frame_tick`. Non-blocking (`try_recv`); when `Done` arrives (or the
+    /// channel disconnects) the receiver is dropped and the running flag clears.
+    fn drain_find_in_files(&mut self) {
+        let Some(rx) = self.find_in_files_rx.as_ref() else {
+            return;
+        };
+        let mut finished = false;
+        loop {
+            match rx.try_recv() {
+                Ok(crate::find_in_files::SearchMsg::Batch(batch)) => {
+                    self.find_in_files_results.extend(batch);
+                }
+                Ok(crate::find_in_files::SearchMsg::Done) => {
+                    finished = true;
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    finished = true;
+                    break;
+                }
+            }
+        }
+        if finished {
+            self.find_in_files_rx = None;
+            self.find_in_files_running = false;
+            self.status = format!("{} match(es)", self.find_in_files_results.len());
+        }
     }
 
     /// Wave-5: open `path` in a tab (reusing the normal open path) then scroll to
@@ -6211,6 +6275,11 @@ impl ScribeApp {
             self.reload_config_from_disk(ctx);
         }
 
+        // 4-02 — drain any batches the off-thread project-find worker streamed
+        // back this frame so the results pane fills in progressively. Cheap
+        // (one `try_recv` loop) and a no-op when no search is in flight.
+        self.drain_find_in_files();
+
         // Drain LSP diagnostics published by the server thread.
         let mut new_diags: Option<Vec<Diagnostic>> = None;
         if let Some(client) = &self.lsp {
@@ -6995,11 +7064,22 @@ impl ScribeApp {
                         ui.checkbox(&mut self.find_in_files_regex, "regex");
                         let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                         if enter || ui.button("search").clicked() {
-                            self.run_find_in_files();
+                            self.run_find_in_files(ctx);
                         }
                     });
                     if let Some(err) = &self.find_in_files_error {
                         ui.colored_label(Color32::from_rgb(0xe5, 0x3e, 0x3e), err);
+                    }
+                    // 4-02: streaming hint while the off-thread worker is walking.
+                    if self.find_in_files_running {
+                        ui.label(
+                            RichText::new(format!(
+                                "searching… {} so far",
+                                self.find_in_files_results.len()
+                            ))
+                            .color(muted)
+                            .small(),
+                        );
                     }
                     ui.separator();
                     let mut open_target: Option<(PathBuf, usize)> = None;
