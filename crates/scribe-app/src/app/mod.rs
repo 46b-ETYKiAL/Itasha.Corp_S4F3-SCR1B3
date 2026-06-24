@@ -6439,6 +6439,9 @@ mod plugin_manager_tests;
 mod qa_correctness_workflow_tests;
 
 #[cfg(test)]
+mod qa_largefile_scale_tests;
+
+#[cfg(test)]
 mod qa_security_workflow_tests;
 
 #[cfg(test)]
