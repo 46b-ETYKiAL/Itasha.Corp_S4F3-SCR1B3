@@ -27,10 +27,11 @@
 //!
 //! ## Promotion path
 //!
-//! [`Buffer::promote_to_rope`] decodes the mmap as UTF-8 (lossy on
-//! invalid bytes — matches the existing `Document::open` discipline) and
-//! moves the resulting string into a fresh `Rope::from_str`. The mmap
-//! handle is dropped. The on-disk file is never touched.
+//! [`Buffer::promote_to_rope`] decodes the mmap through `crate::encoding`
+//! (BOM sniff + chardetng statistical detection, lossy only on malformed
+//! sequences — matches the existing `Document::open` discipline) and moves
+//! the resulting string into a fresh `Rope::from_str`. The mmap handle is
+//! dropped. The on-disk file is never touched.
 //!
 //! ## Why not put this on `Document`
 //!
@@ -41,6 +42,7 @@
 //! follow-ups may unify the two when the multi-GB browse path lands in
 //! production.
 
+use crate::encoding;
 use ropey::Rope;
 use std::fs;
 use std::io;
@@ -88,8 +90,9 @@ impl Buffer {
     /// [`Buffer::Mmap`]; smaller files load into a `Rope`.
     ///
     /// On a successful mmap, the file handle is closed (memmap2 keeps its
-    /// own internal handle); the caller never sees the `File`. On UTF-8
-    /// decode errors the rope path uses lossy decode.
+    /// own internal handle); the caller never sees the `File`. The rope path
+    /// decodes through `crate::encoding` (BOM + chardetng), so non-UTF-8 files
+    /// decode correctly rather than as lossy mojibake.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         let meta = fs::metadata(path)?;
@@ -126,7 +129,11 @@ impl Buffer {
             })
         } else {
             let bytes = fs::read(path)?;
-            let text = String::from_utf8_lossy(&bytes).into_owned();
+            // Route decoding through `crate::encoding` (BOM sniff + chardetng
+            // statistical detection) exactly like `Document::open`, so a
+            // UTF-16 / Windows-1252 / Shift-JIS file decodes correctly instead
+            // of becoming U+FFFD mojibake under a raw UTF-8 lossy decode.
+            let (text, _enc) = encoding::decode(&bytes);
             Ok(Buffer::Rope(Rope::from_str(&text)))
         }
     }
@@ -158,15 +165,20 @@ impl Buffer {
         matches!(self, Buffer::Mmap { .. })
     }
 
-    /// Promote an [`Buffer::Mmap`] to [`Buffer::Rope`] in place. UTF-8
-    /// lossy-decode matches the existing `Document::open` discipline so a
-    /// mid-file invalid byte never aborts the editor. No-op on rope.
+    /// Promote an [`Buffer::Mmap`] to [`Buffer::Rope`] in place. Decoding
+    /// routes through `crate::encoding` (BOM + chardetng), matching the
+    /// existing `Document::open` discipline, so a non-UTF-8 file decodes
+    /// correctly and a mid-file invalid byte never aborts the editor. No-op
+    /// on rope.
     ///
     /// After promotion the mmap handle is dropped (memmap2 unmaps as it
     /// goes out of scope) and the on-disk file is never modified.
     pub fn promote_to_rope(&mut self) -> io::Result<()> {
         if let Buffer::Mmap { mmap, .. } = self {
-            let text = String::from_utf8_lossy(mmap).into_owned();
+            // Decode through `crate::encoding` (BOM + chardetng), matching
+            // `Document::open`, so promoting a non-UTF-8 mmap'd browse view
+            // yields the correct text rather than U+FFFD mojibake.
+            let (text, _enc) = encoding::decode(mmap);
             *self = Buffer::Rope(Rope::from_str(&text));
         }
         Ok(())
@@ -310,5 +322,89 @@ mod tests {
             rope.insert(2, "c");
         }
         assert_eq!(b.as_rope().unwrap().to_string(), "abc");
+    }
+
+    /// Build a UTF-16LE-with-BOM byte payload of at least `min_bytes` bytes whose
+    /// decoded text is `marker` repeated. Used to force the mmap browse path
+    /// (`>= MMAP_THRESHOLD`) with non-UTF-8 content.
+    fn utf16le_payload_at_least(marker: &str, min_bytes: usize) -> Vec<u8> {
+        let mut out: Vec<u8> = vec![0xFF, 0xFE]; // UTF-16LE BOM
+                                                 // Repeat the marker until the byte count clears the threshold.
+        while out.len() < min_bytes {
+            for unit in marker.encode_utf16() {
+                out.extend_from_slice(&unit.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn promote_to_rope_decodes_utf16le_not_mojibake() -> io::Result<()> {
+        // R8/C-04: a UTF-16LE file opened via the mmap browse path then promoted
+        // must decode through `crate::encoding` (BOM + chardetng), NOT through a
+        // raw `String::from_utf8_lossy` that would turn every other byte into the
+        // U+FFFD replacement char. The marker is multilingual so a lossy UTF-8
+        // decode is unambiguously wrong.
+        let marker = "café 速記 héllo\n";
+        let payload = utf16le_payload_at_least(marker, (MMAP_THRESHOLD as usize) + 64);
+        let mut f = NamedTempFile::new()?;
+        f.write_all(&payload)?;
+        f.flush()?;
+
+        let mut b = Buffer::open(f.path())?;
+        assert!(matches!(b, Buffer::Mmap { .. }), "large file opens as mmap");
+        b.promote_to_rope()?;
+        let rope = b.as_rope().expect("rope after promote");
+        let body = rope.to_string();
+
+        // No U+FFFD mojibake, and the real text is present.
+        assert!(
+            !body.contains('\u{FFFD}'),
+            "decoded body must not contain replacement chars (lossy-UTF8 mojibake)"
+        );
+        assert!(
+            body.starts_with(marker),
+            "decoded text must match the source"
+        );
+        assert!(
+            body.contains("速記"),
+            "kanji must survive the UTF-16 decode"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_small_utf16le_file_decodes_through_encoding() -> io::Result<()> {
+        // R8/C-04 (rope path): a SMALL UTF-16LE file (under MMAP_THRESHOLD, so it
+        // takes the eager `fs::read` rope path) must also decode through
+        // `crate::encoding`, not `from_utf8_lossy`.
+        let mut f = NamedTempFile::new()?;
+        // "Hi\n" in UTF-16LE with BOM.
+        f.write_all(&[0xFF, 0xFE, b'H', 0x00, b'i', 0x00, b'\n', 0x00])?;
+        f.flush()?;
+        let b = Buffer::open(f.path())?;
+        let rope = b.as_rope().expect("small file is a rope");
+        assert_eq!(rope.to_string(), "Hi\n");
+        Ok(())
+    }
+
+    #[test]
+    fn promote_preserves_valid_utf8_unchanged() -> io::Result<()> {
+        // Behaviour-identical guard: valid UTF-8 content (the common case) must
+        // round-trip through the new decode path byte-for-byte (chars), so the
+        // encoding routing never regresses the plain-ASCII / UTF-8 path.
+        let marker = "plain ascii line\n";
+        let mut payload = Vec::new();
+        while payload.len() < (MMAP_THRESHOLD as usize) + 16 {
+            payload.extend_from_slice(marker.as_bytes());
+        }
+        let expected = String::from_utf8(payload.clone()).unwrap();
+        let mut f = NamedTempFile::new()?;
+        f.write_all(&payload)?;
+        f.flush()?;
+        let mut b = Buffer::open(f.path())?;
+        b.promote_to_rope()?;
+        assert_eq!(b.as_rope().unwrap().to_string(), expected);
+        Ok(())
     }
 }
