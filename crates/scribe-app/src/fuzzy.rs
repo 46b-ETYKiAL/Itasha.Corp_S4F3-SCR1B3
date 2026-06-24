@@ -275,6 +275,42 @@ mod tests {
     }
 
     #[test]
+    fn scan_project_honours_the_cap_and_stops_walking() {
+        // More files than the cap → the walk returns EXACTLY `cap` paths and
+        // stops (exercises both the per-directory and the inner-loop cap breaks).
+        let dir = tempfile::tempdir().expect("tempdir");
+        for n in 0..20 {
+            std::fs::write(dir.path().join(format!("f{n}.rs")), "x").expect("write file");
+        }
+        let r = scan_project(dir.path(), 5);
+        assert_eq!(r.len(), 5, "the cap must bound the result size");
+    }
+
+    #[test]
+    fn scan_project_zero_cap_returns_empty() {
+        // A cap of 0 must stop before pushing anything (the entry-level
+        // `out.len() >= cap` break fires immediately).
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.rs"), "x").expect("write a");
+        assert!(scan_project(dir.path(), 0).is_empty());
+    }
+
+    #[test]
+    fn scan_project_on_a_file_path_yields_nothing_and_does_not_panic() {
+        // `read_dir` on a non-directory (a regular file) errors; the walk must
+        // silently skip the offending entry (the `Err(_) => continue` arm) and
+        // return an empty list rather than propagating the error or panicking.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-dir.rs");
+        std::fs::write(&file, "x").expect("write file");
+        let r = scan_project(&file, 100);
+        assert!(
+            r.is_empty(),
+            "scanning a file (not a dir) must return nothing, got: {r:?}"
+        );
+    }
+
+    #[test]
     fn scan_project_skips_target_node_modules() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(dir.path().join("target")).expect("mk target");

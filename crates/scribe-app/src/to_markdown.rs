@@ -696,4 +696,51 @@ mod tests {
             assert!(!md.contains("| --- |"), "no table for empty CSV:\n{md}");
         }
     }
+
+    #[test]
+    fn csv_escaped_double_quote_becomes_a_literal_quote_in_cell() {
+        // Inside a quoted field, `""` is the RFC-4180 escape for a single literal
+        // `"`. The cell `"say ""hi"""` must render as `say "hi"`, NOT split or
+        // lose the quotes — exercising the `""` lookahead in the scanner.
+        let md = to_markdown("\"say \"\"hi\"\"\",b\n1,2\n", Some("csv"));
+        assert!(
+            md.contains("| say \"hi\" | b |"),
+            "escaped double-quote not unescaped to a literal quote:\n{md}"
+        );
+        // Still a 2-column table (the escaped quotes did not break field parsing).
+        assert!(md.contains("| --- | --- |"), "expected 2-col table:\n{md}");
+    }
+
+    #[test]
+    fn csv_crlf_line_endings_split_records() {
+        // CRLF (\r\n) record terminators must split rows exactly like LF — the
+        // scanner swallows the \n after a \r. A Windows-authored CSV must produce
+        // the same table a Unix one does.
+        let md = to_markdown("a,b\r\n1,2\r\n3,4\r\n", Some("csv"));
+        assert!(md.contains("| a | b |"), "header row missing in:\n{md}");
+        assert!(md.contains("| 1 | 2 |"), "first data row missing in:\n{md}");
+        assert!(
+            md.contains("| 3 | 4 |"),
+            "second data row missing in:\n{md}"
+        );
+        // Exactly two columns — a stray \r must NOT leak into a cell as content.
+        assert!(md.contains("| --- | --- |"), "expected 2-col table:\n{md}");
+        assert!(
+            !md.contains('\r'),
+            "carriage return leaked into output:\n{md:?}"
+        );
+    }
+
+    #[test]
+    fn csv_without_trailing_newline_flushes_the_final_record() {
+        // Input that does NOT end with a newline still flushes its final
+        // field+record (the `!field.is_empty() || !record.is_empty()` flush
+        // branch) — the last row must not be dropped.
+        let md = to_markdown("a,b\n1,2", Some("csv"));
+        assert!(md.contains("| a | b |"), "header missing in:\n{md}");
+        assert!(
+            md.contains("| 1 | 2 |"),
+            "final no-newline record was dropped:\n{md}"
+        );
+    }
 }

@@ -2730,7 +2730,33 @@ mod deep_link {
     //! before flipping the window open; [`show`] reads the SAME temp key on its
     //! next frame. This pins that both sides agree on the key + value so the
     //! deep-link can't silently regress to opening on the wrong page.
-    use super::{request_category, settings_cat_id};
+    use super::{
+        open_plugin_manager_id, request_category, settings_cat_id, take_open_plugin_manager_request,
+    };
+
+    #[test]
+    fn take_open_plugin_manager_request_consumes_a_pending_flag_once() {
+        // The Plugins section sets a temp bool to ask the host to open the plugin
+        // manager. The host accessor must return true ONCE (and clear the flag),
+        // then false on the next call — a latch, not a level (so the manager
+        // doesn't re-open every frame).
+        let ctx = egui::Context::default();
+        // Absent flag → false (the empty/no-request path).
+        assert!(
+            !take_open_plugin_manager_request(&ctx),
+            "no pending request must read as false"
+        );
+        // Simulate the Plugins section raising the request.
+        ctx.data_mut(|d| d.insert_temp(open_plugin_manager_id(), true));
+        assert!(
+            take_open_plugin_manager_request(&ctx),
+            "a pending request must read as true once"
+        );
+        assert!(
+            !take_open_plugin_manager_request(&ctx),
+            "the flag must be cleared after one read (one-shot latch)"
+        );
+    }
 
     #[test]
     fn request_category_sets_the_key_show_reads() {
