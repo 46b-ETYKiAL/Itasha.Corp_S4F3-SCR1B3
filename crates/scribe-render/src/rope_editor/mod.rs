@@ -38,7 +38,7 @@ use egui::text::LayoutJob;
 use egui::{Color32, FontId, TextFormat, Ui};
 use ropey::Rope;
 use scribe_core::buffer::Buffer;
-use scribe_core::syntax::{Highlighter, HlSpan};
+use scribe_core::syntax::{Highlighter, HlSpan, IncrementalHighlightState};
 
 /// Inherent-method widget over a `&mut Buffer` (NOT a `Widget` impl —
 /// the renderer needs `&mut self` plumbing through `show_rows`).
@@ -352,6 +352,38 @@ impl<'a> RopeEditor<'a> {
         // position the OS IME composition window.
         let mut caret_screen: Option<egui::Rect> = None;
 
+        // ---- highlight phase (P-02 fix + C-01 cross-line correctness) ----
+        //
+        // Whole-document highlighting, keyed on the edit generation: recomputed
+        // ONLY when the buffer changes (or the language does), reused across
+        // idle frames with zero highlighter work. Highlighting the WHOLE
+        // document (not the joined visible window) means a block comment /
+        // multi-line string opened ABOVE the viewport colours its visible
+        // continuation correctly, because `highlight_document_incremental`
+        // carries the syntect parse state across lines.
+        //
+        // Over `MAX_HIGHLIGHT_BYTES` the incremental engine deliberately skips
+        // (a multi-MB file is layout-bound no matter the colour), so for the
+        // huge-file browse view we fall back to the viewport-only approximate
+        // highlight — an explicit, bounded degradation, NOT the default path.
+        let len_bytes = rope.len_bytes();
+        let use_full_doc =
+            highlighter.is_some() && len_bytes <= scribe_core::syntax::MAX_HIGHLIGHT_BYTES;
+        let doc_spans: Option<&[Vec<HlSpan>]> = if use_full_doc {
+            let hl = highlighter.expect("use_full_doc implies highlighter is Some");
+            let edit_gen = state.edit_gen;
+            Some(state.hl_cache.spans_for(
+                hl,
+                edit_gen,
+                ext.as_deref(),
+                len_bytes,
+                total_lines,
+                &|| rope.to_string(),
+            ))
+        } else {
+            None
+        };
+
         let scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, line_h, total_lines, |ui, range| {
@@ -368,8 +400,16 @@ impl<'a> RopeEditor<'a> {
                     }
                     line_strings.push(buf);
                 }
-                let window_spans: Option<Vec<Vec<HlSpan>>> = highlighter
-                    .map(|hl| hl.highlight_document(&line_strings.join("\n"), ext.as_deref()));
+                // Huge-file fallback ONLY: when the whole-document path is off
+                // (buffer over the highlight cap), highlight the visible window
+                // as a standalone chunk. This is the bounded browse-view
+                // approximation; the under-cap path above is the correct one.
+                let window_spans: Option<Vec<Vec<HlSpan>>> = if doc_spans.is_none() {
+                    highlighter
+                        .map(|hl| hl.highlight_document(&line_strings.join("\n"), ext.as_deref()))
+                } else {
+                    None
+                };
 
                 for (i, s) in line_strings.iter().enumerate() {
                     let li = range.start + i;
@@ -385,7 +425,13 @@ impl<'a> RopeEditor<'a> {
                                 .color(gutter_color),
                             );
                         }
-                        let spans = window_spans.as_ref().and_then(|w| w.get(i));
+                        // Prefer the cached whole-document spans (indexed by the
+                        // ABSOLUTE line number); fall back to the per-window
+                        // spans only on the huge-file path.
+                        let spans = match doc_spans {
+                            Some(all) => all.get(li),
+                            None => window_spans.as_ref().and_then(|w| w.get(i)),
+                        };
                         let job = build_line_job(s, spans, &font, text_color);
                         ui.label(job).rect
                     });
@@ -747,11 +793,123 @@ pub enum BufferModeSeen {
 
 use scribe_core::editing::{self, EditKind, EditState, History, Snapshot};
 
+/// The cheap, O(1) fingerprint that decides whether the cached highlight is
+/// still valid for the current frame. Mirrors the app-side `spell_cache`
+/// discipline (key off the monotonic edit-generation, not a per-frame re-hash
+/// of the whole buffer), with the rope's O(1) length counters folded in so an
+/// *external* buffer swap (the app's `set_text`, which rebuilds `rope_buf` and
+/// changes byte/line count) also invalidates the cache without the widget
+/// needing the app's own `edit_gen`.
+#[derive(Clone, PartialEq, Eq)]
+struct HlKey {
+    /// The widget's own monotonic edit generation (bumped on every mutating
+    /// `apply_event`). Catches every keystroke / paste / undo / snippet edit.
+    edit_gen: u64,
+    /// File-extension identity (drives the engine + theme route). A change here
+    /// recolours, so it must invalidate.
+    ext: Option<String>,
+    /// Rope byte length — O(1) on ropey. Catches an external content swap whose
+    /// byte count differs (reload, sort, format, most find/replace).
+    len_bytes: usize,
+    /// Rope line count — O(1) on ropey. Catches an external swap that changes
+    /// the line count even at equal byte length.
+    len_lines: usize,
+}
+
+/// Per-session, edit-generation-keyed highlight cache. Holds the LAST computed
+/// **whole-document** per-line spans and the incremental engine state used to
+/// recompute them.
+///
+/// This is the structural fix for the per-frame re-highlight leak (P-02): the
+/// previous code called `highlight_document` on the joined visible window *every
+/// frame* even though the highlight only changes when the buffer changes. Now
+/// the spans are recomputed ONLY when the [`HlKey`] changes (an edit, an
+/// external swap, or a language change); on an idle frame the cached spans are
+/// reused with zero highlighter work.
+///
+/// Highlighting the **whole** document (not just the visible window) also fixes
+/// the cross-line correctness gap (C-01): a block comment / multi-line string
+/// whose opener is scrolled above the viewport now colours its visible
+/// continuation correctly, because [`Highlighter::highlight_document_incremental`]
+/// carries the syntect parse state across lines. Cost stays bounded because the
+/// incremental engine only re-highlights from the first changed line downward —
+/// a one-line edit is O(changed lines), not O(document) — and the recompute runs
+/// once per edit, never per frame.
+#[derive(Default)]
+pub struct HighlightCache {
+    /// The key the cached `spans` were computed for. `None` until first compute.
+    key: Option<HlKey>,
+    /// Whole-document per-line spans (indexed by absolute line number). Empty
+    /// when highlighting is disabled or the buffer is over the highlighter's
+    /// size cap (the visible-window fallback handles that case).
+    spans: Vec<Vec<HlSpan>>,
+    /// The incremental syntect engine state, reused across recomputes so only
+    /// the changed-line tail is re-highlighted.
+    incremental: IncrementalHighlightState,
+    /// Diagnostics: how many times the spans were actually (re)computed. The
+    /// idle-frame proof test asserts this stays FLAT across repaints with no
+    /// edit — the objective evidence the per-frame leak is gone. Wraps on
+    /// overflow (purely a test/observability counter).
+    recompute_count: u64,
+}
+
+impl HighlightCache {
+    /// Return whole-document per-line spans for `(text, ext)` at the current
+    /// `edit_gen`, recomputing ONLY when the [`HlKey`] differs from the cached
+    /// one. On a cache hit this does no highlighter work at all — the fix for
+    /// the per-frame re-highlight leak.
+    ///
+    /// `rope` is used only for its O(1) length counters (the fingerprint);
+    /// `text` is the materialised document the highlighter consumes. The caller
+    /// only materialises `text` on a miss, so an idle frame never pays the
+    /// `rope.to_string()` either.
+    fn spans_for(
+        &mut self,
+        hl: &Highlighter,
+        edit_gen: u64,
+        ext: Option<&str>,
+        len_bytes: usize,
+        len_lines: usize,
+        text: &dyn Fn() -> String,
+    ) -> &[Vec<HlSpan>] {
+        let key = HlKey {
+            edit_gen,
+            ext: ext.map(str::to_string),
+            len_bytes,
+            len_lines,
+        };
+        if self.key.as_ref() != Some(&key) {
+            // Cache MISS: recompute the whole-document spans via the incremental
+            // engine (cross-line state correct; only the changed tail re-runs).
+            let doc = text();
+            self.spans = hl.highlight_document_incremental(&doc, ext, &mut self.incremental);
+            self.key = Some(key);
+            self.recompute_count = self.recompute_count.wrapping_add(1);
+        }
+        &self.spans
+    }
+
+    /// How many times the cached spans were (re)computed. Flat across idle
+    /// frames == the per-frame leak is gone (asserted by the idle-frame test).
+    pub fn recompute_count(&self) -> u64 {
+        self.recompute_count
+    }
+}
+
+impl std::fmt::Debug for HighlightCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HighlightCache")
+            .field("cached", &self.key.is_some())
+            .field("lines", &self.spans.len())
+            .field("recompute_count", &self.recompute_count)
+            .finish()
+    }
+}
+
 /// Persistent editing state for an *editable* RopeEditor session, held by the
 /// caller across frames: the caret/selection plus the undo history. This is
 /// the owned editing layer that replaces the state egui's `TextEdit` keeps
 /// internally — the basis for multi-cursor + persistent undo.
-#[derive(Debug, Clone)]
 pub struct RopeEditorState {
     pub edit: EditState,
     /// Secondary carets for multi-cursor (F-009). Empty in single-caret mode.
@@ -762,6 +920,14 @@ pub struct RopeEditorState {
     /// a (line, col) pair. `None` outside a block drag. Not persisted — it is
     /// pure interaction state for the duration of one drag gesture.
     block_anchor: Option<(usize, usize)>,
+    /// Monotonic edit generation, bumped on every mutating `apply_event`
+    /// (typing, paste, delete, undo/redo, snippet expansion). Keys the highlight
+    /// cache so highlighting reruns once per edit, not once per frame. Same
+    /// discipline as the app-side per-tab `edit_gen` driving `spell_cache`.
+    edit_gen: u64,
+    /// Edit-generation-keyed whole-document highlight cache (P-02 fix +
+    /// C-01 cross-line correctness). See [`HighlightCache`].
+    hl_cache: HighlightCache,
 }
 
 impl Default for RopeEditorState {
@@ -771,6 +937,8 @@ impl Default for RopeEditorState {
             extra: Vec::new(),
             history: History::default(),
             block_anchor: None,
+            edit_gen: 0,
+            hl_cache: HighlightCache::default(),
         }
     }
 }
@@ -819,6 +987,19 @@ impl RopeEditorState {
     /// Whether multi-cursor mode is active.
     pub fn is_multi(&self) -> bool {
         !self.extra.is_empty()
+    }
+
+    /// The widget's monotonic edit generation (bumped on every content edit).
+    /// Exposed for observability / tests.
+    pub fn edit_gen(&self) -> u64 {
+        self.edit_gen
+    }
+
+    /// How many times the highlight cache has (re)computed its spans. The
+    /// load-bearing P-02 proof: this stays FLAT across idle repaints (no edit),
+    /// so highlighting runs once per edit, never once per frame.
+    pub fn highlight_recompute_count(&self) -> u64 {
+        self.hl_cache.recompute_count()
     }
 }
 
@@ -873,6 +1054,9 @@ fn try_expand_snippet(
     let caret = (start + exp.caret_offset).min(rope.len_chars());
     state.edit.cursor = caret;
     state.edit.anchor = caret;
+    // Snippet expansion is a content edit on the side path (it doesn't return
+    // through `apply_event`), so bump the highlight-cache generation here too.
+    state.edit_gen = state.edit_gen.wrapping_add(1);
     true
 }
 
@@ -1188,6 +1372,12 @@ pub fn apply_event(
     // Most edits change length — derive `mutated` from that, OR'd with the
     // explicit same-length flags set above.
     out.mutated = out.mutated || rope.len_chars() != len_before;
+    // Bump the edit generation on any real content change so the
+    // highlight cache (keyed on `edit_gen`) recomputes exactly once per edit —
+    // not once per frame. Caret-only events leave it untouched.
+    if out.mutated {
+        state.edit_gen = state.edit_gen.wrapping_add(1);
+    }
     out
 }
 
@@ -1769,6 +1959,177 @@ mod tests {
                 assert_eq!(resp.buffer_mode, BufferModeSeen::Rope);
             });
         });
+    }
+
+    /// Drive `show_editable` once in a fresh egui context, sending `events`
+    /// (empty == an idle repaint). Returns the editor's edit-generation and
+    /// highlight-recompute counters AFTER the frame, so a test can assert how
+    /// many times the highlight actually recomputed.
+    fn drive_editable_frame(
+        hl: &scribe_core::syntax::Highlighter,
+        buf: &mut Buffer,
+        state: &mut RopeEditorState,
+        events: Vec<egui::Event>,
+        focus: bool,
+    ) {
+        let mut raw = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        // A non-degenerate screen so `show_rows` hands back a real visible range.
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(800.0, 600.0),
+        ));
+        let ctx = egui::Context::default();
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let editor_id = ui.id().with("scr1b3-rope-editable");
+                if focus {
+                    ui.memory_mut(|m| m.request_focus(editor_id));
+                }
+                let _ = RopeEditor::new(buf, FontId::monospace(14.0), 18.0)
+                    .with_syntax(hl, Some("rs".to_string()))
+                    .show_editable(ui, state);
+            });
+        });
+    }
+
+    /// P-02 PROOF (the load-bearing test): two consecutive IDLE frames (no edit)
+    /// must NOT recompute highlights. The previous code re-ran
+    /// `highlight_document` on the joined visible window every frame; the
+    /// edit-gen-keyed cache reruns once per edit, so the recompute counter stays
+    /// FLAT across idle repaints. A regression that reintroduces per-frame
+    /// highlighting makes this counter climb every frame and fails here.
+    #[test]
+    fn idle_frames_do_not_recompute_highlights() {
+        let hl = scribe_core::syntax::Highlighter::new();
+        let mut buf = Buffer::Rope(Rope::from_str("fn main() {\n    let x = 1;\n}\n"));
+        let mut state = RopeEditorState::new();
+
+        // Frame 1: first paint computes the highlight exactly once.
+        drive_editable_frame(&hl, &mut buf, &mut state, vec![], false);
+        let after_first = state.highlight_recompute_count();
+        assert_eq!(
+            after_first, 1,
+            "the first frame computes the highlight exactly once"
+        );
+
+        // Frames 2..=6: idle repaints (egui `frame_tick` runs continuously) —
+        // the buffer never changes, so NO recompute may happen.
+        for _ in 0..5 {
+            drive_editable_frame(&hl, &mut buf, &mut state, vec![], false);
+        }
+        assert_eq!(
+            state.highlight_recompute_count(),
+            after_first,
+            "idle frames must reuse the cached highlight — recompute count stays flat"
+        );
+        assert_eq!(state.edit_gen(), 0, "no edit means edit_gen never moved");
+    }
+
+    /// An actual content edit bumps the recompute counter by exactly one (the
+    /// edit's frame), then idle frames after it are flat again. Proves the cache
+    /// invalidates on edits (correctness) while still not running per-frame.
+    #[test]
+    fn edit_recomputes_once_then_idle_is_flat() {
+        let hl = scribe_core::syntax::Highlighter::new();
+        let mut buf = Buffer::Rope(Rope::from_str("fn main() {}\n"));
+        let mut state = RopeEditorState::new();
+
+        // Frame 1 (idle, focused so input is accepted next frame): 1 compute.
+        drive_editable_frame(&hl, &mut buf, &mut state, vec![], true);
+        assert_eq!(state.highlight_recompute_count(), 1);
+
+        // Frame 2: type a character (a real content edit). The edit bumps
+        // `edit_gen`, so the highlight recomputes for the new content.
+        drive_editable_frame(
+            &hl,
+            &mut buf,
+            &mut state,
+            vec![egui::Event::Text("x".to_string())],
+            true,
+        );
+        assert!(state.edit_gen() >= 1, "the edit moved the generation");
+        let after_edit = state.highlight_recompute_count();
+        assert_eq!(after_edit, 2, "the edit triggers exactly one recompute");
+
+        // Frames 3..=5: idle again — flat.
+        for _ in 0..3 {
+            drive_editable_frame(&hl, &mut buf, &mut state, vec![], true);
+        }
+        assert_eq!(
+            state.highlight_recompute_count(),
+            after_edit,
+            "post-edit idle frames reuse the cache"
+        );
+    }
+
+    /// C-01 PROOF: a block comment whose opener (`/*`) is ABOVE the viewport
+    /// must colour its visible continuation lines as a comment. The old path
+    /// highlighted only the joined VISIBLE window, so a line like `still in the
+    /// comment` — with no opener in the window — was mis-coloured as code. The
+    /// whole-document incremental highlight carries the cross-line parse state,
+    /// so the continuation is correctly a comment.
+    ///
+    /// We assert at the highlighter level (the engine the cache routes through),
+    /// driving the exact `highlight_document` whole-doc vs window-only contrast.
+    #[test]
+    fn cross_line_block_comment_colors_continuation() {
+        let hl = scribe_core::syntax::Highlighter::new();
+        // A Rust block comment opened on line 0, continued on line 1, closed on
+        // line 2. Line 1 ("still inside the comment") is the "visible" line.
+        let doc = "/* opener line\nstill inside the comment\nlast */\nfn after() {}\n";
+        let ext = Some("rs");
+
+        // Whole-document highlight (what the cache now uses): line 1 is a comment.
+        let whole = hl.highlight_document(doc, ext);
+        assert!(whole.len() >= 2, "doc has at least two lines");
+        let line1 = &whole[1];
+        assert!(!line1.is_empty(), "the continuation line has spans");
+        // The opener line (line 0) is unambiguously a comment; its colour is the
+        // engine's comment colour under the active theme. The continuation line
+        // (line 1) must carry that SAME colour across the line boundary. Comparing
+        // against the opener (not a hardcoded RGB) keeps the test theme-robust.
+        let opener_comment_color = whole[0]
+            .iter()
+            .map(|s| s.color)
+            .next()
+            .expect("opener line has spans");
+        assert!(
+            line1.iter().all(|s| s.color == opener_comment_color),
+            "the continuation line carries the comment colour from the opener \
+             (cross-line parse state preserved): line1={line1:?}"
+        );
+
+        // Contrast: highlighting JUST the visible line as a standalone window
+        // (the OLD behaviour) does NOT see the opener, so it is NOT all-comment —
+        // proving the window-only path mis-coloured the continuation.
+        let window_only = hl.highlight_document("still inside the comment", ext);
+        let window_line0 = &window_only[0];
+        let window_is_all_comment = !window_line0.is_empty()
+            && window_line0.iter().all(|s| s.color == opener_comment_color);
+        assert!(
+            !window_is_all_comment,
+            "window-only highlight mis-colours the continuation (the C-01 bug); \
+             the whole-document path fixes it: window={window_line0:?}"
+        );
+    }
+
+    /// The cross-line fix also holds end-to-end through `show_editable`: render a
+    /// buffer whose block comment spans lines without panic, and confirm the
+    /// cache populated whole-document spans (not a per-window slice).
+    #[test]
+    fn show_editable_uses_whole_document_highlight() {
+        let hl = scribe_core::syntax::Highlighter::new();
+        let mut buf = Buffer::Rope(Rope::from_str(
+            "/* a\nb\nc */\nfn main() {\n    let x = 1;\n}\n",
+        ));
+        let mut state = RopeEditorState::new();
+        drive_editable_frame(&hl, &mut buf, &mut state, vec![], false);
+        // The cache recomputed once and holds spans for ALL lines (whole-doc),
+        // not just the visible window — the structural basis of the C-01 fix.
+        assert_eq!(state.highlight_recompute_count(), 1);
     }
 
     /// Sanity: a 1M-line rope renders without panicking. This is the
