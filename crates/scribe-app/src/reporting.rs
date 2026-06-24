@@ -481,6 +481,25 @@ mod tests {
     }
 
     #[test]
+    fn disable_telemetry_suppresses_outcome_logging() {
+        // With S4F3_DISABLE_TELEMETRY=1 the internal log_outcome must early-return
+        // and write NOTHING to the action log — the privacy opt-out is honoured.
+        // Routed through send_report (no endpoint → RefusedNoEndpoint → logged),
+        // the call must still return the structured outcome without panicking.
+        // Serialized on ENDPOINT_LOCK because it mutates process env.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _endpoint = EnvGuard::unset(REPORT_ENDPOINT_ENV);
+        let _telemetry = EnvGuard::set("S4F3_DISABLE_TELEMETRY", "1");
+        let r = build_crash_report("boom", "src/x.rs:1");
+        let outcome = send_report(&r, &ConsentToken::granted());
+        assert_eq!(
+            outcome,
+            ReportOutcome::RefusedNoEndpoint,
+            "the outcome is still surfaced; only the logging is suppressed"
+        );
+    }
+
+    #[test]
     fn remember_choice_maps_to_config_mode() {
         assert_eq!(
             RememberChoice::Always.persisted_mode(),

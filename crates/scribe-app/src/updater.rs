@@ -980,4 +980,49 @@ mod tests {
     fn launch_kind_default_is_manual() {
         assert_eq!(LaunchKind::default(), LaunchKind::Manual);
     }
+
+    #[test]
+    fn running_exe_dir_writable_resolves_without_panicking() {
+        // Probes the directory holding the test runner binary. The result is
+        // environment-dependent (true on a writable target dir, possibly false
+        // on a locked install), so we assert only that it RESOLVES to a bool
+        // without panicking — exercising the current_exe() → parent → probe path
+        // and its unknown→assume-yes fallback.
+        let _ = running_exe_dir_writable();
+    }
+
+    #[test]
+    fn cleanup_after_update_is_idempotent_and_never_errors() {
+        // Best-effort housekeeping: removing a (possibly absent) staging dir and
+        // a (possibly absent) `.bak` must be a silent no-op when there is nothing
+        // to remove, and must be safe to call repeatedly. It returns () and must
+        // never panic regardless of what is or isn't on disk.
+        cleanup_after_update();
+        cleanup_after_update();
+    }
+
+    #[test]
+    fn downloaded_ok_chains_into_apply_and_surfaces_an_install_failure() {
+        // A successful download drives the one-click flow: the reducer sets
+        // ReadyToApply then immediately calls apply_and_restart within the same
+        // poll. With a NEWER version (so the anti-downgrade gate passes) but a
+        // nonexistent staged binary, the in-place swap fails BEFORE any process
+        // spawn — landing in Failed("install failed: …"), never a fake Applied.
+        let ctx = egui::Context::default();
+        let mut u = Updater::default();
+        u.handle_update_msg(
+            UpdateMsg::Downloaded(Ok((
+                std::path::PathBuf::from("/nonexistent/scr1b3-staged-binary"),
+                "9.9.9".to_string(), // newer than the running build → passes the gate
+            ))),
+            &ctx,
+        );
+        match &u.state {
+            UpdateState::Failed(e) => assert!(
+                e.contains("install failed"),
+                "expected an install-failure (the staged binary does not exist), got: {e}"
+            ),
+            other => panic!("expected Failed(install failed), got {other:?}"),
+        }
+    }
 }

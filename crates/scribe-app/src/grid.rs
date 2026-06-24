@@ -240,6 +240,10 @@ impl<'a> egui_tiles::Behavior<Pane> for AppGridBehavior<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The grid behaviour is exercised through the egui_tiles `Behavior` trait
+    // (tab_title_for_pane / min_size / gap_width / retain_pane); bring it into
+    // scope so the tests can call those trait methods.
+    use egui_tiles::Behavior as _;
 
     #[test]
     fn doc_id_allocator_monotonic() {
@@ -375,5 +379,86 @@ mod tests {
         let docs: Vec<DocId> = (0..(MAX_PANES as u64 + 4)).map(DocId).collect();
         let tree = build_default_grid(&docs);
         assert_eq!(count_panes(&tree), MAX_PANES);
+    }
+
+    // ----------------------------------------------------------------------
+    // AppGridBehavior trait surface.
+    //
+    // The `Behavior<Pane>` methods that DON'T need a live `Ui` (everything but
+    // `pane_ui`, which paints into a frame) are pure dispatch — title lookup,
+    // layout constants, and the close-request retain check. Exercising them
+    // directly pins the grid's layout policy + the close-pane plumbing without
+    // driving a wgpu frame, so a refactor can't silently change the min pane
+    // size, the gap, the "(closed)" title fallback, or the retain semantics.
+    // ----------------------------------------------------------------------
+
+    /// Build an `AppGridBehavior` over the given titles + close-request buffer.
+    /// `render_body` is never invoked by the methods under test here, so a stub
+    /// that returns `false` is sufficient.
+    fn behavior<'a>(
+        titles: &'a [(DocId, String)],
+        render: &'a mut dyn FnMut(&mut egui::Ui, DocId) -> bool,
+        closes: &'a std::cell::RefCell<Vec<DocId>>,
+    ) -> AppGridBehavior<'a> {
+        AppGridBehavior {
+            titles,
+            render_body: render,
+            close_requests: closes,
+        }
+    }
+
+    #[test]
+    fn tab_title_for_pane_uses_the_matching_title() {
+        let titles = vec![
+            (DocId(7), "lib.rs".to_string()),
+            (DocId(8), "main.rs".to_string()),
+        ];
+        let mut render = |_: &mut egui::Ui, _: DocId| false;
+        let closes = std::cell::RefCell::new(Vec::new());
+        let mut b = behavior(&titles, &mut render, &closes);
+        let text = b.tab_title_for_pane(&Pane::new(DocId(8)));
+        // WidgetText renders to the underlying string; assert it carries the title.
+        assert_eq!(text.text(), "main.rs");
+    }
+
+    #[test]
+    fn tab_title_for_pane_falls_back_to_closed_for_an_unknown_doc() {
+        let titles = vec![(DocId(7), "lib.rs".to_string())];
+        let mut render = |_: &mut egui::Ui, _: DocId| false;
+        let closes = std::cell::RefCell::new(Vec::new());
+        let mut b = behavior(&titles, &mut render, &closes);
+        // A pane whose doc id is not in the title list shows the "(closed)"
+        // sentinel rather than panicking or rendering an empty tab.
+        let text = b.tab_title_for_pane(&Pane::new(DocId(999)));
+        assert_eq!(text.text(), "(closed)");
+    }
+
+    #[test]
+    fn layout_constants_are_stable() {
+        let titles: Vec<(DocId, String)> = Vec::new();
+        let mut render = |_: &mut egui::Ui, _: DocId| false;
+        let closes = std::cell::RefCell::new(Vec::new());
+        let b = behavior(&titles, &mut render, &closes);
+        assert_eq!(b.min_size(), 120.0, "min pane size pins the grid layout");
+        // gap_width ignores the style argument; a default style is fine.
+        assert_eq!(b.gap_width(&egui::Style::default()), 4.0);
+    }
+
+    #[test]
+    fn retain_pane_drops_only_panes_with_a_pending_close_request() {
+        let titles: Vec<(DocId, String)> = Vec::new();
+        let mut render = |_: &mut egui::Ui, _: DocId| false;
+        // The host queued a close for DocId(5) this frame; retain_pane must drop
+        // exactly that pane (return false) and keep every other (return true).
+        let closes = std::cell::RefCell::new(vec![DocId(5)]);
+        let mut b = behavior(&titles, &mut render, &closes);
+        assert!(
+            !b.retain_pane(&Pane::new(DocId(5))),
+            "a pane with a pending close request must NOT be retained"
+        );
+        assert!(
+            b.retain_pane(&Pane::new(DocId(6))),
+            "a pane with no close request must be retained"
+        );
     }
 }
