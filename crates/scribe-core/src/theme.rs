@@ -964,6 +964,14 @@ impl Theme {
     /// `shutoko-night` — 80s-2000s JDM (Itasha brand root). Documented
     /// period paint codes: NH-547 Berlina Black (NSX), BT2 Bayside Blue
     /// (R34 GT-R), Mazda Soul-Red-Crystal precedent.
+    ///
+    /// Accent discipline (opt-in exception): the system voice is BT2 Bayside
+    /// Blue over near-black NH-547 void — the identity-defining brand-root
+    /// colour. That pairing is intentionally below the WCAG 1.4.11 3:1
+    /// non-text ratio (≈1.55:1), the same deliberate "the colour IS the brand"
+    /// trade-off as `akira-redshift`/`atompunk-sodium`. It is therefore listed
+    /// in the a11y audit's camp-exception set (audited, not failed). Users who
+    /// need a high-contrast voice pick `a11y-high-contrast`.
     pub fn shutoko_night() -> Theme {
         let mut p = BTreeMap::new();
         p.insert("void".into(), Rgba::new(0x05, 0x05, 0x05, 255)); // NH-547

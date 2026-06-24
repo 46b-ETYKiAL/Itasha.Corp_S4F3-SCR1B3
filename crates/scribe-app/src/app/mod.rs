@@ -1952,6 +1952,15 @@ impl ScribeApp {
             })
             .response
             .on_hover_text("More actions");
+            // Expose an accessible name for the icon-only (painted-dots) trigger.
+            // The `Button::new("")` above carries no text, so without this the
+            // node reaches the AccessKit tree as an UNNAMED interactive Button —
+            // a screen-reader dead end (WCAG 4.1.2 Name/Role/Value). `on_hover_text`
+            // sets a tooltip/description, NOT the accessible name, so it is set
+            // explicitly here.
+            resp.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "More actions")
+            });
             // Paint a horizontal 3-dot "⋯" centered in the button rect.
             let c = resp.rect.center();
             let painter = ui.painter();
@@ -9411,6 +9420,15 @@ mod change_bar_tests;
 
 #[cfg(test)]
 mod visual_qa;
+
+#[cfg(test)]
+mod visual_regression;
+
+#[cfg(test)]
+mod a11y_audit;
+
+#[cfg(test)]
+mod e2e_overlays;
 
 #[cfg(test)]
 mod update_reminder_tests;
