@@ -640,16 +640,15 @@ fn command_palette_filter_then_click_executes_command() {
     );
 }
 
-/// BUG-APP-01 repro (#[ignore]): the command palette has NO Enter-to-execute
-/// and NO arrow-key selection — only mouse click runs a command. The sibling
-/// fuzzy-file-finder modal (`fuzzy_open`) HAS full Up/Down/Enter keyboard nav
-/// (mod.rs ~L4757), so this is an inconsistency: a keyboard user can type to
-/// filter the palette to a single command but must reach for the mouse to run
-/// it. Expected: typing a filter then pressing Enter runs the top/only match.
-/// Actual: Enter does nothing; the buffer is unchanged and the palette stays
-/// open. Remove `#[ignore]` once the palette gains an Enter handler.
+/// BUG-APP-01 regression-lock (FIXED): the command palette now has full
+/// Enter-to-execute keyboard nav, mirroring the sibling fuzzy-file-finder modal
+/// (`fuzzy_open`, mod.rs ~L4757). Root cause of the original gap: the palette
+/// render path ran commands solely via `.clicked()` with no `key_pressed(Enter)`
+/// handler and no selected-index state. Now a keyboard user can type to filter
+/// the palette to a single command and press Enter to run it — no mouse needed.
+/// This test types a filter that narrows to one command, presses Enter, and
+/// asserts the command executed (buffer sorted) and the palette closed.
 #[test]
-#[ignore = "BUG-APP-01: command palette has no Enter-to-execute (mouse-only)"]
 fn bug_app_01_command_palette_enter_does_not_execute() {
     let mut app = app_ready();
     app.tabs[0].text = "gamma\nalpha\nbeta\n".into();
@@ -669,8 +668,61 @@ fn bug_app_01_command_palette_enter_does_not_execute() {
     assert_eq!(
         h.state().tabs[a].text,
         "alpha\nbeta\ngamma\n",
-        "EXPECTED: Enter on the filtered palette command executes it. ACTUAL: \
-         the palette has no Enter handler, so the buffer stays unsorted."
+        "Enter on the filtered palette command executes it (sort lines), \
+         matching the click path"
+    );
+    assert!(
+        !h.state().palette_open,
+        "executing a palette command via Enter closes the palette"
+    );
+}
+
+/// BUG-APP-01 arrow-key selection regression-lock: a filter that yields ≥2
+/// matches + ArrowDown moves the highlight off the top row, and Enter runs the
+/// SELECTED (non-top) command — not the top one. Filtering "line endings:"
+/// matches three commands in registry order — CR, CRLF, LF (commands.rs) — so
+/// the top match is "Set line endings to CR" and the SECOND is CRLF. The active
+/// doc starts at the default LF (`Eol::default()`), so observing the doc's eol
+/// become `Crlf` proves Down-then-Enter ran the second match, not the first
+/// (which would have set `Cr`) and not the unmoved top (also `Cr`). Mirrors the
+/// fuzzy-finder Up/Down/Enter model (mod.rs ~L4757).
+#[test]
+fn command_palette_arrow_down_then_enter_runs_second_match() {
+    let app = app_ready();
+    // Sanity: a fresh doc starts at the default line ending (LF), so the
+    // assertion below genuinely distinguishes the second match from the first.
+    let a0 = app.active;
+    assert_eq!(
+        app.tabs[a0].doc.eol(),
+        scribe_core::eol::Eol::Lf,
+        "fresh doc starts at default LF — the second-match assertion is meaningful"
+    );
+    let mut h = harness(app);
+    h.run();
+    h.get_by_label(">_").click();
+    h.run();
+    assert!(h.state().palette_open, "palette opened");
+    let q = h.get_by_role(egui::accesskit::Role::TextInput);
+    q.focus();
+    h.run();
+    h.get_by_role(egui::accesskit::Role::TextInput)
+        .type_text("line endings:");
+    h.run();
+    // Down once → highlight moves from the top match (CR) to the second (CRLF).
+    h.key_press(egui::Key::ArrowDown);
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let a = h.state().active;
+    assert_eq!(
+        h.state().tabs[a].doc.eol(),
+        scribe_core::eol::Eol::Crlf,
+        "ArrowDown then Enter runs the SECOND filtered command (Set line endings \
+         to CRLF), not the top match (CR) — arrow-key selection is wired"
+    );
+    assert!(
+        !h.state().palette_open,
+        "running a palette command via arrow-key + Enter closes the palette"
     );
 }
 

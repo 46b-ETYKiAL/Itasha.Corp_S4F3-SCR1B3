@@ -62,6 +62,9 @@ impl ScribeApp {
                 }
                 self.palette_open = true;
                 self.palette_query.clear();
+                // BUG-APP-01: a fresh open starts the keyboard highlight at the
+                // top so Enter runs the first match.
+                self.palette_selected = 0;
             }
             // F-006 fix from docs/audits/overlooked-surfaces-2026-05-29.md —
             // wave 1 keyboard shortcuts:
