@@ -11,10 +11,11 @@ pub mod protocol;
 pub use protocol::Diagnostic;
 
 use serde_json::{json, Value};
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::thread::JoinHandle;
 
 /// One language server: the command to run + the languages it serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,10 +92,50 @@ pub fn did_open_params(uri: &str, language_id: &str, text: &str) -> Value {
     })
 }
 
+/// Drive a writer thread that owns `stdin` and serialises every outgoing
+/// message in FIFO order. This is the root-cause fix for "a full stdin pipe
+/// freezes the UI": the egui frame thread enqueues via a channel
+/// ([`std::sync::mpsc::Sender::send`] never blocks on an unbounded channel) and
+/// the *writer thread* — never the frame thread — is the one that blocks on a
+/// stalled `write_all`/`flush`. A single writer draining a FIFO channel also
+/// preserves the on-the-wire ordering callers expect (`initialize` before
+/// `initialized` before `didOpen`, …).
+///
+/// The thread exits when the [`Sender`] is dropped: `recv()` returns `Err`, we
+/// flush and return. It is the same off-thread idiom as the diagnostics reader
+/// thread spawned alongside it.
+fn run_writer_loop<W: Write>(mut stdin: W, rx: Receiver<Value>) {
+    // FIFO drain: one message at a time, in the exact order they were enqueued.
+    while let Ok(msg) = rx.recv() {
+        // A broken pipe (server died / closed stdin) ends the loop — there is
+        // nothing left to write to. Best-effort: the Drop path still reaps the
+        // child regardless.
+        if protocol::write_message(&mut stdin, &msg).is_err() {
+            break;
+        }
+    }
+    // Sender dropped (graceful shutdown) or the pipe broke: flush whatever the
+    // OS still buffers, then let `stdin` drop (closing the write end, which the
+    // server observes as EOF).
+    let _ = stdin.flush();
+}
+
 /// A running LSP server connection. Diagnostics arrive on `diagnostics`.
+///
+/// Outgoing messages are never written on the caller's (egui frame) thread:
+/// they are enqueued on `outgoing` and drained by a dedicated writer thread
+/// that owns the child's `stdin`. A slow or stalled server can therefore never
+/// block the UI — at worst the writer thread blocks, and the channel buffers.
 pub struct LspClient {
     child: Child,
-    stdin: std::process::ChildStdin,
+    /// Enqueue outgoing framed messages. `send` is non-blocking; the writer
+    /// thread performs the actual (potentially blocking) `write_all`/`flush`.
+    /// `Option` so [`Drop`] can take it and drop it to signal shutdown before
+    /// joining the writer thread.
+    outgoing: Option<Sender<Value>>,
+    /// Handle to the writer thread, joined on [`Drop`] after the sender is
+    /// dropped so `stdin` is flushed + closed before we reap the child.
+    writer: Option<JoinHandle<()>>,
     next_id: AtomicI64,
     pub diagnostics: Receiver<Vec<Diagnostic>>,
 }
@@ -110,7 +151,7 @@ impl LspClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
-        let mut stdin = child.stdin.take().expect("piped stdin");
+        let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
 
         let (tx, rx): (Sender<Vec<Diagnostic>>, Receiver<Vec<Diagnostic>>) =
@@ -125,33 +166,65 @@ impl LspClient {
             }
         });
 
+        // Writer thread: owns `stdin`, drains `out_rx` FIFO. Every outgoing
+        // message — including the handshake below — flows through this thread,
+        // so no `write_all`/`flush` ever runs on the caller's frame thread.
+        let (out_tx, out_rx): (Sender<Value>, Receiver<Value>) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || run_writer_loop(stdin, out_rx));
+
         let next_id = AtomicI64::new(1);
+        // Enqueue the handshake. `send` is non-blocking; ordering is guaranteed
+        // by the single FIFO writer (initialize → initialized → any later
+        // did_open). A send error here means the writer thread already died
+        // (the spawn failed pathologically) — surface it as a broken pipe so
+        // the caller degrades gracefully, exactly as a failed write would have.
         let init = protocol::request(
             next_id.fetch_add(1, Ordering::Relaxed),
             "initialize",
             initialize_params(root_uri),
         );
-        protocol::write_message(&mut stdin, &init)?;
-        protocol::write_message(
-            &mut stdin,
-            &protocol::notification("initialized", json!({})),
-        )?;
+        let send = |m: Value| -> std::io::Result<()> {
+            out_tx
+                .send(m)
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "lsp writer gone"))
+        };
+        send(init)?;
+        send(protocol::notification("initialized", json!({})))?;
 
         Ok(Self {
             child,
-            stdin,
+            outgoing: Some(out_tx),
+            writer: Some(writer),
             next_id,
             diagnostics: rx,
         })
     }
 
     /// Notify the server a document was opened.
+    ///
+    /// Non-blocking: the message is enqueued for the writer thread. Even if the
+    /// server's stdin pipe is full, this returns promptly — the writer thread,
+    /// not the caller, owns the blocking `write_all`. An `Err` means the writer
+    /// thread has gone (server died); the caller degrades gracefully.
     pub fn did_open(&mut self, uri: &str, language_id: &str, text: &str) -> std::io::Result<()> {
         let msg = protocol::notification(
             "textDocument/didOpen",
             did_open_params(uri, language_id, text),
         );
-        protocol::write_message(&mut self.stdin, &msg)
+        self.enqueue(msg)
+    }
+
+    /// Enqueue a framed message for the writer thread (FIFO, non-blocking).
+    fn enqueue(&self, msg: Value) -> std::io::Result<()> {
+        match &self.outgoing {
+            Some(tx) => tx.send(msg).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "lsp writer gone")
+            }),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "lsp client shutting down",
+            )),
+        }
     }
 
     fn id(&self) -> i64 {
@@ -170,20 +243,26 @@ impl LspClient {
 impl Drop for LspClient {
     /// Reap the language server so we never leak an orphaned process. The
     /// default `Child` drop only *detaches* — a large server (rust-analyzer,
-    /// clangd) would linger for the OS session. We send the LSP graceful
-    /// `shutdown`+`exit`, then `kill`+`wait` to guarantee termination even if
-    /// the server ignores the request. All steps are best-effort; a child that
-    /// has already exited makes `kill`/`wait` return harmless errors.
+    /// clangd) would linger for the OS session. We enqueue the LSP graceful
+    /// `shutdown`+`exit`, drop the sender so the writer thread flushes the
+    /// queue + closes `stdin`, join the writer, then `kill`+`wait` to guarantee
+    /// termination even if the server ignores the request. All steps are
+    /// best-effort; a child that has already exited makes `kill`/`wait` return
+    /// harmless errors.
     fn drop(&mut self) {
         let id = self.id();
-        let _ = protocol::write_message(
-            &mut self.stdin,
-            &protocol::request(id, "shutdown", Value::Null),
-        );
-        let _ = protocol::write_message(
-            &mut self.stdin,
-            &protocol::notification("exit", Value::Null),
-        );
+        // Enqueue the graceful shutdown handshake (FIFO — drained after any
+        // already-queued message). Errors are ignored: if the writer is already
+        // gone the child is reaped below regardless.
+        let _ = self.enqueue(protocol::request(id, "shutdown", Value::Null));
+        let _ = self.enqueue(protocol::notification("exit", Value::Null));
+        // Drop the sender: the writer thread's `recv()` now returns `Err`, so it
+        // flushes and exits, closing `stdin`. Join it so the close + flush have
+        // happened before we reap the child.
+        drop(self.outgoing.take());
+        if let Some(handle) = self.writer.take() {
+            let _ = handle.join();
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -261,6 +340,144 @@ mod tests {
             .unwrap()
             .expect("one framed message");
         assert_eq!(back, msg);
+    }
+
+    // ---- writer-thread off-thread send: a full/stalled stdin pipe must never
+    // block the caller (the egui frame thread). Proven against a mock `Write`
+    // sink, with no child process. ----
+
+    use std::sync::mpsc::{channel, Sender as MpscSender};
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// A `Write` sink that blocks on the FIRST `write_all` until released, then
+    /// records every subsequent write verbatim. Models a server whose stdin
+    /// pipe is full: the writer thread stalls inside `write_all`, exactly where
+    /// the old synchronous code stalled the frame thread.
+    struct StallingSink {
+        gate: Arc<Barrier>,
+        gated: Mutex<bool>,
+        written: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for StallingSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            // Block exactly once, on the first write, until the test releases us.
+            let mut already = self.gated.lock().unwrap();
+            if !*already {
+                *already = true;
+                drop(already);
+                self.gate.wait(); // stall here until the test signals
+            }
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn spawn_writer(sink: StallingSink) -> (MpscSender<Value>, std::thread::JoinHandle<()>) {
+        let (tx, rx) = channel::<Value>();
+        let handle = std::thread::spawn(move || run_writer_loop(sink, rx));
+        (tx, handle)
+    }
+
+    #[test]
+    fn send_returns_promptly_even_when_the_sink_is_stalled() {
+        // The sink blocks on its first write. The caller enqueues several
+        // messages; each `send` must return immediately (well under a generous
+        // bound) — the blocking lives on the writer thread, never the caller.
+        let gate = Arc::new(Barrier::new(2));
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let sink = StallingSink {
+            gate: gate.clone(),
+            gated: Mutex::new(false),
+            written: written.clone(),
+        };
+        let (tx, handle) = spawn_writer(sink);
+
+        let start = Instant::now();
+        for i in 1..=5 {
+            tx.send(protocol::request(
+                i,
+                "textDocument/didOpen",
+                json!({ "n": i }),
+            ))
+            .expect("enqueue never blocks");
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "caller sends must not block on a stalled sink (took {elapsed:?})"
+        );
+
+        // Now release the stalled writer; it drains the FIFO queue.
+        gate.wait();
+        drop(tx); // signal shutdown
+        handle.join().unwrap();
+        assert!(
+            !written.lock().unwrap().is_empty(),
+            "the writer thread did eventually write once unblocked"
+        );
+    }
+
+    #[test]
+    fn writer_preserves_message_order_and_framing_end_to_end() {
+        // Enqueue a sequence; once the (briefly-stalled) writer drains it, the
+        // bytes on the sink must decode back to the SAME messages in the SAME
+        // order, with intact Content-Length framing.
+        let gate = Arc::new(Barrier::new(2));
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let sink = StallingSink {
+            gate: gate.clone(),
+            gated: Mutex::new(false),
+            written: written.clone(),
+        };
+        let (tx, handle) = spawn_writer(sink);
+
+        let msgs = vec![
+            protocol::request(1, "initialize", json!({ "rootUri": "file:///p" })),
+            protocol::notification("initialized", json!({})),
+            protocol::notification("textDocument/didOpen", json!({ "v": 1 })),
+            protocol::notification("textDocument/didChange", json!({ "v": 2 })),
+        ];
+        for m in &msgs {
+            tx.send(m.clone()).expect("enqueue");
+        }
+        gate.wait(); // release the writer
+        drop(tx);
+        handle.join().unwrap();
+
+        // Decode the recorded bytes back into messages and compare order-faithfully.
+        let bytes = written.lock().unwrap().clone();
+        let mut reader = BufReader::new(&bytes[..]);
+        let mut decoded = Vec::new();
+        while let Some(m) = protocol::read_message(&mut reader).unwrap() {
+            decoded.push(m);
+        }
+        assert_eq!(decoded, msgs, "FIFO order + framing preserved on the wire");
+    }
+
+    #[test]
+    fn dropping_the_sender_flushes_and_exits_the_writer_thread() {
+        // Graceful shutdown: with no stall, dropping the sender drains the queue,
+        // flushes, and the writer thread terminates (the Drop-path contract).
+        let gate = Arc::new(Barrier::new(2));
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let sink = StallingSink {
+            gate: gate.clone(),
+            gated: Mutex::new(true), // pre-released: never stalls
+            written: written.clone(),
+        };
+        let (tx, rx) = channel::<Value>();
+        let handle = std::thread::spawn(move || run_writer_loop(sink, rx));
+        tx.send(protocol::notification("exit", Value::Null))
+            .unwrap();
+        drop(tx);
+        // join must return — the writer saw the Recv error and exited.
+        handle.join().unwrap();
+        assert!(!written.lock().unwrap().is_empty());
     }
 
     #[test]
