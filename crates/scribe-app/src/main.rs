@@ -18,6 +18,7 @@ mod datetime;
 mod diff_view;
 mod editor_features;
 mod filetree;
+mod find_cache;
 mod find_in_files;
 mod fuzzy;
 mod grid;
