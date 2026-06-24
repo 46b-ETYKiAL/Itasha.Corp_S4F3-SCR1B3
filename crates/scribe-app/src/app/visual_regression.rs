@@ -14,7 +14,9 @@
 //! HONEST SKIP: the GPU lane is gated behind `gpu_available()`. On a headless
 //! host (no wgpu adapter — e.g. this CI/dev session) the scene tests skip
 //! cleanly and PRINT that they skipped — they NEVER pass falsely and NEVER
-//! fail for lack of a GPU (per `.s4f3/rules/visual-qa.md` + `test-skip-governance`).
+//! fail for lack of a GPU (per the project's visual-QA discipline + test-skip
+//! governance: a render is never silently skipped, only honestly skipped when
+//! no GPU adapter is available).
 //! The perceptual-diff math + the reduced-motion resting-frame assertions are
 //! pure and run on EVERY host (no GPU needed).
 //!

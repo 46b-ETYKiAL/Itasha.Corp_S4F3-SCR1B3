@@ -61,6 +61,11 @@ criteria = "safe-to-deploy"
 version = "0.2.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.anstyle]]
+version = "1.0.14"
+criteria = "safe-to-run"
+notes = "criterion dev-bench dependency tree (dev-only, never shipped)"
+
 [[exemptions.anyhow]]
 version = "1.0.102"
 criteria = "safe-to-deploy"
@@ -201,6 +206,21 @@ criteria = "safe-to-deploy"
 version = "0.2.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.clap]]
+version = "4.6.1"
+criteria = "safe-to-run"
+notes = "criterion dev-bench dependency tree (dev-only, never shipped)"
+
+[[exemptions.clap_builder]]
+version = "4.6.0"
+criteria = "safe-to-run"
+notes = "criterion dev-bench dependency tree (dev-only, never shipped)"
+
+[[exemptions.clap_lex]]
+version = "1.1.0"
+criteria = "safe-to-run"
+notes = "criterion dev-bench dependency tree (dev-only, never shipped)"
+
 [[exemptions.clipboard-win]]
 version = "5.4.1"
 criteria = "safe-to-deploy"
@@ -248,6 +268,16 @@ criteria = "safe-to-deploy"
 [[exemptions.crc32fast]]
 version = "1.5.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.criterion]]
+version = "0.5.1"
+criteria = "safe-to-run"
+notes = "criterion dev-bench dependency tree (dev-only, never shipped)"
+
+[[exemptions.criterion-plot]]
+version = "0.5.0"
+criteria = "safe-to-run"
+notes = "criterion dev-bench dependency tree (dev-only, never shipped)"
 
 [[exemptions.crossbeam-utils]]
 version = "0.8.21"
@@ -608,6 +638,11 @@ criteria = "safe-to-deploy"
 [[exemptions.inout]]
 version = "0.1.4"
 criteria = "safe-to-run"
+
+[[exemptions.is-terminal]]
+version = "0.4.17"
+criteria = "safe-to-run"
+notes = "criterion dev-bench dependency tree (dev-only, never shipped)"
 
 [[exemptions.itertools]]
 version = "0.14.0"
