@@ -35,7 +35,7 @@ use std::path::{Component, Path, PathBuf};
 ///   * device-namespace (`\\.\PhysicalDrive0`, `\\?\C:` style raw devices) —
 ///     not an ordinary file.
 ///
-/// IMPORTANT: a Windows *verbatim-disk* path (`\\?\C:\Users\…\notes.md`, the
+/// IMPORTANT: a Windows *verbatim-disk* path (`\\?\C:\Data\…\notes.md`, the
 /// form `std::fs::canonicalize` returns) is an ORDINARY LOCAL FILE and MUST
 /// NOT be flagged — else every canonicalized restore path would be falsely
 /// rejected. We distinguish verbatim-disk (allowed) from verbatim-UNC /
@@ -164,18 +164,18 @@ mod tests {
         assert!(is_unc_path(Path::new(r"\\.\PhysicalDrive0")));
         assert!(is_unc_path(Path::new("//server/share/x")));
         // A normal local path is NOT a UNC path.
-        assert!(!is_unc_path(Path::new("/home/user/notes.md")));
-        assert!(!is_unc_path(Path::new(r"C:\Users\me\notes.md")));
+        assert!(!is_unc_path(Path::new("/srv/me/notes.md")));
+        assert!(!is_unc_path(Path::new(r"C:\Data\me\notes.md")));
         assert!(!is_unc_path(Path::new("relative/notes.md")));
         // CRITICAL: a Windows *verbatim-disk* path (`\\?\C:\…`, the form
         // `canonicalize` returns) is LOCAL — it must NOT be flagged, or every
         // canonicalized restore path would be falsely rejected.
-        assert!(!is_unc_path(Path::new(r"\\?\C:\Users\me\notes.md")));
+        assert!(!is_unc_path(Path::new(r"\\?\C:\Data\me\notes.md")));
         // …but the explicit verbatim-UNC spelling IS rejected, and a `\\.\`
         // device-namespace path is rejected too (it is a raw device, not an
         // ordinary file we should auto-open).
         assert!(is_unc_path(Path::new(r"\\?\UNC\server\share\x")));
-        assert!(is_unc_path(Path::new(r"\\.\C:\Users\me\notes.md")));
+        assert!(is_unc_path(Path::new(r"\\.\C:\Data\me\notes.md")));
     }
 
     #[test]

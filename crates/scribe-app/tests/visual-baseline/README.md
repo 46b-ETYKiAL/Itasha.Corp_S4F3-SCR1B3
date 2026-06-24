@@ -28,7 +28,7 @@ subsequent GPU runs diff against it and FAIL on a perceptual regression
 
 Scenes: `default_editor`, `settings_open`, `find_bar`.
 
-## Discipline (`.s4f3/rules/visual-qa.md`)
+## Discipline (the project's visual-QA discipline)
 
 An agent cannot "see" a frame from source — render it, diff it, assert it, then
 **Read** the rendered PNG (written to `%TEMP%/scr1b3-visual-regression/`) to
