@@ -699,6 +699,19 @@ pub struct ScribeApp {
     /// count and the red squiggle underlines painted in the editor, so the
     /// dictionary scan runs at most once per (changed) frame.
     spell_cache: std::cell::RefCell<Option<(u64, Vec<spell::Misspelling>)>>,
+    /// P-01 / 4-02 R2 — single-slot find-match memo for the in-buffer find bar,
+    /// keyed by `(query, active tab edit_gen, doc_id)`. While the find bar is
+    /// open, `find_matches_active` is called every frame (counter, highlight-all
+    /// overlay, navigation); without this cache that re-scanned the whole buffer
+    /// AND recompiled the regex per idle frame. The matches are recomputed ONLY
+    /// when the key moves (query edit, buffer edit, or tab switch); otherwise the
+    /// cached `Vec<Match>` is cloned out — mirrors the `spell_cache` idiom above.
+    find_cache: std::cell::RefCell<Option<crate::find_cache::FindCacheEntry>>,
+    /// P-01 test instrumentation: counts how many times `find_matches_active`
+    /// actually invoked `scribe_core::search::find_all` (i.e. a cache MISS). The
+    /// "no recompute on idle frame" test asserts this stays flat across repeated
+    /// idle calls. Bumped only on a real recompute; never read in production.
+    find_recompute_count: std::cell::Cell<u64>,
     /// Config-file watcher for live-reload (kept alive; events arrive on `cfg_rx`).
     _cfg_watcher: Option<notify::RecommendedWatcher>,
     cfg_rx: Option<std::sync::mpsc::Receiver<()>>,
@@ -1096,6 +1109,8 @@ impl ScribeApp {
             hl_galley_cache: std::cell::RefCell::new(None),
             hl_inc_cache: std::cell::RefCell::new(IncrementalHighlightState::default()),
             spell_cache: std::cell::RefCell::new(None),
+            find_cache: std::cell::RefCell::new(None),
+            find_recompute_count: std::cell::Cell::new(0),
             _cfg_watcher: cfg_watcher,
             cfg_rx: Some(cfg_rx),
             fold_view: false,
@@ -4667,15 +4682,42 @@ impl ScribeApp {
 
     /// #R6 — all matches of the current find query in the active buffer (empty
     /// when there is no query / no buffer / the regex is invalid).
+    ///
+    /// P-01 / 4-02 R2 — memoized in `find_cache`, keyed by
+    /// `(query, active tab edit_gen, doc_id)`. This function is called every
+    /// frame the find bar is open (counter, highlight-all overlay, navigation);
+    /// the cache makes the full-document rescan + regex recompile happen ONLY
+    /// when the query, the buffer (`edit_gen`), or the active tab (`doc_id`)
+    /// actually changed. On an idle frame the cached matches are cloned out and
+    /// `find_all` is never re-invoked. Mirrors the `spell_cache` /
+    /// `ensure_change_states` generation-keyed idiom.
     fn find_matches_active(&self) -> Vec<scribe_core::search::Match> {
         if self.find_query.is_empty() || self.active >= self.tabs.len() {
             return Vec::new();
         }
+        let tab = &self.tabs[self.active];
+        let key =
+            crate::find_cache::FindCacheKey::new(&self.find_query, tab.edit_gen, tab.doc_id.raw());
+        // Cache HIT: query, edit generation, and active document all unchanged
+        // since the cached entry — reuse the matches, no rescan, no recompile.
+        if let Some(entry) = self.find_cache.borrow().as_ref() {
+            if !crate::find_cache::should_recompute(Some(&entry.key), &key) {
+                return entry.matches.clone();
+            }
+        }
+        // Cache MISS: recompute once and store under the new key.
+        self.find_recompute_count
+            .set(self.find_recompute_count.get().wrapping_add(1));
         let q = scribe_core::search::Query {
             pattern: self.find_query.clone(),
             ..Default::default()
         };
-        scribe_core::search::find_all(&self.tabs[self.active].text, &q).unwrap_or_default()
+        let matches = scribe_core::search::find_all(&tab.text, &q).unwrap_or_default();
+        *self.find_cache.borrow_mut() = Some(crate::find_cache::FindCacheEntry {
+            key,
+            matches: matches.clone(),
+        });
+        matches
     }
 
     /// Scroll the editor so the byte offset `start` is in view, reusing the
