@@ -6375,3 +6375,6 @@ mod qa_correctness_workflow_tests;
 
 #[cfg(test)]
 mod qa_security_workflow_tests;
+
+#[cfg(test)]
+mod qa_app_workflow_tests;
