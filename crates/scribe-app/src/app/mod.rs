@@ -6351,3 +6351,12 @@ mod e2e;
 
 #[cfg(test)]
 mod perframe_cache_tests;
+
+#[cfg(test)]
+mod find_in_files_tests;
+
+#[cfg(test)]
+mod grid_pane_tests;
+
+#[cfg(test)]
+mod filetree_tests;
