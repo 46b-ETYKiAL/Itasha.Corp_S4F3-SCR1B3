@@ -601,6 +601,21 @@ impl Highlighter {
 
     /// tree-sitter highlight pass → per-line spans. `None` if the grammar is
     /// unavailable or the pass errors (caller falls back to syntect).
+    ///
+    /// P-03 NOTE — this is a WHOLE-DOCUMENT reparse, not a `Tree::edit`
+    /// incremental reparse. The `tree_sitter_highlight::Highlighter::highlight`
+    /// convenience API takes `source: &[u8]` with NO old-tree hook: it builds a
+    /// fresh `Parser`/`Tree` internally and discards it, so there is no seam to
+    /// feed a `Tree::edit`'d old tree through. True per-keystroke incremental
+    /// reparse would require abandoning this convenience layer and
+    /// reimplementing the highlight-query traversal against a manually-managed
+    /// `tree_sitter::Parser` + persisted `Tree` + `QueryCursor` — a large,
+    /// correctness-risky rewrite of the span-tiling. It is deliberately NOT
+    /// half-wired here. Instead the per-FRAME cost (the dominant P-02 leak: this
+    /// 700+ms pass ran every egui repaint) is removed by the edit-generation
+    /// highlight cache in `scribe_render::rope_editor` — Rust highlighting now
+    /// runs once per EDIT, not once per frame, which subsumes the worst cost.
+    /// `Tree::edit` incremental reparse remains the open follow-up optimization.
     fn highlight_tree_sitter(&self, text: &str) -> Option<Vec<Vec<HlSpan>>> {
         let cfg = self.ts_rust()?;
         let mut ts = TsHighlighter::new();
