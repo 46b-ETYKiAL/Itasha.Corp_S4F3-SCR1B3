@@ -41,7 +41,15 @@ pub fn detect(text: &str) -> Eol {
     let total_lf = text.matches('\n').count();
     let lone_lf = total_lf.saturating_sub(crlf);
 
-    if crlf >= lone_lf && crlf >= lone_cr && crlf > 0 {
+    // C-07 tie-break rationale: prefer LF on an EXACT LF/CRLF tie. A genuinely
+    // mixed file with equal lone-LF and CRLF counts must NOT be silently
+    // mass-rewritten to CRLF on an otherwise no-op save — that surprises the
+    // user (a "save with no edits" that flips every line ending). LF is the
+    // portable default, so a balanced file resolves to LF (`crlf > lone_lf`
+    // requires a STRICT CRLF majority). CRLF still wins on a clear majority, and
+    // the CRLF-vs-lone-CR comparison keeps `>=` (CR is the rare classic-Mac case;
+    // a CRLF/CR tie sensibly favours the far more common CRLF).
+    if crlf > lone_lf && crlf >= lone_cr && crlf > 0 {
         Eol::Crlf
     } else if lone_cr > lone_lf && lone_cr > 0 {
         Eol::Cr
@@ -172,6 +180,28 @@ mod tests {
         // `crlf >= lone_cr` are vacuously true for an all-zero-newline string.
         // This pins the `crlf > 0` guard.
         assert_eq!(detect("plain text no newlines"), Eol::Lf);
+    }
+
+    #[test]
+    fn detect_exact_lf_crlf_tie_prefers_lf() {
+        // C-07: a file with an EQUAL number of lone-LF and CRLF endings is
+        // genuinely mixed. The old `crlf >= lone_lf` tie-break picked CRLF, so a
+        // no-op save silently rewrote every ending to CRLF — a surprising
+        // mutation. The least-surprising semantics is to prefer LF on an exact
+        // tie (the portable default), so a balanced file is NOT mass-rewritten.
+        // "a\r\nb\nc": crlf = 1, lone_lf = 1, lone_cr = 0 → LF (tie → LF).
+        assert_eq!(detect("a\r\nb\nc"), Eol::Lf);
+        // Two of each, still a tie → LF.
+        // "a\r\nb\nc\r\nd\ne": crlf = 2, lone_lf = 2 → LF.
+        assert_eq!(detect("a\r\nb\nc\r\nd\ne"), Eol::Lf);
+    }
+
+    #[test]
+    fn detect_crlf_clear_majority_still_wins() {
+        // The tie-break change must NOT regress a clear CRLF majority: one more
+        // CRLF than lone LF must still resolve to CRLF (a genuine Windows file).
+        // "a\r\nb\r\nc\nd": crlf = 2, lone_lf = 1 → CRLF.
+        assert_eq!(detect("a\r\nb\r\nc\nd"), Eol::Crlf);
     }
 }
 

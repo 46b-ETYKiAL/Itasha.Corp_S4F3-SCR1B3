@@ -348,7 +348,22 @@ pub fn add_caret_vertical(rope: &Rope, carets: &mut Vec<EditState>, dir: isize) 
         return false;
     }
     let at = char_at(rope, target as usize, col);
-    if carets.iter().any(|c| c.cursor == at && !c.has_selection()) {
+    // C-06: don't add a caret that is already covered by an existing caret.
+    // The old guard only checked coincidence against COLLAPSED carets
+    // (`c.cursor == at && !c.has_selection()`), so a new caret landing on the
+    // cursor of — or anywhere inside the selection of — an existing caret slipped
+    // through as a phantom. `normalize_carets` (run on the next edit) then merges
+    // that phantom into the overlapping selection and silently drops it, so the
+    // reported caret count was a transient lie. Skip the add when `at` coincides
+    // with any caret's cursor OR falls within any caret's selection `[start,end)`.
+    let already_covered = carets.iter().any(|c| {
+        if c.cursor == at {
+            return true;
+        }
+        let sel = c.selection();
+        sel.start <= at && at < sel.end
+    });
+    if already_covered {
         return false;
     }
     carets.push(EditState::at(at));
@@ -1427,6 +1442,86 @@ mod tests {
                                                  // No line above → no caret added.
         assert!(!add_caret_vertical(&r, &mut carets, -1));
         assert_eq!(carets.len(), 1);
+    }
+
+    #[test]
+    fn add_caret_vertical_does_not_create_a_caret_doomed_to_be_merged() {
+        // C-06: the ADD-time duplicate guard only compared the target `at`
+        // against COLLAPSED carets (`c.cursor == at && !c.has_selection()`). When
+        // `at` instead coincides with the cursor of an existing SELECTION caret
+        // (or falls inside that selection), the buggy guard let the add through,
+        // pushing a phantom collapsed caret on top of the selection. That phantom
+        // is NOT independently editable: the very next `for_each_caret` runs
+        // `normalize_carets`, which merges the zero-width caret into the
+        // overlapping selection and silently drops it — so the reported caret
+        // count is a lie (it grows by one, then collapses back on first edit).
+        //
+        // Layout "abcd\nefgh\nijkl\n": line0 0..5, line1 5..10, line2 10..15.
+        // Caret A: collapsed on line0 col0 (char 0). Caret B: a REVERSED
+        // multi-line selection anchored at line2 col2 (char 12) with its cursor
+        // up at line0 col2 (char 2) — so B's selection range is [2, 12).
+        //
+        // For a DOWN add the reference is `max(cursor)` = max(0, 2) = 2 (caret
+        // B's cursor, line0 col2), so the target is line1 col2 = char 7. Char 7
+        // lies INSIDE caret B's selection [2,12) but matches no caret's cursor,
+        // so the old collapsed-only guard let it through as a phantom.
+        let r = rope("abcd\nefgh\nijkl\n");
+        let mut carets = vec![
+            EditState::at(0), // line0 col0
+            EditState {
+                anchor: 12, // line2, col2 (selection anchor)
+                cursor: 2,  // line0, col2 (selection cursor → DOWN reference)
+                goal_col: None,
+            },
+        ];
+        let added = add_caret_vertical(&r, &mut carets, 1);
+        assert!(
+            !added,
+            "must NOT add a caret coinciding with an existing selection's \
+             position — it would be a phantom that the next edit merges away"
+        );
+        assert_eq!(
+            carets.len(),
+            2,
+            "the caret set must stay honest (no phantom caret), got {:?}",
+            carets
+                .iter()
+                .map(|c| (c.anchor, c.cursor))
+                .collect::<Vec<_>>()
+        );
+
+        // Prove the phantom would have vanished: dispatching an edit through
+        // for_each_caret (which normalizes) leaves the SAME number of carets,
+        // confirming the reported count is real, not a transient.
+        let count_before_edit = carets.len();
+        for_each_caret(&mut r.clone(), &mut carets, |rope, st| {
+            replace_selection(rope, st, "Z");
+        });
+        assert!(
+            carets.len() <= count_before_edit,
+            "no caret was silently dropped by the post-add normalization"
+        );
+    }
+
+    #[test]
+    fn add_caret_vertical_still_adds_a_genuinely_distinct_caret() {
+        // Regression guard for the fix: a vertical add whose landing position is
+        // NOT occupied by (nor inside) any existing caret must still succeed and
+        // grow the set — the common multi-cursor case is unchanged.
+        let r = rope("abcd\nefgh\nijkl\n");
+        let mut carets = vec![EditState {
+            anchor: 5, // line 1, col 0
+            cursor: 8, // line 1, col 3  ← reference column
+            goal_col: None,
+        }];
+        assert!(add_caret_vertical(&r, &mut carets, 1));
+        assert_eq!(carets.len(), 2);
+        assert!(
+            carets
+                .iter()
+                .any(|c| !c.has_selection() && line_col(&r, c.cursor) == (2, 3)),
+            "a distinct collapsed caret must be added on line 2 col 3"
+        );
     }
 
     // ---- editing power-features ----
