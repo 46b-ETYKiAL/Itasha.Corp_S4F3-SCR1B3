@@ -46,6 +46,58 @@ pub enum PinOutcome {
     Mismatch { old: String, new: String },
 }
 
+/// R7 / S-01 + S-02 (CWE-347 improper-verification-of-signature /
+/// CWE-295 improper-certificate-validation, applied to plugin author-key
+/// trust). The decision a caller MUST route a plugin load through after
+/// presenting the manifest key to [`PinnedKeyStore::pin_or_match`].
+///
+/// The defect this closes: the load loop treated `Match | New` identically
+/// (a FIRST-seen key was silently TOFU-pinned with no consent) and dropped a
+/// `Mismatch` (the pinned author key CHANGED — a possible plugin takeover) to
+/// a log line that still let the plugin be considered. This enum makes the
+/// three outcomes DISTINCT and makes "key changed → silently load" impossible
+/// by construction.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PluginLoadDecision {
+    /// The presented key matches the pinned anchor (`Match`), OR this is a
+    /// first contact (`New`) for which the user has ALREADY granted explicit
+    /// consent. Safe to load + pin.
+    Allow,
+    /// First contact (`New`) with NO prior explicit consent. The load MUST be
+    /// withheld until the user explicitly allows it (the "needs approval"
+    /// surface). NOT silently pinned.
+    NeedsFirstConsent,
+    /// The pinned author key CHANGED. The plugin MUST NOT load. The UI must
+    /// surface a blocking "author key changed — old→new, approve?" prompt and
+    /// only [`PinnedKeyStore::replace_with_consent`] on explicit user approval.
+    BlockKeyChanged { old: String, new: String },
+}
+
+/// Pure mapping from a [`PinOutcome`] (+ whether the user has already granted
+/// explicit first-contact consent for this plugin) to a [`PluginLoadDecision`].
+///
+/// This is the security spine of the plugin key-trust gate — fully unit-tested
+/// and free of IO so the "a Mismatch can never silently load" invariant is
+/// provable. `first_consent_granted` is the caller's notion of explicit
+/// approval (e.g. the plugin id present in the user's trusted-approvals map).
+pub fn decide_key_trust(outcome: PinOutcome, first_consent_granted: bool) -> PluginLoadDecision {
+    match outcome {
+        // The key matches the trust anchor → always safe.
+        PinOutcome::Match => PluginLoadDecision::Allow,
+        // First contact: load ONLY with explicit prior consent; otherwise
+        // hold for approval (never silent TOFU).
+        PinOutcome::New => {
+            if first_consent_granted {
+                PluginLoadDecision::Allow
+            } else {
+                PluginLoadDecision::NeedsFirstConsent
+            }
+        }
+        // Key rotation without consent → BLOCK, surface old→new. Never load.
+        PinOutcome::Mismatch { old, new } => PluginLoadDecision::BlockKeyChanged { old, new },
+    }
+}
+
 /// On-disk pinned-keys store. Cheap to construct (just records a path);
 /// the file is read on each call to amortise restart cost over the
 /// "user opens settings, looks at 1 plugin" pattern.
@@ -291,6 +343,75 @@ mod tests {
         match s.pin_or_match("p.id", "K_OLD").unwrap() {
             PinOutcome::Mismatch { old, .. } => assert_eq!(old, "K_NEW"),
             other => panic!("expected mismatch, got {other:?}"),
+        }
+    }
+
+    // --- R7 / S-01 + S-02: the pure key-trust decision gate ---
+
+    #[test]
+    fn decide_match_always_allows() {
+        // A key matching the pinned anchor loads regardless of consent state.
+        assert_eq!(
+            decide_key_trust(PinOutcome::Match, false),
+            PluginLoadDecision::Allow
+        );
+        assert_eq!(
+            decide_key_trust(PinOutcome::Match, true),
+            PluginLoadDecision::Allow
+        );
+    }
+
+    #[test]
+    fn decide_new_without_consent_needs_first_consent() {
+        // S-01 — a FIRST-seen key must NOT silently TOFU-pin + load.
+        assert_eq!(
+            decide_key_trust(PinOutcome::New, false),
+            PluginLoadDecision::NeedsFirstConsent
+        );
+    }
+
+    #[test]
+    fn decide_new_with_prior_consent_allows() {
+        // First contact the user has ALREADY explicitly approved → load.
+        assert_eq!(
+            decide_key_trust(PinOutcome::New, true),
+            PluginLoadDecision::Allow
+        );
+    }
+
+    #[test]
+    fn decide_mismatch_always_blocks_and_never_allows() {
+        // S-02 — a CHANGED pinned key is a possible takeover. It must BLOCK and
+        // surface old→new, NEVER load — even if some "consent" flag is set
+        // (consent for first-contact is NOT consent for key rotation; that
+        // requires `replace_with_consent`).
+        for consent in [false, true] {
+            let decision = decide_key_trust(
+                PinOutcome::Mismatch {
+                    old: "K_OLD".into(),
+                    new: "K_NEW".into(),
+                },
+                consent,
+            );
+            match decision {
+                PluginLoadDecision::BlockKeyChanged { old, new } => {
+                    assert_eq!(old, "K_OLD");
+                    assert_eq!(new, "K_NEW");
+                }
+                other => panic!("a mismatch must NEVER allow; got {other:?}"),
+            }
+            // Strongest invariant: a mismatch is never the Allow variant.
+            assert_ne!(
+                decide_key_trust(
+                    PinOutcome::Mismatch {
+                        old: "a".into(),
+                        new: "b".into()
+                    },
+                    consent
+                ),
+                PluginLoadDecision::Allow,
+                "a changed author key must never silently load"
+            );
         }
     }
 

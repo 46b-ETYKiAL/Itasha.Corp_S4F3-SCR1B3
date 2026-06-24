@@ -361,13 +361,96 @@ pub fn show(ui: &mut egui::Ui, md: &str, accent: Color32, muted: Color32) {
     }
 }
 
+/// S-05 (CWE-79 / CWE-939 — URL-scheme injection). Decide whether a markdown
+/// link URL is safe to make CLICKABLE. Only a small allowlist of schemes is
+/// permitted; everything else (`javascript:`, `data:`, `file:`, `vbscript:`,
+/// …) is rendered as inert text so a malicious markdown document can never
+/// hand the user a one-click code-execution / local-file / data-URI vector.
+///
+/// Allowed:
+///   * `http:` / `https:` / `mailto:` (explicit safe schemes)
+///   * relative & anchor links (no scheme at all — `./x`, `../x`, `#frag`,
+///     `path/page.md`) — these resolve against the document, never a new
+///     protocol handler.
+///
+/// Fail-CLOSED: an unknown scheme is rejected. The check is case-insensitive
+/// and tolerant of leading ASCII whitespace / control bytes (the classic
+/// `  JavaScript:` and `java\tscript:` obfuscation tricks).
+///
+/// Pure function — no egui, no IO — so it is exhaustively unit-tested below.
+pub(crate) fn is_safe_link_scheme(url: &str) -> bool {
+    // Per the WHATWG URL spec, ASCII whitespace and C0 control bytes (NUL,
+    // TAB, CR, LF, …) are STRIPPED THROUGHOUT a URL before scheme parsing —
+    // not merely from the front. So "java\tscript:" and "  java\nscript:"
+    // both collapse to "javascript:" and must be rejected; a naive leading-
+    // trim would let the embedded-tab form smuggle past. We remove every
+    // ASCII whitespace/control byte, then parse the scheme from what remains.
+    let trimmed: String = url
+        .chars()
+        .filter(|c| !(c.is_ascii_whitespace() || c.is_ascii_control()))
+        .collect();
+
+    // Find the scheme delimiter. Per RFC 3986 a scheme is
+    // ALPHA *( ALPHA / DIGIT / "+" / "-" / "." ) followed by ':'. If there
+    // is no ':' before the first '/', '?', '#' or whitespace, there is no
+    // scheme → it is a relative/anchor link, which is always safe.
+    let mut scheme = String::new();
+    let mut has_scheme = false;
+    for (i, c) in trimmed.char_indices() {
+        if c == ':' {
+            // A ':' as the FIRST char, or after a path separator, is not a
+            // scheme delimiter (e.g. "./a:b" or "#a:b").
+            has_scheme = i > 0;
+            break;
+        }
+        // Anything that can't be part of a scheme means there is no scheme
+        // (it's a relative path like "a/b.md" or "page?x=1#y").
+        if c == '/' || c == '?' || c == '#' || c.is_ascii_whitespace() {
+            break;
+        }
+        if c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.' {
+            scheme.push(c.to_ascii_lowercase());
+        } else {
+            // A control/other byte inside the would-be scheme: not a valid
+            // scheme → treat as relative (and the rest of the pipeline will
+            // render it as text/relative, never a protocol handler).
+            break;
+        }
+    }
+
+    if !has_scheme {
+        // No scheme → relative or anchor link → safe.
+        return true;
+    }
+
+    // The first char of a scheme must be ALPHA (RFC 3986). A leading digit
+    // means this wasn't a real scheme.
+    if scheme
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_ascii_alphabetic())
+    {
+        return false;
+    }
+
+    matches!(scheme.as_str(), "http" | "https" | "mailto")
+}
+
 /// Emit a sequence of styled inline runs into the current (typically
 /// `horizontal_wrapped`) layout.
 fn render_runs(ui: &mut egui::Ui, runs: &[MdRun], accent: Color32, muted: Color32) {
     for r in runs {
         if let Some(url) = &r.link {
-            // egui handles its own link styling/underline; only colour it.
-            ui.hyperlink_to(RichText::new(&r.text).color(accent), url);
+            if is_safe_link_scheme(url) {
+                // egui handles its own link styling/underline; only colour it.
+                ui.hyperlink_to(RichText::new(&r.text).color(accent), url);
+            } else {
+                // S-05 — disallowed scheme (javascript:/data:/file:/…). Render
+                // the link TEXT as inert, visually-muted styled text so it is
+                // NOT clickable and cannot open a protocol handler.
+                ui.label(RichText::new(&r.text).color(muted).strikethrough())
+                    .on_hover_text("link blocked: unsafe URL scheme");
+            }
             continue;
         }
         let mut rt = RichText::new(&r.text);
@@ -706,5 +789,66 @@ mod tests {
         let mut h = egui_kittest::Harness::builder()
             .build_ui(|ui| show(ui, "", Color32::WHITE, Color32::GRAY));
         h.run();
+    }
+
+    // --- S-05 (CWE-79 / CWE-939): markdown link scheme allowlist ---
+
+    #[test]
+    fn link_scheme_rejects_dangerous_schemes() {
+        // The whole point of the fix: these must NEVER be made clickable.
+        assert!(!is_safe_link_scheme("javascript:alert(1)"));
+        assert!(!is_safe_link_scheme(
+            "data:text/html,<script>alert(1)</script>"
+        ));
+        assert!(!is_safe_link_scheme("file:///etc/passwd"));
+        assert!(!is_safe_link_scheme("vbscript:msgbox(1)"));
+        // UNC-ish / other protocol handlers also rejected.
+        assert!(!is_safe_link_scheme("ftp://host/x"));
+        assert!(!is_safe_link_scheme("smb://attacker/share"));
+    }
+
+    #[test]
+    fn link_scheme_allows_safe_schemes_and_relative() {
+        assert!(is_safe_link_scheme("http://example.com"));
+        assert!(is_safe_link_scheme("https://example.com/x?y=1#z"));
+        assert!(is_safe_link_scheme("mailto:user@example.com"));
+        // Relative / anchor links carry no scheme → always safe.
+        assert!(is_safe_link_scheme("./page.md"));
+        assert!(is_safe_link_scheme("../other/page.md"));
+        assert!(is_safe_link_scheme("page.md"));
+        assert!(is_safe_link_scheme("#section-2"));
+        assert!(is_safe_link_scheme("path/page?x=1#y"));
+        // A relative path that happens to contain a colon AFTER a slash is
+        // still relative (no scheme delimiter before the first '/').
+        assert!(is_safe_link_scheme("./a:b"));
+    }
+
+    #[test]
+    fn link_scheme_is_case_insensitive_and_strips_obfuscation() {
+        // Case-insensitive.
+        assert!(!is_safe_link_scheme("JavaScript:alert(1)"));
+        assert!(!is_safe_link_scheme("JAVASCRIPT:alert(1)"));
+        assert!(is_safe_link_scheme("HTTPS://example.com"));
+        assert!(is_safe_link_scheme("MailTo:user@example.com"));
+        // Leading-whitespace trick.
+        assert!(!is_safe_link_scheme("   JavaScript:alert(1)"));
+        // Leading control bytes (TAB / NEWLINE / CR / NUL) are stripped before
+        // scheme parsing — the classic "java\tscript:" smuggle.
+        assert!(!is_safe_link_scheme("\tjavascript:alert(1)"));
+        assert!(!is_safe_link_scheme("\n\r javascript:alert(1)"));
+        assert!(!is_safe_link_scheme("\u{0000}javascript:alert(1)"));
+        // Embedded control inside the scheme also fails closed.
+        assert!(!is_safe_link_scheme("java\tscript:alert(1)"));
+    }
+
+    #[test]
+    fn link_scheme_empty_and_degenerate_inputs() {
+        // Empty / scheme-only-colon inputs are treated as relative (safe to
+        // render — they cannot open a protocol handler).
+        assert!(is_safe_link_scheme(""));
+        assert!(is_safe_link_scheme(":"));
+        // A leading-digit "scheme" is not a valid RFC-3986 scheme → reject so
+        // "123:foo" can never be coerced into a handler.
+        assert!(!is_safe_link_scheme("1http://x"));
     }
 }

@@ -26,6 +26,7 @@ mod issue_intake;
 mod md_preview;
 mod plugin_manager;
 mod reporting;
+mod session_path_guard;
 mod settings;
 mod theme_editor;
 mod to_markdown;

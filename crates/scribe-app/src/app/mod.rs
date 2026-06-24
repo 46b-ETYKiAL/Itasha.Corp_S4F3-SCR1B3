@@ -908,7 +908,26 @@ impl ScribeApp {
             }
         }
         if tabs.is_empty() && config.editor.restore_session {
-            for path in load_session() {
+            // R6 / S-04 — the legacy paths-only session file is also a
+            // user-writable on-disk artifact. Apply the same restore guard:
+            // reject UNC / nonexistent / root-escaping paths, self-rooting the
+            // allowed set on the listed paths' own parent directories.
+            let listed = load_session();
+            let legacy_roots = crate::session_path_guard::allowed_roots(
+                listed
+                    .iter()
+                    .filter(|p| !crate::session_path_guard::is_unc_path(p))
+                    .filter_map(|p| p.parent())
+                    .collect::<Vec<_>>(),
+            );
+            for path in listed {
+                if !crate::session_path_guard::is_safe_restore_path(&path, &legacy_roots) {
+                    tracing::warn!(
+                        "session restore (legacy): skipping untrusted path {} — not auto-opening",
+                        path.display()
+                    );
+                    continue;
+                }
                 if let Ok(t) = EditorTab::from_path(path) {
                     tabs.push(t);
                 }
@@ -932,6 +951,11 @@ impl ScribeApp {
         // dir auto-executed unsigned, unreviewed code on the next launch.
         let mut plugins = PluginHost::new();
         let mut pending_plugins: Vec<String> = Vec::new();
+        // S-02 — plugins whose pinned author key CHANGED (possible takeover).
+        // These are BLOCKED from loading and surfaced distinctly so the user
+        // can decide whether to approve the new key (key rotation), never a
+        // silent log line.
+        let mut key_changed_plugins: Vec<String> = Vec::new();
         if config.plugins.enabled {
             if let Some(dir) = Config::config_dir() {
                 let (found, errors) = plugin::discover(&dir.join("plugins"));
@@ -959,33 +983,96 @@ impl ScribeApp {
                     };
                     let sha = scribe_core::update::verify::sha256_hex(src.as_bytes());
                     let may_run = if config.plugins.require_signed {
-                        // Strict mode: pinned author key (TOFU) + a valid
-                        // minisign signature over the entry script.
-                        let verified = match (&p.manifest.author_pubkey, &p.manifest.signature) {
+                        // R7 / S-01 + S-02 — strict mode: the author-key trust
+                        // decision is now EXPLICIT (no silent TOFU, no silent
+                        // key-rotation). We first verify the minisign signature
+                        // over the entry script, then route the pinned-key
+                        // outcome through the pure `decide_key_trust` gate:
+                        //   * Match               → Allow (anchor matches)
+                        //   * New + prior consent  → Allow (user already approved
+                        //                            this exact entry script)
+                        //   * New + no consent     → held for approval (pending)
+                        //   * Mismatch (key change)→ BLOCKED; surfaced old→new;
+                        //                            NEVER loads without explicit
+                        //                            `replace_with_consent`.
+                        match (&p.manifest.author_pubkey, &p.manifest.signature) {
                             (Some(pk), Some(sig)) => {
-                                let pinned = matches!(
-                                    key_store.pin_or_match(&p.manifest.id, pk),
-                                    Ok(scribe_core::plugin::PinOutcome::Match
-                                        | scribe_core::plugin::PinOutcome::New)
-                                );
-                                pinned
-                                    && scribe_core::update::verify::verify_signature(
-                                        src.as_bytes(),
-                                        sig,
-                                        pk,
-                                    )
-                                    .is_ok()
+                                let sig_ok = scribe_core::update::verify::verify_signature(
+                                    src.as_bytes(),
+                                    sig,
+                                    pk,
+                                )
+                                .is_ok();
+                                if !sig_ok {
+                                    tracing::warn!(
+                                        "plugin '{}' rejected: require_signed is on but the \
+                                         signature does not verify",
+                                        p.manifest.id
+                                    );
+                                    false
+                                } else {
+                                    // The entry-hash trusted-approvals map is the
+                                    // user's explicit first-contact consent signal.
+                                    let first_consent = scribe_core::plugin::entry_is_trusted(
+                                        &p.manifest.id,
+                                        &sha,
+                                        &config.plugins.trusted,
+                                    );
+                                    let outcome = match key_store.pin_or_match(&p.manifest.id, pk) {
+                                        Ok(o) => o,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "plugin '{}' rejected: pinned-key store \
+                                                     error: {e}",
+                                                p.manifest.id
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    match scribe_core::plugin::pinned_keys::decide_key_trust(
+                                        outcome,
+                                        first_consent,
+                                    ) {
+                                        scribe_core::plugin::pinned_keys::PluginLoadDecision::Allow => true,
+                                        scribe_core::plugin::pinned_keys::PluginLoadDecision::NeedsFirstConsent => {
+                                            tracing::warn!(
+                                                "plugin '{}' held: first-seen author key needs \
+                                                 your explicit approval before it runs",
+                                                p.manifest.id
+                                            );
+                                            pending_plugins.push(p.manifest.id.clone());
+                                            false
+                                        }
+                                        scribe_core::plugin::pinned_keys::PluginLoadDecision::BlockKeyChanged {
+                                            old,
+                                            new,
+                                        } => {
+                                            // S-02 — the pinned author key CHANGED
+                                            // (possible takeover). NEVER load. Surface
+                                            // a BLOCKING old→new warning; rotation
+                                            // requires explicit `replace_with_consent`.
+                                            tracing::warn!(
+                                                "plugin '{}' BLOCKED: author key changed \
+                                                 (old={old} new={new}) — possible takeover; \
+                                                 approve the new key in Settings → Plugins \
+                                                 before it can run",
+                                                p.manifest.id
+                                            );
+                                            key_changed_plugins.push(p.manifest.id.clone());
+                                            false
+                                        }
+                                    }
+                                }
                             }
-                            _ => false,
-                        };
-                        if !verified {
-                            tracing::warn!(
-                                "plugin '{}' rejected: require_signed is on but it is \
-                                 unsigned or fails verification",
-                                p.manifest.id
-                            );
+                            _ => {
+                                tracing::warn!(
+                                    "plugin '{}' rejected: require_signed is on but it is \
+                                     unsigned (no author key / signature)",
+                                    p.manifest.id
+                                );
+                                false
+                            }
                         }
-                        verified
                     } else {
                         // Default mode: trust-on-first-use by entry checksum.
                         scribe_core::plugin::entry_is_trusted(
@@ -1012,6 +1099,17 @@ impl ScribeApp {
                         "{} plugin(s) need your approval before they run — open Settings \
                          → Plugins → Manage plugins",
                         pending_plugins.len()
+                    ));
+                }
+                // S-02 — a CHANGED author key is the highest-severity plugin
+                // event (possible takeover): surface it with priority over the
+                // softer "skipped" / "pending" toasts so the user sees it.
+                if !key_changed_plugins.is_empty() {
+                    toast = Some(format!(
+                        "⚠ {} plugin(s) BLOCKED — author key changed since last run \
+                         (possible takeover). Open Settings → Plugins to review the \
+                         new key before allowing it.",
+                        key_changed_plugins.len()
                     ));
                 }
             }
@@ -3278,6 +3376,24 @@ impl ScribeApp {
         let manifest = session::load_manifest(&dir)?;
         let bdir = session::backup_dir(&dir);
         let mut tabs: Vec<EditorTab> = Vec::new();
+
+        // R6 / S-04 — the manifest is a user-writable on-disk artifact; a
+        // tampered `session.json` can point at a `\\attacker\share\…` UNC path
+        // (→ SMB/NTLM credential leak) or a symlink escaping the prior working
+        // set. Derive the ALLOWED ROOTS for this restore from the parent
+        // directories of the manifest's OWN declared paths (the prior session
+        // roots). Only paths that canonicalize to stay under one of these roots
+        // — and are not UNC, and exist — are auto-opened. See
+        // `session_path_guard::is_safe_restore_path` for the fail-closed rules.
+        let root_candidates: Vec<PathBuf> = manifest
+            .tabs
+            .iter()
+            .filter_map(|s| s.path.as_ref().map(PathBuf::from))
+            .filter(|p| !crate::session_path_guard::is_unc_path(p))
+            .filter_map(|p| p.parent().map(|par| par.to_path_buf()))
+            .collect();
+        let allowed_roots =
+            crate::session_path_guard::allowed_roots(root_candidates.iter().map(|p| p.as_path()));
         // Enforce the one-tab-per-file invariant on restore: a file must NEVER be
         // reopened into two tabs. The manifest can legitimately carry two entries
         // for the same path — a stale unsaved-backup entry coexisting with a
@@ -3293,20 +3409,46 @@ impl ScribeApp {
         let mut snap_to_tab: std::collections::HashMap<usize, usize> =
             std::collections::HashMap::new();
         for (si, snap) in manifest.tabs.iter().enumerate() {
-            let path = snap.path.as_ref().map(PathBuf::from);
+            let raw_path = snap.path.as_ref().map(PathBuf::from);
+            // R6 / S-04 — classify this entry's declared path. A path that
+            // FAILS the restore guard (UNC, nonexistent, or escaping the
+            // allowed roots) is NEVER auto-opened from disk and NEVER carried
+            // as the tab's save target. `path` below is the SAFE path used for
+            // disk re-open / save-target; an unsafe path is dropped to `None`.
+            let path: Option<PathBuf> = match &raw_path {
+                Some(p) if crate::session_path_guard::is_safe_restore_path(p, &allowed_roots) => {
+                    Some(p.clone())
+                }
+                Some(p) => {
+                    tracing::warn!(
+                        "session restore: skipping untrusted path {} (UNC / nonexistent / \
+                         escapes the prior session roots) — not auto-opening",
+                        p.display()
+                    );
+                    None
+                }
+                None => None,
+            };
             // Build the candidate tab for this entry, or skip it (None) — keeping
             // the original gating: a backup restores unsaved content always; a
             // clean file-backed tab reopens only when `restore_session` is on.
+            // S-04: a backup whose declared path was unsafe still restores its
+            // UNSAVED CONTENT (never lose the user's work) but as a PATHLESS
+            // scratch buffer — the attacker-chosen path is stripped so it can
+            // neither auto-open nor become a silent save target.
             let candidate: Option<EditorTab> = if let Some(name) = &snap.backup {
                 match session::read_backup(&bdir, name) {
                     Ok(content) => Some(EditorTab::from_backup(path.clone(), content)),
                     // Backup unreadable → fall back to the clean-file rule below.
+                    // Only a SAFE path is re-openable from disk.
                     Err(_) if restore_session => {
                         path.clone().and_then(|p| EditorTab::from_path(p).ok())
                     }
                     Err(_) => None,
                 }
             } else if restore_session {
+                // A clean file-backed tab reopens ONLY from a safe path. An
+                // unsafe path (path == None) is skipped entirely.
                 path.clone().and_then(|p| EditorTab::from_path(p).ok())
             } else {
                 None
