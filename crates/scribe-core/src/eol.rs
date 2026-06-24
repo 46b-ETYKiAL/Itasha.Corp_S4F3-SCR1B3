@@ -135,6 +135,44 @@ mod tests {
             assert_eq!(apply("a\nb", eol), format!("a{}b", eol.as_str()));
         }
     }
+
+    #[test]
+    fn label_strings_are_exact() {
+        // The status-bar EOL indicator depends on these exact labels; a wrong
+        // label silently mislabels the file's line ending.
+        assert_eq!(Eol::Lf.label(), "LF");
+        assert_eq!(Eol::Crlf.label(), "CRLF");
+        assert_eq!(Eol::Cr.label(), "CR");
+    }
+
+    #[test]
+    fn detect_lone_cr_does_not_win_when_not_strict_majority() {
+        // Equal lone-CR and lone-LF counts (no CRLF) must fall through to LF:
+        // the CR branch requires a STRICT majority of lone CRs. This pins the
+        // `lone_cr > lone_lf` comparison against a `>=` mutation.
+        // "a\rb\nc": lone_cr = 1, lone_lf = 1, crlf = 0 → LF.
+        assert_eq!(detect("a\rb\nc"), Eol::Lf);
+    }
+
+    #[test]
+    fn detect_requires_both_cr_conditions_not_either() {
+        // More lone LFs than lone CRs (but at least one CR present) must NOT be
+        // detected as CR. This pins the `&&` in the CR branch against an `||`
+        // mutation: with `||`, "one CR present" alone would wrongly pick CR.
+        // "a\rb\nc\nd": lone_cr = 1, lone_lf = 2, crlf = 0 → LF (not CR).
+        assert_eq!(detect("a\rb\nc\nd"), Eol::Lf);
+        // And a genuine lone-CR majority still resolves to CR (guards against
+        // the comparison being inverted to always-false).
+        assert_eq!(detect("a\rb\rc\nd"), Eol::Cr);
+    }
+
+    #[test]
+    fn detect_crlf_branch_needs_at_least_one_crlf() {
+        // crlf == 0 must never select CRLF even though `crlf >= lone_lf` and
+        // `crlf >= lone_cr` are vacuously true for an all-zero-newline string.
+        // This pins the `crlf > 0` guard.
+        assert_eq!(detect("plain text no newlines"), Eol::Lf);
+    }
 }
 
 #[cfg(test)]
