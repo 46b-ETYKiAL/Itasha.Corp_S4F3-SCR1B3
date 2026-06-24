@@ -94,7 +94,9 @@ impl Document {
     /// Atomic: writes to a temp file then renames over the target. Returns
     /// `Ok(true)` when one or more characters could not be represented in the
     /// file's encoding (they were replaced — i.e. data was lost — so the caller
-    /// MUST warn the user).
+    /// MUST warn the user). A document opened read-only (`read_only_large`, the
+    /// 256 MiB-and-up mmap browse path) refuses to save and returns
+    /// [`CoreError::FileTooLargeToEdit`](crate::error::CoreError::FileTooLargeToEdit).
     pub fn save(&mut self) -> Result<bool> {
         let Some(path) = self.path.clone() else {
             return Err(crate::error::CoreError::Other(
@@ -107,6 +109,19 @@ impl Document {
     /// Save to an explicit path (also used for "Save As"). Returns `Ok(true)`
     /// when characters were lost to the target encoding (see [`Self::save`]).
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> Result<bool> {
+        // C-08: enforce the read-only-large contract. A document opened via the
+        // >=256 MiB mmap browse path is read-only by design; saving it would
+        // re-materialise the whole rope and is exactly what the browse path
+        // exists to avoid. The `read_only_large` flag previously named a
+        // contract it never enforced — both `save` and `save_as` wrote anyway.
+        // Refuse with a structured error so the flag means what it says; the UI
+        // already gates the Save action on `is_read_only_large`, so this is a
+        // defense-in-depth backstop, not a new restriction on the edit flow.
+        if self.read_only_large {
+            return Err(crate::error::CoreError::FileTooLargeToEdit(
+                self.rope.len_bytes() as u64,
+            ));
+        }
         let path = path.as_ref();
         let lf_text = self.rope.to_string();
         let styled = eol::apply(&lf_text, self.eol);
@@ -519,6 +534,70 @@ mod tests {
             Some("rs"),
             "extension must be lowercased for case-insensitive routing"
         );
+    }
+
+    #[test]
+    fn read_only_large_doc_refuses_to_save() {
+        // C-08: a Document flagged `read_only_large` (opened via the >=256 MiB
+        // mmap browse path) must REFUSE to save — the flag now means what its
+        // name says. Previously save/save_as wrote regardless, so the name
+        // over-promised. The error is the structured FileTooLargeToEdit variant
+        // so the UI can surface it, and the on-disk file is never touched.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("huge.log");
+        std::fs::write(&p, b"original content\n").unwrap();
+
+        // Construct a read-only-large doc directly (a real 256 MiB file is
+        // prohibitive in a unit test; the private field is reachable from the
+        // in-module test).
+        let mut doc = Document {
+            rope: Rope::from_str("edited in memory\n"),
+            path: Some(p.clone()),
+            encoding: DetectedEncoding::default(),
+            eol: Eol::Lf,
+            dirty: true,
+            read_only_large: true,
+        };
+
+        // Bare save() is refused with the structured error.
+        let err = doc.save().expect_err("a read-only-large doc must not save");
+        match err {
+            crate::error::CoreError::FileTooLargeToEdit(_) => {}
+            other => panic!("expected FileTooLargeToEdit, got: {other:?}"),
+        }
+        // save_as is refused too (the read-only contract is about the source
+        // document, independent of the destination path).
+        let other = dir.path().join("copy.log");
+        assert!(
+            matches!(
+                doc.save_as(&other),
+                Err(crate::error::CoreError::FileTooLargeToEdit(_))
+            ),
+            "save_as must also refuse a read-only-large doc"
+        );
+
+        // The on-disk files are untouched: the original keeps its bytes and the
+        // alternate target was never created.
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "original content\n",
+            "the source file must be left exactly as it was"
+        );
+        assert!(!other.exists(), "save_as must not create the target file");
+    }
+
+    #[test]
+    fn normal_doc_still_saves_after_read_only_enforcement() {
+        // Regression guard: an ordinary (not read-only-large) document still
+        // saves normally — the C-08 enforcement only blocks the read-only flag.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("ok.txt");
+        std::fs::write(&p, b"x\n").unwrap();
+        let mut doc = Document::open(&p).unwrap();
+        assert!(!doc.is_read_only_large());
+        doc.set_text("y\n");
+        doc.save().expect("a normal document must still save");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "y\n");
     }
 
     #[test]
