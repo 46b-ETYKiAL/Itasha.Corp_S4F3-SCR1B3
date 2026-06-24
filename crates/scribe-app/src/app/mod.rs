@@ -631,6 +631,11 @@ pub struct ScribeApp {
     spell: HashSetEngine,
     palette_open: bool,
     palette_query: String,
+    /// BUG-APP-01: keyboard-nav highlight index into the palette's filtered
+    /// command list, mirroring `fuzzy_selected` for the fuzzy-file-finder. Up/
+    /// Down move it, Enter runs the highlighted command. Reset to 0 whenever the
+    /// query text changes so the highlight never points past the filtered set.
+    palette_selected: usize,
     settings_open: bool,
     /// F-014 from docs/audits/overlooked-surfaces-2026-05-29.md: an in-app
     /// modal listing every wired keyboard shortcut. Opens on F1. The modal
@@ -1056,6 +1061,7 @@ impl ScribeApp {
             plugin_cmds,
             spell,
             palette_open: false,
+            palette_selected: 0,
             palette_query: String::new(),
             settings_open: false,
             cheatsheet_open: false,
@@ -4157,6 +4163,82 @@ impl ScribeApp {
         // searches both.
         let mut run_builtin: Option<BuiltinCommand> = None;
         if self.palette_open {
+            // BUG-APP-01 fix: build the filtered command list ONCE up front so
+            // keyboard nav (Up/Down/Enter) and the rendered rows agree on the
+            // same set — mirroring the fuzzy-file-finder's "rank once up front"
+            // pattern (mod.rs `if self.fuzzy_open`). Each entry carries what to
+            // run; the index into this Vec is the selectable highlight.
+            enum PaletteAction {
+                Builtin(BuiltinCommand),
+                Plugin(String),
+            }
+            struct PaletteItem {
+                display: String,
+                action: PaletteAction,
+                /// True for the first plugin command — render a separator above
+                /// it, preserving the prior built-in/plugin visual split.
+                separator_before: bool,
+            }
+            let q = self.palette_query.to_lowercase();
+            let mut items: Vec<PaletteItem> = Vec::new();
+            // Built-in commands first — universally available even with zero
+            // plugins.
+            for cmd in BUILTIN_COMMANDS {
+                let label = cmd.label;
+                let shortcut = cmd.shortcut;
+                if q.is_empty()
+                    || label.to_lowercase().contains(&q)
+                    || shortcut.to_lowercase().contains(&q)
+                {
+                    let display = if shortcut.is_empty() {
+                        label.to_string()
+                    } else {
+                        format!("{label}  ·  {shortcut}")
+                    };
+                    items.push(PaletteItem {
+                        display,
+                        action: PaletteAction::Builtin(cmd.action),
+                        separator_before: false,
+                    });
+                }
+            }
+            let mut first_plugin = true;
+            for c in &self.plugin_cmds {
+                if q.is_empty() || c.label.to_lowercase().contains(&q) || c.id.contains(&q) {
+                    items.push(PaletteItem {
+                        display: format!("{}  ·  {}", c.label, c.plugin_id),
+                        action: PaletteAction::Plugin(c.id.clone()),
+                        separator_before: first_plugin,
+                    });
+                    first_plugin = false;
+                }
+            }
+
+            // Read Up/Down/Enter here (outside the window body). A singleline
+            // TextEdit ignores these keys, so this does not fight the query
+            // field's caret — same rationale as the fuzzy finder.
+            let (up, down, enter) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::Enter),
+                )
+            });
+            if items.is_empty() {
+                self.palette_selected = 0;
+            } else {
+                self.palette_selected =
+                    fuzzy_move_selection(self.palette_selected, items.len(), up, down);
+                if enter {
+                    match &items[self.palette_selected].action {
+                        PaletteAction::Builtin(a) => run_builtin = Some(*a),
+                        PaletteAction::Plugin(id) => run_cmd = Some(id.clone()),
+                    }
+                }
+            }
+            let selected = self.palette_selected;
+
+            let mut query_changed = false;
             egui::Window::new(
                 RichText::new(format!("{}  command palette", egui_phosphor::thin::COMMAND))
                     .color(accent)
@@ -4175,56 +4257,36 @@ impl ScribeApp {
                     r.request_focus();
                     self.focus_palette = false;
                 }
-                let q = self.palette_query.to_lowercase();
+                query_changed = r.changed();
                 egui::ScrollArea::vertical()
                     .max_height(360.0)
                     .show(ui, |ui| {
-                        let mut any = false;
-                        // Built-in commands first — universally available even
-                        // with zero plugins.
-                        for cmd in BUILTIN_COMMANDS {
-                            let label = cmd.label;
-                            let shortcut = cmd.shortcut;
-                            if q.is_empty()
-                                || label.to_lowercase().contains(&q)
-                                || shortcut.to_lowercase().contains(&q)
-                            {
-                                any = true;
-                                let display = if shortcut.is_empty() {
-                                    label.to_string()
-                                } else {
-                                    format!("{label}  ·  {shortcut}")
-                                };
-                                if ui.selectable_label(false, display).clicked() {
-                                    run_builtin = Some(cmd.action);
+                        for (idx, item) in items.iter().enumerate() {
+                            if item.separator_before {
+                                ui.separator();
+                            }
+                            let row = ui.selectable_label(idx == selected, item.display.clone());
+                            if row.clicked() {
+                                match &item.action {
+                                    PaletteAction::Builtin(a) => run_builtin = Some(*a),
+                                    PaletteAction::Plugin(id) => run_cmd = Some(id.clone()),
                                 }
                             }
-                        }
-                        if !self.plugin_cmds.is_empty() {
-                            ui.separator();
-                        }
-                        for c in &self.plugin_cmds {
-                            if q.is_empty()
-                                || c.label.to_lowercase().contains(&q)
-                                || c.id.contains(&q)
-                            {
-                                any = true;
-                                if ui
-                                    .selectable_label(
-                                        false,
-                                        format!("{}  ·  {}", c.label, c.plugin_id),
-                                    )
-                                    .clicked()
-                                {
-                                    run_cmd = Some(c.id.clone());
-                                }
+                            // Keep the keyboard-highlighted row in view.
+                            if idx == selected && (up || down) {
+                                row.scroll_to_me(Some(egui::Align::Center));
                             }
                         }
-                        if !any {
+                        if items.is_empty() {
                             ui.label(RichText::new("no match").color(muted).small());
                         }
                     });
             });
+            // A new query invalidates the old highlight position — reset to the
+            // top so Enter runs the new top match (acceptance criterion 2).
+            if query_changed {
+                self.palette_selected = 0;
+            }
         }
 
         // ---- Settings window (deep customization, live preview) ----

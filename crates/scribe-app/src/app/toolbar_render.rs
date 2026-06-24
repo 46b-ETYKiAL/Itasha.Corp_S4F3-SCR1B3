@@ -37,6 +37,8 @@ impl ScribeApp {
             self.palette_open = true;
             self.focus_palette = true;
             self.palette_query.clear();
+            // BUG-APP-01: fresh open starts the keyboard highlight at the top.
+            self.palette_selected = 0;
         }
         ui.separator();
         // User-customizable quick-access items (membership + order from
@@ -260,6 +262,8 @@ impl ScribeApp {
                     self.palette_open = true;
                     self.focus_palette = true;
                     self.palette_query.clear();
+                    // BUG-APP-01: fresh open starts the highlight at the top.
+                    self.palette_selected = 0;
                 }
             }
             "split" => {
