@@ -6360,3 +6360,12 @@ mod grid_pane_tests;
 
 #[cfg(test)]
 mod filetree_tests;
+
+#[cfg(test)]
+mod report_issue_tests;
+
+#[cfg(test)]
+mod theme_editor_tests;
+
+#[cfg(test)]
+mod plugin_manager_tests;
