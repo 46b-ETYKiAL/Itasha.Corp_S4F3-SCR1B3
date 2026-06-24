@@ -1549,7 +1549,7 @@ fn external_disk_change_reloads_clean_buffer() {
     // typically only track mtime at second resolution.
     std::thread::sleep(std::time::Duration::from_millis(1200));
     std::fs::write(&path, "second").expect("write update");
-    app.poll_external_disk_changes();
+    app.poll_external_disk_changes(0);
     assert_eq!(
         app.tabs[opened_idx].text, "second",
         "clean buffer reloads from disk silently"
@@ -1572,7 +1572,7 @@ fn external_disk_change_prompts_when_buffer_dirty() {
     app.tabs[opened_idx].text = "local edits".to_string();
     std::thread::sleep(std::time::Duration::from_millis(1200));
     std::fs::write(&path, "second").expect("write update");
-    app.poll_external_disk_changes();
+    app.poll_external_disk_changes(0);
     assert_eq!(
         app.tabs[opened_idx].text, "local edits",
         "dirty buffer must NOT be silently overwritten"

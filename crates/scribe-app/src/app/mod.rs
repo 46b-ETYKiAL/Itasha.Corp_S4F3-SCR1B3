@@ -216,14 +216,23 @@ fn save_session(paths: &[PathBuf]) {
         return;
     };
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        // E-01: best-effort, but a persistently-failing mkdir would silently
+        // lose the restore list forever. Log it (do NOT make it fatal).
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("session restore-list dir create failed (non-fatal): {e}");
+        }
     }
     let body: String = paths
         .iter()
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    let _ = std::fs::write(path, body);
+    // E-01: best-effort restore-list write. A persistent failure here means
+    // the next launch silently restores nothing -- surface it in the log so
+    // the failure is not completely invisible. Still non-fatal (same control).
+    if let Err(e) = std::fs::write(&path, body) {
+        tracing::warn!("session restore-list write failed (non-fatal): {e}");
+    }
 }
 
 /// Convert a filesystem path to a `file://` URI (LSP wants URIs).
@@ -316,6 +325,27 @@ struct ClosedTab {
     path: Option<PathBuf>,
     text: String,
     cursor: usize,
+}
+
+/// P-06: how many frames must elapse between successive disk-change polls.
+/// At ~60fps this is roughly twice a second — frequent enough that an external
+/// edit (git pull, formatter) is picked up promptly, infrequent enough that the
+/// per-tab `fs::metadata` stat is not paid on every single frame.
+const DISK_POLL_INTERVAL_FRAMES: u64 = 30;
+
+/// P-06 (pure): decide whether the disk-change poll should run this frame.
+/// Polls when it has never polled before (`last == u64::MAX` sentinel), when at
+/// least `interval` frames have elapsed since the last poll, or when the frame
+/// counter has wrapped (`current < last`). Factored out as a pure function so
+/// the throttle decision is unit-tested without a live egui frame.
+fn should_poll_disk(current: u64, last: u64, interval: u64) -> bool {
+    if last == u64::MAX {
+        return true;
+    }
+    if current < last {
+        return true; // frame counter wrapped — poll rather than stall.
+    }
+    current - last >= interval
 }
 
 /// Last-modified time of `path`, or `None` if it cannot be stat'd or the
@@ -709,6 +739,23 @@ pub struct ScribeApp {
     /// count and the red squiggle underlines painted in the editor, so the
     /// dictionary scan runs at most once per (changed) frame.
     spell_cache: std::cell::RefCell<Option<(u64, Vec<spell::Misspelling>)>>,
+    /// P-05: memoized breadcrumb/sticky-header definition scopes for the
+    /// active buffer, keyed by `(edit_gen, doc_id)` -- the same idiom as
+    /// `spell_cache`. The breadcrumb + sticky-header path re-ran the O(n)
+    /// `symbol_scopes` char scan EVERY frame; this caches it so the scan runs
+    /// only on an edit or a tab switch (a 1-frame-stale breadcrumb after a
+    /// keystroke is harmless). `doc_id` disambiguates tabs sharing an edit_gen.
+    symbol_cache: std::cell::RefCell<Option<(u64, Vec<crate::editor_features::SymbolScope>)>>,
+    /// P-05: monotonic count of how many times `symbol_scopes_for_active`
+    /// actually RE-RAN the underlying scan (a cache miss). A pure observation
+    /// counter the idle-frame proof test reads to assert the scan does NOT
+    /// recompute across repeated calls with no edit. Never read by the UI.
+    symbol_scan_count: std::cell::Cell<u64>,
+    /// P-06: the frame number (`egui::Context::cumulative_pass_nr`) at which
+    /// `poll_external_disk_changes` last ran its per-tab `fs::metadata` stat.
+    /// The poll is throttled to once every `DISK_POLL_INTERVAL_FRAMES` frames
+    /// so it does not stat every open file-backed tab on every single frame.
+    last_disk_poll_frame: u64,
     /// P-01 / 4-02 R2 — single-slot find-match memo for the in-buffer find bar,
     /// keyed by `(query, active tab edit_gen, doc_id)`. While the find bar is
     /// open, `find_matches_active` is called every frame (counter, highlight-all
@@ -1219,6 +1266,9 @@ impl ScribeApp {
             hl_galley_cache: std::cell::RefCell::new(None),
             hl_inc_cache: std::cell::RefCell::new(IncrementalHighlightState::default()),
             spell_cache: std::cell::RefCell::new(None),
+            symbol_cache: std::cell::RefCell::new(None),
+            symbol_scan_count: std::cell::Cell::new(0),
+            last_disk_poll_frame: u64::MAX,
             find_cache: std::cell::RefCell::new(None),
             find_recompute_count: std::cell::Cell::new(0),
             _cfg_watcher: cfg_watcher,
@@ -2383,19 +2433,78 @@ impl ScribeApp {
     }
 
     /// Count misspellings in the active buffer when spellcheck is enabled.
+    ///
+    /// P-08: reads the memoized vec length through a borrow -- it does NOT
+    /// clone the cached `Vec<Misspelling>` (the status-bar count runs every
+    /// frame, so the per-frame clone-just-to-call-`.len()` was pure waste).
     fn spell_count(&self) -> usize {
-        self.misspellings_for_active().len()
+        self.with_active_misspellings(|m| m.len())
+    }
+
+    /// Ensure the active buffer misspelling memo is current and run `f` over a
+    /// BORROW of the cached slice (no clone). Shared by the status-bar count
+    /// (`spell_count`, which only needs `.len()`) and the squiggle painter
+    /// (`misspellings_for_active`, which clones exactly once because its owned
+    /// snapshot has to outlive a later `&mut self` borrow). `f` sees an empty
+    /// slice when spellcheck is off or there is no active buffer.
+    fn with_active_misspellings<R>(&self, f: impl FnOnce(&[spell::Misspelling]) -> R) -> R {
+        if !self.config.spellcheck.enabled {
+            return f(&[]);
+        }
+        let active = self.active.min(self.tabs.len().saturating_sub(1));
+        if self.tabs.get(active).is_none() {
+            return f(&[]);
+        }
+        let key = self.spell_cache_key(active);
+        // Cache hit: borrow the cached vec and hand the slice to `f` (no clone).
+        if let Some((k, v)) = self.spell_cache.borrow().as_ref() {
+            if *k == key {
+                return f(v);
+            }
+        }
+        // Miss: recompute, store, then hand the stored slice to `f` via borrow.
+        let result = self.compute_misspellings(active);
+        *self.spell_cache.borrow_mut() = Some((key, result));
+        let slot = self.spell_cache.borrow();
+        f(&slot.as_ref().expect("just stored above").1)
+    }
+
+    /// Content+config cache key for the active buffer misspelling memo: the
+    /// per-tab `edit_gen` (so the scan re-runs only on a real edit, not every
+    /// frame), the `doc_id` (disambiguates tabs sharing an `edit_gen` in the
+    /// single-slot cache), the three scope toggles, and the language hint.
+    fn spell_cache_key(&self, active: usize) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let Some(tab) = self.tabs.get(active) else {
+            return 0;
+        };
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        tab.edit_gen.hash(&mut h);
+        tab.doc_id.raw().hash(&mut h);
+        self.config.spellcheck.check_comments.hash(&mut h);
+        self.config.spellcheck.check_strings.hash(&mut h);
+        self.config.spellcheck.check_identifiers.hash(&mut h);
+        tab.doc.language_hint().hash(&mut h);
+        h.finish()
     }
 
     /// Misspellings in the active buffer (#78), memoized by a content+config
     /// hash so the dictionary scan runs once per changed frame and is shared by
     /// the status-bar count and the editor underline painter. Empty when
     /// spellcheck is off or there is no active buffer.
+    ///
+    /// P-08: this returns an OWNED snapshot because its caller (the editor
+    /// closure) holds the result across a later `&mut self` borrow, so a
+    /// `Ref`/`&[..]` cannot be used there. The clone is now confined to this
+    /// one call site -- `spell_count` reads the cache via
+    /// `with_active_misspellings` without cloning.
     fn misspellings_for_active(&self) -> Vec<spell::Misspelling> {
-        if !self.config.spellcheck.enabled {
-            return Vec::new();
-        }
-        let active = self.active.min(self.tabs.len().saturating_sub(1));
+        self.with_active_misspellings(|m| m.to_vec())
+    }
+
+    /// Run the dictionary scan for the active buffer (the cache-miss body,
+    /// factored out of `with_active_misspellings`).
+    fn compute_misspellings(&self, active: usize) -> Vec<spell::Misspelling> {
         let Some(tab) = self.tabs.get(active) else {
             return Vec::new();
         };
@@ -2410,28 +2519,6 @@ impl ScribeApp {
             self.config.spellcheck.check_identifiers,
         );
         let ext = tab.doc.language_hint();
-        // Cache key: text + scope toggles + language. A change to any of these
-        // invalidates the memo.
-        let key = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            // Wave-3: key off the per-tab edit generation instead of re-hashing
-            // the whole buffer every frame. `doc_id` disambiguates tabs that
-            // happen to share an edit_gen (the single-slot cache is shared). A
-            // 1-frame-stale squiggle after a keystroke is visually harmless.
-            tab.edit_gen.hash(&mut h);
-            tab.doc_id.raw().hash(&mut h);
-            self.config.spellcheck.check_comments.hash(&mut h);
-            self.config.spellcheck.check_strings.hash(&mut h);
-            self.config.spellcheck.check_identifiers.hash(&mut h);
-            ext.hash(&mut h);
-            h.finish()
-        };
-        if let Some((k, v)) = self.spell_cache.borrow().as_ref() {
-            if *k == key {
-                return v.clone();
-            }
-        }
         let spans = self.hl.classify_document(&tab.text, ext.as_deref());
         // Scoping (comments / strings / identifiers) is a CODE concept. When the
         // buffer has no code structure — an untitled note, plain text, markdown —
@@ -2441,13 +2528,49 @@ impl ScribeApp {
         let has_code_structure = spans
             .iter()
             .any(|s| !matches!(s.class, spell::SpanClass::Other));
-        let result = if has_code_structure {
+        if has_code_structure {
             spell::check_text_scoped(&self.spell, &tab.text, &spans, scope)
         } else {
             spell::check_text(&self.spell, &tab.text, true)
+        }
+    }
+
+    /// P-05: brace-delimited definition scopes for the active buffer, memoized
+    /// by `(edit_gen, doc_id)` so the O(n) `symbol_scopes` char scan that drives
+    /// the breadcrumb bar + sticky-scroll headers runs ONLY on an edit or a tab
+    /// switch, not every frame. A 1-frame-stale breadcrumb after a keystroke is
+    /// visually harmless (same rationale as the spell + minimap memos). Returns
+    /// an owned snapshot because the caller holds it across a later `&mut self`
+    /// borrow. Buffers over `MAX_SYMBOL_SCAN_BYTES` are not scanned (the scan
+    /// stays bounded), matching the prior inline guard.
+    fn symbol_scopes_for_active(&self) -> Vec<crate::editor_features::SymbolScope> {
+        /// Upper buffer size for the breadcrumb/sticky symbol scan.
+        const MAX_SYMBOL_SCAN_BYTES: usize = 500_000;
+        let active = self.active.min(self.tabs.len().saturating_sub(1));
+        let Some(tab) = self.tabs.get(active) else {
+            return Vec::new();
         };
-        *self.spell_cache.borrow_mut() = Some((key, result.clone()));
-        result
+        if tab.text.len() > MAX_SYMBOL_SCAN_BYTES {
+            return Vec::new();
+        }
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            tab.edit_gen.hash(&mut h);
+            tab.doc_id.raw().hash(&mut h);
+            h.finish()
+        };
+        if let Some((k, v)) = self.symbol_cache.borrow().as_ref() {
+            if *k == key {
+                return v.clone();
+            }
+        }
+        // Cache miss: run the scan, record that it re-ran (proof counter), store.
+        self.symbol_scan_count
+            .set(self.symbol_scan_count.get().wrapping_add(1));
+        let scopes = crate::editor_features::symbol_scopes(&tab.text);
+        *self.symbol_cache.borrow_mut() = Some((key, scopes.clone()));
+        scopes
     }
 
     /// Once per launch: if the user opted into automatic update checks
@@ -3350,7 +3473,12 @@ impl ScribeApp {
             });
         }
         let manifest = session::SessionManifest::new(snapshots, active);
-        let _ = session::save_manifest(&dir, &manifest);
+        // E-02: best-effort hot-exit manifest write. A persistently-failing
+        // save means unsaved-buffer recovery silently breaks on the next crash
+        // -- log it (non-fatal: the periodic flush keeps trying next interval).
+        if let Err(e) = session::save_manifest(&dir, &manifest) {
+            tracing::warn!("session backup manifest write failed (non-fatal): {e}");
+        }
         session::prune_orphan_backups(&bdir, &manifest);
         self.last_backup_at = Some(std::time::Instant::now());
     }
@@ -3497,7 +3625,22 @@ impl ScribeApp {
     /// advanced AND the buffer is still clean (text == disk_text), re-read
     /// the file in place + surface a status toast. If the buffer is dirty,
     /// flag the user so save doesn't silently clobber their edits.
-    fn poll_external_disk_changes(&mut self) {
+    ///
+    /// P-06: throttled to once every `DISK_POLL_INTERVAL_FRAMES` frames so it
+    /// does not `fs::metadata`-stat every open file-backed tab on every single
+    /// frame. `current_frame` is `egui::Context::cumulative_pass_nr`. External
+    /// changes are still detected — just on the next poll tick, not instantly.
+    /// The O(n) `text == disk_text` compare is already gated on a changed mtime
+    /// below, so it never runs on the common unchanged path.
+    fn poll_external_disk_changes(&mut self, current_frame: u64) {
+        if !should_poll_disk(
+            current_frame,
+            self.last_disk_poll_frame,
+            DISK_POLL_INTERVAL_FRAMES,
+        ) {
+            return;
+        }
+        self.last_disk_poll_frame = current_frame;
         // Snapshot first so we don't hold &mut self while mutating tabs.
         let mut to_reload: Vec<usize> = Vec::new();
         let mut to_warn: Vec<usize> = Vec::new();
@@ -5858,6 +6001,13 @@ fn make_layouter<'a>(
         let text: &str = text.as_str();
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        // P-07: this DELIBERATELY hashes the full buffer text every frame and
+        // is NOT replaced by an `(edit_gen, len)` key. The layouter receives
+        // egui's LIVE `&dyn TextBuffer` (it has no access to a per-tab
+        // `edit_gen`), and the cached galley/job BAKES IN the text -- a lagging
+        // counter would render STALE TEXT, not just a stale squiggle. See the
+        // `edit_gen` field docs: the syntax layouter intentionally keeps its
+        // content hash while the minimap/spell memos key off `edit_gen`.
         text.hash(&mut hasher);
         ext.hash(&mut hasher);
         font.size.to_bits().hash(&mut hasher);
@@ -6289,7 +6439,8 @@ impl ScribeApp {
         // F-022 — poll the disk mtimes of every open file-backed tab. Cheap
         // when nothing changed (one stat per tab); silent reload when the
         // buffer is clean; status toast when local edits would be clobbered.
-        self.poll_external_disk_changes();
+        // P-06: throttled to once every N frames (see `should_poll_disk`).
+        self.poll_external_disk_changes(ctx.cumulative_pass_nr());
         // Phase 18 T18.2 — keep the grid in step with the editor.grid_enabled
         // config preference (toggled in Settings or via TOML edit + watcher).
         // This is cheap on the common path (config unchanged + ids already
@@ -8489,15 +8640,12 @@ impl ScribeApp {
                 }
 
                 // F-033 / F-034 from docs/audits/overlooked-surfaces-2026-05-29.md:
-                // compute brace-delimited definition scopes once for the
-                // breadcrumb bar (above the editor) and the sticky-scroll
-                // headers (pinned at the viewport top). Skipped for very large
-                // buffers to keep the per-frame O(n) scan bounded.
-                let scopes = if self.tabs[active].text.len() <= 500_000 {
-                    crate::editor_features::symbol_scopes(&self.tabs[active].text)
-                } else {
-                    Vec::new()
-                };
+                // brace-delimited definition scopes for the breadcrumb bar (above
+                // the editor) and the sticky-scroll headers (pinned at the
+                // viewport top). P-05: memoized by `(edit_gen, doc_id)` so the
+                // O(n) scan runs only on an edit or a tab switch, not every
+                // frame. Still skipped for very large buffers inside the memo.
+                let scopes = self.symbol_scopes_for_active();
                 // Breadcrumb bar (F-033): the enclosing-symbol path of the
                 // cursor line, outermost first (`mod foo › impl Bar › fn baz`).
                 if !scopes.is_empty() {
@@ -9699,3 +9847,6 @@ mod update_reminder_tests;
 
 #[cfg(test)]
 mod e2e;
+
+#[cfg(test)]
+mod perframe_cache_tests;
