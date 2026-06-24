@@ -26,7 +26,7 @@ serde.workspace = true                         # DocId / Pane serde for Tree<Pan
 serde_json = "1"                               # JSON serialisation of the grid Tree<Pane> layout
 tracing.workspace = true
 tracing-subscriber.workspace = true
-rfd = "0.15"          # native OS file dialogs (native-feel)
+rfd = "0.17"          # native OS file dialogs (native-feel)
 arboard = "3"         # OS clipboard read for palette-driven Paste (egui exposes no read API; already in tree via eframe)
 notify = { workspace = true }                 # config/theme live-reload
 mimalloc = "0.1"                               # global allocator — ~20% faster on egui/editor alloc churn (egui docs); unsafe is in-crate, app stays #![forbid(unsafe_code)]
