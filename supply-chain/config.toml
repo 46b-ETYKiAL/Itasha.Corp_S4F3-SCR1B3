@@ -191,7 +191,7 @@ version = "0.4.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.cc]]
-version = "1.2.63"
+version = "1.2.65"
 criteria = "safe-to-deploy"
 
 [[exemptions.cesu8]]
@@ -1553,7 +1553,7 @@ version = "0.8.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid]]
-version = "1.23.2"
+version = "1.23.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.valuable]]
@@ -1621,7 +1621,7 @@ version = "0.31.14"
 criteria = "safe-to-deploy"
 
 [[exemptions.wayland-protocols]]
-version = "0.32.12"
+version = "0.32.13"
 criteria = "safe-to-deploy"
 
 [[exemptions.wayland-protocols-experimental]]
@@ -1669,7 +1669,7 @@ version = "1.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.webpki-roots]]
-version = "1.0.7"
+version = "1.0.8"
 criteria = "safe-to-deploy"
 
 [[exemptions.weezl]]
