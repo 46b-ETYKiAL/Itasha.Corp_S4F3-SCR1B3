@@ -45,7 +45,6 @@
 use crate::encoding;
 use ropey::Rope;
 use std::fs;
-use std::io;
 use std::path::Path;
 
 /// Files at or above this size open as [`Buffer::Mmap`] rather than loading
@@ -93,7 +92,12 @@ impl Buffer {
     /// own internal handle); the caller never sees the `File`. The rope path
     /// decodes through `crate::encoding` (BOM + chardetng), so non-UTF-8 files
     /// decode correctly rather than as lossy mojibake.
-    pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
+    ///
+    /// Returns [`crate::Result`] (`CoreError`) to match the sibling
+    /// [`Document::open`] file-loading entry point; an underlying `io::Error`
+    /// is wrapped (via `CoreError: From<std::io::Error>`) into
+    /// [`CoreError::Io`] with its kind and message preserved.
+    pub fn open(path: impl AsRef<Path>) -> crate::Result<Self> {
         let path = path.as_ref();
         let meta = fs::metadata(path)?;
         let size = meta.len();
@@ -173,7 +177,10 @@ impl Buffer {
     ///
     /// After promotion the mmap handle is dropped (memmap2 unmaps as it
     /// goes out of scope) and the on-disk file is never modified.
-    pub fn promote_to_rope(&mut self) -> io::Result<()> {
+    ///
+    /// Returns [`crate::Result`] (`CoreError`) to match the sibling
+    /// [`Buffer::open`] / [`Document::open`] file-loading API.
+    pub fn promote_to_rope(&mut self) -> crate::Result<()> {
         if let Buffer::Mmap { mmap, .. } = self {
             // Decode through `crate::encoding` (BOM + chardetng), matching
             // `Document::open`, so promoting a non-UTF-8 mmap'd browse view
@@ -220,7 +227,7 @@ mod tests {
     }
 
     #[test]
-    fn open_small_file_returns_rope() -> io::Result<()> {
+    fn open_small_file_returns_rope() -> crate::Result<()> {
         let mut f = NamedTempFile::new()?;
         writeln!(f, "hello rope")?;
         let b = Buffer::open(f.path())?;
@@ -231,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn open_large_file_returns_mmap() -> io::Result<()> {
+    fn open_large_file_returns_mmap() -> crate::Result<()> {
         let mut f = NamedTempFile::new()?;
         // Just past MMAP_THRESHOLD — 16 MiB + 1 byte.
         let payload = vec![b'a'; (MMAP_THRESHOLD as usize) + 1];
@@ -245,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_to_rope_converts_mmap_losslessly() -> io::Result<()> {
+    fn promote_to_rope_converts_mmap_losslessly() -> crate::Result<()> {
         let mut f = NamedTempFile::new()?;
         let payload = vec![b'x'; (MMAP_THRESHOLD as usize) + 32];
         f.write_all(&payload)?;
@@ -339,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_to_rope_decodes_utf16le_not_mojibake() -> io::Result<()> {
+    fn promote_to_rope_decodes_utf16le_not_mojibake() -> crate::Result<()> {
         // R8/C-04: a UTF-16LE file opened via the mmap browse path then promoted
         // must decode through `crate::encoding` (BOM + chardetng), NOT through a
         // raw `String::from_utf8_lossy` that would turn every other byte into the
@@ -374,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn open_small_utf16le_file_decodes_through_encoding() -> io::Result<()> {
+    fn open_small_utf16le_file_decodes_through_encoding() -> crate::Result<()> {
         // R8/C-04 (rope path): a SMALL UTF-16LE file (under MMAP_THRESHOLD, so it
         // takes the eager `fs::read` rope path) must also decode through
         // `crate::encoding`, not `from_utf8_lossy`.
@@ -389,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn promote_preserves_valid_utf8_unchanged() -> io::Result<()> {
+    fn promote_preserves_valid_utf8_unchanged() -> crate::Result<()> {
         // Behaviour-identical guard: valid UTF-8 content (the common case) must
         // round-trip through the new decode path byte-for-byte (chars), so the
         // encoding routing never regresses the plain-ASCII / UTF-8 path.
