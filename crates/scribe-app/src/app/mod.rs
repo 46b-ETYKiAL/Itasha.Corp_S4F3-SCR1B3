@@ -1420,13 +1420,18 @@ impl ScribeApp {
         // than opening a second copy. An un-deduped open was the upstream cause
         // of the "same note opened twice" duplication — once two tabs shared a
         // path they were both persisted to the session manifest and reappeared
-        // every restart. Match by canonical path (separator/case-insensitive on
-        // Windows), falling back to the raw path when canonicalize fails.
+        // every restart. Match by canonical path, then compare with the host-FS
+        // identity helper (case-/separator-insensitive on Windows, case-sensitive
+        // on POSIX) so a casefold-different existing file still dedups even when
+        // canonicalize falls back to the raw path on either side.
         let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if let Some(idx) = self.tabs.iter().position(|t| {
             t.doc
                 .path()
-                .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()) == canon)
+                .map(|p| {
+                    let other = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                    scribe_core::path_norm::paths_equal_for_compare(&other, &canon)
+                })
                 .unwrap_or(false)
         }) {
             self.active = idx;

@@ -150,9 +150,11 @@ impl ScribeApp {
         // `open_path` allowed that). Without this guard the duplicate persists and
         // COMPOUNDS every restart, the two copies silently diverging (restored
         // snapshot vs current disk) — exactly the "same note opened twice, the
-        // second a newer saved version" report. Key by canonical path (falling
-        // back to the raw path when the file has vanished).
-        let mut seen: std::collections::HashMap<PathBuf, usize> = std::collections::HashMap::new();
+        // second a newer saved version" report. Key by the host-FS identity of
+        // the canonical path (falling back to the raw path when the file has
+        // vanished) so two casings/separators of one file on Windows collapse to
+        // a single tab; POSIX stays case-sensitive (see `scribe_core::path_norm`).
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         // Map each manifest entry index → the tab index it resolved to, so the
         // active-tab pointer stays coherent after dedup collapses entries.
         let mut snap_to_tab: std::collections::HashMap<usize, usize> =
@@ -204,12 +206,13 @@ impl ScribeApp {
             };
             let Some(candidate) = candidate else { continue };
 
-            // Dedup key = the restored tab's OWN canonical path (a vanished file
-            // restores as a pathless scratch buffer, which we never dedup).
-            let key = candidate
-                .doc
-                .path()
-                .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+            // Dedup key = host-FS identity of the restored tab's OWN canonical
+            // path (a vanished file restores as a pathless scratch buffer, which
+            // we never dedup).
+            let key = candidate.doc.path().map(|p| {
+                let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                scribe_core::path_norm::normalize_for_compare(&canon)
+            });
             match key.and_then(|k| seen.get(&k).copied().map(|j| (k, j))) {
                 Some((_, j)) => {
                     // A second entry for an already-restored file: collapse into
@@ -220,10 +223,8 @@ impl ScribeApp {
                 None => {
                     let idx = tabs.len();
                     if let Some(p) = candidate.doc.path() {
-                        seen.insert(
-                            std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()),
-                            idx,
-                        );
+                        let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                        seen.insert(scribe_core::path_norm::normalize_for_compare(&canon), idx);
                     }
                     tabs.push(candidate);
                     snap_to_tab.insert(si, idx);

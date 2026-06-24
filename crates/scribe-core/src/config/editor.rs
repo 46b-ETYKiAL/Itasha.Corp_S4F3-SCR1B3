@@ -225,11 +225,12 @@ pub fn record_scroll_pos(map: &mut std::collections::HashMap<String, f32>, path:
 /// convention (VSCode, Sublime, Notepad++).
 pub const RECENT_FILES_MAX: usize = 20;
 
-/// Push `path` to the front of `recent` (MRU semantics), dedup by exact
-/// path equality, and cap the list at [`RECENT_FILES_MAX`]. Pure helper so
-/// the open-path codepath stays testable without the egui shell.
+/// Push `path` to the front of `recent` (MRU semantics), dedup by host-FS
+/// path identity (case-/separator-insensitive on Windows, case-sensitive on
+/// POSIX — see [`crate::path_norm`]), and cap the list at [`RECENT_FILES_MAX`].
+/// Pure helper so the open-path codepath stays testable without the egui shell.
 pub fn record_recent_file(recent: &mut Vec<PathBuf>, path: PathBuf) {
-    recent.retain(|p| p != &path);
+    recent.retain(|p| !crate::path_norm::paths_equal_for_compare(p, &path));
     recent.insert(0, path);
     if recent.len() > RECENT_FILES_MAX {
         recent.truncate(RECENT_FILES_MAX);
@@ -338,6 +339,26 @@ mod tests {
             record_recent_file(&mut r, PathBuf::from(format!("/fill/{n}.txt")));
         }
         assert_eq!(r.len(), RECENT_FILES_MAX);
+    }
+
+    /// A-07: on Windows the recent list dedups by host-FS identity — the SAME
+    /// file reached via two casings must NOT produce two entries. On POSIX the
+    /// list stays case-sensitive, so the two casings are genuinely distinct.
+    #[test]
+    fn record_recent_file_casefold_dedup_per_platform() {
+        use super::record_recent_file;
+        let mut r: Vec<PathBuf> = Vec::new();
+        record_recent_file(&mut r, PathBuf::from(r"C:\Data\f.txt"));
+        record_recent_file(&mut r, PathBuf::from(r"c:\data\F.TXT"));
+        if cfg!(windows) {
+            // Windows FS is case-insensitive → one entry, front-pushed to the
+            // most-recent casing.
+            assert_eq!(r.len(), 1, "windows must dedup the two casings");
+            assert_eq!(r[0], PathBuf::from(r"c:\data\F.TXT"));
+        } else {
+            // POSIX is case-sensitive → two genuinely distinct files.
+            assert_eq!(r.len(), 2, "posix must keep both casings");
+        }
     }
 
     /// F-012: recent_files round-trips through TOML.
