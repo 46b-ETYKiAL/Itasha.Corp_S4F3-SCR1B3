@@ -94,17 +94,19 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Coverage floor (ratchet)
-        # After the WU-1..WU-7 coverage initiative, the TESTABLE surface (with
-        # the four structurally-uncoverable-headless whole files excluded via
-        # COVERAGE_IGNORE_REGEX above) measures ~84.6% lines. This floor gates
-        # at 83% lines — a ~1.6pt safety margin under the measured 84.6% that
-        # catches a real regression while tolerating normal fluctuation. RAISE
-        # it as coverage climbs (e.g. when the app/mod.rs testing backlog lands);
+        # After the WU-1..WU-7 initiative AND the #26-#39 testing program
+        # (proptest/fuzz, integration/load/IPC, e2e/a11y/visual, security,
+        # crash-safety/i18n, criterion, Miri, mutation, + scribe-app logic
+        # coverage), the TESTABLE surface (structurally-uncoverable-headless
+        # whole files excluded via COVERAGE_IGNORE_REGEX above) measures ~85.3%
+        # lines. This floor gates at 85% lines — a safety margin under the
+        # measured value that catches a real regression while tolerating normal
+        # fluctuation. RAISE it further as the app/mod.rs decomposition lands;
         # never lower it to make a red build pass. The exclusion regex MUST match
         # the one used for the summary/lcov steps so the gated number is the
         # testable number. See docs/adr/0007-coverage-exclusions-and-floor.md.
         # Renders from the same cached profdata (no second run).
-        run: cargo llvm-cov report --fail-under-lines 83 --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
+        run: cargo llvm-cov report --fail-under-lines 85 --ignore-filename-regex "$COVERAGE_IGNORE_REGEX"
       - name: Upload lcov report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
