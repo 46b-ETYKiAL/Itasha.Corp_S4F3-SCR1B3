@@ -6350,6 +6350,9 @@ mod update_reminder_tests;
 mod e2e;
 
 #[cfg(test)]
+mod qa_fixtures;
+
+#[cfg(test)]
 mod perframe_cache_tests;
 
 #[cfg(test)]
