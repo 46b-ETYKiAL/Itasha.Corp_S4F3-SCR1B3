@@ -240,15 +240,62 @@ impl LspClient {
     }
 }
 
+/// A process handle the teardown can terminate. Abstracted so the [`Drop`]
+/// ordering (C-1) is unit-testable against a fake without spawning a real,
+/// genuinely-wedged server (which cannot be deterministically constructed).
+trait Killable {
+    /// Request termination NOW. On a real [`Child`] this breaks the stdin pipe,
+    /// which is what UNBLOCKS an in-flight `write_all` in the writer thread so
+    /// the subsequent join cannot hang.
+    fn start_kill(&mut self);
+    /// Reap the (now-terminated) process.
+    fn reap(&mut self);
+}
+
+impl Killable for Child {
+    fn start_kill(&mut self) {
+        // `kill()` sends SIGKILL / TerminateProcess and closes our handles to
+        // the child's pipes, breaking a full stdin pipe so a stalled
+        // `write_all` returns with a broken-pipe error and the writer exits.
+        let _ = self.kill();
+    }
+    fn reap(&mut self) {
+        let _ = self.wait();
+    }
+}
+
+/// C-1 root-cause fix: kill the child BEFORE joining the writer thread.
+///
+/// The prior order joined the writer FIRST. If that thread was inside a
+/// blocking `write_all` to a live-but-not-reading server with a FULL stdin
+/// pipe, dropping the sender could NOT interrupt the in-flight write, so the
+/// join (and thus the egui frame thread, which runs `Drop`) blocked until the
+/// pipe drained or broke. Killing the child first breaks the pipe, which
+/// unblocks the write, which lets the join complete promptly. Reap order
+/// (kill → join → wait) preserves the existing no-orphan-process semantics.
+///
+/// Generic over [`Killable`] + the join thunk so the ordering is asserted in a
+/// unit test without a real wedged server.
+fn teardown<K: Killable>(child: &mut K, join_writer: impl FnOnce()) {
+    // 1. Kill FIRST — breaks the stdin pipe, unblocking any stalled writer.
+    child.start_kill();
+    // 2. Now the writer's `write_all` is guaranteed to return (broken pipe), so
+    //    the join cannot hang.
+    join_writer();
+    // 3. Reap the terminated child (no orphaned process).
+    child.reap();
+}
+
 impl Drop for LspClient {
     /// Reap the language server so we never leak an orphaned process. The
     /// default `Child` drop only *detaches* — a large server (rust-analyzer,
     /// clangd) would linger for the OS session. We enqueue the LSP graceful
     /// `shutdown`+`exit`, drop the sender so the writer thread flushes the
-    /// queue + closes `stdin`, join the writer, then `kill`+`wait` to guarantee
-    /// termination even if the server ignores the request. All steps are
-    /// best-effort; a child that has already exited makes `kill`/`wait` return
-    /// harmless errors.
+    /// queue + closes `stdin`, then **kill the child BEFORE joining the writer**
+    /// (C-1) so a wedged server's full stdin pipe can never hang the join (and
+    /// thus the egui frame thread), then `wait` to guarantee termination. All
+    /// steps are best-effort; a child that has already exited makes `kill`/
+    /// `wait` return harmless errors.
     fn drop(&mut self) {
         let id = self.id();
         // Enqueue the graceful shutdown handshake (FIFO — drained after any
@@ -257,20 +304,67 @@ impl Drop for LspClient {
         let _ = self.enqueue(protocol::request(id, "shutdown", Value::Null));
         let _ = self.enqueue(protocol::notification("exit", Value::Null));
         // Drop the sender: the writer thread's `recv()` now returns `Err`, so it
-        // flushes and exits, closing `stdin`. Join it so the close + flush have
-        // happened before we reap the child.
+        // flushes and exits, closing `stdin`. (A graceful server drains the
+        // queue and exits on `exit`; a wedged one is force-broken by the kill
+        // below.)
         drop(self.outgoing.take());
-        if let Some(handle) = self.writer.take() {
-            let _ = handle.join();
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let writer = self.writer.take();
+        teardown(&mut self.child, move || {
+            if let Some(handle) = writer {
+                let _ = handle.join();
+            }
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// C-1 regression: a real "wedged server with a full stdin pipe" cannot be
+    /// deterministically constructed in a unit test, so we assert the load-
+    /// bearing PROPERTY directly — `teardown` kills the child BEFORE joining the
+    /// writer thread. A fake [`Killable`] records the kill event into a shared
+    /// trace; the join thunk records its own event. The kill index MUST precede
+    /// the join index, otherwise a stalled write could hang the join (and the
+    /// egui frame thread) — the exact failure C-1 fixes.
+    #[derive(Default)]
+    struct FakeChild {
+        trace: Rc<RefCell<Vec<&'static str>>>,
+    }
+    impl Killable for FakeChild {
+        fn start_kill(&mut self) {
+            self.trace.borrow_mut().push("kill");
+        }
+        fn reap(&mut self) {
+            self.trace.borrow_mut().push("reap");
+        }
+    }
+
+    #[test]
+    fn teardown_kills_child_before_joining_writer() {
+        let trace: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(Vec::new()));
+        let mut child = FakeChild {
+            trace: trace.clone(),
+        };
+        let t2 = trace.clone();
+        teardown(&mut child, move || {
+            // Stand-in for `writer.join()`. If this ran BEFORE the kill, a
+            // full-pipe write could block it forever.
+            t2.borrow_mut().push("join");
+        });
+        let order = trace.borrow();
+        assert_eq!(
+            order.as_slice(),
+            &["kill", "join", "reap"],
+            "child must be killed BEFORE the writer join so a stalled write can't hang it"
+        );
+        let kill_at = order.iter().position(|e| *e == "kill").unwrap();
+        let join_at = order.iter().position(|e| *e == "join").unwrap();
+        assert!(kill_at < join_at, "kill must strictly precede join");
+    }
 
     #[test]
     fn registry_defaults_route_languages() {

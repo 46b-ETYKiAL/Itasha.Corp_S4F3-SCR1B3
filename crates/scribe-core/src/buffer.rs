@@ -226,6 +226,12 @@ mod tests {
         assert!(!b.is_read_only());
     }
 
+    // miri hygiene: this test drives real file-I/O syscalls (`Buffer::open` →
+    // `fs::read`) that miri cannot model, so `cargo miri test -p scribe-core`
+    // would error here. CI's miri job scopes to `--test miri_soundness`, which
+    // is unaffected; this `cfg_attr` keeps a developer's local `cargo miri test`
+    // clean. (Not a silent skip — the test runs fully under normal `cargo test`.)
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn open_small_file_returns_rope() -> crate::Result<()> {
         let mut f = NamedTempFile::new()?;
@@ -237,6 +243,9 @@ mod tests {
         Ok(())
     }
 
+    // miri hygiene: drives `memmap2::Mmap::map` (mmap syscall) which miri can't
+    // model. See the note on `open_small_file_returns_rope`.
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn open_large_file_returns_mmap() -> crate::Result<()> {
         let mut f = NamedTempFile::new()?;
@@ -251,6 +260,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg_attr(miri, ignore)] // mmap syscall (see `open_small_file_returns_rope`)
     #[test]
     fn promote_to_rope_converts_mmap_losslessly() -> crate::Result<()> {
         let mut f = NamedTempFile::new()?;
@@ -345,6 +355,7 @@ mod tests {
         out
     }
 
+    #[cfg_attr(miri, ignore)] // mmap syscall (see `open_small_file_returns_rope`)
     #[test]
     fn promote_to_rope_decodes_utf16le_not_mojibake() -> crate::Result<()> {
         // R8/C-04: a UTF-16LE file opened via the mmap browse path then promoted
@@ -380,6 +391,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg_attr(miri, ignore)] // file-I/O syscall (see `open_small_file_returns_rope`)
     #[test]
     fn open_small_utf16le_file_decodes_through_encoding() -> crate::Result<()> {
         // R8/C-04 (rope path): a SMALL UTF-16LE file (under MMAP_THRESHOLD, so it
@@ -395,6 +407,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg_attr(miri, ignore)] // mmap syscall (see `open_small_file_returns_rope`)
     #[test]
     fn promote_preserves_valid_utf8_unchanged() -> crate::Result<()> {
         // Behaviour-identical guard: valid UTF-8 content (the common case) must

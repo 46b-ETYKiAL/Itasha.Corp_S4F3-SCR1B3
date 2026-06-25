@@ -29,14 +29,35 @@ pub fn ensure_final_newline(text: &str) -> String {
     s
 }
 
+/// Split `text` into lines for sorting WITHOUT mutating any line's bytes.
+///
+/// CORR-03: `str::lines()` strips a `\r` from a `\r\n` pair, so sorting a
+/// non-LF-normalized buffer would silently DROP carriage returns (a content
+/// mutation under a "sort" operation). Splitting on `'\n'` instead preserves a
+/// trailing `\r` verbatim inside each line. A trailing `'\n'` produces a final
+/// empty segment which the caller re-appends as the preserved newline rather
+/// than treating as a sortable line.
+fn split_lines_preserving(text: &str) -> (Vec<&str>, bool) {
+    let had_final_nl = text.ends_with('\n');
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if had_final_nl {
+        // The trailing `\n` yields a final empty element; drop it so it is not
+        // sorted as a blank line, then re-append the `\n` after the join.
+        lines.pop();
+    }
+    (lines, had_final_nl)
+}
+
 /// Sort the lines of `text` lexicographically (stable), preserving a trailing
 /// newline if the input had one. Empty input is returned unchanged.
+///
+/// CORR-03: line splitting preserves each line's bytes exactly (including a
+/// `\r` inside a `\r\n`), so the sort never mutates content — only reorders.
 pub fn sort_lines(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
-    let had_final_nl = text.ends_with('\n');
-    let mut lines: Vec<&str> = text.lines().collect();
+    let (mut lines, had_final_nl) = split_lines_preserving(text);
     lines.sort();
     let mut out = lines.join("\n");
     if had_final_nl {
@@ -60,8 +81,8 @@ pub fn sort_lines_unique(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
-    let had_final_nl = text.ends_with('\n');
-    let mut lines: Vec<&str> = text.lines().collect();
+    // CORR-03: same byte-preserving split as `sort_lines` (no `\r` eating).
+    let (mut lines, had_final_nl) = split_lines_preserving(text);
     lines.sort();
     lines.dedup(); // adjacent dups after sort == all dups
     let mut out = lines.join("\n");
@@ -163,6 +184,35 @@ mod tests {
         assert_eq!(sort_lines("b\na\nc\n"), "a\nb\nc\n");
         assert_eq!(sort_lines("b\na"), "a\nb");
         assert_eq!(sort_lines(""), "");
+    }
+
+    #[test]
+    fn sort_lines_preserves_embedded_carriage_returns() {
+        // CORR-03: `str::lines()` would strip the `\r` from each `\r\n`; the
+        // byte-preserving split must keep them. Sorting a CRLF buffer must
+        // reorder lines WITHOUT mutating any line's bytes.
+        let src = "b\r\na\r\nc\r\n";
+        let out = sort_lines(src);
+        assert_eq!(out, "a\r\nb\r\nc\r\n", "carriage returns survive the sort");
+        // No data mutation: the multiset of bytes is identical (same count of
+        // `\r`, `\n`, and letters), only the line order changed.
+        assert_eq!(
+            out.matches('\r').count(),
+            src.matches('\r').count(),
+            "no `\\r` dropped"
+        );
+        // Without a trailing newline, the last line's `\r` is also preserved.
+        assert_eq!(sort_lines("b\r\na\r"), "a\r\nb\r");
+    }
+
+    #[test]
+    fn sort_unique_preserves_embedded_carriage_returns() {
+        // CORR-03 (dedup variant): `\r`-bearing lines are compared and emitted
+        // byte-exact; an exact CRLF duplicate collapses, distinct ones survive.
+        let src = "b\r\na\r\nb\r\nc\r\n";
+        let out = sort_lines_unique(src);
+        assert_eq!(out, "a\r\nb\r\nc\r\n");
+        assert_eq!(out.matches('\r').count(), 3, "one `\\r` per surviving line");
     }
 
     #[test]

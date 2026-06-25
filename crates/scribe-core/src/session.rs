@@ -120,15 +120,46 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
-/// Atomically write `content` to `<dir>/<name>` (write temp, then rename).
-/// Creates `dir` if needed. `name` MUST be a bare file name (no separators).
-pub fn write_backup(dir: &Path, name: &str, content: &str) -> io::Result<()> {
+/// SEC-1 path-traversal guard. A backup `name` is ALWAYS a bare file name by
+/// construction ([`backup_name`]), but it re-enters from the untrusted,
+/// user-writable `session.json` manifest on every restore, so the
+/// "always a bare filename" invariant must be re-validated at EVERY boundary
+/// that joins it to a directory — not just the write side.
+///
+/// The strongest, OS-uniform primitive is: `Path::new(name).components()` must
+/// be EXACTLY one [`std::path::Component::Normal`]. This uniformly rejects `..`
+/// (`ParentDir`), an absolute path / root (`RootDir`), a Windows drive or UNC
+/// prefix (`Prefix`), a current-dir token (`CurDir`), an empty name, and any
+/// `/` or `\` separator (which would split into >1 component) on both Windows
+/// and POSIX. It mirrors — and subsumes — [`write_backup`]'s separator check so
+/// the read and write sides are symmetric.
+fn validate_backup_name(name: &str) -> io::Result<()> {
+    use std::path::Component;
+    // A `session.json` manifest is portable across OSes, so a malicious
+    // Windows-authored `backup: "..\\..\\secret"` could be opened on POSIX
+    // (where `\` is a legal filename char, NOT a separator, so `components()`
+    // alone would treat it as one Normal component and accept it). Reject BOTH
+    // separators explicitly on every platform so the guard is OS-independent.
     if name.contains('/') || name.contains('\\') {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "backup name must not contain a path separator",
         ));
     }
+    let mut comps = Path::new(name).components();
+    match (comps.next(), comps.next()) {
+        (Some(Component::Normal(_)), None) => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "backup name must be a single bare file component (no separators, `..`, or root/drive prefix)",
+        )),
+    }
+}
+
+/// Atomically write `content` to `<dir>/<name>` (write temp, then rename).
+/// Creates `dir` if needed. `name` MUST be a bare file name (no separators).
+pub fn write_backup(dir: &Path, name: &str, content: &str) -> io::Result<()> {
+    validate_backup_name(name)?;
     fs::create_dir_all(dir)?;
     let tmp = dir.join(format!("{name}.tmp"));
     let dst = dir.join(name);
@@ -137,13 +168,23 @@ pub fn write_backup(dir: &Path, name: &str, content: &str) -> io::Result<()> {
     fs::rename(&tmp, &dst)
 }
 
-/// Read a backup's content.
+/// Read a backup's content. SEC-1: the `name` arrives verbatim from the
+/// untrusted `session.json` manifest, so it MUST be re-validated as a single
+/// bare file component before joining it to `dir` — otherwise a tampered
+/// manifest (`backup: "../../../secret"`) reads an arbitrary file into a
+/// restored buffer (CWE-22 path traversal / arbitrary-file-read).
 pub fn read_backup(dir: &Path, name: &str) -> io::Result<String> {
+    validate_backup_name(name)?;
     fs::read_to_string(dir.join(name))
 }
 
-/// Delete a backup (best-effort; missing file is not an error).
+/// Delete a backup (best-effort; missing file is not an error). SEC-1: the same
+/// path-traversal guard applies — a tampered manifest name must not be able to
+/// `remove_file` outside the backup dir.
 pub fn delete_backup(dir: &Path, name: &str) {
+    if validate_backup_name(name).is_err() {
+        return;
+    }
     let _ = fs::remove_file(dir.join(name));
 }
 
@@ -208,7 +249,21 @@ pub fn prune_orphan_backups(dir: &Path, manifest: &SessionManifest) -> usize {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        // Never touch in-flight temp files or non-backup files.
+        if let Some(stem) = name.strip_suffix(".bak.tmp") {
+            // CORR-02: a crash mid-`write_backup` leaves a `<name>.bak.tmp`
+            // (the atomic-rename source) that `clear_session_state` would
+            // reclaim but `prune` previously skipped, leaking it forever.
+            // Reclaim it conservatively: only when no LIVE backup shares its
+            // stem (i.e. the rename never completed for a referenced tab).
+            // `live` holds full `*.bak` names, so reconstruct the sibling.
+            let live_sibling = format!("{stem}.bak");
+            if !live.contains(live_sibling.as_str()) {
+                let _ = fs::remove_file(entry.path());
+                pruned += 1;
+            }
+            continue;
+        }
+        // Never touch non-backup files.
         if !name.ends_with(".bak") {
             continue;
         }
@@ -253,6 +308,98 @@ mod tests {
     fn write_backup_rejects_path_separator() {
         let dir = tempdir().unwrap();
         assert!(write_backup(dir.path(), "../escape.bak", "x").is_err());
+    }
+
+    #[test]
+    fn read_backup_rejects_path_traversal() {
+        // SEC-1: a tampered `session.json` `backup` field that contains `..`, an
+        // absolute path, or a separator must be REJECTED before any file is
+        // read — otherwise it reads an arbitrary file into a restored buffer.
+        let dir = tempdir().unwrap();
+        let bdir = backup_dir(dir.path());
+        // Plant a real "secret" OUTSIDE the backup dir (sibling of bdir).
+        let secret = dir.path().join("secret.txt");
+        fs::create_dir_all(&bdir).unwrap();
+        fs::write(&secret, "TOP SECRET").unwrap();
+
+        // `..`-relative escape (the audit's exact attack shape).
+        assert!(
+            read_backup(&bdir, "../secret.txt").is_err(),
+            "`..` traversal must be rejected (no file read)"
+        );
+        // Forward-slash separator.
+        assert!(
+            read_backup(&bdir, "sub/secret.txt").is_err(),
+            "`/` separator must be rejected"
+        );
+        // Backslash separator (Windows).
+        assert!(
+            read_backup(&bdir, "sub\\secret.txt").is_err(),
+            "`\\` separator must be rejected"
+        );
+        // Absolute path.
+        let abs = secret.to_string_lossy().to_string();
+        assert!(
+            read_backup(&bdir, &abs).is_err(),
+            "absolute path must be rejected"
+        );
+        // Empty / current-dir tokens.
+        assert!(read_backup(&bdir, "").is_err(), "empty name rejected");
+        assert!(read_backup(&bdir, ".").is_err(), "`.` rejected");
+
+        // A plain bare name still works (round-trip preserved).
+        write_backup(&bdir, "f0.bak", "ok").unwrap();
+        assert_eq!(read_backup(&bdir, "f0.bak").unwrap(), "ok");
+    }
+
+    #[test]
+    fn delete_backup_rejects_path_traversal() {
+        // SEC-1: `delete_backup` joins the same untrusted name → must not be
+        // able to `remove_file` outside the backup dir.
+        let dir = tempdir().unwrap();
+        let bdir = backup_dir(dir.path());
+        let secret = dir.path().join("keep.txt");
+        fs::create_dir_all(&bdir).unwrap();
+        fs::write(&secret, "do not delete").unwrap();
+        delete_backup(&bdir, "../keep.txt");
+        assert!(secret.exists(), "traversal delete must be a no-op");
+        // A valid name still deletes.
+        write_backup(&bdir, "f0.bak", "x").unwrap();
+        delete_backup(&bdir, "f0.bak");
+        assert!(read_backup(&bdir, "f0.bak").is_err());
+    }
+
+    #[test]
+    fn prune_reclaims_orphan_bak_tmp() {
+        // CORR-02: a crash mid-write leaves a `*.bak.tmp` with no completed
+        // `.bak`. Prune must reclaim it; a `*.bak.tmp` whose `.bak` sibling is
+        // LIVE must be left alone (a write may be in flight for it).
+        let dir = tempdir().unwrap();
+        let bdir = backup_dir(dir.path());
+        fs::create_dir_all(&bdir).unwrap();
+        // Orphan temp: no matching live backup.
+        fs::write(bdir.join("orphan.bak.tmp"), "crash residue").unwrap();
+        // Live backup + an in-flight temp for that same live name.
+        write_backup(&bdir, "live.bak", "a").unwrap();
+        fs::write(bdir.join("live.bak.tmp"), "in flight").unwrap();
+
+        let m = SessionManifest::new(
+            vec![TabSnapshot {
+                path: None,
+                dirty: true,
+                backup: Some("live.bak".into()),
+                cursor: 0,
+            }],
+            0,
+        );
+        let pruned = prune_orphan_backups(&bdir, &m);
+        assert_eq!(pruned, 1, "only the orphan temp is reclaimed");
+        assert!(!bdir.join("orphan.bak.tmp").exists(), "orphan temp gone");
+        assert!(
+            bdir.join("live.bak.tmp").exists(),
+            "in-flight temp for a live backup is preserved"
+        );
+        assert!(read_backup(&bdir, "live.bak").is_ok(), "live backup intact");
     }
 
     #[test]
