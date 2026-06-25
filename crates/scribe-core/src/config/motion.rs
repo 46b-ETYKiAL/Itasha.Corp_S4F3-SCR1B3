@@ -245,4 +245,23 @@ mod tests {
         assert_eq!(ok.clamped_flicker_strength(), 0.1);
         assert_eq!(ok.clamped_mesh_density(), 0.5);
     }
+
+    // ---- MUTANT-EQUIVALENT (config/motion.rs): documented, intentionally not tested ----
+    //
+    // The three surviving mutants are the serde-default *initial* values for
+    // purely-presentational CRT post-effects. No control-flow branches on these
+    // numbers — they are starting positions for UI sliders, each independently
+    // clamped to its design band by a `clamped_*` method (which IS tested above,
+    // killing the clamp-boundary mutants). Pinning the exact default 0.06 / 0.3 /
+    // 0.4 with an equality assertion would assert a cosmetic constant for its own
+    // sake (the kind of default-value test-bloat the triage brief forbids):
+    //
+    // MUTANT-EQUIVALENT: config/motion.rs:116 — `default_scanline_darkness -> 0.0/1.0/-1.0`.
+    //   Initial scanline darkness slider value (0.3). Cosmetic; clamped at use.
+    // MUTANT-EQUIVALENT: config/motion.rs:121 — `default_flicker_strength -> 0.0/1.0/-1.0`.
+    //   Initial flicker-strength slider value (0.06). Cosmetic; the 0.20 ceiling
+    //   is enforced by `clamped_flicker_strength` (tested), not by this default.
+    // MUTANT-EQUIVALENT: config/motion.rs:126 — `default_mesh_density -> 0.0/1.0/-1.0`.
+    //   Initial wired-ambient mesh-density slider value (0.4). Cosmetic; clamped
+    //   to [0,1] by `clamped_mesh_density` (tested) regardless of this default.
 }

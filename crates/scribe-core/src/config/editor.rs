@@ -469,6 +469,52 @@ mod tests {
     }
 
     #[test]
+    fn default_rope_auto_threshold_is_16_mib() {
+        // Real behavioural constant: the byte size above which a buffer is
+        // auto-promoted to the viewport-culled rope editor. It MUST equal
+        // `Buffer::MMAP_THRESHOLD` (16 MiB). A mutated `0`/`1` would auto-promote
+        // (almost) every buffer to the heavy rope path; the `16 * 1024 * 1024`
+        // product degrading to `16 + 1024 + 1024` (≈2 KiB) would do the same.
+        use super::default_rope_auto_threshold;
+        assert_eq!(default_rope_auto_threshold(), 16 * 1024 * 1024);
+        assert_eq!(default_rope_auto_threshold(), 16_777_216);
+        // The default config wires this in.
+        assert_eq!(
+            EditorConfig::default().rope_editor_auto_threshold_bytes,
+            16_777_216
+        );
+    }
+
+    #[test]
+    fn default_note_theme_is_a_nonempty_bundled_theme_name() {
+        // The note syntax-colour theme name is a functional contract: it must
+        // name a real bundled syntect theme, so it cannot be empty (an empty
+        // name resolves to no highlighting). Guards the `String::new()` mutant.
+        use super::default_note_theme;
+        let name = default_note_theme();
+        assert!(!name.is_empty(), "note theme name must be non-empty");
+        assert_eq!(name, "base16-eighties.dark");
+        assert_eq!(EditorConfig::default().note_theme, "base16-eighties.dark");
+    }
+
+    // ---- MUTANT-EQUIVALENT (config/editor.rs): documented, intentionally not tested ----
+    //
+    // These surviving mutants have no behaviourally-distinguishable effect on a
+    // realistic input, so killing them would mean asserting an internal constant
+    // for its own sake (test bloat) or is impossible (clamp masks the change):
+    //
+    // MUTANT-EQUIVALENT: config/editor.rs:187 — `default_caret_width -> 0.0` /
+    //   `-> -1.0`. The default feeds straight into `clamped_caret_width()` whose
+    //   floor is 1.0, so any value <= 1.0 (including 0.0 and -1.0) produces the
+    //   SAME clamped result 1.0. No observable difference; the clamp test already
+    //   pins the user-visible output. (The raw default is never read un-clamped.)
+    // MUTANT-EQUIVALENT: config/editor.rs:235 — `record_recent_file` `>` -> `>=`
+    //   in `recent.len() > RECENT_FILES_MAX`. `truncate(MAX)` is a no-op when
+    //   `len == MAX`, so `>` and `>=` produce identical lists for every input
+    //   (at len==MAX both leave MAX entries; at len>MAX both truncate to MAX).
+    //   Behaviourally indistinguishable — the cap test already pins len==MAX.
+
+    #[test]
     fn tab_bar_defaults_to_top_horizontal() {
         // T18.4: the v1 layout puts the tab strip inline with the toolbar at
         // the top. is_vertical() flips only for the side positions.

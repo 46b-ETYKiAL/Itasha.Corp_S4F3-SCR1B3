@@ -1911,4 +1911,37 @@ keyword = "#ff00ff"
             Rgba::new(255, 0, 255, 255)
         );
     }
+
+    #[test]
+    fn to_array_yields_rgba_components_in_order() {
+        // `to_array` is the bridge to egui's `Color32::from_rgba_*`; it MUST emit
+        // [r, g, b, a] in order. A const [0;4]/[1;4] mutant would paint every
+        // colour black/transparent (or near-black) — a total-theme regression.
+        let c = Rgba::new(0x12, 0x34, 0x56, 0x78);
+        assert_eq!(c.to_array(), [0x12, 0x34, 0x56, 0x78]);
+        // Each lane is distinct, so a per-lane swap or const-fill is observable.
+        assert_eq!(Rgba::new(10, 20, 30, 40).to_array(), [10, 20, 30, 40]);
+        assert_ne!(Rgba::new(1, 2, 3, 4).to_array(), [0; 4]);
+        assert_ne!(Rgba::new(2, 2, 2, 2).to_array(), [1; 4]);
+    }
+
+    #[test]
+    fn builtin_names_is_a_nonempty_picker_list() {
+        // The theme picker is driven by this list. An empty slice (the
+        // `Vec::leak(Vec::new())` mutant) would leave the picker with zero
+        // selectable themes — every existing iterate-and-dispatch test passes
+        // VACUOUSLY over an empty list, so assert the list is substantial and
+        // contains the house default + the fallback brand theme by name.
+        let names = Theme::builtin_names();
+        assert!(
+            names.len() >= 20,
+            "the picker ships a large built-in theme set, got {}",
+            names.len()
+        );
+        assert!(names.contains(&"itasha-corp"), "house default present");
+        assert!(
+            names.contains(&"wired-noir"),
+            "fallback brand theme present"
+        );
+    }
 }

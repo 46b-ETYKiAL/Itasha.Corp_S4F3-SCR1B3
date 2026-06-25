@@ -661,4 +661,22 @@ mod tests {
         assert_eq!(damerau_levenshtein("abcd", ""), 4);
         assert_eq!(damerau_levenshtein("", ""), 0);
     }
+
+    #[test]
+    fn from_word_list_drops_blank_and_comment_lines() {
+        // The line filter is `!is_empty() && !starts_with('#')` — BOTH must hold
+        // for a line to survive. If the `&&` degrades to `||`, blank lines and
+        // `#`-comment lines leak into the dictionary (a blank becomes ""), so the
+        // count is wrong AND a comment marker would spell-pass. Mix all four cases.
+        let e = HashSetEngine::from_word_list("alpha\n\n# this is a comment\nbeta\n");
+        assert_eq!(
+            e.word_count(),
+            2,
+            "only the two real words load; blank + comment lines are dropped"
+        );
+        // The literal comment text must NOT be a known word (would be, under `||`).
+        assert!(!e.is_correct("comment"));
+        // And no empty-string word slipped in (an empty token is "< 2 chars" so it
+        // can't be observed via is_correct; the count guard above covers it).
+    }
 }
