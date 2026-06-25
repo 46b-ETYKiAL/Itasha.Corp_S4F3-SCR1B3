@@ -60,10 +60,10 @@ fn pos_to_char_offset_strips_crlf_when_clamping_to_eol() {
     };
     // Row 0 ("ab\r\n"): far-right click clamps to col 2 (after 'b', before \r\n),
     // i.e. char offset 2 — NOT 3 (which would sit on the '\r').
-    let off = pos_to_char_offset(&r, egui::pos2(999.0, 4.0), geom, 0, total);
+    let off = pos_to_char_offset(&r, egui::pos2(999.0, 4.0), geom, 0, total, None);
     assert_eq!(off, 2, "CRLF: clamp lands before \\r, not on it");
     // Sanity: a click at col 1 still lands at offset 1.
-    let off1 = pos_to_char_offset(&r, egui::pos2(8.0, 4.0), geom, 0, total);
+    let off1 = pos_to_char_offset(&r, egui::pos2(8.0, 4.0), geom, 0, total, None);
     assert_eq!(off1, 1);
 }
 
@@ -81,7 +81,7 @@ fn pos_to_char_offset_strips_lone_cr() {
         char_w: 8.0,
     };
     // Far-right on row 0 ("x\r") clamps after 'x' (offset 1), excluding the \r.
-    let off = pos_to_char_offset(&r, egui::pos2(999.0, 4.0), geom, 0, total);
+    let off = pos_to_char_offset(&r, egui::pos2(999.0, 4.0), geom, 0, total, None);
     assert_eq!(off, 1, "lone \\r excluded from clamp");
 }
 
@@ -99,14 +99,14 @@ fn pos_to_char_offset_honours_scrolled_range_start() {
         char_w: 8.0,
     };
     // Viewport scrolled so row0 == line 2. A click at y in [0,16) maps to line 2.
-    let off = pos_to_char_offset(&r, egui::pos2(0.0, 4.0), geom, 2, total);
+    let off = pos_to_char_offset(&r, egui::pos2(0.0, 4.0), geom, 2, total, None);
     assert_eq!(
         off,
         r.line_to_char(2),
         "top visible row maps to range_start"
     );
     // Second visible row (y in [16,32)) → line 3.
-    let off3 = pos_to_char_offset(&r, egui::pos2(0.0, 20.0), geom, 2, total);
+    let off3 = pos_to_char_offset(&r, egui::pos2(0.0, 20.0), geom, 2, total, None);
     assert_eq!(off3, r.line_to_char(3));
 }
 
@@ -123,7 +123,7 @@ fn pos_to_char_offset_click_above_clamps_to_first_line() {
         char_w: 8.0,
     };
     // Click well above the first row (y=0) → rel is negative → clamps to line 0.
-    let off = pos_to_char_offset(&r, egui::pos2(0.0, 0.0), geom, 0, total);
+    let off = pos_to_char_offset(&r, egui::pos2(0.0, 0.0), geom, 0, total, None);
     assert_eq!(off, 0, "click above first row clamps to line 0 col 0");
 }
 
@@ -140,7 +140,7 @@ fn pos_to_char_offset_empty_rope_is_zero() {
         char_w: 8.0,
     };
     assert_eq!(
-        pos_to_char_offset(&r, egui::pos2(50.0, 4.0), geom, 0, total),
+        pos_to_char_offset(&r, egui::pos2(50.0, 4.0), geom, 0, total, None),
         0
     );
 }
@@ -159,10 +159,10 @@ fn pos_to_char_offset_multibyte_columns_are_char_indexed() {
         char_w: 8.0,
     };
     // Column 2 (x ≈ 2*8 = 16) → char offset 2 (before 'ü').
-    let off = pos_to_char_offset(&r, egui::pos2(16.0, 4.0), geom, 0, total);
+    let off = pos_to_char_offset(&r, egui::pos2(16.0, 4.0), geom, 0, total, None);
     assert_eq!(off, 2, "column counts chars, not bytes");
     // Far right clamps to 3 (the three chars), not the byte length 6.
-    let end = pos_to_char_offset(&r, egui::pos2(999.0, 4.0), geom, 0, total);
+    let end = pos_to_char_offset(&r, egui::pos2(999.0, 4.0), geom, 0, total, None);
     assert_eq!(end, 3);
 }
 

@@ -37,8 +37,11 @@
 use egui::text::LayoutJob;
 use egui::{Color32, FontId, TextFormat, Ui};
 use ropey::Rope;
+
+mod tab_geometry;
 use scribe_core::buffer::Buffer;
 use scribe_core::syntax::{Highlighter, HlSpan, IncrementalHighlightState};
+use tab_geometry::{col_to_rel_x, layout_line, rel_x_to_col};
 
 /// Inherent-method widget over a `&mut Buffer` (NOT a `Widget` impl —
 /// the renderer needs `&mut self` plumbing through `show_rows`).
@@ -346,11 +349,20 @@ impl<'a> RopeEditor<'a> {
 
         // Captured during render: the (x, y) of the first visible row's text
         // origin (after the gutter). Mouse hit-testing maps a pointer position
-        // back to a (line, col) using this origin + the monospace advance.
+        // back to a (line, col) using this origin + the per-line galley.
         let mut text_geom: Option<(f32, f32)> = None;
         // Captured during render: the primary caret's screen rect, used to
         // position the OS IME composition window.
         let mut caret_screen: Option<egui::Rect> = None;
+        // CORR-01: per-visible-line laid-out galley + that row's text-left x.
+        // The galley is the source of truth for column<->x (tab stops + any
+        // non-uniform glyph width), so the click hit-test (after the scroll
+        // closure) inverse-maps a pointer x through the SAME galley the row
+        // painted with, instead of arithmetic on the monospace advance.
+        let mut line_galleys: std::collections::HashMap<
+            usize,
+            (std::sync::Arc<egui::Galley>, f32),
+        > = std::collections::HashMap::new();
 
         // ---- highlight phase (P-02 fix + C-01 cross-line correctness) ----
         //
@@ -444,11 +456,22 @@ impl<'a> RopeEditor<'a> {
                     }
                     let line_chars = s.chars().count();
 
+                    // CORR-01: lay this visible line out into a galley once and
+                    // route ALL x-positioning through it. egui advances a `\t`
+                    // to its tab stop (and may give non-uniform glyph widths),
+                    // so a char column's screen x is `text_left + galley(col)`,
+                    // NOT `col * char_w`. `col_x(col)` is the absolute screen x
+                    // of the left edge of column `col`.
+                    let line_galley = layout_line(ui, s, font.clone(), text_color);
+                    line_galleys.insert(li, (line_galley.clone(), text_rect.left()));
+                    let col_x = |col: usize| text_rect.left() + col_to_rel_x(&line_galley, col);
+
                     // Render-whitespace overlay: paint a faint `·` centered in
                     // each space cell and a `→` for each tab. Pure overlay —
-                    // the real text + highlight spans are untouched. Positions
-                    // use the monospace advance (`char_w`) the caret math also
-                    // uses, so the markers sit dead-centre over their cells.
+                    // the real text + highlight spans are untouched. Each marker
+                    // is centred between its cell's left and right galley edges,
+                    // so a `→` spans the FULL tab cell (column col..col+1) rather
+                    // than a single `char_w` slot.
                     if render_whitespace {
                         let ws_color = gutter_color.gamma_multiply(0.7);
                         for (col, ch) in s.chars().enumerate() {
@@ -457,7 +480,7 @@ impl<'a> RopeEditor<'a> {
                                 '\t' => "→",
                                 _ => continue,
                             };
-                            let cx = text_rect.left() + (col as f32 + 0.5) * char_w;
+                            let cx = (col_x(col) + col_x(col + 1)) * 0.5;
                             let cy = (text_rect.top() + text_rect.bottom()) * 0.5;
                             ui.painter().text(
                                 egui::pos2(cx, cy),
@@ -492,8 +515,8 @@ impl<'a> RopeEditor<'a> {
                         } else {
                             line_chars
                         };
-                        let x0 = text_rect.left() + from as f32 * char_w;
-                        let x1 = text_rect.left() + to as f32 * char_w;
+                        let x0 = col_x(from);
+                        let x1 = col_x(to);
                         let band = egui::Rect::from_min_max(
                             egui::pos2(x0, text_rect.top()),
                             egui::pos2(x1.max(x0 + 2.0), text_rect.bottom()),
@@ -503,7 +526,7 @@ impl<'a> RopeEditor<'a> {
 
                     // Primary caret.
                     if focused && li == caret_line {
-                        let cx = text_rect.left() + caret_col as f32 * char_w;
+                        let cx = col_x(caret_col);
                         ui.painter().vline(
                             cx,
                             text_rect.top()..=text_rect.bottom(),
@@ -522,7 +545,7 @@ impl<'a> RopeEditor<'a> {
                     if focused {
                         for (cl, cc) in &extra_carets {
                             if *cl == li {
-                                let cx = text_rect.left() + *cc as f32 * char_w;
+                                let cx = col_x(*cc);
                                 ui.painter().vline(
                                     cx,
                                     text_rect.top()..=text_rect.bottom(),
@@ -533,10 +556,13 @@ impl<'a> RopeEditor<'a> {
                         // Matching-bracket boxes on this line.
                         for (bl, bc) in &bracket_hl {
                             if *bl == li {
-                                let x = text_rect.left() + *bc as f32 * char_w;
+                                let x = col_x(*bc);
+                                // Box the WHOLE glyph cell (col..col+1) so a
+                                // wide-advance glyph (e.g. a tab) is enclosed.
+                                let x_end = col_x(*bc + 1);
                                 let box_rect = egui::Rect::from_min_max(
                                     egui::pos2(x, text_rect.top()),
-                                    egui::pos2(x + char_w, text_rect.bottom()),
+                                    egui::pos2(x_end.max(x + 2.0), text_rect.bottom()),
                                 );
                                 ui.painter().rect_stroke(
                                     box_rect,
@@ -559,7 +585,8 @@ impl<'a> RopeEditor<'a> {
             ui.memory_mut(|m| m.request_focus(editor_id));
         }
         // Map a screen position to a rope char offset via the captured text
-        // origin + monospace advance. `None` until the first row has rendered.
+        // origin + the clicked line's galley (tab-aware column resolution).
+        // `None` until the first row has rendered.
         let range_start = scroll.inner.start;
         let pos_to_offset = |pos: egui::Pos2| -> Option<usize> {
             let (text_left, row0_top) = text_geom?;
@@ -569,12 +596,21 @@ impl<'a> RopeEditor<'a> {
                 line_h,
                 char_w,
             };
+            // Resolve the clicked line (same math as pos_to_char_offset) to fetch
+            // its galley, so the column is inverse-mapped through the SAME galley
+            // the row painted with (CORR-01: tab stops honoured).
+            let rel = ((pos.y - row0_top) / line_h).floor();
+            let clicked_line = (range_start as f32 + rel)
+                .clamp(0.0, total_lines.saturating_sub(1) as f32)
+                as usize;
+            let galley = line_galleys.get(&clicked_line).map(|(g, _)| g.as_ref());
             Some(pos_to_char_offset(
                 rope,
                 pos,
                 geom,
                 range_start,
                 total_lines,
+                galley,
             ))
         };
         if let Some(pos) = area.interact_pointer_pos() {
@@ -680,19 +716,29 @@ struct TextGeom {
     char_w: f32,
 }
 
-/// Map a screen position to a rope char offset, given the monospace text
-/// geometry and the visible row range. Pure so the pointer→caret mapping is
-/// unit-testable without simulating egui events.
+/// Map a screen position to a rope char offset, given the text geometry and the
+/// visible row range. Pure so the pointer→caret mapping is unit-testable without
+/// simulating egui events.
 ///
 /// A click past a line's end clamps to its last glyph; a click below the last
-/// line clamps to that line. Columns round to the nearest glyph boundary so the
-/// caret lands where the eye expects between two characters.
+/// line clamps to that line. The column is resolved tab-aware:
+///
+/// * `line_galley` (the laid-out galley for the clicked line, when the caller
+///   has it) is the AUTHORITY — [`rel_x_to_col`] walks the row's glyph advances
+///   (tab stops included), so a click after a `\t` lands on the right column
+///   (CORR-01). The row's `text_left` is passed as `geom.text_left` so the
+///   pointer x is made galley-relative.
+/// * Without a galley, the column falls back to `(x / char_w).round()` — the
+///   monospace approximation. This path is only taken when no row galley is
+///   available (the synthetic-geometry unit tests); the live click path always
+///   supplies the galley.
 fn pos_to_char_offset(
     rope: &Rope,
     pos: egui::Pos2,
     geom: TextGeom,
     range_start: usize,
     total_lines: usize,
+    line_galley: Option<&egui::Galley>,
 ) -> usize {
     let rel = ((pos.y - geom.row0_top) / geom.line_h).floor();
     let line = (range_start as f32 + rel).clamp(0.0, total_lines.saturating_sub(1) as f32) as usize;
@@ -709,7 +755,13 @@ fn pos_to_char_offset(
     if len > 0 && rope.char(line_start + len - 1) == '\r' {
         len -= 1;
     }
-    let col = (((pos.x - geom.text_left) / geom.char_w).round().max(0.0) as usize).min(len);
+    let raw_col = match line_galley {
+        // Tab-aware: walk the galley's glyph advances (tab stops included).
+        Some(galley) => rel_x_to_col(galley, pos.x - geom.text_left),
+        // Monospace fallback (no galley available).
+        None => ((pos.x - geom.text_left) / geom.char_w).round().max(0.0) as usize,
+    };
+    let col = raw_col.min(len);
     line_start + col
 }
 
@@ -1801,7 +1853,7 @@ mod tests {
             line_h: 16.0,
             char_w: 8.0,
         };
-        let at = |x: f32, y: f32| pos_to_char_offset(&r, egui::pos2(x, y), geom, 0, total);
+        let at = |x: f32, y: f32| pos_to_char_offset(&r, egui::pos2(x, y), geom, 0, total, None);
         // Row 0, before the 3rd glyph (x≈10+2*8=26) → offset 2 ("he|llo").
         assert_eq!(at(26.0, 4.0), 2);
         // Row 0, far left clamps to col 0.
@@ -1827,7 +1879,7 @@ mod tests {
             line_h: 16.0,
             char_w: 10.0,
         };
-        let at = |x: f32| pos_to_char_offset(&r, egui::pos2(x, 1.0), geom, 0, 1);
+        let at = |x: f32| pos_to_char_offset(&r, egui::pos2(x, 1.0), geom, 0, 1, None);
         assert_eq!(at(4.0), 0); // closer to boundary 0
         assert_eq!(at(6.0), 1); // closer to boundary 1
         assert_eq!(at(14.0), 1); // closer to boundary 1
