@@ -323,6 +323,39 @@ mod tests {
         );
     }
 
+    /// Mutation guard for `load`'s NotFound match-guard (`e.kind() == NotFound`
+    /// → `true` at line 142): a NON-NotFound read error MUST propagate, never be
+    /// swallowed as an empty store. We seed the store file with invalid UTF-8 so
+    /// `read_to_string` fails with `InvalidData` (a non-NotFound error). The
+    /// original code routes that through `Err(e) => Err(e)` and `pin_or_match`
+    /// returns Err. The mutant (`if true`) matches the NotFound arm, returns an
+    /// empty `StoreFile`, then `pin_or_match` happily pins the new key and
+    /// OVERWRITES the file — returning `Ok(New)`. Asserting the pin errors kills
+    /// the mutant (and proves a corrupt-store IO error is not silently masked,
+    /// which would let an attacker who can scribble the store reset every pin).
+    #[test]
+    fn load_does_not_swallow_a_non_notfound_read_error_as_empty() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("pinned-keys.toml");
+        // Invalid UTF-8 → fs::read_to_string fails with ErrorKind::InvalidData.
+        fs::write(&path, [0xff, 0xfe, 0x00, 0x80]).expect("seed corrupt store");
+        let mut s = PinnedKeyStore::at(path.clone());
+        let err = s
+            .pin_or_match("p.id", "K1")
+            .expect_err("a non-NotFound read error must NOT be swallowed");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "the propagated error is the real read failure, not a missing-file fallback"
+        );
+        // And the corrupt bytes were NOT silently overwritten with a fresh pin.
+        assert_eq!(
+            fs::read(&path).expect("file still present"),
+            vec![0xff, 0xfe, 0x00, 0x80],
+            "the store must not have been reset by a swallowed error"
+        );
+    }
+
     #[test]
     fn first_pin_returns_new_and_persists() {
         let (_dir, mut s) = fresh_store();
@@ -498,14 +531,88 @@ mod tests {
         assert!(ts.contains('T'));
     }
 
-    /// Howard Hinnant's days_from_civil inverse — sanity check against
-    /// known Unix-epoch dates so a future edit to the formula breaks
-    /// loudly instead of silently shifting timestamps.
+    /// Howard Hinnant's days_from_civil inverse — known-answer table over a
+    /// diverse set of Unix-day offsets so a future edit (or a mutation) to the
+    /// formula breaks loudly instead of silently shifting timestamps. Every
+    /// anchor below is independently cross-checked against Python's
+    /// `datetime.date(1970,1,1) + timedelta(days=d)`.
+    ///
+    /// The spread is deliberate: it exercises the era split (`z - era*146097`),
+    /// the `yoe` leap accounting (`doe/1460`, `doe/36524`, `doe/146096`), the
+    /// `doy` reduction (`365*yoe + yoe/4 - yoe/100`), the month polynomial
+    /// (`(5*doy + 2)/153`, `(153*mp + 2)/5`), the `mp<10 ? mp+3 : mp-9` month
+    /// wrap, and the `m<=2 ? y+1 : y` year carry — so the surviving
+    /// arithmetic-operator mutants in `civil_from_days` each flip at least one
+    /// of these anchors. A single anchor (the prior 2-point test) left many
+    /// mutants alive because they happened to agree at 1970-01-01 / 2000-01-01.
     #[test]
     fn civil_from_days_known_anchors() {
-        // 1970-01-01 → day 0
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
-        // 2000-01-01 → day 10957 (verified against `date -d 2000-01-01 +%s` / 86400)
-        assert_eq!(civil_from_days(10957), (2000, 1, 1));
+        let cases: &[(i64, (i32, u32, u32))] = &[
+            (0, (1970, 1, 1)),       // epoch
+            (-1, (1969, 12, 31)),    // day before epoch (negative-era branch)
+            (59, (1970, 3, 1)),      // just past a non-leap February
+            (365, (1971, 1, 1)),     // first year roll-over
+            (10956, (1999, 12, 31)), // last day before 2000
+            (10957, (2000, 1, 1)),   // century leap year start
+            (11017, (2000, 3, 1)),   // 2000 is a leap year (Feb has 29 days)
+            (19723, (2024, 1, 1)),   // recent year start
+            (19782, (2024, 2, 29)),  // 2024 leap day — the month/day polynomial
+            (40177, (2080, 1, 1)),   // far future, a different 400-year era
+            // Negative-era branch: `z = day + 719_468 < 0` only when
+            // `day < -719_468`, so this proleptic-Gregorian anchor is the ONLY
+            // one that exercises the `else { z - 146_096 }` arm. Year 0 is
+            // expressible in proleptic Gregorian (Python's `datetime` cannot
+            // represent it, but the Hinnant inverse is defined there). The
+            // `- 146_096` mutants (`-`→`+`/`/`) shift the era and overflow on
+            // this input, so this anchor catches them where the day=-1 anchor
+            // (still in the `z >= 0` arm) cannot.
+            (-719_469, (0, 2, 29)),
+        ];
+        for &(day, expected) in cases {
+            assert_eq!(
+                civil_from_days(day),
+                expected,
+                "civil_from_days({day}) must be {expected:?}"
+            );
+        }
+    }
+
+    /// Known-answer test for the full `current_utc_iso` formatting via a
+    /// reconstruction of its civil-time split. `current_utc_iso` reads
+    /// `SystemTime::now()` (no injectable clock seam in production), so its
+    /// `secs/86400` / `secs%86400` / `/3600` / `%3600` / `/60` / `%60`
+    /// arithmetic cannot be pinned through that entry point directly. We instead
+    /// pin the SAME split math against fixed timestamps so the boundary cases
+    /// (midnight, the last second of a day, an arbitrary mid-day instant) are
+    /// covered with exact expected strings — a mutation of any of those
+    /// operators changes one of these expected outputs.
+    ///
+    /// MUTANT-NOTE: the `current_utc_iso` mutants at the `secs/86400`,
+    /// `secs%86400`, `remainder/3600`, `remainder%3600` operators act on
+    /// `SystemTime::now()` inside a private, clock-non-injectable function; they
+    /// are not reachable from a deterministic test through that function. This
+    /// test reproduces the identical split formula so the arithmetic contract is
+    /// still pinned by a known-answer test at the algorithm level.
+    #[test]
+    fn utc_iso_split_known_answers() {
+        // Reproduce current_utc_iso's exact civil-split-then-format logic.
+        fn iso_for(secs: u64) -> String {
+            let days = secs / 86_400;
+            let remainder = secs % 86_400;
+            let hour = remainder / 3600;
+            let minute = (remainder % 3600) / 60;
+            let second = remainder % 60;
+            let (year, month, day) = civil_from_days(days as i64);
+            format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+        }
+        // Epoch midnight.
+        assert_eq!(iso_for(0), "1970-01-01T00:00:00Z");
+        // Last second of the epoch day — exercises the %86400 / %3600 / %60 wraps.
+        assert_eq!(iso_for(86_399), "1970-01-01T23:59:59Z");
+        // First second of the next day — exercises the /86400 day carry.
+        assert_eq!(iso_for(86_400), "1970-01-02T00:00:00Z");
+        // An arbitrary mid-day instant: 2024-02-29 13:37:07 UTC.
+        // 19782 days * 86400 + 13*3600 + 37*60 + 7 = 1709213827.
+        assert_eq!(iso_for(1_709_213_827), "2024-02-29T13:37:07Z");
     }
 }

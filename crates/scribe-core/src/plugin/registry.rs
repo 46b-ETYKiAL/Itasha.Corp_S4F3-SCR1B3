@@ -284,6 +284,35 @@ author_pubkey = "K2"
         assert_eq!(hits[0].id, "dev.hjkl.vim-keys");
     }
 
+    /// Mutation guard for `search` (`||` → `&&` at the id-OR-name junction): a
+    /// query that matches the NAME but NOT the id (nor description/author) must
+    /// still be found. Plugin[1] name is "Vim Keys"; its id is
+    /// "dev.hjkl.vim-keys" (hyphen, so it does NOT contain "vim keys"), and the
+    /// description/author don't contain it either. Under the original `||` the
+    /// name-hit alone matches; under the `&&` mutant `(id && name)` requires both
+    /// id AND name, so the name-only hit would vanish — this asserts it does not.
+    #[test]
+    fn search_matches_on_name_only_or_semantics() {
+        let idx = RegistryIndex::from_toml_str(SAMPLE_INDEX).expect("parse");
+        // Sanity: the query matches NAME but none of id / description / author.
+        let p = &idx.plugins[1];
+        let q = "vim keys";
+        assert!(p.name.to_lowercase().contains(q), "name must match");
+        assert!(!p.id.to_lowercase().contains(q), "id must NOT match");
+        assert!(
+            !p.description.to_lowercase().contains(q),
+            "description must NOT match"
+        );
+        assert!(
+            !p.author.to_lowercase().contains(q),
+            "author must NOT match"
+        );
+
+        let hits = idx.search("Vim Keys");
+        assert_eq!(hits.len(), 1, "a name-only OR hit must still be found");
+        assert_eq!(hits[0].id, "dev.hjkl.vim-keys");
+    }
+
     #[test]
     fn by_id_finds_entry() {
         let idx = RegistryIndex::from_toml_str(SAMPLE_INDEX).expect("parse");
@@ -298,6 +327,31 @@ author_pubkey = "K2"
         let p = &idx.plugins[0];
         let r = p.stable_release().expect("stable resolves");
         assert_eq!(r.version, "0.2.0");
+    }
+
+    /// Mutation guard for `stable_release` (`delete !` at line 176): when
+    /// `version_stable` points at a release that is NOT the latest, the resolved
+    /// release MUST be the version_stable one, not the latest. The existing
+    /// "resolves_when_present" test happens to set version_stable == latest, so
+    /// the `!`-deleted mutant (which falls straight through to `latest_release`)
+    /// returns the SAME release and survives. Pointing version_stable at the
+    /// EARLIER release (0.1.0, while latest is 0.2.0) makes the two paths
+    /// diverge: original returns 0.1.0; the `if version_stable.is_empty()` mutant
+    /// skips the find and returns 0.2.0.
+    #[test]
+    fn stable_release_resolves_non_latest_pinned_version() {
+        let mut idx = RegistryIndex::from_toml_str(SAMPLE_INDEX).expect("parse");
+        // Pin the EARLIER release; latest by publish order is still 0.2.0.
+        idx.plugins[0].version_stable = "0.1.0".into();
+        let r = idx.plugins[0]
+            .stable_release()
+            .expect("the pinned stable release must resolve");
+        assert_eq!(
+            r.version, "0.1.0",
+            "stable_release must honour version_stable, not fall through to latest"
+        );
+        // And the latest is genuinely different, so this is a real discriminator.
+        assert_eq!(idx.plugins[0].latest_release().unwrap().version, "0.2.0");
     }
 
     #[test]
