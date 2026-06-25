@@ -25,12 +25,35 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 /// "Export as HTML" command). Uses pulldown-cmark's own HTML writer — pure Rust,
 /// no webview, no network. A minimal embedded stylesheet keeps the output
 /// readable on its own.
+///
+/// # Security (SEC-2 — stored XSS in the exported artifact)
+///
+/// Unlike the in-app preview (which renders a safe block model with no HTML),
+/// the exported `.html` is a file the user opens in a **browser**, where any
+/// raw HTML or dangerous-scheme URL from an untrusted markdown document would
+/// EXECUTE. pulldown-cmark's default writer passes raw inline/block HTML through
+/// verbatim and does not filter `javascript:`/`data:` hrefs, so an export of
+/// attacker-supplied markdown could carry `<script>`, `<img onerror=…>`, and
+/// `javascript:` links into the browser context of the exported file.
+///
+/// Defense (mirrors the in-app [`is_safe_link_scheme`] allowlist, no new crate):
+///   * Raw-HTML passthrough is DISABLED — every [`Event::Html`] /
+///     [`Event::InlineHtml`] is dropped from the stream before the writer sees
+///     it, so no author-supplied `<script>`/`onerror=`/`<iframe>` survives.
+///   * Every [`Tag::Link`]/[`Tag::Image`] destination is run through
+///     [`is_safe_link_scheme`]; a disallowed scheme (`javascript:`, `data:`,
+///     `file:`, …) is neutralised to an inert `#` anchor so it can never reach
+///     the HTML writer as a live URL.
+///   * A restrictive `Content-Security-Policy` meta tag is emitted as
+///     defense-in-depth: even if a vector ever slipped past the event filter,
+///     the browser is told to run no script and load nothing.
 pub fn to_html(md: &str) -> String {
-    let parser = Parser::new(md);
-    let mut body = String::new();
-    pulldown_cmark::html::push_html(&mut body, parser);
+    let body = render_safe_html(md);
     format!(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta http-equiv=\"Content-Security-Policy\" \
+         content=\"default-src 'none'; img-src 'self' http: https: mailto:; \
+         style-src 'unsafe-inline'\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <style>\n\
          body{{max-width:46rem;margin:2rem auto;padding:0 1rem;\
@@ -43,6 +66,58 @@ pub fn to_html(md: &str) -> String {
          table{{border-collapse:collapse}}td,th{{border:1px solid #ccc;padding:.3rem .6rem}}\n\
          </style>\n</head>\n<body>\n{body}</body>\n</html>\n"
     )
+}
+
+/// Build the `<body>` HTML from markdown with raw-HTML passthrough disabled and
+/// dangerous link/image schemes neutralised (see [`to_html`] for the threat
+/// model). Pure `&str -> String`, no IO — unit-tested below.
+fn render_safe_html(md: &str) -> String {
+    let safe_events = Parser::new(md).filter_map(|ev| match ev {
+        // Drop author-supplied raw HTML entirely. This is the `<script>` /
+        // `<img onerror=…>` / `<iframe>` vector — markdown that embeds raw HTML
+        // must NOT have it survive into a browser-opened export.
+        Event::Html(_) | Event::InlineHtml(_) => None,
+        // Neutralise dangerous-scheme link/image destinations to an inert `#`
+        // anchor before the HTML writer turns them into a live `href`/`src`.
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Some(Event::Start(Tag::Link {
+            link_type,
+            dest_url: neutralise_dest(dest_url),
+            title,
+            id,
+        })),
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) => Some(Event::Start(Tag::Image {
+            link_type,
+            dest_url: neutralise_dest(dest_url),
+            title,
+            id,
+        })),
+        other => Some(other),
+    });
+    let mut body = String::new();
+    pulldown_cmark::html::push_html(&mut body, safe_events);
+    body
+}
+
+/// Replace a link/image destination with an inert `#` anchor when its scheme is
+/// not on the [`is_safe_link_scheme`] allowlist; otherwise pass it through. The
+/// `#` fragment resolves against the document and can never invoke a protocol
+/// handler (`javascript:`, `data:`, `file:`, …).
+fn neutralise_dest(dest_url: pulldown_cmark::CowStr<'_>) -> pulldown_cmark::CowStr<'_> {
+    if is_safe_link_scheme(&dest_url) {
+        dest_url
+    } else {
+        pulldown_cmark::CowStr::Borrowed("#")
+    }
 }
 
 /// A renderable block in document order. Inline styling within a block is
@@ -744,6 +819,51 @@ mod tests {
             b.iter().any(|blk| matches!(blk, MdBlock::Paragraph(runs)
                 if runs_text(runs).contains("dangling text"))),
             "expected the dangling paragraph to be flushed, got {b:?}"
+        );
+    }
+
+    // --- SEC-2 (CWE-79): exported HTML must not carry executable content ---
+
+    /// Red-first guard for SEC-2: the "Export as HTML" output is opened in a
+    /// browser, so author-supplied raw HTML and dangerous-scheme links must be
+    /// stripped/neutralised. Against the OLD unfiltered `push_html`, the export
+    /// contained a live `<script>`, an `onerror=` attribute, and a `javascript:`
+    /// href — this test asserts NONE of them survive after the fix.
+    #[test]
+    fn to_html_strips_raw_html_and_dangerous_schemes() {
+        let md = "Intro text\n\n\
+                  <script>alert(1)</script>\n\n\
+                  An image: <img src=x onerror=alert(1)>\n\n\
+                  A [click me](javascript:alert(1)) link\n\n\
+                  A markdown ![pic](javascript:alert(1)) image\n\n\
+                  A safe [home](https://example.com) link\n";
+        let html = to_html(md);
+
+        // No live <script> element survives (raw HTML dropped). pulldown-cmark
+        // escapes any leftover angle brackets to entities, so the literal tag
+        // must not appear.
+        assert!(
+            !html.contains("<script>"),
+            "exported HTML still contains a live <script> tag:\n{html}"
+        );
+        // No event-handler attribute survives (the raw <img onerror=…> is gone).
+        assert!(
+            !html.contains("onerror="),
+            "exported HTML still contains an onerror= handler:\n{html}"
+        );
+        // No javascript: URI survives in any href/src (link + image dests were
+        // neutralised to '#').
+        assert!(
+            !html.contains("javascript:"),
+            "exported HTML still contains a javascript: URI:\n{html}"
+        );
+
+        // The safe content is preserved: the body text and the allowlisted
+        // https link must still be present + clickable.
+        assert!(html.contains("Intro text"), "lost safe body text:\n{html}");
+        assert!(
+            html.contains("href=\"https://example.com\""),
+            "safe https link was incorrectly stripped:\n{html}"
         );
     }
 
