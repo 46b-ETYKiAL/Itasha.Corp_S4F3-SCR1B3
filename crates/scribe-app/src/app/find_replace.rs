@@ -64,6 +64,8 @@ impl ScribeApp {
     pub(super) fn run_find_in_files(&mut self, ctx: &egui::Context) {
         self.find_in_files_error = None;
         self.find_in_files_results.clear();
+        // PA-02: a fresh search invalidates the old keyboard-selection index.
+        self.find_in_files_selected = 0;
         // Dropping any in-flight receiver supersedes the previous search.
         self.find_in_files_rx = None;
         self.find_in_files_running = false;

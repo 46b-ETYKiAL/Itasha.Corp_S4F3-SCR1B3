@@ -192,11 +192,13 @@ impl ScribeApp {
                 }
                 self.goto_symbol_open = true;
                 self.goto_symbol_query.clear();
+                self.goto_symbol_selected = 0;
             }
             // F-012 — Ctrl+R opens the recent-files modal. Exclude shift so
             // Ctrl+Shift+R (reopen-closed-tab, above) does not ALSO open it.
             if cmd && !i.modifiers.shift && i.key_pressed(egui::Key::R) {
                 self.recent_open = true;
+                self.recent_selected = 0;
             }
             // Line bookmarks: Ctrl+F2 toggles on the cursor line; F2 jumps to
             // the next bookmark; Shift+F2 jumps to the previous one. Ctrl takes
@@ -240,6 +242,9 @@ impl ScribeApp {
                     self.recent_folders_open = false;
                     self.welcome_open = false;
                     self.fuzzy_open = false;
+                    // PA-02: route the project-find results pane through the same
+                    // centralized Esc-close as the other overlays.
+                    self.find_in_files_open = false;
                 }
             }
         });
