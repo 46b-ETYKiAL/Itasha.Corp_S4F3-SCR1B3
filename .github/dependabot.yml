@@ -37,6 +37,26 @@ updates:
     # hardening dossier (T21.2).
     allow:
       - dependency-type: "all"
+    # The egui UI stack is version-LOCKSTEP: egui / eframe / egui_tiles /
+    # egui_kittest / egui-phosphor must all move to the same egui minor TOGETHER.
+    # egui_tiles 0.16 requires egui 0.35, but egui-phosphor (our hairline icon
+    # font, DECISION-2026-005) has no egui-0.35 release yet — its latest 0.12
+    # still requires egui ^0.34 — so the whole 0.35 bump is upstream-BLOCKED and
+    # cannot resolve (`cargo` errors selecting egui ^0.34 for egui-phosphor).
+    # Ignore the 0.35-line bumps until egui-phosphor ships for 0.35 and the
+    # coordinated egui 0.35 migration is done as a deliberate, visually-QA'd
+    # effort; patch/minor bumps within the 0.34 line still flow normally.
+    ignore:
+      - dependency-name: "egui"
+        versions: [">=0.35"]
+      - dependency-name: "eframe"
+        versions: [">=0.35"]
+      - dependency-name: "egui_tiles"
+        versions: [">=0.16"]
+      - dependency-name: "egui_kittest"
+        versions: [">=0.35"]
+      - dependency-name: "egui-phosphor"
+        versions: [">=0.13"]
 
   # GitHub Actions used in apps/scribe/.github/workflows/.
   - package-ecosystem: github-actions
