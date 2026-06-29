@@ -296,6 +296,35 @@ description = "Uppercases the buffer"
         assert_eq!(found[0].manifest.id, "uppercase");
     }
 
+    #[test]
+    fn discover_rejects_a_future_api_version_plugin() {
+        // The `Ok(m) if m.is_compatible()` match guard is the load-or-refuse gate.
+        // A plugin declaring a FUTURE api_version (99 > supported 1) must NOT be
+        // loaded — it must land in `errors`, never `found`. A `match guard -> true`
+        // mutation would force EVERY parsed manifest into `found`, auto-loading a
+        // forward-incompatible plugin the build cannot safely run.
+        let tmp = tempfile::tempdir().unwrap();
+        let pdir = tmp.path().join("fromfuture");
+        std::fs::create_dir_all(&pdir).unwrap();
+        std::fs::write(
+            pdir.join("plugin.toml"),
+            "id='fromfuture'\nname='FromFuture'\napi_version=99\nentry='main.rhai'\n",
+        )
+        .unwrap();
+        std::fs::write(pdir.join("main.rhai"), "// noop").unwrap();
+        let (found, errors) = discover(tmp.path());
+        assert!(
+            found.is_empty(),
+            "an incompatible (future api_version) plugin must never be loaded"
+        );
+        assert_eq!(errors.len(), 1, "the incompatible plugin must be reported");
+        assert!(
+            errors[0].contains("fromfuture") && errors[0].contains("api_version"),
+            "the error must name the offending plugin + the api_version gate, got: {}",
+            errors[0]
+        );
+    }
+
     // ---- Phase 20 T20.2 is_app_version_ok regression tests ----
 
     fn manifest_with_min(min: Option<&str>) -> PluginManifest {

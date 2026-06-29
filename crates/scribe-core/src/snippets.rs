@@ -158,6 +158,22 @@ mod tests {
     }
 
     #[test]
+    fn is_empty_is_false_when_a_snippet_is_loaded() {
+        // Pins `is_empty` to its delegate `self.snippets.is_empty()`. The default
+        // set is empty (covered above); a set with ANY snippet must report NON-
+        // empty. A `-> true` mutation would wrongly claim "no snippets loaded"
+        // even with snippets present, silently disabling Tab-expansion.
+        let set = SnippetSet {
+            snippets: vec![Snippet {
+                prefix: "fn".into(),
+                body: "fn $1() {}".into(),
+                description: String::new(),
+            }],
+        };
+        assert!(!set.is_empty(), "a loaded snippet set must not be empty");
+    }
+
+    #[test]
     fn malformed_dollar_brace_is_preserved_not_dropped() {
         // A body containing a literal `${…}` (unterminated, or a non-numeric
         // body) must NOT lose content — previously the consumed chars were

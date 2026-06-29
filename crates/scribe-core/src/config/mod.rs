@@ -397,6 +397,56 @@ show_dropdown = false
     }
 
     #[test]
+    fn v1_config_does_not_rerun_the_v0_experience_block() {
+        // EXACT lower boundary of the v0→v1 step (`schema_version < 1`). A config
+        // already AT version 1 — with an experience toggle the user deliberately
+        // turned OFF after v1 — must NOT have that toggle forced back on. The v0
+        // block is gated by a STRICT `< 1`: at version 1, `1 < 1` is false, so the
+        // block is skipped and the user's `false` survives. A `<= 1` mutation would
+        // re-enter the block at version 1 and clobber the user's choice.
+        let toml = "\
+schema_version = 1
+
+[editor]
+show_line_numbers = false
+show_minimap = false
+";
+        let mut c = Config::from_toml_str(toml).unwrap();
+        assert_eq!(c.schema_version, 1, "config loads at exactly version 1");
+        // It still migrates v1→v2→v3 (a change is reported), but the v0 toggles
+        // must be untouched.
+        let _ = c.migrate();
+        assert!(
+            !c.editor.show_line_numbers,
+            "a v1 user's OFF toggle must not be re-flipped by the v0 block (`< 1`, not `<= 1`)"
+        );
+        assert!(
+            !c.editor.show_minimap,
+            "a v1 user's OFF toggle must not be re-flipped by the v0 block (`< 1`, not `<= 1`)"
+        );
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v2_config_does_not_rerun_the_v1_update_mode_block() {
+        // EXACT lower boundary of the v1→v2 step (`schema_version < 2`). A config
+        // already AT version 2 whose update mode is Manual (a deliberate post-v2
+        // choice) must NOT be rewritten to Notify. The v1 block is gated by a
+        // STRICT `< 2`: at version 2, `2 < 2` is false, so Manual survives. A
+        // `<= 2` mutation would re-enter the block at version 2 and clobber Manual.
+        let mut c =
+            Config::from_toml_str("schema_version = 2\n[updates]\nmode = \"manual\"\n").unwrap();
+        assert_eq!(c.schema_version, 2, "config loads at exactly version 2");
+        let _ = c.migrate(); // v2→v3 still runs (additive), but mode must stay Manual
+        assert_eq!(
+            c.updates.mode,
+            UpdateMode::Manual,
+            "a v2 user's deliberate Manual must not be re-flipped by the v1 block (`< 2`, not `<= 2`)"
+        );
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
     fn update_mode_defaults_to_notify_and_v2_migrates_from_manual() {
         // Fresh default is Notify.
         assert_eq!(Config::default().updates.mode, UpdateMode::Notify);
