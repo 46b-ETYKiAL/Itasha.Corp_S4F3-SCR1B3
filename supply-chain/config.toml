@@ -752,20 +752,12 @@ criteria = "safe-to-deploy"
 version = "0.4.14"
 criteria = "safe-to-deploy"
 
-[[exemptions.log]]
-version = "0.4.32"
-criteria = "safe-to-deploy"
-
 [[exemptions.markup5ever]]
 version = "0.38.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.markup5ever_rcdom]]
 version = "0.38.0+unofficial"
-criteria = "safe-to-deploy"
-
-[[exemptions.memchr]]
-version = "2.8.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.memmap2]]
@@ -1368,10 +1360,6 @@ criteria = "safe-to-deploy"
 version = "2.6.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.syn]]
-version = "2.0.117"
-criteria = "safe-to-deploy"
-
 [[exemptions.syntect]]
 version = "5.3.0"
 criteria = "safe-to-deploy"
@@ -1550,10 +1538,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.utf8-zero]]
 version = "0.8.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.uuid]]
-version = "1.23.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.valuable]]
