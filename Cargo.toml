@@ -51,7 +51,7 @@ anyhow = "1"
 eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "wayland", "x11", "persistence"] }  # `persistence` = native window pos+size restore + App::save() firing on exit/interval (ron state under the app_id folder)
 egui = "0.34"
 egui-phosphor = { version = "0.12", default-features = false, features = ["thin"] }  # Phosphor Thin icon font (T16.3, DECISION-2026-005 "hairline icons")
-egui_tiles = "0.15"           # tiling layout engine — multi-note grid (Phase 18 T18.2). Pairs lockstep with egui 0.34. Default features include `serde` so the Tree round-trips through the existing TOML config.
+egui_tiles = "0.16"           # tiling layout engine — multi-note grid (Phase 18 T18.2). Pairs lockstep with egui 0.34. Default features include `serde` so the Tree round-trips through the existing TOML config.
 # Internal
 scribe-core = { path = "crates/scribe-core" }
 scribe-render = { path = "crates/scribe-render" }
