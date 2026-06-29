@@ -1,0 +1,15 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+#
+# ENC-1: the detection-instability counterexample. Under the OLD
+# detection-idempotence assertion this seed regenerates the input
+# bytes = [252, 79, 176, 161] (decode "彘陛" -> re-encode non-lossily ->
+# re-DETECT "佤啊", a flip). The corrected `decode_encode_decode_is_text_stable`
+# now asserts encoding-PRESERVATION via `decode_with` (the real save/reload
+# contract), which is stable for this input, so this pinned seed PASSES
+# deterministically on every run instead of failing intermittently.
+cc 533c99a963c43751c9c04d27578ddc50895e5afded4f4949729495b00e65dc4c

@@ -112,27 +112,67 @@ proptest! {
         let (_text, _enc) = encoding::decode(&bytes);
     }
 
-    /// Decoding then re-encoding under the SAME detected encoding produces bytes
-    /// that decode back to the same text — the open→save fidelity loop. (We assert
-    /// text-stability rather than byte-equality because statistical detection may
-    /// pick a different-but-equivalent label for ambiguous inputs.)
+    /// ENCODING-PRESERVATION round-trip — the editor's REAL save/reload contract.
     ///
-    /// The fidelity guarantee holds ONLY when the re-encode is non-lossy. When
-    /// `chardetng` mis-detects arbitrary bytes as a single-byte legacy codepage
-    /// whose decoded text contains characters that codepage cannot represent
-    /// (e.g. random bytes decoded as windows-1252 yielding CJK scalars), the
-    /// re-encode is legitimately lossy — `encoding_rs` substitutes HTML numeric
-    /// character references (`&#NNNNN;`) for the unmappable scalars, which is its
-    /// documented, intended behaviour (the editor warns the user on a lossy save
-    /// via the `encode_checked` flag). Gating on that flag is the correct
-    /// invariant: text-stability is asserted exactly when the round-trip is
-    /// representable.
+    /// This models what actually happens to user data: a file is opened and its
+    /// encoding `e` is detected ONCE; from then on the editor SAVES under `e`
+    /// (`encode_checked(text, e)`) and, on an in-session reload, decodes the file
+    /// back WITH the same known `e` (`decode_with(bytes, e)` —
+    /// [`Document::reload_from_disk`]). Under that contract the invariant is:
+    /// `decode_with(encode_checked(text1, e), e) == text1` whenever the re-encode
+    /// is non-lossy.
+    ///
+    /// This deliberately does NOT assert detection idempotence
+    /// (`decode(encode(text1)) == text1`). Re-DETECTING arbitrary bytes is an
+    /// unachievable property: `chardetng` is a heuristic and is non-idempotent on
+    /// detection-ambiguous inputs (the ENC-1 counterexample
+    /// `bytes = [252, 79, 176, 161]` decodes to one CJK string, re-encodes
+    /// non-lossily, then RE-DETECTS to a different label and different text). The
+    /// old test asserted that flip would never happen — an unachievable property
+    /// that made the test intermittently fail. Encoding-preservation
+    /// (decode_with the KNOWN encoding) is the meaningful data-safety guarantee
+    /// and the one the editor actually relies on; it holds for ALL representable
+    /// inputs, including the pinned ENC-1 regression seed in
+    /// `roundtrip_proptest.proptest-regressions`.
+    ///
+    /// The non-lossy gate is required for the same reason as before: when
+    /// `chardetng` mis-detects random bytes as a single-byte legacy codepage that
+    /// cannot represent the decoded scalars, the re-encode is legitimately lossy
+    /// (`encoding_rs` substitutes replacements) and is not expected to round-trip
+    /// — the editor warns the user on a lossy save via the `encode_checked` flag.
     #[test]
     fn decode_encode_decode_is_text_stable(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
         let (text1, e) = encoding::decode(&bytes);
         let (reencoded, lossy) = encoding::encode_checked(&text1, &e);
         prop_assume!(!lossy);
-        let (text2, _e2) = encoding::decode(&reencoded);
+        // Decode the re-encoded bytes WITH the KNOWN encoding `e` (the reload
+        // contract), NOT statistical re-detection. This recovers text1 exactly.
+        let text2 = encoding::decode_with(&reencoded, &e);
+        prop_assert_eq!(text1, text2);
+    }
+
+    /// Where detection IS authoritative — a BOM-tagged input — re-detection is
+    /// genuinely stable. A leading BOM is sniffed first and is conclusive
+    /// (`Encoding::for_bom`), so for BOM-bearing round-trips the detection-based
+    /// loop `decode(encode(decode(bytes))) ` recovers the same text. This keeps
+    /// the original detection-idempotence intent exactly where it actually holds
+    /// (BOM inputs), complementing the encoding-preservation invariant above.
+    #[test]
+    fn bom_tagged_roundtrips_redetect_stably(s in ".*", be in any::<bool>()) {
+        // Build a BOM-bearing UTF-16 file from `s` (UTF-16 covers all Unicode,
+        // never lossy), decode it (BOM is authoritative), re-encode under the
+        // detected encoding (BOM re-emitted), and re-DETECT — the BOM makes the
+        // second detection conclusive, so the text is stable.
+        let name = if be { "UTF-16BE" } else { "UTF-16LE" };
+        let tagged = encoding::DetectedEncoding { name: name.to_string(), had_bom: true };
+        let (file_bytes, lossy) = encoding::encode_checked(&s, &tagged);
+        prop_assume!(!lossy);
+        let (text1, e) = encoding::decode(&file_bytes);
+        prop_assert!(e.had_bom, "a BOM-tagged file detects had_bom = true");
+        let (reencoded, lossy2) = encoding::encode_checked(&text1, &e);
+        prop_assume!(!lossy2);
+        let (text2, e2) = encoding::decode(&reencoded);
+        prop_assert!(e2.had_bom, "the re-emitted BOM is detected again");
         prop_assert_eq!(text1, text2);
     }
 }

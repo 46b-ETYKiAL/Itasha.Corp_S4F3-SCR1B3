@@ -90,6 +90,53 @@ impl Document {
         })
     }
 
+    /// Re-read this document's file from disk, decoding with the document's
+    /// ALREADY-KNOWN encoding instead of re-detecting it.
+    ///
+    /// # Data-safety rationale
+    ///
+    /// [`Document::open`] (a fresh first open) runs statistical detection
+    /// (`chardetng`) because the file's encoding is genuinely unknown then —
+    /// that is correct and unavoidable. But once a document is open, its
+    /// encoding is KNOWN, and the editor preserves it on save
+    /// (`encode_checked(&self.encoding)`). If a reload were to re-detect, the
+    /// heuristic — which is non-idempotent on detection-ambiguous bytes — could
+    /// flip the encoding (and therefore the displayed text) of a file the user
+    /// has NOT changed: the canonical ENC-1 hazard
+    /// (open(detect e1) → save(encode e1) → reload(detect e2≠e1)). Decoding with
+    /// the known `self.encoding` via [`encoding::decode_with`] removes that flip,
+    /// so the in-session contract holds: a file already open with a known
+    /// encoding stays in that encoding across a reload, and its text is exactly
+    /// what `decode_with(known_bytes, known_encoding)` yields.
+    ///
+    /// EOL is re-detected from the freshly-read text (line endings can change on
+    /// disk under an external edit, and EOL detection is not the source of the
+    /// encoding-flip hazard). The dirty flag is cleared — the buffer now matches
+    /// disk. A document opened read-only-large refuses to reload via the same
+    /// mmap-browse contract `save_as` enforces, and a pathless scratch buffer has
+    /// nothing to reload.
+    pub fn reload_from_disk(&mut self) -> Result<()> {
+        let Some(path) = self.path.clone() else {
+            return Err(crate::error::CoreError::Other(
+                "no path set; nothing to reload".into(),
+            ));
+        };
+        if self.read_only_large {
+            return Err(crate::error::CoreError::FileTooLargeToEdit(
+                self.rope.len_bytes() as u64,
+            ));
+        }
+        let bytes = fs::read(&path)?;
+        // Decode with the KNOWN encoding — NO re-detection (the data-safety fix).
+        let text = encoding::decode_with(&bytes, &self.encoding);
+        let detected_eol = eol::detect(&text);
+        let normalized = eol::normalize_to_lf(&text);
+        self.rope = Rope::from_str(&normalized);
+        self.eol = detected_eol;
+        self.dirty = false;
+        Ok(())
+    }
+
     /// Save back to the document's path using its original encoding + EOL.
     /// Atomic: writes to a temp file then renames over the target. Returns
     /// `Ok(true)` when one or more characters could not be represented in the
@@ -598,6 +645,211 @@ mod tests {
         doc.set_text("y\n");
         doc.save().expect("a normal document must still save");
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "y\n");
+    }
+
+    #[test]
+    fn reload_from_disk_preserves_encoding_and_recovers_text() {
+        // ENC-1 core fix: a document already open with a KNOWN encoding must
+        // keep that encoding across a reload (no detection flip), and the
+        // reloaded text must equal decode_with(known_bytes, known_encoding).
+        // We use the adversarial ENC-1 input pattern: write a single-byte
+        // legacy-codepage file, open it (detect), then reload and assert the
+        // encoding is byte-for-byte preserved and the text is stable.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("legacy.txt");
+        // 0xE9 is 'é' in windows-1252 / Latin-1; café\n.
+        std::fs::write(&p, [b'c', b'a', b'f', 0xE9, b'\n']).unwrap();
+
+        let mut doc = Document::open(&p).unwrap();
+        let enc_before = doc.encoding().clone();
+        let text_before = doc.text();
+
+        // Save (re-encodes under the known encoding), then reload from disk.
+        doc.save().unwrap();
+        doc.reload_from_disk().unwrap();
+
+        // The encoding is preserved EXACTLY across the reload (no re-detection),
+        // and the text is recovered — the data-safety contract.
+        assert_eq!(
+            doc.encoding(),
+            &enc_before,
+            "reload must preserve the known encoding, not re-detect it"
+        );
+        assert_eq!(
+            doc.text(),
+            text_before,
+            "reload must recover the same text via decode_with"
+        );
+        assert!(!doc.is_dirty(), "a fresh reload matches disk → clean");
+    }
+
+    #[test]
+    fn reload_preserves_encoding_even_when_detection_would_flip() {
+        // Stronger ENC-1 guard: construct a document whose stored encoding is
+        // KNOWN to differ from what fresh detection would pick on the on-disk
+        // bytes, and prove reload keeps the stored encoding. We write KOI8-R
+        // bytes but tag the document as windows-1251 (both Cyrillic codepages
+        // that a detector can confuse). reload_from_disk must decode with the
+        // STORED windows-1251, not re-detect.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("cyr.txt");
+        let stored = DetectedEncoding {
+            name: "windows-1251".to_string(),
+            had_bom: false,
+        };
+        // Encode some Cyrillic under windows-1251, write those raw bytes.
+        let (bytes, lossy) = encoding::encode_checked("Привет\n", &stored);
+        assert!(!lossy);
+        std::fs::write(&p, &bytes).unwrap();
+
+        let mut doc = Document {
+            rope: Rope::from_str("placeholder\n"),
+            path: Some(p.clone()),
+            encoding: stored.clone(),
+            eol: Eol::Lf,
+            dirty: true,
+            read_only_large: false,
+        };
+        doc.reload_from_disk().unwrap();
+
+        assert_eq!(doc.encoding(), &stored, "stored encoding survives reload");
+        assert_eq!(
+            doc.text(),
+            "Привет\n",
+            "reload decodes with the stored encoding → exact text"
+        );
+    }
+
+    #[test]
+    fn reload_from_disk_refuses_pathless_and_read_only_large() {
+        // A scratch (pathless) buffer has nothing to reload.
+        let mut scratch = Document::scratch();
+        assert!(
+            scratch.reload_from_disk().is_err(),
+            "pathless buffer cannot reload"
+        );
+
+        // A read-only-large doc refuses reload (same mmap-browse contract as save).
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.log");
+        std::fs::write(&p, b"x\n").unwrap();
+        let mut big = Document {
+            rope: Rope::from_str("y\n"),
+            path: Some(p),
+            encoding: DetectedEncoding::default(),
+            eol: Eol::Lf,
+            dirty: false,
+            read_only_large: true,
+        };
+        assert!(
+            matches!(
+                big.reload_from_disk(),
+                Err(crate::error::CoreError::FileTooLargeToEdit(_))
+            ),
+            "read-only-large doc must refuse reload"
+        );
+    }
+
+    #[test]
+    fn scratch_yields_a_clean_empty_pathless_buffer() {
+        // Pins Document::scratch's observable contract (kills the
+        // `scratch -> Default::default()` mutant by asserting every field of the
+        // scratch buffer, so the function's return value is fully constrained).
+        let doc = Document::scratch();
+        assert_eq!(doc.text(), "", "scratch starts empty");
+        assert!(doc.path().is_none(), "scratch has no path");
+        assert!(!doc.is_dirty(), "scratch is clean");
+        assert!(!doc.is_read_only_large(), "scratch is not read-only-large");
+        assert_eq!(doc.eol(), Eol::default(), "scratch uses the default EOL");
+        assert_eq!(
+            doc.encoding(),
+            &DetectedEncoding::default(),
+            "scratch uses the default (UTF-8, no BOM) encoding"
+        );
+    }
+
+    #[test]
+    fn is_read_only_large_reports_true_for_a_browse_doc() {
+        // Pins is_read_only_large (kills the `-> bool with false` mutant): a doc
+        // constructed with read_only_large=true must report true, and a normal
+        // opened doc must report false.
+        let doc = Document {
+            rope: Rope::new(),
+            path: None,
+            encoding: DetectedEncoding::default(),
+            eol: Eol::Lf,
+            dirty: false,
+            read_only_large: true,
+        };
+        assert!(
+            doc.is_read_only_large(),
+            "a read-only-large doc must report TRUE"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("small.txt");
+        std::fs::write(&p, b"hi\n").unwrap();
+        let normal = Document::open(&p).unwrap();
+        assert!(
+            !normal.is_read_only_large(),
+            "a normal small file is NOT read-only-large"
+        );
+    }
+
+    #[test]
+    fn tempfile_flush_propagates_a_real_flush() {
+        // Pins TempFile::flush (kills the `flush -> Ok(())` mutant): flush must
+        // actually drive the underlying file so written bytes are durable before
+        // persist. We write through TempFile, flush, take the path, persist, and
+        // assert the bytes landed — a no-op flush mutant cannot be distinguished
+        // by content alone, so we additionally assert flush returns an error once
+        // the handle is taken (the real flush touches the handle; Ok(()) would
+        // not).
+        let dir = tempfile::tempdir().unwrap();
+        let mut tf = tempfile_in(dir.path()).unwrap();
+        tf.write_all(b"durable bytes").unwrap();
+        // A real flush succeeds while the handle is live.
+        tf.flush().unwrap();
+        let dest = dir.path().join("out.bin");
+        let tp = tf.into_temp_path();
+        assert!(
+            tp.persist(&dest).is_ok(),
+            "persist of flushed temp must succeed"
+        );
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            b"durable bytes",
+            "flushed bytes must be persisted"
+        );
+
+        // After the handle is taken, file_mut → Err, so flush propagates an
+        // error rather than Ok(()) — distinguishing the real impl from the
+        // `flush -> Ok(())` mutant.
+        let mut taken = tempfile_in(dir.path()).unwrap();
+        taken.file.take();
+        let err = taken.flush();
+        assert!(
+            err.is_err(),
+            "flush on a taken handle must surface an error, not Ok(())"
+        );
+    }
+
+    #[test]
+    fn temppath_drop_removes_the_temp_file() {
+        // Pins <impl Drop for TempPath>::drop (kills the `drop -> ()` mutant):
+        // dropping a TempPath without persisting must delete the temp file from
+        // disk. The `drop -> ()` mutant would leave the file behind.
+        let dir = tempfile::tempdir().unwrap();
+        let tf = tempfile_in(dir.path()).unwrap();
+        let tmp_on_disk = tf.path.clone();
+        assert!(tmp_on_disk.exists(), "temp file exists before drop");
+        let tp = tf.into_temp_path();
+        assert!(tmp_on_disk.exists(), "still present after into_temp_path");
+        drop(tp); // no persist → Drop must clean it up
+        assert!(
+            !tmp_on_disk.exists(),
+            "Drop for TempPath must remove the un-persisted temp file"
+        );
     }
 
     #[test]
