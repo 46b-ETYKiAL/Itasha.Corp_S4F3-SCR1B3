@@ -508,6 +508,13 @@ impl EditorTab {
     }
 }
 
+/// PA-04/05 — memoized `(lines, words, chars)` document counts for a buffer.
+type DocCounts = (usize, usize, usize);
+/// PA-04/05 — the `count_cache` payload: `(edit_gen, doc_id, counts)`, `None`
+/// until the first `doc_counts_active` walk. Factored into a `type` alias so
+/// the `RefCell` field stays under clippy's `type_complexity` ceiling.
+type CountCache = Option<(u64, crate::grid::DocId, DocCounts)>;
+
 pub struct ScribeApp {
     config: Config,
     /// Resolved config/runtime directory (where `scr1b3.toml`, the session
@@ -569,6 +576,10 @@ pub struct ScribeApp {
     find_in_files_results: Vec<crate::find_in_files::FileMatch>,
     find_in_files_error: Option<String>,
     focus_find_in_files: bool,
+    /// PA-02 keyboard-nav highlight index into the find-in-files results list.
+    /// Up/Down move it; Enter opens the selected result. Mirrors
+    /// `fuzzy_selected`; reset to 0 when a new search runs.
+    find_in_files_selected: usize,
     /// 4-02 — receiver for the off-thread project-find worker. The fs walk +
     /// per-file scan run on a spawned `std::thread`, streaming `FileMatch`
     /// batches back over this channel so the egui frame thread NEVER blocks on a
@@ -646,9 +657,15 @@ pub struct ScribeApp {
     /// the recent-files modal renders this frame. Opened via Ctrl+R, the
     /// command palette, or the toolbar's "Recent" button.
     recent_open: bool,
+    /// PA-03 keyboard-nav highlight index into the recent-files list. Up/Down
+    /// move it; Enter opens the selected entry. Mirrors `fuzzy_selected`.
+    recent_selected: usize,
     /// When true, the recent-folders modal renders this frame (mirrors
     /// `recent_open`). Opened via the command palette / "Open recent folder".
     recent_folders_open: bool,
+    /// PA-03 keyboard-nav highlight index into the recent-folders list. Up/Down
+    /// move it; Enter opens the selected entry. Mirrors `fuzzy_selected`.
+    recent_folders_selected: usize,
     /// Command-palette → caret-command bridges. These commands need the egui
     /// `TextEditState` (only reachable with `ctx`), so the palette (which has
     /// no `ctx`) sets a flag here that `frame_tick` drains, mirroring the `act`
@@ -689,6 +706,12 @@ pub struct ScribeApp {
     goto_symbol_open: bool,
     goto_symbol_query: String,
     focus_goto_symbol: bool,
+    /// PA-01 keyboard-nav highlight index into the go-to-symbol modal's
+    /// filtered symbol list, mirroring `palette_selected`/`fuzzy_selected`.
+    /// Up/Down move it; Enter jumps to the SELECTED symbol (not the first
+    /// match); reset to 0 whenever the filter text changes so the highlight
+    /// never points past the filtered set.
+    goto_symbol_selected: usize,
     /// Open folder for the file-tree sidebar (None = sidebar hidden).
     file_tree_root: Option<PathBuf>,
     /// F-041: keyboard nav state for the sidebar. The struct rebuilds its
@@ -774,6 +797,20 @@ pub struct ScribeApp {
     /// "no recompute on idle frame" test asserts this stays flat across repeated
     /// idle calls. Bumped only on a real recompute; never read in production.
     find_recompute_count: std::cell::Cell<u64>,
+    /// PA-04 / PA-05 — memoized `(lines, words, chars)` document counts for the
+    /// active buffer, keyed by `(edit_gen, doc_id)` — the same `edit_gen`-keyed
+    /// idiom as `spell_cache`/`symbol_cache`/`find_cache`. The status bar and the
+    /// sticky line-number gutter both walked the WHOLE buffer every frame
+    /// (`lines().count()` / `split_whitespace().count()` / `chars().count()`) on
+    /// non-huge files; this caches the three O(n) passes so they recompute ONLY
+    /// on a real edit or a tab switch, not on every idle frame. `doc_id`
+    /// disambiguates tabs that share an `edit_gen`.
+    count_cache: std::cell::RefCell<CountCache>,
+    /// PA-04/05 test instrumentation: counts how many times `doc_counts_active`
+    /// actually re-walked the buffer (a cache MISS). The idle-frame proof test
+    /// asserts this stays flat across repeated calls with no edit. Never read by
+    /// the UI.
+    count_recompute_count: std::cell::Cell<u64>,
     /// Config-file watcher for live-reload (kept alive; events arrive on `cfg_rx`).
     _cfg_watcher: Option<notify::RecommendedWatcher>,
     cfg_rx: Option<std::sync::mpsc::Receiver<()>>,
@@ -1035,6 +1072,7 @@ impl ScribeApp {
             find_in_files_results: Vec::new(),
             find_in_files_error: None,
             focus_find_in_files: false,
+            find_in_files_selected: 0,
             find_in_files_rx: None,
             find_in_files_running: false,
             zen_mode: false,
@@ -1066,7 +1104,9 @@ impl ScribeApp {
             settings_open: false,
             cheatsheet_open: false,
             recent_open: false,
+            recent_selected: 0,
             recent_folders_open: false,
+            recent_folders_selected: 0,
             pending_jump_bracket: false,
             pending_insert_datetime: false,
             pending_dup_selection: false,
@@ -1082,6 +1122,7 @@ impl ScribeApp {
             goto_symbol_open: false,
             goto_symbol_query: String::new(),
             focus_goto_symbol: false,
+            goto_symbol_selected: 0,
             file_tree_root: None,
             file_tree_state: crate::filetree::FileTreeState::default(),
             plugin_manager: crate::plugin_manager::PluginManagerState::default(),
@@ -1104,6 +1145,8 @@ impl ScribeApp {
             last_disk_poll_frame: u64::MAX,
             find_cache: std::cell::RefCell::new(None),
             find_recompute_count: std::cell::Cell::new(0),
+            count_cache: std::cell::RefCell::new(None),
+            count_recompute_count: std::cell::Cell::new(0),
             _cfg_watcher: cfg_watcher,
             cfg_rx: Some(cfg_rx),
             fold_view: false,
@@ -1651,6 +1694,42 @@ impl ScribeApp {
         scopes
     }
 
+    /// PA-04 / PA-05 — memoized `(lines, words, chars)` for the tab at `active`,
+    /// keyed by `(edit_gen, doc_id)`. The status bar (line/word/char readout) and
+    /// the sticky line-number gutter (digit-width) both walked the WHOLE buffer
+    /// every frame; this caches the three `O(n)` passes so they recompute ONLY on
+    /// a real edit or a tab switch (a 1-frame-stale count after a keystroke is
+    /// harmless — `edit_gen` moves on the next frame), not on every idle frame.
+    /// Word/char are 0 for `is_read_only_large()` buffers (the multi-GB rope-
+    /// browser path), exactly as the un-memoized status bar short-circuited.
+    /// Mirrors the `symbol_scopes_for_active` / `spell_count` memo idiom.
+    fn doc_counts_active(&self, active: usize) -> DocCounts {
+        let Some(tab) = self.tabs.get(active) else {
+            return (1, 0, 0);
+        };
+        if let Some((gen, doc, counts)) = self.count_cache.borrow().as_ref() {
+            if *gen == tab.edit_gen && *doc == tab.doc_id {
+                return *counts;
+            }
+        }
+        // Cache miss: re-walk the buffer once, record the re-walk (proof counter),
+        // store keyed on (edit_gen, doc_id).
+        self.count_recompute_count
+            .set(self.count_recompute_count.get().wrapping_add(1));
+        let lines = tab.text.lines().count().max(1);
+        let (words, chars) = if tab.doc.is_read_only_large() {
+            (0, 0)
+        } else {
+            (
+                tab.text.split_whitespace().count(),
+                tab.text.chars().count(),
+            )
+        };
+        let counts = (lines, words, chars);
+        *self.count_cache.borrow_mut() = Some((tab.edit_gen, tab.doc_id, counts));
+        counts
+    }
+
     /// Rebuild the spell engine from the current config — called after the user
     /// changes the spellcheck language or custom dictionary in Settings so the
     /// new dictionary takes effect without a restart.
@@ -1755,6 +1834,7 @@ impl ScribeApp {
             }
             BuiltinCommand::OpenRecentFolder => {
                 self.recent_folders_open = true;
+                self.recent_folders_selected = 0;
             }
             BuiltinCommand::Save => self.save_active(),
             BuiltinCommand::ReportIssue => self.issue_intake.open_fresh(),
@@ -1946,6 +2026,7 @@ impl ScribeApp {
             BuiltinCommand::GoToSymbol => {
                 self.goto_symbol_open = true;
                 self.focus_goto_symbol = true;
+                self.goto_symbol_selected = 0;
                 self.goto_symbol_query.clear();
             }
         }
@@ -3806,7 +3887,16 @@ impl ScribeApp {
                     egui::TopBottomPanel::top("tabs-top")
                         .frame(egui::Frame::default().fill(panel))
                         .show(ctx, |ui| {
-                            ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
+                            // PA-06: wrap the top strip in a HORIZONTAL ScrollArea
+                            // (mirroring the side strips' vertical ScrollArea in
+                            // `draw_side_tab_strip`) so that with many open tabs the
+                            // overflowing tabs stay scroll-reachable instead of
+                            // clipping off the right edge with no affordance.
+                            egui::ScrollArea::horizontal()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| self.draw_tab_strip(ui, accent, muted));
+                                });
                         });
                 }
                 scribe_core::config::TabBarPosition::Bottom => {
@@ -4092,6 +4182,27 @@ impl ScribeApp {
 
         // ---- Wave-5: find in files (project-wide search results pane) ----
         if self.find_in_files_open {
+            // PA-02: read Up/Down/Enter for RESULT navigation here (outside the
+            // panel body), mirroring the command-palette / fuzzy-finder list-nav.
+            // Enter opens the selected result, but ONLY when the query field is
+            // not focused — an Enter in the query field triggers SEARCH (handled
+            // below via `lost_focus()`), so the two Enter meanings never collide.
+            let result_count = self.find_in_files_results.len();
+            let (up, down, enter_pressed) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::Enter),
+                )
+            });
+            if result_count == 0 {
+                self.find_in_files_selected = 0;
+            } else {
+                self.find_in_files_selected =
+                    fuzzy_move_selection(self.find_in_files_selected, result_count, up, down);
+            }
+            let selected = self.find_in_files_selected;
+            let mut open_selected_via_enter = false;
             egui::SidePanel::right("find_in_files")
                 .resizable(true)
                 .default_width(360.0)
@@ -4107,6 +4218,13 @@ impl ScribeApp {
                     if self.focus_find_in_files {
                         r.request_focus();
                         self.focus_find_in_files = false;
+                    }
+                    let query_focused = r.has_focus();
+                    // Enter while the query is NOT focused (e.g. after arrow-key
+                    // navigation moved focus into the results) opens the selected
+                    // result — the keyboard-activate leg the audit (PA-02) flagged.
+                    if enter_pressed && !query_focused && result_count > 0 {
+                        open_selected_via_enter = true;
                     }
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut self.find_in_files_regex, "regex");
@@ -4132,20 +4250,31 @@ impl ScribeApp {
                     ui.separator();
                     let mut open_target: Option<(PathBuf, usize)> = None;
                     egui::ScrollArea::vertical().show(ui, |ui| {
-                        for m in &self.find_in_files_results {
+                        for (idx, m) in self.find_in_files_results.iter().enumerate() {
                             let name = m.path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
                             let label = format!("{}:{}  {}", name, m.line, m.line_text.trim());
-                            if ui
-                                .add(
-                                    egui::Label::new(RichText::new(label).monospace().small())
-                                        .sense(egui::Sense::click()),
-                                )
-                                .clicked()
-                            {
+                            // PA-02: a highlighted selectable row (mirroring the
+                            // palette / fuzzy finder) replaces the bare click-Label,
+                            // so the keyboard-selected result is visibly distinct
+                            // and Up/Down/Enter drive it — not mouse-click only.
+                            let row = ui.selectable_label(
+                                idx == selected,
+                                RichText::new(label).monospace().small(),
+                            );
+                            if row.clicked() {
                                 open_target = Some((m.path.clone(), m.line));
+                            }
+                            if idx == selected && (up || down) {
+                                row.scroll_to_me(Some(egui::Align::Center));
                             }
                         }
                     });
+                    // Enter (query unfocused) opens the keyboard-selected result.
+                    if open_selected_via_enter {
+                        if let Some(m) = self.find_in_files_results.get(selected) {
+                            open_target = Some((m.path.clone(), m.line));
+                        }
+                    }
                     if let Some((path, line)) = open_target {
                         self.open_find_in_files_result(path, line);
                     }
@@ -4475,9 +4604,48 @@ impl ScribeApp {
                 Vec::new()
             };
             let q = self.goto_symbol_query.trim().to_lowercase();
+            // PA-01: filter ONCE up front so keyboard nav (Up/Down/Enter) and the
+            // rendered rows agree on the same set — mirroring the command-palette /
+            // fuzzy-finder "rank once up front" pattern. Each entry carries its
+            // start line + a display string; the index into this Vec is the
+            // selectable highlight.
+            let matches: Vec<(usize, String)> = symbols
+                .iter()
+                .filter(|s| q.is_empty() || s.label.to_lowercase().contains(&q))
+                .map(|s| {
+                    let indent = "  ".repeat(s.depth);
+                    (
+                        s.start_line,
+                        format!("{indent}{}  ·  {}", s.label, s.start_line + 1),
+                    )
+                })
+                .collect();
             let mut chosen: Option<usize> = None;
             let mut want_close = false;
-            let mut first_match: Option<usize> = None;
+            // Read Up/Down/Enter here (outside the window body). A singleline
+            // TextEdit ignores these keys, so this does not fight the query field's
+            // caret — same rationale as the command palette / fuzzy finder.
+            let (up, down, enter) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::Enter),
+                )
+            });
+            if matches.is_empty() {
+                self.goto_symbol_selected = 0;
+                if enter {
+                    want_close = true;
+                }
+            } else {
+                self.goto_symbol_selected =
+                    fuzzy_move_selection(self.goto_symbol_selected, matches.len(), up, down);
+                if enter {
+                    chosen = Some(matches[self.goto_symbol_selected].0);
+                }
+            }
+            let selected = self.goto_symbol_selected;
+            let mut query_changed = false;
             egui::Window::new(
                 RichText::new(format!("{}  go to symbol", egui_phosphor::thin::DIAMOND))
                     .color(accent)
@@ -4497,8 +4665,7 @@ impl ScribeApp {
                     r.request_focus();
                     self.focus_goto_symbol = false;
                 }
-                // Enter jumps to the first match; Esc closes (handled in input).
-                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                query_changed = r.changed();
                 ui.separator();
                 if symbols.is_empty() {
                     ui.label(
@@ -4510,42 +4677,39 @@ impl ScribeApp {
                     egui::ScrollArea::vertical()
                         .max_height(360.0)
                         .show(ui, |ui| {
-                            for s in &symbols {
-                                if !q.is_empty() && !s.label.to_lowercase().contains(&q) {
-                                    continue;
+                            for (idx, (start_line, display)) in matches.iter().enumerate() {
+                                let label = RichText::new(display.clone()).monospace();
+                                let row = ui.selectable_label(idx == selected, label);
+                                if row.clicked() {
+                                    chosen = Some(*start_line);
                                 }
-                                if first_match.is_none() {
-                                    first_match = Some(s.start_line);
+                                // Keep the keyboard-highlighted row in view.
+                                if idx == selected && (up || down) {
+                                    row.scroll_to_me(Some(egui::Align::Center));
                                 }
-                                // Indent by nesting depth; show the 1-based line.
-                                let indent = "  ".repeat(s.depth);
-                                let label = RichText::new(format!(
-                                    "{indent}{}  ·  {}",
-                                    s.label,
-                                    s.start_line + 1
-                                ))
-                                .monospace();
-                                if ui.selectable_label(false, label).clicked() {
-                                    chosen = Some(s.start_line);
-                                }
+                            }
+                            if matches.is_empty() {
+                                ui.label(RichText::new("no match").color(muted).small());
                             }
                         });
                 }
-                if enter {
-                    if let Some(line0) = first_match {
-                        chosen = Some(line0);
-                    } else {
-                        want_close = true;
-                    }
-                }
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new("Enter jumps to the first match · Esc closes")
-                        .color(muted)
-                        .small()
-                        .monospace(),
+                    RichText::new(format!(
+                        "{}{} select · Enter jumps to selection · Esc closes",
+                        egui_phosphor::thin::ARROW_UP,
+                        egui_phosphor::thin::ARROW_DOWN
+                    ))
+                    .color(muted)
+                    .small()
+                    .monospace(),
                 );
             });
+            // A new filter invalidates the old highlight position — reset to the
+            // top so Enter runs the new top match.
+            if query_changed {
+                self.goto_symbol_selected = 0;
+            }
             if let Some(line0) = chosen {
                 self.goto_line(line0 + 1);
                 self.goto_symbol_open = false;
@@ -4563,6 +4727,30 @@ impl ScribeApp {
         if self.recent_open {
             let mut chosen: Option<PathBuf> = None;
             let mut still_open = true;
+            // PA-03: Up/Down move the highlight, Enter opens the selection —
+            // mirroring the fuzzy finder. Read the keys outside the window body.
+            let count = self.config.editor.recent_files.len();
+            let (up, down, enter) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::Enter),
+                )
+            });
+            if count == 0 {
+                self.recent_selected = 0;
+            } else {
+                self.recent_selected = fuzzy_move_selection(self.recent_selected, count, up, down);
+                if enter {
+                    chosen = self
+                        .config
+                        .editor
+                        .recent_files
+                        .get(self.recent_selected)
+                        .cloned();
+                }
+            }
+            let selected = self.recent_selected;
             egui::Window::new(
                 RichText::new(format!(
                     "{}  recent files",
@@ -4587,20 +4775,28 @@ impl ScribeApp {
                     egui::ScrollArea::vertical()
                         .max_height(360.0)
                         .show(ui, |ui| {
-                            for p in &self.config.editor.recent_files {
+                            for (idx, p) in self.config.editor.recent_files.iter().enumerate() {
                                 let label = RichText::new(p.display().to_string()).monospace();
-                                if ui.selectable_label(false, label).clicked() {
+                                let row = ui.selectable_label(idx == selected, label);
+                                if row.clicked() {
                                     chosen = Some(p.clone());
+                                }
+                                if idx == selected && (up || down) {
+                                    row.scroll_to_me(Some(egui::Align::Center));
                                 }
                             }
                         });
                 }
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new("press Ctrl+R or Esc to close")
-                        .color(muted)
-                        .small()
-                        .monospace(),
+                    RichText::new(format!(
+                        "{}{} select · Enter opens · Ctrl+R or Esc to close",
+                        egui_phosphor::thin::ARROW_UP,
+                        egui_phosphor::thin::ARROW_DOWN
+                    ))
+                    .color(muted)
+                    .small()
+                    .monospace(),
                 );
             });
             if let Some(p) = chosen {
@@ -4618,6 +4814,30 @@ impl ScribeApp {
         if self.recent_folders_open {
             let mut chosen: Option<PathBuf> = None;
             let mut still_open = true;
+            // PA-03: Up/Down move the highlight, Enter opens the selection.
+            let count = self.config.editor.recent_folders.len();
+            let (up, down, enter) = ctx.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::Enter),
+                )
+            });
+            if count == 0 {
+                self.recent_folders_selected = 0;
+            } else {
+                self.recent_folders_selected =
+                    fuzzy_move_selection(self.recent_folders_selected, count, up, down);
+                if enter {
+                    chosen = self
+                        .config
+                        .editor
+                        .recent_folders
+                        .get(self.recent_folders_selected)
+                        .cloned();
+                }
+            }
+            let selected = self.recent_folders_selected;
             egui::Window::new(
                 RichText::new(format!(
                     "{}  recent folders",
@@ -4642,20 +4862,28 @@ impl ScribeApp {
                     egui::ScrollArea::vertical()
                         .max_height(360.0)
                         .show(ui, |ui| {
-                            for p in &self.config.editor.recent_folders {
+                            for (idx, p) in self.config.editor.recent_folders.iter().enumerate() {
                                 let label = RichText::new(p.display().to_string()).monospace();
-                                if ui.selectable_label(false, label).clicked() {
+                                let row = ui.selectable_label(idx == selected, label);
+                                if row.clicked() {
                                     chosen = Some(p.clone());
+                                }
+                                if idx == selected && (up || down) {
+                                    row.scroll_to_me(Some(egui::Align::Center));
                                 }
                             }
                         });
                 }
                 ui.add_space(6.0);
                 ui.label(
-                    RichText::new("press Esc to close")
-                        .color(muted)
-                        .small()
-                        .monospace(),
+                    RichText::new(format!(
+                        "{}{} select · Enter opens · Esc to close",
+                        egui_phosphor::thin::ARROW_UP,
+                        egui_phosphor::thin::ARROW_DOWN
+                    ))
+                    .color(muted)
+                    .small()
+                    .monospace(),
                 );
             });
             if let Some(p) = chosen {
@@ -4786,6 +5014,7 @@ impl ScribeApp {
             }
             if want_recent {
                 self.recent_open = true;
+                self.recent_selected = 0;
                 self.welcome_open = false;
             }
             if want_settings {
@@ -4918,6 +5147,9 @@ impl ScribeApp {
                         // the window edge (mirrors the titlebar's 10px lead-in).
                         ui.add_space(8.0);
                         let active = self.active.min(self.tabs.len().saturating_sub(1));
+                        // PA-04: line/word/char counts via the (edit_gen, doc_id)
+                        // memo — recomputed only on edit, not every idle frame.
+                        let (lines, words, chars) = self.doc_counts_active(active);
                         if let Some(t) = self.tabs.get(active) {
                             // F-025 — clickable EOL segment cycles LF → CRLF → CR.
                             if ui
@@ -4959,17 +5191,11 @@ impl ScribeApp {
                             {
                                 open_settings_for = Some("Editor");
                             }
-                            let lines = t.text.lines().count().max(1);
                             // F-024 — word + line counters in the status bar.
-                            // Both are cheap (single-pass split) on the buffers
-                            // SCR1B3 targets (multi-GB files go through the rope
-                            // browser which sets is_read_only_large and short-
-                            // circuits this segment).
-                            let (words, chars) = if t.doc.is_read_only_large() {
-                                (0, 0)
-                            } else {
-                                (t.text.split_whitespace().count(), t.text.chars().count())
-                            };
+                            // Computed via `doc_counts_active` (PA-04 memo): the
+                            // three O(n) passes run once per edit, not per frame.
+                            // Word/char are 0 for is_read_only_large() (multi-GB
+                            // rope-browser) buffers, as before.
                             ui.label(
                                 RichText::new(format!("{lines} ln · {words} w · {chars} ch"))
                                     .color(muted)
@@ -5269,7 +5495,9 @@ impl ScribeApp {
         if show_line_numbers && !self.fold_view && !read_only && !chrome_hidden {
             // Change-bar: refresh the per-line state cache before borrowing it.
             self.ensure_change_states(active);
-            let total = self.tabs[active].text.lines().count().max(1);
+            // PA-05: reuse the PA-04 (edit_gen, doc_id) memo for the gutter
+            // digit-width line count — no extra per-frame O(n) `lines().count()`.
+            let total = self.doc_counts_active(active).0;
             let digits = total.to_string().len().max(2);
             let gutter_w = digits as f32 * (font.size * 0.62) + 16.0;
             let rows = &self.line_gutter;
@@ -6452,3 +6680,6 @@ mod qa_find_scale_tests;
 
 #[cfg(test)]
 mod qa_session_scale_tests;
+
+#[cfg(test)]
+mod appnav_keyboard_tests;
