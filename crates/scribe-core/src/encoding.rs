@@ -24,9 +24,15 @@ impl Default for DetectedEncoding {
 /// Detect the encoding of a byte slice and decode it to a `String` (lossy on
 /// malformed sequences so the editor never refuses to open a file).
 pub fn decode(bytes: &[u8]) -> (String, DetectedEncoding) {
-    // BOM sniff first — authoritative when present.
+    // BOM sniff first — authoritative when present. We strip the leading marker
+    // BOM ourselves via `for_bom`'s reported length, then decode the remainder
+    // WITHOUT further BOM handling. `Encoding::decode` would BOM-sniff the slice
+    // a SECOND time and erase a content U+FEFF that legitimately follows the
+    // marker (a double byte-order-mark, where the first is the marker and the
+    // second is content), so we use `decode_without_bom_handling` to keep the
+    // strip count at exactly one.
     if let Some((enc, bom_len)) = Encoding::for_bom(bytes) {
-        let (text, _, _) = enc.decode(&bytes[bom_len..]);
+        let (text, _) = enc.decode_without_bom_handling(&bytes[bom_len..]);
         return (
             text.into_owned(),
             DetectedEncoding {
@@ -83,7 +89,12 @@ pub fn decode_with(bytes: &[u8], enc: &DetectedEncoding) -> String {
     } else {
         bytes
     };
-    let (text, _, _) = encoding.decode(body);
+    // Decode the body WITHOUT BOM handling: when `had_bom` is set we have already
+    // stripped exactly one marker BOM above, so a content U+FEFF that follows it
+    // must survive (no second strip). When `had_bom` is false we decode literally,
+    // so a leading content U+FEFF is never mistaken for a marker. `Encoding::decode`
+    // would BOM-sniff again in both branches and erode a content U+FEFF.
+    let (text, _) = encoding.decode_without_bom_handling(body);
     text.into_owned()
 }
 
@@ -334,6 +345,68 @@ mod tests {
         };
         assert_eq!(&encode_checked("Hi", &le).0[..2], &[0xFF, 0xFE]);
         assert_eq!(&encode_checked("Hi", &be).0[..2], &[0xFE, 0xFF]);
+    }
+
+    #[test]
+    fn double_bom_content_char_is_preserved_and_redetect_is_stable() {
+        // REGRESSION (double-BOM): the FIRST U+FEFF is the encoding MARKER; a
+        // SECOND U+FEFF is CONTENT. Detection must strip exactly one leading
+        // marker BOM and preserve every subsequent U+FEFF, and a re-detect of
+        // the re-encoded bytes must be IDEMPOTENT (no further U+FEFF eroded per
+        // pass). This mirrors the `bom_tagged_roundtrips_redetect_stably`
+        // proptest counterexample s = "\u{feff}\u{feff}".
+        for name in ["UTF-16LE", "UTF-16BE", "UTF-8"] {
+            let tagged = DetectedEncoding {
+                name: name.to_string(),
+                had_bom: true,
+            };
+            let s = "\u{feff}\u{feff}"; // marker + one content U+FEFF
+            let (file_bytes, lossy) = encode_checked(s, &tagged);
+            assert!(!lossy, "{name} represents U+FEFF");
+
+            // First detect: the marker BOM is consumed, the content U+FEFF stays.
+            let (text1, e1) = decode(&file_bytes);
+            assert!(e1.had_bom, "{name}: a BOM-tagged file detects had_bom");
+            assert_eq!(
+                text1, s,
+                "{name}: the content U+FEFF after the marker BOM must survive"
+            );
+
+            // Re-encode under the detected encoding, then re-detect: stable.
+            let (reencoded, lossy2) = encode_checked(&text1, &e1);
+            assert!(!lossy2);
+            let (text2, e2) = decode(&reencoded);
+            assert!(
+                e2.had_bom,
+                "{name}: the re-emitted marker BOM detects again"
+            );
+            assert_eq!(text1, text2, "{name}: re-detection must be idempotent");
+        }
+    }
+
+    #[test]
+    fn decode_with_preserves_content_bom_after_marker() {
+        // decode_with must NOT double-strip: with had_bom=true it skips exactly
+        // one leading marker BOM and decodes the remainder LITERALLY, so a
+        // content U+FEFF immediately after the marker survives.
+        let enc = DetectedEncoding {
+            name: "UTF-16LE".to_string(),
+            had_bom: true,
+        };
+        let s = "\u{feff}data"; // one content U+FEFF, then "data"
+                                // encode prepends the marker BOM, then the body "\u{feff}data", so the
+                                // bytes are [marker BOM] + [content U+FEFF] + ['d','a','t','a'].
+        let bytes = encode(s, &enc);
+        assert_eq!(decode_with(&bytes, &enc), s);
+
+        // had_bom=false: a leading content U+FEFF is NOT mistaken for a BOM.
+        let enc_no_bom = DetectedEncoding {
+            name: "UTF-8".to_string(),
+            had_bom: false,
+        };
+        let mut u8_bytes = vec![0xEF, 0xBB, 0xBF];
+        u8_bytes.extend_from_slice("x".as_bytes());
+        assert_eq!(decode_with(&u8_bytes, &enc_no_bom), "\u{feff}x");
     }
 
     #[test]
