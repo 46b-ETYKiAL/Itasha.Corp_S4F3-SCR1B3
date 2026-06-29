@@ -1,0 +1,110 @@
+name: egui 0.35 unblock watch
+
+# Weekly crates.io poll that opens a tracking issue the moment the egui 0.35
+# migration becomes possible. The egui UI stack (egui / eframe / egui_tiles /
+# egui_kittest / egui-phosphor) moves in LOCKSTEP, and egui_tiles 0.16 needs
+# egui 0.35 — but egui-phosphor (our icon font) has no egui-0.35 release yet
+# (latest 0.12 requires egui ^0.34), so the bump is upstream-BLOCKED and the
+# `ignore` block in .github/dependabot.yml holds it back. This watch flips that
+# to an actionable issue as soon as an egui-phosphor version that allows egui
+# 0.35 is published. Until then it is a quiet no-op (success, no issue).
+
+on:
+  schedule:
+    - cron: "23 9 * * 4" # Thursday 09:23 UTC (off-minute; spread from the other scheduled jobs)
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: egui-035-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: Poll crates.io for egui-phosphor egui-0.35 support
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Check egui-phosphor versions for an egui 0.35-compatible release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          UA="scr1b3-egui035-watch (github actions)"
+          ISSUE_TITLE="egui 0.35 migration is now UNBLOCKED (egui-phosphor shipped)"
+
+          crate=$(curl -fsS -H "User-Agent: $UA" \
+            "https://crates.io/api/v1/crates/egui-phosphor" || true)
+          if [ -z "$crate" ]; then
+            echo "::warning::crates.io unreachable this run; will retry next week."
+            exit 0
+          fi
+
+          # Newest-first version list (skip yanked).
+          versions=$(printf '%s' "$crate" | jq -r '.versions[] | select(.yanked==false) | .num')
+
+          hit_ver=""
+          hit_req=""
+          for v in $versions; do
+            deps=$(curl -fsS -H "User-Agent: $UA" \
+              "https://crates.io/api/v1/crates/egui-phosphor/$v/dependencies" || true)
+            [ -z "$deps" ] && continue
+            # The `egui` normal (non-dev) dependency requirement for this version.
+            req=$(printf '%s' "$deps" | jq -r '
+              .dependencies[] | select(.crate_id=="egui" and .kind=="normal") | .req' | head -1)
+            # A version "supports egui 0.35" iff its req admits 0.35.x.
+            case "$req" in
+              *0.35*) hit_ver="$v"; hit_req="$req"; break ;;
+            esac
+          done
+
+          if [ -z "$hit_ver" ]; then
+            latest=$(printf '%s' "$crate" | jq -r '.crate.max_version')
+            echo "Still BLOCKED — newest egui-phosphor is $latest, none allow egui 0.35 yet."
+            exit 0
+          fi
+
+          echo "UNBLOCKED — egui-phosphor $hit_ver requires egui '$hit_req' (allows 0.35)."
+
+          # Idempotent: only open the tracking issue once.
+          existing=$(gh issue list --repo "$REPO" --state all --search "in:title \"$ISSUE_TITLE\"" \
+            --json number --jq 'length' || echo 0)
+          if [ "${existing:-0}" != "0" ]; then
+            echo "Tracking issue already exists — nothing to do."
+            exit 0
+          fi
+
+          body=$(cat <<EOF
+          egui-phosphor **$hit_ver** now requires \`egui $hit_req\` (allows **0.35**), so the
+          egui 0.34 → 0.35 ecosystem migration that \`egui_tiles 0.16\` needs is no longer
+          blocked upstream.
+
+          ### What this unblocks
+          - Dependabot PR #263 (egui_tiles 0.15 → 0.16) is finally resolvable.
+
+          ### Migration checklist (coordinated — the egui stack moves in lockstep)
+          - [ ] Bump in \`Cargo.toml\`: \`egui\`, \`eframe\` → 0.35; \`egui_tiles\` → 0.16; \`egui-phosphor\` → $hit_ver
+          - [ ] Bump dev-deps: \`egui_kittest\` → 0.35 (+ the matching \`wgpu\` if it moved)
+          - [ ] Fix the egui 0.34 → 0.35 API breaks across ~50 source files (start with \`crates/scribe-app/src/grid.rs\` \`egui_tiles::Behavior\` impl)
+          - [ ] \`cargo build --workspace\` + \`cargo test\` green; \`cargo vet\` (trust/certify the new egui crates); \`cargo fmt\` + \`cargo clippy --all-targets\`
+          - [ ] **Full visual re-QA** (a framework bump can shift rendering) — \`native_gui_render_qa\` / the \`visual_qa\` harness
+          - [ ] Remove the \`egui\`/\`eframe\`/\`egui_tiles\`/\`egui_kittest\`/\`egui-phosphor\` \`ignore\` block from \`.github/dependabot.yml\`
+          - [ ] Cut a release once green
+
+          _Filed automatically by \`.github/workflows/egui-035-watch.yml\`._
+          EOF
+          )
+
+          gh issue create --repo "$REPO" \
+            --title "$ISSUE_TITLE" \
+            --label "dependencies" \
+            --body "$body"
