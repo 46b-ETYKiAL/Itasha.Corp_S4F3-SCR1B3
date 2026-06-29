@@ -664,6 +664,41 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    // --- Documented surviving-mutant dispositions (cargo-mutants) -------------
+    //
+    // The mutants below are intentionally NOT killed; each is either a true
+    // equivalent (no observable behaviour change) or only distinguishable by an
+    // input that is impractical/forbidden in a unit test. Recorded here so a
+    // future mutants run can see the rationale rather than re-deriving it.
+    //
+    // MUTANT-EQUIVALENT: net.rs:414 (`INITIAL_RESERVE = 1024 * 1024`, `*`→`+`/`/`)
+    //   — only a `Vec::with_capacity` HINT; the Vec grows as bytes arrive, so the
+    //   downloaded bytes and progress ticks are byte-for-byte identical. No
+    //   observable difference to assert on.
+    // MUTANT-EQUIVALENT: net.rs:416 (`chunk = [0u8; 64 * 1024]`, `*`→`+`) — only
+    //   the per-read chunk size; the streaming loop reads to EOF regardless, so
+    //   the assembled body and the (0,total)/(total,total) progress contract are
+    //   unchanged (more/fewer iterations, same output).
+    // IMPRACTICAL (512 MiB boundary): net.rs:376 (`MAX_DOWNLOAD_BYTES + 1`,
+    //   `+`→`-`/`*`), net.rs:379 (`buf.len() > MAX`, `>`→`==`/`>=`), net.rs:430
+    //   (`downloaded > MAX`, `>`→`==`/`>=`) — distinguishing these requires a
+    //   body of EXACTLY ~512 MiB ± 1 over a loopback socket, which is infeasible
+    //   for a unit test. The const VALUE itself is pinned (the `*`→`+` mutants at
+    //   line 46) by `download_small_accepts_a_body_above_the_mutated_cap`, and
+    //   the cap's *presence* is exercised by the extract-path bomb test; only the
+    //   exact > / >= / == boundary at 512 MiB is out of reach.
+    // NETWORK-ONLY: net.rs:300 (`fetch_releases -> Ok(vec![])`) — `fetch_releases`
+    //   is the thin wrapper that builds the hard-coded `api.github.com` URL and
+    //   delegates to `fetch_releases_at`; its delegation is unobservable offline
+    //   (we are forbidden to hit the network). The actual parse-returns-releases
+    //   behaviour IS covered by `fetch_releases_at_parses_a_release_list_*`.
+    // TEST/FUZZ-SEAM (no observable output): net.rs:523 (`fuzz_extract_binary`
+    //   `-> ()`) — a `#[cfg(test, fuzzing)]` harness that extracts into a temp dir
+    //   and removes it, returning `()` either way; the libFuzzer target asserts
+    //   only "never panics". The no-op mutant produces the same `()` and the same
+    //   (removed) filesystem state, so there is nothing to assert. The underlying
+    //   `extract_binary` safety caps are covered by the dedicated unit tests.
+
     fn asset(name: &str, url: &str) -> RawAsset {
         RawAsset {
             name: name.to_string(),
@@ -1027,6 +1062,87 @@ mod tests {
             let mode = fs::metadata(&extracted).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o755);
         }
+    }
+
+    /// Mutation guard for the `MAX_EXTRACTED_BINARY_BYTES = 512 * 1024 * 1024`
+    /// const (the `*` → `+` / `/` mutants at line 444): a real binary payload of
+    /// 2 MiB — far under the genuine 512 MiB cap but far OVER every mutated value
+    /// of that const — must extract successfully. The mutated consts collapse to
+    /// ~1 MiB / ~513 KiB / 512 bytes / 0, so the `written >= MAX_EXTRACTED_*`
+    /// guard would (wrongly) reject the 2 MiB binary. The existing bomb test
+    /// references the const symbolically (`MAX + 1`), so it tracks the mutated
+    /// value and can't catch this — a fixed 2 MiB payload can.
+    #[test]
+    fn extract_binary_accepts_a_binary_above_the_mutated_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_name = if cfg!(windows) {
+            "scr1b3.exe"
+        } else {
+            "scr1b3"
+        };
+        // 2 MiB payload: under the real 512 MiB cap, over every mutated cap.
+        let payload = vec![0xABu8; 2 * 1024 * 1024];
+
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, bin_name, &payload[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let archive_bytes = gz.finish().unwrap();
+
+        let extracted = extract_binary(&archive_bytes, dir.path())
+            .expect("a 2 MiB binary is under the real cap and must extract");
+        assert_eq!(
+            fs::read(&extracted).unwrap().len(),
+            payload.len(),
+            "the whole 2 MiB binary must be written (not truncated by a shrunken cap)"
+        );
+    }
+
+    /// Mutation guard for `set_executable` on unix (`-> Ok(())` mutant at line
+    /// 544, which would skip the `chmod 0o755`). `extract_binary` writes the
+    /// output via `fs::File::create` (umask-default mode, typically 0o644) and
+    /// does NOT apply the tar header's mode — only `set_executable` sets the
+    /// exec bits. So on unix the extracted binary's mode is 0o755 IFF
+    /// `set_executable` actually ran. This pins that explicitly (the roundtrip
+    /// test also asserts it, but this isolates the exec-bit contract so the
+    /// mutant cannot hide). No-op on non-unix (the const-fn returns Ok there).
+    #[cfg(unix)]
+    #[test]
+    fn extracted_binary_is_made_executable_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let payload = b"fake scr1b3";
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            // Deliberately NON-executable header mode: proves the exec bit comes
+            // from set_executable, not from the tar header (extract_binary uses
+            // File::create + copy, so the header mode is never applied anyway).
+            header.set_mode(0o600);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "scr1b3", &payload[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let archive_bytes = gz.finish().unwrap();
+        let extracted = extract_binary(&archive_bytes, dir.path()).unwrap();
+        let mode = fs::metadata(&extracted).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o755,
+            "set_executable must have applied 0o755 (the -> Ok(()) mutant skips the chmod)"
+        );
     }
 
     /// Defense-in-depth: a tarball whose `scr1b3` entry is a SYMLINK (not a
@@ -1465,6 +1581,25 @@ mod tests {
         let req = server.captured();
         // Even the sidecar download carries the generic, identifier-free UA.
         assert_eq!(req.header("User-Agent").as_deref(), Some(USER_AGENT));
+    }
+
+    /// Mutation guard for the `MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024` const
+    /// (the `*` → `+` mutants at line 46): a body comfortably larger than every
+    /// mutated value of that const, yet far below the real 512 MiB cap, must
+    /// download successfully. The mutated consts collapse to roughly 1 MiB
+    /// (`512 + 1024*1024`) or ~513 KiB (`512*1024 + 1024`); a 2 MiB body is over
+    /// both but well under 512 MiB, so the original returns the full body while
+    /// the mutant trips the `buf.len() > MAX_DOWNLOAD_BYTES` cap and errors.
+    #[test]
+    fn download_small_accepts_a_body_above_the_mutated_cap() {
+        // 2 MiB — over the collapsed mutant caps (~0.5–1 MiB), under 512 MiB.
+        let body = vec![b'q'; 2 * 1024 * 1024];
+        let server = one_shot("200 OK", &[], body.clone());
+        let url = format!("{}/big.sha256", server.url);
+        let got = download_small(&url)
+            .expect("a 2 MiB body is under the real 512 MiB cap and must download");
+        assert_eq!(got.len(), body.len());
+        let _ = server.captured();
     }
 
     #[test]

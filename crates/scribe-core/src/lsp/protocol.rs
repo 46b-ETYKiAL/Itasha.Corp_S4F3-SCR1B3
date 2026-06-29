@@ -253,4 +253,82 @@ mod tests {
         let err = read_message(&mut cur).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
+
+    #[test]
+    fn message_and_header_limits_are_the_exact_intended_sizes() {
+        // Pin the two byte-limit constants to their EXACT computed values. The
+        // limits are computed as products (`64 * 1024 * 1024`, `64 * 1024`); a
+        // `*` -> `+` mutation collapses 64 MiB to ~2 KiB (or 64 KiB to ~1 KiB),
+        // which would wrongly reject ordinary full-document LSP syncs. Known-answer
+        // exact equality kills every arithmetic mutation on these expressions.
+        assert_eq!(
+            MAX_MESSAGE_BYTES, 67_108_864,
+            "64 MiB, computed as 64*1024*1024"
+        );
+        assert_eq!(MAX_HEADER_BYTES, 65_536, "64 KiB, computed as 64*1024");
+    }
+
+    #[test]
+    fn read_message_accepts_a_header_section_of_exactly_the_limit() {
+        // EXACT upper boundary of the header guard (`header_bytes > MAX_HEADER_BYTES`).
+        // A header section whose total accumulated length is EXACTLY
+        // MAX_HEADER_BYTES must be ACCEPTED (the guard is strict `>`, not `>=`).
+        // The guard sums EVERY line read, including the Content-Length line and the
+        // blank terminator, so we size ONE padding header line to make that grand
+        // total land precisely on the limit. A `>=` mutation would reject this
+        // legitimate at-limit header.
+        let body = b"{}";
+        let cl_line = format!("Content-Length: {}\r\n", body.len()).into_bytes();
+        let terminator: &[u8] = b"\r\n";
+        // One custom pad line "X-Pad: <zzz...>\r\n". Choose its value length so the
+        // total header bytes == MAX_HEADER_BYTES exactly.
+        let pad_prefix: &[u8] = b"X-Pad: ";
+        let pad_suffix: &[u8] = b"\r\n";
+        let fixed = cl_line.len() + terminator.len() + pad_prefix.len() + pad_suffix.len();
+        let value_len = MAX_HEADER_BYTES - fixed;
+        let mut pad_line = pad_prefix.to_vec();
+        pad_line.extend(std::iter::repeat_n(b'z', value_len));
+        pad_line.extend_from_slice(pad_suffix);
+        let mut bytes = pad_line;
+        bytes.extend_from_slice(&cl_line);
+        bytes.extend_from_slice(terminator);
+        // Sanity: the header section (everything before the body) is exactly the limit.
+        assert_eq!(bytes.len(), MAX_HEADER_BYTES);
+        bytes.extend_from_slice(body);
+        let mut cur = Cursor::new(bytes);
+        let parsed = read_message(&mut cur)
+            .expect("a header section of exactly the limit must be accepted, not errored")
+            .expect("a valid framed message follows");
+        assert_eq!(parsed, json!({}));
+    }
+
+    #[test]
+    fn read_message_accepts_a_body_of_exactly_the_max_message_size() {
+        // EXACT upper boundary of the message-size guard (`len > MAX_MESSAGE_BYTES`).
+        // A declared Content-Length of EXACTLY MAX_MESSAGE_BYTES must be ACCEPTED
+        // (strict `>`, not `>=`). We frame a JSON string body padded to exactly
+        // MAX_MESSAGE_BYTES bytes; read_message must parse it rather than reject it.
+        // A `>=` mutation would reject this legitimate at-limit message.
+        let overhead = br#""""#.len(); // the two quote chars of a JSON string
+        let pad = MAX_MESSAGE_BYTES - overhead;
+        let mut body = Vec::with_capacity(MAX_MESSAGE_BYTES);
+        body.push(b'"');
+        body.extend(std::iter::repeat_n(b'a', pad));
+        body.push(b'"');
+        assert_eq!(
+            body.len(),
+            MAX_MESSAGE_BYTES,
+            "body is exactly at the limit"
+        );
+        let mut bytes = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        bytes.extend_from_slice(&body);
+        let mut cur = Cursor::new(bytes);
+        let parsed = read_message(&mut cur)
+            .expect("a body of exactly MAX_MESSAGE_BYTES must be accepted, not rejected")
+            .expect("one framed message");
+        assert!(
+            parsed.is_string(),
+            "the at-limit body round-trips as a JSON string"
+        );
+    }
 }

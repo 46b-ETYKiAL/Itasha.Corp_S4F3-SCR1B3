@@ -80,6 +80,25 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    // --- Documented surviving-mutant dispositions (cargo-mutants) -------------
+    //
+    // UNTESTABLE WITHOUT A PRODUCTION SEAM (not equivalent — real gaps):
+    //   apply.rs:57 (`replace_running_executable -> Ok(Default::default())`) and
+    //   apply.rs:69 (`delete !` in `rollback_running_executable`).
+    //
+    // Both functions operate on the CURRENTLY-RUNNING executable: they call
+    // `std::env::current_exe()` and `self_replace::self_replace(...)`, which
+    // OVERWRITES the running test-runner binary itself. Exercising either to the
+    // point where the mutation becomes observable (the backup `fs::copy` in 57,
+    // or the existing-backup → self_replace path in 69) would require actually
+    // swapping the test process's own binary mid-run — destructive and
+    // non-deterministic, and unsafe to do in CI. Distinguishing the mutants
+    // without that side effect would require injecting the exe path + the swap
+    // function (dependency injection in production code), which is out of scope
+    // for this test-only change. The pure, side-effect-free halves ARE covered:
+    // `backup_path_for` (the sibling-path math) and the missing-backup fail-closed
+    // guard (`rollback_running_without_backup_errors`) are both tested below.
+
     fn write(path: &Path, content: &[u8]) {
         let mut f = fs::File::create(path).unwrap();
         f.write_all(content).unwrap();

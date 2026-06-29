@@ -138,4 +138,30 @@ mod tests {
         let diskish = PathBuf::from(r"C:\server\share\f.txt");
         assert_ne!(normalize_for_compare(&unc), normalize_for_compare(&diskish));
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_verbatim_unc_detected_via_forward_slash_too() {
+        // The verbatim-UNC detector is `rest.starts_with("UNC\\") || starts_with("UNC/")`.
+        // The `||` is load-bearing: a `\\?\` prefix can be followed by EITHER
+        // separator after the literal "UNC". This pins the OR against an `&&`
+        // mutation — with `&&`, a `UNC/`-form prefix (which does NOT start with
+        // `UNC\`) would fail the guard, get its `\\?\` STRIPPED, and be wrongly
+        // conflated with a disk path. Under correct `||`, the `\\?\` is retained
+        // so the verbatim-UNC key stays distinct from the disk-path key.
+        let unc_fwd = PathBuf::from(r"\\?\UNC/server/share/f.txt");
+        let key = normalize_for_compare(&unc_fwd);
+        // The `\\?\` verbatim marker must survive (folded to `\\?\` after the
+        // separator pass) — it must NOT have been stripped to a bare `unc\...`.
+        assert!(
+            key.starts_with(r"\\?\"),
+            "a forward-slash verbatim-UNC must keep its \\\\?\\ marker, got: {key}"
+        );
+        // It must equal the back-slash verbatim-UNC form for the same target (both
+        // are the SAME file), and stay distinct from a disk-path key.
+        let unc_back = PathBuf::from(r"\\?\UNC\server\share\f.txt");
+        assert_eq!(key, normalize_for_compare(&unc_back));
+        let diskish = PathBuf::from(r"C:\unc\server\share\f.txt");
+        assert_ne!(key, normalize_for_compare(&diskish));
+    }
 }

@@ -292,6 +292,33 @@ mod tests {
     }
 
     #[test]
+    fn backup_name_pins_exact_fnv1a_hash() {
+        // Known-answer test that pins the FNV-1a 64-bit hash byte-for-byte.
+        // A saved file's backup name is `f{hash:016x}.bak`; the hash is a STABLE
+        // identity key reused across sessions, so a change to the hash function
+        // (constant, fold operator, or seed) would silently orphan every existing
+        // backup. Vectors computed from the canonical FNV-1a-64 reference.
+        // FNV-1a("a")              = 0xaf63dc4c8601ec8c
+        // FNV-1a("test")           = 0xf9e6e6ef197c2b25
+        // FNV-1a("/proj/notes.txt")= 0xddc29c6c66027a15
+        assert_eq!(backup_name(Some("a"), 0), "faf63dc4c8601ec8c.bak");
+        assert_eq!(backup_name(Some("test"), 7), "ff9e6e6ef197c2b25.bak");
+        assert_eq!(
+            backup_name(Some("/proj/notes.txt"), 3),
+            "fddc29c6c66027a15.bak",
+        );
+        // The index is ignored for a saved path (hash-derived name), so two
+        // different indices for the SAME path yield the SAME, exact name. This
+        // pins that the `^=` fold (not `|=`/`&=`) and the literal seed are intact:
+        // a `0`/`1` return or a different operator changes every digit above.
+        assert_eq!(
+            backup_name(Some("a"), 99),
+            "faf63dc4c8601ec8c.bak",
+            "the saved-path name is the hash, never the seed or a constant",
+        );
+    }
+
+    #[test]
     fn backup_roundtrip_and_delete() {
         let dir = tempdir().unwrap();
         let bdir = backup_dir(dir.path());

@@ -1606,6 +1606,482 @@ mod tests {
         assert_eq!(r.to_string(), "aXYd");
         assert_eq!(st.selection(), 1..3);
     }
+
+    // ---- Mutation-kill tests (targeted boundary/arithmetic pins) ----------
+    //
+    // Each test below pins the EXACT boundary or value a surviving mutant in
+    // `editing.rs` would break. The comment on each names the mutation it kills.
+
+    /// KILLS line 182 `delete ! in move_vertical` (`if !select { anchor = next }`).
+    /// Without the `!`, the anchor is set even when extending a selection — and,
+    /// crucially, NOT collapsed on a plain (non-select) move, leaving a phantom
+    /// selection. Pin: a non-select vertical move must collapse (anchor==cursor).
+    #[test]
+    fn move_vertical_without_select_collapses_anchor() {
+        let mut r = rope("abc\ndef\n");
+        // Start with a stale anchor != cursor, then move down WITHOUT selecting.
+        let mut st = EditState {
+            anchor: 0,
+            cursor: 1, // line0 col1
+            goal_col: None,
+        };
+        move_vertical(&mut r, &mut st, 1, false); // down, not selecting
+                                                  // The anchor must follow the caret → no selection remains.
+        assert!(
+            !st.has_selection(),
+            "non-select vertical move must collapse the anchor, got anchor={} cursor={}",
+            st.anchor,
+            st.cursor
+        );
+        assert_eq!(st.anchor, st.cursor);
+        // And a SELECT move must NOT collapse (keeps the anchor put).
+        let mut st2 = EditState::at(1);
+        move_vertical(&mut r, &mut st2, 1, true);
+        assert!(st2.has_selection(), "select move must keep a selection");
+        assert_eq!(st2.anchor, 1, "select move leaves the anchor where it was");
+    }
+
+    /// KILLS line 303 `> -> >=` in `normalize_carets` (`run.anchor > run.cursor`).
+    /// The run primary here is COLLAPSED (anchor==cursor==0). With `>` it is
+    /// forward (reversed=false) → merged caret is forward (cursor at union end).
+    /// With `>=`, a collapsed primary reads as reversed → cursor lands at the
+    /// union START instead. Pin the forward orientation of the merged caret.
+    #[test]
+    fn normalize_carets_collapsed_primary_merges_forward_not_reversed() {
+        // A: collapsed at 0 → selection [0,0). B: forward [0,4).
+        // Sorted by (start,end): A=(0,0) first, then B=(0,4). B absorbs into A.
+        let mut carets = vec![EditState::at(0), sel(0, 4)];
+        normalize_carets(&mut carets);
+        assert_eq!(carets.len(), 1);
+        assert_eq!(carets[0].selection(), 0..4);
+        // Forward orientation: cursor at the union END, anchor at the START.
+        assert_eq!(
+            carets[0].cursor, 4,
+            "collapsed primary (anchor==cursor) must merge FORWARD (cursor at \
+             union end), not reversed"
+        );
+        assert_eq!(carets[0].anchor, 0);
+        assert!(carets[0].anchor <= carets[0].cursor);
+    }
+
+    /// KILLS line 336 `>= -> <` in `add_caret_vertical` (`if dir >= 0`).
+    /// For `dir == 1` (down) the reference is `max(cursors)`; the `<` mutant
+    /// would pick `min(cursors)` instead, landing the new caret on the wrong
+    /// line/column. Two carets on different lines+columns make the choice
+    /// observable.
+    #[test]
+    fn add_caret_vertical_down_uses_max_cursor_reference() {
+        // "ab\nabcd\nef\n": line0 0..3, line1 3..8, line2 8..11.
+        let r = rope("ab\nabcd\nef\n");
+        let mut carets = vec![
+            EditState::at(1), // line0 col1
+            EditState::at(6), // line1 col3
+        ];
+        assert!(add_caret_vertical(&r, &mut carets, 1));
+        // Correct: reference = max(1,6)=6 (line1 col3) → down to line2 col3,
+        // clamped to "ef" len 2 → idx 10. The `<` mutant would use min(1,6)=1
+        // (line0 col1) → down to line1 col1 → idx 4.
+        assert!(
+            carets.iter().any(|c| c.cursor == 10),
+            "down-add must use the MAX-cursor reference (idx 10), carets={:?}",
+            carets.iter().map(|c| c.cursor).collect::<Vec<_>>()
+        );
+        assert!(
+            !carets.iter().any(|c| c.cursor == 4),
+            "must NOT use the min-cursor reference (idx 4)"
+        );
+    }
+
+    /// KILLS line 347 `< -> ==` and `< -> <=` (`if target < 0`).
+    /// Going UP from line 1 yields `target == 0` (a valid line). The `==0` and
+    /// `<=0` mutants both treat target==0 as out-of-range and refuse the add.
+    /// Pin: an up-add landing exactly on line 0 must succeed.
+    #[test]
+    fn add_caret_vertical_up_to_line_zero_target_is_valid() {
+        let r = rope("abcd\nefgh\nijkl\n"); // line0 0..5, line1 5..10, line2 10..15
+        let mut carets = vec![EditState::at(7)]; // line1 col2
+        assert!(
+            add_caret_vertical(&r, &mut carets, -1),
+            "up-add to line 0 (target==0) must be a valid add"
+        );
+        assert_eq!(carets.len(), 2);
+        // New caret on line0 col2 → idx 2.
+        assert!(carets.iter().any(|c| c.cursor == 2));
+    }
+
+    /// Pins the down-past-last-line refusal. Going DOWN from the LAST line
+    /// yields `target == last_line + 1`, out of range → the add is refused.
+    ///
+    /// MUTANT-EQUIVALENT: line 347:19 `|| -> &&` (`target < 0 && target as usize
+    /// > last_line`). `A || B` and `A && B` differ only when exactly one of A,B
+    /// is true. Here A=`target<0`, B=`target>last_line`. A-true-B-false is
+    /// impossible (a negative target casts to `usize::MAX`, always > last_line,
+    /// so B is true whenever A is). The only differing case is A-false-B-true
+    /// (this down-past-last case): correct refuses; the `&&` mutant proceeds.
+    /// But when it proceeds, `char_at` clamps the out-of-range target back to
+    /// `last_line` at the reference's own column — exactly the reference caret's
+    /// position — so the downstream `already_covered` guard refuses the add
+    /// anyway. No input distinguishes `||` from `&&` here → equivalent. (The
+    /// `> -> ==` and `> -> >=` mutants at 347:38 ARE killed — by
+    /// `add_caret_vertical_down_onto_last_line_succeeds` below.)
+    #[test]
+    fn add_caret_vertical_down_past_last_line_is_refused() {
+        // "ab\ncd\n": line0 0..3, line1 3..6, line2 (empty) 6..6 → last_line==2.
+        // Put the reference ON the last line so target = 2 + 1 = 3 > last_line.
+        let r = rope("ab\ncd\n");
+        let mut carets_last = vec![EditState::at(6)]; // line2 (the trailing empty line)
+        assert!(
+            !add_caret_vertical(&r, &mut carets_last, 1),
+            "down-add from the last line (target>last_line) must be refused"
+        );
+        assert_eq!(carets_last.len(), 1);
+    }
+
+    /// KILLS line 347 `> -> >=` (`target as usize > last_line`).
+    /// A down-add landing EXACTLY on the last line (`target == last_line`) is
+    /// valid. The `>=` mutant rejects the equality boundary. Pin: the add
+    /// succeeds when target==last_line.
+    #[test]
+    fn add_caret_vertical_down_onto_last_line_succeeds() {
+        // "ab\ncd" (NO trailing newline): line0 0..3, line1 3..5 → last_line==1.
+        let r = rope("ab\ncd");
+        let mut carets = vec![EditState::at(1)]; // line0 col1
+        assert!(
+            add_caret_vertical(&r, &mut carets, 1),
+            "down-add onto the last line (target==last_line) must succeed"
+        );
+        assert_eq!(carets.len(), 2);
+        assert!(carets.iter().any(|c| line_col(&r, c.cursor) == (1, 1)));
+    }
+
+    /// KILLS line 364 `< -> <=` (`sel.start <= at && at < sel.end`).
+    /// A new caret landing EXACTLY on the END of an existing selection is NOT
+    /// covered (`[start, end)` is half-open). The `<=` mutant treats `at ==
+    /// sel.end` as covered and wrongly refuses the add. Pin: an add landing on
+    /// sel.end must succeed.
+    #[test]
+    fn add_caret_vertical_landing_on_selection_end_is_not_covered() {
+        // "abcd\nefgh\nijkl\n": line0 0..5, line1 5..10, line2 10..15.
+        // Caret B: reversed selection [2,7) with cursor at line0 col2 (idx 2).
+        // Caret A: collapsed at idx 0.
+        let r = rope("abcd\nefgh\nijkl\n");
+        let mut carets = vec![
+            EditState {
+                anchor: 7, // line1 col2 → selection END
+                cursor: 2, // line0 col2 → DOWN reference (max cursor = 2)
+                goal_col: None,
+            },
+            EditState::at(0),
+        ];
+        // Down reference = max(2,0)=2 (line0 col2) → target line1 col2 = idx 7,
+        // which equals B's sel.end (exclusive) → NOT covered → add succeeds.
+        assert!(
+            add_caret_vertical(&r, &mut carets, 1),
+            "a caret landing on the EXCLUSIVE end of a selection is not covered"
+        );
+        assert_eq!(carets.len(), 3);
+        assert!(carets.iter().any(|c| c.cursor == 7 && !c.has_selection()));
+    }
+
+    /// KILLS line 383/384 `delete match arm '\'' / '`'` in `closing_for`.
+    /// Removing the single-quote or backtick arm makes them fall through to
+    /// `_ => None`. Pin both auto-close partners explicitly.
+    #[test]
+    fn closing_for_single_quote_and_backtick() {
+        assert_eq!(
+            closing_for('\''),
+            Some('\''),
+            "single-quote must auto-close"
+        );
+        assert_eq!(closing_for('`'), Some('`'), "backtick must auto-close");
+    }
+
+    /// KILLS line 418 `word_end -> usize with 0 / with 1`.
+    /// Pin the EXACT end index of the word so neither a constant 0 nor 1 passes.
+    #[test]
+    fn word_end_returns_exact_word_boundary() {
+        let r = rope("let foo_bar = 1");
+        // The word "foo_bar" spans [4,11); its end is 11.
+        assert_eq!(word_end(&r, 6), 11);
+        // A different word at a different position → different non-0/1 end.
+        let r2 = rope("hello world");
+        assert_eq!(word_end(&r2, 8), 11); // "world" ends at 11
+    }
+
+    /// KILLS line 433 `> -> >=` (`rope.len_chars() > 5_000_000`).
+    /// At EXACTLY 5_000_000 chars the op is still permitted (`> 5M` is false).
+    /// The `>=` mutant would bail at the 5M boundary. Pin: a 5M-char buffer with
+    /// a findable next occurrence still adds a caret.
+    #[test]
+    fn add_next_occurrence_at_exact_cap_still_works() {
+        // Exactly 5_000_000 chars: "ab" + filler + "ab" so there is a 2nd "ab".
+        let mut s = String::with_capacity(5_000_000);
+        s.push_str("ab");
+        s.push_str(&"x".repeat(5_000_000 - 4));
+        s.push_str("ab");
+        debug_assert_eq!(s.chars().count(), 5_000_000);
+        let r = rope(&s);
+        let mut p = EditState::at(2);
+        p.anchor = 0; // primary selects the first "ab"
+        let mut carets = vec![p];
+        assert!(
+            add_next_occurrence(&r, &mut carets),
+            "len == 5_000_000 is within the cap (> 5M is false) → must still add"
+        );
+        assert_eq!(carets.len(), 2);
+    }
+
+    /// KILLS line 433 `> -> ==` (`rope.len_chars() > 5_000_000`).
+    /// At 5_000_001 chars the op MUST bail (`> 5M` true). The `== 5M` mutant
+    /// would proceed (5_000_001 != 5M). Pin: one-past-cap is a no-op.
+    #[test]
+    fn add_next_occurrence_past_cap_is_noop() {
+        // 5_000_001 chars with a 2nd "ab" that WOULD be found if not capped.
+        let mut s = String::with_capacity(5_000_001);
+        s.push_str("ab");
+        s.push_str(&"x".repeat(5_000_001 - 4));
+        s.push_str("ab");
+        debug_assert_eq!(s.chars().count(), 5_000_001);
+        let r = rope(&s);
+        let mut p = EditState::at(2);
+        p.anchor = 0;
+        let mut carets = vec![p];
+        assert!(
+            !add_next_occurrence(&r, &mut carets),
+            "len > 5_000_000 must be a no-op regardless of a findable match"
+        );
+        assert_eq!(carets.len(), 1);
+    }
+
+    // MUTANT-EQUIVALENT: line 462 `< -> ==` and `< -> <=` in the `find_at`
+    // closure (`if chars.len() < nlen { return None; }`). The needle is always
+    // a slice of the buffer, so `nlen <= chars.len()` holds for EVERY reachable
+    // call — the guard's True-branch (`chars.len() < nlen`) is unreachable. The
+    // `==`/`<=` mutants differ only when `chars.len() == nlen` (the whole buffer
+    // is the needle); in that case the single occurrence is the selection
+    // itself, which the `existing` filter rejects, so NO caret is added under
+    // either the original or the mutant. There is no input that distinguishes
+    // them → genuinely equivalent. The positive path (chars.len() > nlen) is
+    // exercised by `add_next_occurrence_grows_caret_set_and_wraps` and the
+    // 5M-cap tests above, pinning that the scan range runs normally.
+    #[test]
+    fn add_next_occurrence_find_at_scans_when_buffer_longer_than_needle() {
+        // Documents the reachable (non-equivalent) side: chars.len() > nlen.
+        let r = rope("aa");
+        let mut p = EditState::at(1);
+        p.anchor = 0; // select first "a" (nlen 1, chars.len 2 > 1)
+        let mut carets = vec![p];
+        assert!(
+            add_next_occurrence(&r, &mut carets),
+            "find_at must run its scan range when chars.len() > nlen"
+        );
+        assert_eq!(carets.len(), 2);
+    }
+
+    /// KILLS line 553 `== -> !=` in `indent_lines` outdent whitespace counting
+    /// (`if ch == ' ' || ch == '\t'`). The `!=` mutant breaks on the first
+    /// space → removes nothing. Pin: outdent strips the leading whitespace.
+    #[test]
+    fn indent_lines_outdent_strips_leading_spaces_exactly() {
+        let mut r = rope("    ab\n");
+        let mut st = EditState::at(0);
+        indent_lines(&mut r, &mut st, "  ", true); // outdent by 2
+        assert_eq!(
+            r.to_string(),
+            "  ab\n",
+            "outdent must remove exactly `unit_len` leading whitespace chars"
+        );
+    }
+
+    /// Pins outdent behaviour on a mixed selection (one flush line, one
+    /// indented): only the indented line loses whitespace.
+    ///
+    /// MUTANT-EQUIVALENT: line 559 `> -> >=` (`if removable > 0`). `removable`
+    /// is a `usize`, so when it is 0 the original skips `rope.remove` while the
+    /// `>= 0` mutant executes `rope.remove(line_start..line_start)` — an EMPTY
+    /// range, which is a no-op that leaves the rope byte-identical. No input can
+    /// distinguish them (an empty `remove` never changes the buffer) → genuinely
+    /// equivalent. This test still pins the load-bearing positive behaviour.
+    #[test]
+    fn indent_lines_outdent_flush_line_is_noop() {
+        let mut r = rope("ab\n  cd\n");
+        // Select both lines (line0 flush, line1 indented).
+        let mut st = EditState {
+            anchor: 0,
+            cursor: 6,
+            goal_col: None,
+        };
+        indent_lines(&mut r, &mut st, "  ", true);
+        // line0 "ab" has no leading ws (removable 0 → untouched); line1 loses 2.
+        assert_eq!(r.to_string(), "ab\ncd\n");
+    }
+
+    /// KILLS line 585 `+ -> -` and `+ -> *` in `delete_line`
+    /// (`rope.line_to_char(last_line + 1)`). Deleting a MIDDLE line must remove
+    /// that line and its newline, pinning the `last_line + 1` end index. The
+    /// arithmetic mutants compute the wrong end (`last_line - 1` underflows for
+    /// last_line 0 / points at the wrong line; `last_line * 1` collapses to
+    /// `last_line`, leaving the trailing newline) and corrupt the result.
+    #[test]
+    fn delete_line_middle_removes_exact_line_and_newline() {
+        let mut r = rope("aa\nbb\ncc\n");
+        // Caret on line 1 ("bb"): chars 3..6.
+        let mut st = EditState::at(4);
+        delete_line(&mut r, &mut st);
+        assert_eq!(r.to_string(), "aa\ncc\n");
+        // Caret collapses to the start of the now-line-1 ("cc").
+        assert_eq!(st.cursor, 3);
+        assert!(!st.has_selection());
+    }
+
+    /// Pins deleting the LAST content line (end = `len_chars`).
+    ///
+    /// MUTANT-EQUIVALENT: line 585:32 `< -> <=` (`last_line + 1 <
+    /// rope.len_lines()`). The two branches differ only when `last_line + 1 ==
+    /// len_lines`. In that case the original takes the `else` branch
+    /// (`end = len_chars`), while the `<=` mutant takes the `then` branch
+    /// (`end = line_to_char(last_line + 1) = line_to_char(len_lines)`). ropey
+    /// guarantees `line_to_char(len_lines) == len_chars` (the one-past-last line
+    /// starts at the buffer end), so BOTH branches produce the identical `end`.
+    /// No input distinguishes them → genuinely equivalent. This test still pins
+    /// the exact last-line deletion behaviour.
+    #[test]
+    fn delete_line_last_line_deletes_to_end() {
+        // "aa\nbb": line0 0..3, line1 3..5 (no trailing newline) → len_lines==2,
+        // last_line of caret on "bb" == 1 → last_line+1==2, == len_lines → end = len.
+        let mut r = rope("aa\nbb");
+        let mut st = EditState::at(4); // on "bb"
+        delete_line(&mut r, &mut st);
+        assert_eq!(r.to_string(), "aa\n");
+        assert_eq!(st.cursor, 3);
+    }
+
+    /// KILLS line 630 `< -> <=` in `matching_bracket` forward scan (`i < n`).
+    /// An unmatched opener forces the loop to run to the end; the `<=` mutant
+    /// reads `rope.char(n)` past the end → panic. Pin: no panic, returns None.
+    #[test]
+    fn matching_bracket_forward_unmatched_no_overrun() {
+        let r = rope("(a"); // '(' at 0 with no closer; len 2
+        assert_eq!(matching_bracket(&r, 0, 1000), None);
+    }
+
+    /// KILLS line 641 `+= -> *=` in `matching_bracket` forward depth counting.
+    /// With `depth *= 1`, openers never increase depth, so nested pairs are
+    /// mismatched. Pin: the outer '(' of "((()))" matches the OUTER ')', not an
+    /// inner one — only correct `+=` depth counting finds idx 5.
+    #[test]
+    fn matching_bracket_forward_nested_depth_counts() {
+        let r = rope("((()))");
+        assert_eq!(
+            matching_bracket(&r, 0, 1000),
+            Some(5),
+            "outer '(' must match the OUTER ')' (idx 5), skipping inner pairs"
+        );
+        // The inner '(' at idx 2 matches the inner ')' at idx 3.
+        assert_eq!(matching_bracket(&r, 2, 1000), Some(3));
+    }
+
+    /// KILLS line 645 `&& -> ||` and `< -> <=` in `matching_bracket` backward
+    /// loop (`i >= 0 && steps < max_scan`). With a `max_scan` that is one step
+    /// too small to reach the match, the correct loop stops (None). The `||`
+    /// mutant ignores the step cap (keeps scanning while `i >= 0`) and the
+    /// `<=` mutant grants one extra step — both wrongly FIND the match.
+    #[test]
+    fn matching_bracket_backward_respects_scan_cap() {
+        // "(x)": ')' at idx 2; matching '(' is at idx 0, three steps away.
+        let r = rope("(x)");
+        // With max_scan == 2 the backward scan cannot reach idx 0 → None.
+        assert_eq!(
+            matching_bracket(&r, 2, 2),
+            None,
+            "scan cap must stop the search before the match (||/<= mutants find it)"
+        );
+        // Sanity: a generous cap DOES find the match.
+        assert_eq!(matching_bracket(&r, 2, 1000), Some(0));
+    }
+
+    /// KILLS line 656 `+= -> *=` in `matching_bracket` backward depth counting.
+    /// Symmetric to 641: with `depth *= 1` the backward scan never increments on
+    /// a closer, mismatching nesting. Pin: the outer ')' of "((()))" matches the
+    /// OUTER '(' at idx 0.
+    #[test]
+    fn matching_bracket_backward_nested_depth_counts() {
+        let r = rope("((()))");
+        assert_eq!(
+            matching_bracket(&r, 5, 1000),
+            Some(0),
+            "outer ')' must match the OUTER '(' (idx 0), skipping inner pairs"
+        );
+        // The inner ')' at idx 3 matches the inner '(' at idx 2.
+        assert_eq!(matching_bracket(&r, 3, 1000), Some(2));
+    }
+
+    /// KILLS line 752 `retained_bytes -> usize with 0`.
+    /// Pin a NON-zero, exact retained-byte count after recording a snapshot.
+    #[test]
+    fn history_retained_bytes_is_exact_nonzero() {
+        let mut h = History::new(8);
+        h.record(Snapshot::new("hello", 5), EditKind::Other); // 5 bytes
+        assert_eq!(
+            h.retained_bytes(),
+            5,
+            "retained_bytes must be the summed text byte length, not a constant 0"
+        );
+    }
+
+    /// KILLS line 771 `> -> >=` (`while self.undo.len() > 1 ...`).
+    /// A single oversized checkpoint must NEVER be evicted (it is the user's
+    /// last undo step). The `>= 1` mutant would evict it, emptying the stack.
+    #[test]
+    fn history_never_evicts_the_sole_checkpoint() {
+        // Tiny budget; a single snapshot far exceeds it.
+        let mut h = History::with_byte_budget(8, 4);
+        h.record(Snapshot::new("x".repeat(100), 0), EditKind::Other);
+        assert!(
+            h.can_undo(),
+            "the single most-recent checkpoint must survive even over budget"
+        );
+        let restored = h.undo(Snapshot::new("cur", 0)).unwrap();
+        assert_eq!(restored.text.len(), 100);
+    }
+
+    /// KILLS line 771 `> -> >=` (`... && self.retained_bytes() > budget`).
+    /// At retained == budget EXACTLY, nothing is evicted (`> budget` false).
+    /// The `>= budget` mutant evicts one checkpoint at the equality boundary.
+    #[test]
+    fn history_keeps_checkpoints_at_exact_budget() {
+        // Two 10-byte snapshots, budget == 20 → retained == budget exactly.
+        let budget = 20;
+        let mut h = History::with_byte_budget(1000, budget);
+        h.record(Snapshot::new("0123456789", 0), EditKind::Other); // 10 bytes
+        h.record(Snapshot::new("abcdefghij", 0), EditKind::Delete); // distinct kind, 10 bytes
+        assert_eq!(h.retained_bytes(), 20, "retained must equal the budget");
+        // Both checkpoints must survive (retained == budget is NOT over budget).
+        assert!(h.undo(Snapshot::new("cur", 0)).is_some());
+        assert!(
+            h.undo(Snapshot::new("cur", 0)).is_some(),
+            "at retained == budget exactly, the older checkpoint is NOT evicted"
+        );
+    }
+
+    /// KILLS line 824 `break_group with ()` (`self.last_kind = None`).
+    /// `break_group` must force the next same-kind edit into a NEW undo group.
+    /// As a no-op, two Inserts separated by `break_group` would COALESCE into
+    /// one. Pin: after break_group, the two inserts are two distinct undo steps.
+    #[test]
+    fn break_group_forces_a_new_undo_group() {
+        let mut h = History::new(8);
+        h.record(Snapshot::new("", 0), EditKind::Insert);
+        h.break_group(); // forces the next Insert to start a fresh group
+        h.record(Snapshot::new("a", 1), EditKind::Insert);
+        // Two distinct groups → two undos. (No-op break would coalesce to one.)
+        assert!(h.undo(Snapshot::new("ab", 2)).is_some());
+        assert!(
+            h.undo(Snapshot::new("a", 1)).is_some(),
+            "break_group must split the run into two undo steps"
+        );
+        assert!(!h.can_undo());
+    }
 }
 
 #[cfg(test)]

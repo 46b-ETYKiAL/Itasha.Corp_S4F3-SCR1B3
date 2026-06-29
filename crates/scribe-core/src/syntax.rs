@@ -1306,4 +1306,99 @@ mod tests {
         assert_eq!(d.theme_name(), n.theme_name());
         assert!(d.theme_names().contains(&"Operator Violet".to_string()));
     }
+
+    // ---- capture-name -> color / scope dispatch (color_for / capture_to_scope) ----
+    // These prefix-ladders decide which RGB a tree-sitter capture renders as, and
+    // which syntect scope a capture maps to for theme-derived colouring. The
+    // surviving cluster here is the `||`-joined SECOND prefixes in the compound
+    // arms (constructor / escape / char / number / float / property / punctuation
+    // / tag): a `||`->`&&` mutation makes the arm require BOTH prefixes at once
+    // (impossible), so the capture silently falls through to a later arm or the
+    // default. A known-answer table over EACH alternative prefix kills them.
+
+    #[test]
+    fn color_for_maps_each_capture_prefix_to_its_distinct_color() {
+        // Exact palette from `color_for` — one row per arm, exercising BOTH
+        // operands of every `||` so the second-prefix `||`->`&&` mutants die.
+        let cases: &[(&str, [u8; 3])] = &[
+            ("keyword", [0xcc, 0x99, 0xcc]),
+            ("keyword.control", [0xcc, 0x99, 0xcc]), // prefix match, not exact
+            ("function", [0x66, 0x99, 0xcc]),
+            ("function.method", [0x66, 0x99, 0xcc]),
+            ("constructor", [0x66, 0x99, 0xcc]), // 2nd operand of the function arm
+            ("type", [0xff, 0xcc, 0x66]),
+            ("type.builtin", [0xff, 0xcc, 0x66]),
+            ("string", [0x99, 0xcc, 0x99]),
+            ("escape", [0x99, 0xcc, 0x99]), // 2nd operand of the string arm
+            ("char", [0x99, 0xcc, 0x99]),   // 3rd operand of the string arm
+            ("comment", [0x74, 0x73, 0x69]),
+            ("constant", [0xf9, 0x91, 0x57]),
+            ("number", [0xf9, 0x91, 0x57]), // 2nd operand of the constant arm
+            ("float", [0xf9, 0x91, 0x57]),  // 3rd operand of the constant arm
+            ("attribute", [0x66, 0xcc, 0xcc]),
+            ("property", [0x66, 0xcc, 0xcc]), // 2nd operand of the attribute arm
+            ("operator", [0xa0, 0x9f, 0x93]),
+            ("punctuation", [0xa0, 0x9f, 0x93]), // 2nd operand of the operator arm
+            ("punctuation.bracket", [0xa0, 0x9f, 0x93]),
+            ("label", [0xf2, 0x77, 0x7a]),
+            ("tag", [0xf2, 0x77, 0x7a]), // 2nd operand of the label arm
+        ];
+        for (name, want) in cases {
+            assert_eq!(color_for(name), *want, "color_for({name:?})");
+        }
+        // The catch-all default for an unrecognised capture.
+        assert_eq!(color_for("totally-unknown"), DEFAULT_FG);
+        // Distinct arms really do differ (guards a whole-fn const-return mutant).
+        assert_ne!(color_for("keyword"), color_for("function"));
+        assert_ne!(color_for("string"), color_for("comment"));
+    }
+
+    #[test]
+    fn capture_to_scope_maps_each_capture_prefix_to_its_syntect_scope() {
+        // Exact mapping from `capture_to_scope`; again covering every `||` operand.
+        let cases: &[(&str, &str)] = &[
+            ("keyword", "keyword.control"),
+            ("function", "entity.name.function"),
+            ("constructor", "entity.name.function"), // 2nd operand
+            ("type", "entity.name.type"),
+            ("string", "string.quoted.double"),
+            ("escape", "string.quoted.double"), // 2nd operand
+            ("char", "string.quoted.double"),   // 3rd operand
+            ("comment", "comment.line"),
+            ("constant", "constant.numeric"),
+            ("number", "constant.numeric"), // 2nd operand
+            ("float", "constant.numeric"),  // 3rd operand
+            ("attribute", "entity.other.attribute-name"),
+            ("property", "entity.other.attribute-name"), // 2nd operand
+            ("operator", "punctuation"),
+            ("punctuation", "punctuation"), // 2nd operand
+            ("label", "entity.name.tag"),
+            ("tag", "entity.name.tag"), // 2nd operand
+            ("variable", "source"),     // catch-all
+        ];
+        for (name, want) in cases {
+            assert_eq!(capture_to_scope(name), *want, "capture_to_scope({name:?})");
+        }
+    }
+
+    #[test]
+    fn color_from_theme_resolves_distinct_colors_per_capture() {
+        // `color_from_theme` derives a capture's RGB from the ACTIVE syntect theme
+        // (via capture_to_scope -> scope-stack -> theme style). A whole-fn mutant
+        // returning a constant [0;3]/[1;3] is killed by showing two semantically
+        // different captures resolve to DIFFERENT, non-trivial colours under a
+        // real bundled theme.
+        let h = Highlighter::new();
+        let theme = &h.themes.themes["base16-eighties.dark"];
+        let kw = color_from_theme(theme, "keyword");
+        let st = color_from_theme(theme, "string");
+        let cm = color_from_theme(theme, "comment");
+        assert_ne!(kw, [0, 0, 0], "a real theme colour, not the const-0 mutant");
+        assert_ne!(kw, [1, 1, 1], "not the const-1 mutant");
+        // Keyword, string and comment occupy different theme slots.
+        assert!(
+            kw != st || st != cm,
+            "distinct captures must not all collapse to one colour: kw={kw:?} st={st:?} cm={cm:?}"
+        );
+    }
 }

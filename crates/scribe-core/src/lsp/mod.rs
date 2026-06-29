@@ -574,6 +574,84 @@ mod tests {
         assert!(!written.lock().unwrap().is_empty());
     }
 
+    /// Spawn a benign, long-lived, stdin-piped child so `LspClient`'s
+    /// enqueue/id/Drop machinery can be exercised without a real language server.
+    /// The child reads/holds stdin and stays alive until killed (which Drop does).
+    /// Returns `None` if no such helper binary exists on this host (CI-skip — a
+    /// genuine absence, never a false pass; the asserts below only run when a real
+    /// client was constructed).
+    fn spawn_benign_lsp_client() -> Option<LspClient> {
+        let cfg = if cfg!(windows) {
+            LspServerConfig {
+                command: "cmd".into(),
+                args: vec!["/c".into(), "pause".into()],
+                languages: vec!["rs".into()],
+            }
+        } else {
+            LspServerConfig {
+                command: "cat".into(),
+                args: vec![],
+                languages: vec!["rs".into()],
+            }
+        };
+        LspClient::spawn(&cfg, "file:///proj").ok()
+    }
+
+    #[test]
+    fn id_returns_then_increments_the_next_id_counter() {
+        // `id()` must return the CURRENT next_id and post-increment it. A mutation
+        // pinning it to a constant (0 / 1 / -1) would hand out a fixed, colliding
+        // request id and never advance — breaking response correlation. `spawn`
+        // consumes id 1 for `initialize`, so the next allocations are 2, 3, ….
+        let Some(client) = spawn_benign_lsp_client() else {
+            return; // no benign child available on this host; nothing to assert
+        };
+        let first = client.id();
+        let second = client.id();
+        assert_eq!(first, 2, "first post-handshake id is 2 (initialize took 1)");
+        assert_eq!(second, 3, "id must strictly increment on each call");
+        assert!(second > first, "id must advance, never return a constant");
+    }
+
+    #[test]
+    fn did_open_and_enqueue_succeed_then_fail_after_shutdown() {
+        // Two assertions in one client lifecycle:
+        //   1. With a live writer, `did_open` (and thus `enqueue`) returns Ok — the
+        //      message is actually handed to the channel (kills `did_open -> Ok(())`
+        //      ONLY together with #2, since a bare Ok(()) passes #1 too).
+        //   2. After the outgoing sender is dropped, `enqueue`/`did_open` MUST
+        //      return Err (writer gone). The `-> Ok(())` mutations on both
+        //      `did_open` and `enqueue` would WRONGLY report success here — this is
+        //      the discriminating case that kills them.
+        let Some(mut client) = spawn_benign_lsp_client() else {
+            return;
+        };
+        // Live path: enqueue succeeds.
+        client
+            .did_open("file:///x.rs", "rust", "fn main(){}")
+            .expect("did_open enqueues while the writer is live");
+        client
+            .enqueue(protocol::notification("textDocument/didChange", json!({})))
+            .expect("enqueue succeeds while the writer is live");
+
+        // Drop the sender to simulate the writer being gone, then both calls fail.
+        drop(client.outgoing.take());
+        let did_open_err = client.did_open("file:///x.rs", "rust", "x").unwrap_err();
+        assert_eq!(
+            did_open_err.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "did_open must surface a broken pipe once the writer is gone, not Ok(())"
+        );
+        let enqueue_err = client
+            .enqueue(protocol::notification("textDocument/didChange", json!({})))
+            .unwrap_err();
+        assert_eq!(
+            enqueue_err.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "enqueue must surface a broken pipe once the writer is gone, not Ok(())"
+        );
+    }
+
     #[test]
     fn read_message_decodes_a_stream_of_two_then_eof() {
         let a = protocol::notification("initialized", json!({}));
