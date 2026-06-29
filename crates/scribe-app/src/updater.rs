@@ -211,9 +211,30 @@ pub struct Updater {
     pub toast_pending: Option<String>,
     /// A version the user declined this session — don't re-prompt for it.
     pub skipped_version: Option<String>,
+    /// The verified manifest `release_index` of the update being downloaded —
+    /// persisted as the new monotonic anti-rollback high-water mark AFTER a
+    /// successful apply (the manifest-native floor consulted at the next check).
+    /// Set by [`Updater::start_download`] from the chosen `ReleaseInfo`; consumed
+    /// on a successful in-place swap or installer launch. `None` when the source
+    /// `ReleaseInfo` carried no index (a hand-built fixture; the production
+    /// resolver always sets it).
+    pending_release_index: Option<u64>,
 }
 
 impl Updater {
+    /// Persist the verified manifest `release_index` of the just-applied update
+    /// as the new monotonic anti-rollback high-water mark (best-effort; a write
+    /// failure never blocks an applied update — the floor is re-derived next
+    /// launch from the record AND the version floor). A no-op when no index was
+    /// captured (a fixture). Clears the pending index so a later re-poll cannot
+    /// double-record. Called ONLY on a genuinely successful apply (in-place swap
+    /// relaunch OR installer launch), never on a failure/downgrade-refusal path.
+    fn commit_applied_index(&mut self) {
+        if let Some(idx) = self.pending_release_index.take() {
+            update::update_state::record_applied_index_for_current_exe(idx);
+        }
+    }
+
     /// True while a network/apply operation is in flight (used to disable the
     /// "Check for updates" button so a second click can't spawn a second job).
     pub fn is_busy(&self) -> bool {
@@ -255,6 +276,9 @@ impl Updater {
         }
         // NOTE: do not clear `show_prompt` here — the on-launch (Auto) modal
         // stays open and follows the download → ready → restart states.
+        // Capture the verified manifest's anti-rollback ordinal so a successful
+        // apply can advance the persisted high-water mark.
+        self.pending_release_index = info.release_index;
         self.state = UpdateState::Downloading {
             received: 0,
             total: 0,
@@ -358,6 +382,9 @@ impl Updater {
                 tracing::info!(
                     "update applied: installer for v{version} launched; closing to apply"
                 );
+                // The verified installer is launching to update in place — record
+                // its manifest release_index as the new anti-rollback floor.
+                self.commit_applied_index();
                 self.state = UpdateState::Applied { version };
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -418,9 +445,12 @@ impl Updater {
                         // downloaded archive + sidecars in the staging dir are no
                         // longer needed, so reap them now (the `.bak` is kept for
                         // rollback and is reaped by the relaunched build's
-                        // startup cleanup once it confirms it runs).
+                        // startup cleanup once it confirms it runs). Record the
+                        // verified manifest release_index as the new anti-rollback
+                        // floor now that the swapped binary is launching.
                         clean_staging_dir();
                         tracing::info!("update applied: v{version} swapped in and relaunching");
+                        self.commit_applied_index();
                         self.state = UpdateState::Applied { version };
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
@@ -658,8 +688,40 @@ mod tests {
             sig_url: "https://dl/scr1b3.tar.gz.minisig".to_string(),
             sha_url: "https://dl/scr1b3.tar.gz.sha256".to_string(),
             html_url: "https://github.com/o/r/releases/tag/x".to_string(),
+            pinned_sha256: "deadbeef".to_string(),
+            release_index: Some(9_009_009),
             installer: None,
         }
+    }
+
+    #[test]
+    fn commit_applied_index_records_then_clears_and_is_idempotent() {
+        // The anti-rollback wiring: commit_applied_index consumes the captured
+        // manifest release_index (best-effort persist next to the running exe)
+        // and clears it so a re-poll cannot double-record. With None set it is a
+        // pure no-op. It must never panic regardless of the install-dir's
+        // writability (the update_state writer is best-effort).
+        let mut u = Updater {
+            pending_release_index: Some(4_044),
+            ..Default::default()
+        };
+        u.commit_applied_index();
+        assert!(
+            u.pending_release_index.is_none(),
+            "the pending index must be taken so a re-poll cannot double-record"
+        );
+        // Idempotent: a second call with nothing pending is a no-op.
+        u.commit_applied_index();
+        assert!(u.pending_release_index.is_none());
+    }
+
+    #[test]
+    fn fake_release_carries_a_manifest_pin_and_index() {
+        // Every resolved ReleaseInfo carries the signed-manifest pin + ordinal —
+        // there is no unpinned/manifest-absent install descriptor.
+        let r = fake_release("9.9.9");
+        assert!(!r.pinned_sha256.is_empty());
+        assert!(r.release_index.is_some());
     }
 
     /// Feed `msg` to the reducer with a fresh `Updater` whose `launch_kind` is

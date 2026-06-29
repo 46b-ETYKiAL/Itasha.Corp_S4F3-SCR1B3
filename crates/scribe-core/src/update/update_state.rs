@@ -3,21 +3,23 @@
 //! ## Why a separate ordinal from the version floor
 //!
 //! [`super::net::ensure_upgrade`] already keeps a strictly-monotonic VERSION
-//! floor (apply-time anti-downgrade). The signed manifest carries a parallel
-//! `release_index` (`major*1_000_000 + minor*1_000 + patch`) — a single integer
-//! total-order over releases. The Tier-1 check refuses any manifest whose
-//! `release_index` is not STRICTLY greater than the highest index ever applied,
-//! closing the signed-but-older replay window at check time the same way
-//! `ensure_upgrade` closes it at apply time. The two are deliberately redundant
-//! defenses; this one is the manifest-native ordinal.
+//! floor (re-checked at APPLY time against the running `CARGO_PKG_VERSION`). The
+//! signed manifest carries a parallel `release_index`
+//! (`major*1_000_000 + minor*1_000 + patch`) — a single integer total-order over
+//! releases. The Tier-1 check refuses any manifest whose `release_index` is not
+//! STRICTLY greater than the highest index ever applied, closing the
+//! signed-but-older replay window at check time the same way `ensure_upgrade`
+//! closes it at apply time. The two are deliberately redundant defenses; this
+//! one is the manifest-native ordinal.
 //!
-//! ## Persistence — sibling-of-exe
+//! ## Persistence — sibling-of-exe, mirroring the `.bak` backup
 //!
 //! The high-water index is a single integer line in
-//! `<exe-dir>/.scr1b3-release-index`, written next to the running executable.
-//! This keeps the updater's persisted state co-located with the binary it
-//! guards, needs NO new dependency (plain `std::fs` text I/O), and inherits the
-//! install dir's permissions.
+//! `<exe-dir>/.scr1b3-release-index`, written next to the running executable —
+//! the SAME directory the keep-one-prior `.bak` backup
+//! ([`super::apply::backup_path_for`]) already uses. This keeps the updater's
+//! persisted state co-located, needs NO new dependency (plain `std::fs` text
+//! I/O), and inherits the install dir's permissions.
 //!
 //! ## Fail-safe reads, best-effort writes
 //!
@@ -79,7 +81,7 @@ pub fn applied_index() -> u64 {
 /// best-effort. A failure to resolve the exe or write the record is ignored —
 /// the next launch re-derives the floor from the record and the version floor,
 /// so a lost write never corrupts the anti-rollback guarantee. Called AFTER a
-/// successful in-place apply.
+/// successful in-place apply (or installer launch).
 pub fn record_applied_index_for_current_exe(index: u64) {
     if let Ok(exe) = std::env::current_exe() {
         let _ = record_applied_index(&exe, index);
@@ -102,8 +104,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("scr1b3.exe");
 
-        record_applied_index(&exe, 4040).unwrap();
-        assert_eq!(read_applied_index(&exe), 4040);
+        record_applied_index(&exe, 4044).unwrap();
+        assert_eq!(read_applied_index(&exe), 4044);
 
         // A higher index advances the mark.
         record_applied_index(&exe, 5000).unwrap();

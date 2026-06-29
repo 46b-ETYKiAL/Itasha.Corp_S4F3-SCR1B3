@@ -8,22 +8,21 @@
 //! deterministic document that binds together the release's IDENTITY — its
 //! product, schema, version, a strictly-monotonic `release_index`, a
 //! `minimum_version` floor, a freshness window (`valid_until_utc`, a "freeze
-//! beacon"), and the expected SHA-256 of every platform asset (the in-place
-//! `.tar.gz` archive AND the self-elevating Windows installer `setup.exe`). A
-//! MITM or a compromised CDN that swaps one asset for an older-but-genuine one,
-//! replays a stale listing, or freezes the user on a vulnerable version is
-//! caught here even though every individual artifact still verifies on its own.
+//! beacon"), and the expected SHA-256 of every platform asset. A MITM or a
+//! compromised CDN that swaps one asset for an older-but-genuine one, replays a
+//! stale listing, or freezes the user on a vulnerable version is caught here
+//! even though every individual artifact still verifies on its own.
 //!
 //! `release.yml` emits this manifest as a signed `latest.json` (+ a
 //! `latest.json.minisig` produced by the SAME signing key the client already
 //! embeds), with deterministically sorted keys. The schema:
 //!
 //! ```json
-//! { "schema":"itasha.update.manifest/v1","product":"scr1b3","version":"0.4.40",
-//!   "release_index":4040,"minimum_version":"0.4.0",
+//! { "schema":"itasha.update.manifest/v1","product":"scr1b3","version":"0.4.44",
+//!   "release_index":4044,"minimum_version":"0.4.0",
 //!   "published_utc":"2026-06-29T14:17:42Z","valid_until_utc":"2026-07-13T14:17:42Z",
-//!   "assets":[ {"platform":"x86_64-unknown-linux-gnu","kind":"tar.gz",
-//!     "asset_name":"scr1b3-x86_64-unknown-linux-gnu.tar.gz",
+//!   "assets":[ {"platform":"x86_64-pc-windows-msvc","kind":"zip",
+//!     "asset_name":"scr1b3-x86_64-pc-windows-msvc.tar.gz",
 //!     "url":"https://github.com/.../scr1b3-...tar.gz","size":8095481,
 //!     "sha256":"1963210d…0eb0f510"}, ... ] }
 //! ```
@@ -54,13 +53,6 @@ pub const MANIFEST_SCHEMA_PREFIX: &str = "itasha.update.manifest/";
 /// The product id this client accepts in a manifest's `product` field.
 pub const MANIFEST_PRODUCT: &str = "scr1b3";
 
-/// The Windows self-elevating installer kind. Unlike a fresh-install-only
-/// installer, SCR1B3's `setup.exe` IS an in-place update path (it self-elevates
-/// to replace files in a protected location such as `C:\Program Files`), so its
-/// SHA-256 is pinned by the manifest just like the archive — never trusted from
-/// an unsigned sidecar alone.
-pub const INSTALLER_KIND: &str = "exe";
-
 /// One platform asset entry in the signed manifest.
 ///
 /// `#[serde(default)]` on every field makes parsing tolerant of a partial or
@@ -71,13 +63,13 @@ pub const INSTALLER_KIND: &str = "exe";
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 pub struct ManifestAsset {
     /// The Rust target triple this asset is built for (e.g.
-    /// `x86_64-unknown-linux-gnu`).
+    /// `x86_64-pc-windows-msvc`).
     #[serde(default)]
     pub platform: String,
-    /// The artifact kind: `"tar.gz"` / `"zip"` (an in-place-updatable ARCHIVE)
-    /// or `"exe"` (the self-elevating Windows installer — also an in-place
-    /// update path on SCR1B3). [`Manifest::archive_for`] selects only archive
-    /// kinds; [`Manifest::installer_for`] selects only the `exe` kind.
+    /// The artifact kind: `"zip"` / `"tar.gz"` (an in-place-updatable ARCHIVE)
+    /// or `"exe"` (the setup installer — the self-elevating Program-Files path,
+    /// NEVER an in-place archive swap). [`Manifest::archive_for`] selects only
+    /// archive kinds; [`Manifest::installer_for`] selects the `exe`.
     #[serde(default)]
     pub kind: String,
     /// The asset's file name (matches the GitHub release asset name).
@@ -135,20 +127,19 @@ pub struct Manifest {
 /// Verify a signed manifest and parse it — **signature first, ALWAYS**.
 ///
 /// The minisign signature (`sig_str`, the `latest.json.minisig` contents) is
-/// verified over the RAW `json_bytes` against the trusted `pubkeys` set BEFORE
-/// any deserialization. Using the SET (not a single key) keeps the manifest
-/// verification on the SAME key-rotation-safe path as the per-asset gate
-/// ([`verify::EMBEDDED_PUBLIC_KEYS`]). An unverified manifest is never parsed —
-/// so a tampered or forged `latest.json` cannot reach the serde layer (let alone
-/// the gates). Fails closed: any signature OR parse error returns `Err`.
+/// verified over the RAW `json_bytes` against the trusted `pubkeys` SET BEFORE
+/// any deserialization. Passing the full [`verify::EMBEDDED_PUBLIC_KEYS`] set
+/// (not a single key) keeps the manifest verification ROTATION-safe, identical
+/// to the per-asset gate. An unverified manifest is never parsed — so a
+/// tampered or forged `latest.json` cannot reach the serde layer (let alone the
+/// gates). Fails closed: any signature OR parse error returns `Err`.
 pub fn parse_and_verify(
     json_bytes: &[u8],
     sig_str: &str,
     pubkeys: &[&str],
 ) -> Result<Manifest, String> {
     // Cryptographic gate first — verify the signature over the exact bytes
-    // against the trusted key set (any key in the set accepting is sufficient,
-    // the rotation contract).
+    // against at least one trusted key (rotation-safe, fail-closed).
     verify::verify_any_signature(json_bytes, sig_str, pubkeys)?;
     // Only a verified manifest is ever deserialized.
     serde_json::from_slice::<Manifest>(json_bytes)
@@ -191,11 +182,11 @@ impl Manifest {
     /// Select the in-place-updatable ARCHIVE asset for this `target` + `ext`.
     ///
     /// An asset matches iff: its `platform` equals `target` OR its `asset_name`
-    /// contains `target` (robust to any tag prefix in the name); AND its `kind`
-    /// is an archive (`"tar.gz"` / `"zip"`, NEVER `"exe"` — the setup installer
-    /// is selected separately via [`Self::installer_for`]); AND its `asset_name`
-    /// ends with `ext` (`.tar.gz` on SCR1B3, all platforms). Returns the FIRST
-    /// match, or `None` when no archive asset exists for this platform.
+    /// contains `target` (robust to a tag prefix in the name); AND its `kind`
+    /// is an archive (`"zip"` / `"tar.gz"`, NEVER `"exe"` — the setup installer
+    /// is for the elevated Program-Files path, never an in-place swap); AND its
+    /// `asset_name` ends with `ext` (`.tar.gz` for the SCR1B3 archive). Returns
+    /// the FIRST match, or `None` when no archive asset exists for this platform.
     pub fn archive_for(&self, target: &str, ext: &str) -> Option<&ManifestAsset> {
         if target.is_empty() {
             return None; // no baked target → no asset can match this build
@@ -207,23 +198,27 @@ impl Manifest {
         })
     }
 
-    /// Select the self-elevating Windows installer asset (`kind == "exe"`) whose
-    /// `asset_name` matches `name_suffix` (e.g. `-x86_64-setup.exe`). SCR1B3's
-    /// installer IS an in-place update path, so its manifest entry exists and its
-    /// SHA-256 is pinned exactly like the archive. Returns the FIRST match, or
-    /// `None` when the release ships no installer.
-    pub fn installer_for(&self, name_suffix: &str) -> Option<&ManifestAsset> {
+    /// Select the self-elevating Windows installer (`exe`) asset for a Windows
+    /// `target`, if the manifest enumerates one. This is the SCR1B3-specific
+    /// Program-Files apply path: the `setup.exe` self-elevates so it can write a
+    /// protected install location an in-place swap cannot. Returns `None` for a
+    /// non-Windows target or when the manifest carries no `exe` asset. The
+    /// matched asset's signed `sha256` pins the installer download.
+    pub fn installer_for(&self, target: &str) -> Option<&ManifestAsset> {
+        if !target.contains("windows") {
+            return None;
+        }
         self.assets
             .iter()
-            .find(|a| a.kind == INSTALLER_KIND && a.asset_name.ends_with(name_suffix))
+            .find(|a| a.kind == "exe" && a.asset_name.ends_with("-x86_64-setup.exe"))
     }
 }
 
 /// True for the in-place-updatable archive kinds ONLY. `"exe"` (the setup
-/// installer) is deliberately excluded — it is selected separately via
-/// [`Manifest::installer_for`] so the two apply paths never cross-select.
+/// installer) is deliberately excluded — it is the elevated-install artifact
+/// selected by [`Manifest::installer_for`], never an in-place archive swap.
 fn is_archive_kind(kind: &str) -> bool {
-    matches!(kind, "tar.gz" | "zip")
+    matches!(kind, "zip" | "tar.gz")
 }
 
 /// Convert civil `(year, month, day)` to days since the Unix epoch
@@ -311,7 +306,6 @@ fn rfc3339_to_unix(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::verify::EMBEDDED_PUBLIC_KEYS;
 
     /// The canonical manifest JSON fixture (matches the `release.yml` schema).
     fn fixture_json(version: &str, release_index: u64, valid_until: &str) -> String {
@@ -320,14 +314,14 @@ mod tests {
 "release_index":{release_index},"minimum_version":"0.4.0",
 "published_utc":"2026-06-29T14:17:42Z","valid_until_utc":"{valid_until}",
 "assets":[
- {{"platform":"x86_64-unknown-linux-gnu","kind":"tar.gz",
-  "asset_name":"scr1b3-x86_64-unknown-linux-gnu.tar.gz",
-  "url":"https://github.com/o/r/releases/download/v{version}/scr1b3-x86_64-unknown-linux-gnu.tar.gz",
-  "size":7000000,"sha256":"deadbeefcafef00d"}},
  {{"platform":"x86_64-pc-windows-msvc","kind":"tar.gz",
   "asset_name":"scr1b3-x86_64-pc-windows-msvc.tar.gz",
   "url":"https://github.com/o/r/releases/download/v{version}/scr1b3-x86_64-pc-windows-msvc.tar.gz",
   "size":8095481,"sha256":"1963210d0eb0f510"}},
+ {{"platform":"x86_64-unknown-linux-gnu","kind":"tar.gz",
+  "asset_name":"scr1b3-x86_64-unknown-linux-gnu.tar.gz",
+  "url":"https://github.com/o/r/releases/download/v{version}/scr1b3-x86_64-unknown-linux-gnu.tar.gz",
+  "size":7000000,"sha256":"deadbeefcafef00d"}},
  {{"platform":"x86_64-pc-windows-msvc","kind":"exe",
   "asset_name":"scr1b3-v{version}-x86_64-setup.exe",
   "url":"https://github.com/o/r/releases/download/v{version}/scr1b3-v{version}-x86_64-setup.exe",
@@ -356,16 +350,16 @@ mod tests {
 
     #[test]
     fn good_manifest_verifies_and_parses() {
-        let json = fixture_json("0.4.40", 4040, "2099-01-01T00:00:00Z");
+        let json = fixture_json("0.4.9", 4009, "2099-01-01T00:00:00Z");
         let (pk, sig) = sign(json.as_bytes());
         let m = parse_and_verify(json.as_bytes(), &sig, &[pk.as_str()])
             .expect("a valid manifest parses");
         assert_eq!(m.schema, "itasha.update.manifest/v1");
         assert_eq!(m.product, "scr1b3");
-        assert_eq!(m.release_index, 4040);
+        assert_eq!(m.release_index, 4009);
         assert_eq!(
             m.version().unwrap(),
-            semver::Version::parse("0.4.40").unwrap()
+            semver::Version::parse("0.4.9").unwrap()
         );
         assert_eq!(
             m.minimum_version().unwrap(),
@@ -375,10 +369,20 @@ mod tests {
     }
 
     #[test]
+    fn manifest_verifies_against_any_key_in_rotation_set() {
+        // Rotation-safe: a manifest signed by a key that is NOT the first entry
+        // must still verify as long as it is somewhere in the trust set.
+        let json = fixture_json("0.4.9", 4009, "2099-01-01T00:00:00Z");
+        let (pk, sig) = sign(json.as_bytes());
+        let keys = [verify::EMBEDDED_PUBLIC_KEY, pk.as_str()];
+        assert!(parse_and_verify(json.as_bytes(), &sig, &keys).is_ok());
+    }
+
+    #[test]
     fn bad_signature_is_rejected_before_parse() {
         // A manifest whose signature does NOT verify against the key is refused
         // — and is never parsed (the signature gate runs first).
-        let json = fixture_json("0.4.40", 4040, "2099-01-01T00:00:00Z");
+        let json = fixture_json("0.4.9", 4009, "2099-01-01T00:00:00Z");
         let (pk, _good_sig) = sign(json.as_bytes());
         // A signature over DIFFERENT bytes (same key) must not verify this json.
         let (_pk2, sig_other) = sign(b"a different document entirely");
@@ -395,15 +399,15 @@ mod tests {
         // Sign the original json, then tamper one byte: the signature no longer
         // matches and parse_and_verify fails closed (defends against an attacker
         // editing release_index/version after signing).
-        let json = fixture_json("0.4.40", 4040, "2099-01-01T00:00:00Z");
+        let json = fixture_json("0.4.9", 4009, "2099-01-01T00:00:00Z");
         let (pk, sig) = sign(json.as_bytes());
         let mut tampered = json.into_bytes();
         // Flip a byte inside the release_index region.
         let pos = tampered
             .windows(4)
-            .position(|w| w == b"4040")
-            .expect("fixture contains release_index 4040");
-        tampered[pos] = b'9'; // 4040 -> 9040 (a forged higher index)
+            .position(|w| w == b"4009")
+            .expect("fixture contains release_index 4009");
+        tampered[pos] = b'9'; // 4009 -> 9009 (a forged higher index)
         assert!(
             parse_and_verify(&tampered, &sig, &[pk.as_str()]).is_err(),
             "a tampered manifest must fail signature verification"
@@ -411,16 +415,11 @@ mod tests {
     }
 
     #[test]
-    fn manifest_rejected_against_unrelated_embedded_key_set() {
-        // A real (valid) signature from a throwaway key must NOT verify against
-        // the production embedded key set — only a release signed by the real
-        // secret key is ever accepted (fail-closed, no key confusion).
-        let json = fixture_json("0.4.40", 4040, "2099-01-01T00:00:00Z");
+    fn parse_and_verify_rejects_empty_key_set() {
+        // An empty trust set must never accept anything (fail-closed).
+        let json = fixture_json("0.4.9", 4009, "2099-01-01T00:00:00Z");
         let (_pk, sig) = sign(json.as_bytes());
-        assert!(
-            parse_and_verify(json.as_bytes(), &sig, EMBEDDED_PUBLIC_KEYS).is_err(),
-            "a non-trusted-key signature must be rejected by the embedded key set"
-        );
+        assert!(parse_and_verify(json.as_bytes(), &sig, &[]).is_err());
     }
 
     #[test]
@@ -437,21 +436,25 @@ mod tests {
 
     #[test]
     fn is_fresh_false_on_unparseable_valid_until_fail_closed() {
-        let m = Manifest {
-            valid_until_utc: "not-a-date".to_string(),
-            ..Default::default()
-        };
-        assert!(
-            !m.is_fresh(0),
-            "an unparseable deadline must be treated as NOT fresh"
-        );
+        // An unreadable deadline is NEVER trusted — a manifest whose freshness
+        // window cannot be parsed is refused (treated as not fresh).
+        for bad in ["", "not-a-date", "2026-13-40T99:99:99Z", "2026-07-13"] {
+            let m = Manifest {
+                valid_until_utc: bad.to_string(),
+                ..Default::default()
+            };
+            assert!(
+                !m.is_fresh(0),
+                "an unparseable valid_until {bad:?} must read as NOT fresh"
+            );
+        }
     }
 
     #[test]
     fn version_and_minimum_version_fail_closed_on_garbage() {
         let m = Manifest {
             version: "not-a-version".to_string(),
-            minimum_version: "also-garbage".to_string(),
+            minimum_version: "also-bad".to_string(),
             ..Default::default()
         };
         assert!(m.version().is_err());
@@ -459,10 +462,38 @@ mod tests {
     }
 
     #[test]
-    fn archive_for_selects_targz_and_never_the_exe() {
-        let json = fixture_json("0.4.40", 4040, "2099-01-01T00:00:00Z");
+    fn version_tolerates_leading_v() {
+        let m = Manifest {
+            version: "v1.2.3".to_string(),
+            minimum_version: "v1.0.0".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            m.version().unwrap(),
+            semver::Version::parse("1.2.3").unwrap()
+        );
+        assert_eq!(
+            m.minimum_version().unwrap(),
+            semver::Version::parse("1.0.0").unwrap()
+        );
+    }
+
+    #[test]
+    fn archive_for_skips_exe_and_picks_the_matching_archive() {
+        let json = fixture_json("0.4.9", 4009, "2099-01-01T00:00:00Z");
         let (pk, sig) = sign(json.as_bytes());
         let m = parse_and_verify(json.as_bytes(), &sig, &[pk.as_str()]).unwrap();
+
+        // Windows: must pick the .tar.gz ARCHIVE, never the setup .exe.
+        let win = m
+            .archive_for("x86_64-pc-windows-msvc", ".tar.gz")
+            .expect("a windows archive must be selected");
+        assert_eq!(win.kind, "tar.gz");
+        assert!(win.asset_name.ends_with(".tar.gz"));
+        assert!(
+            !win.asset_name.contains("setup"),
+            "the setup installer must never be selected for in-place update"
+        );
 
         // Linux: must pick the .tar.gz archive.
         let nix = m
@@ -470,29 +501,36 @@ mod tests {
             .expect("a linux tar.gz archive must be selected");
         assert_eq!(nix.kind, "tar.gz");
         assert!(nix.asset_name.ends_with(".tar.gz"));
+    }
 
-        // Windows: the .tar.gz (in-place archive), NOT the setup.exe.
-        let win = m
-            .archive_for("x86_64-pc-windows-msvc", ".tar.gz")
-            .expect("a windows tar.gz archive must be selected");
-        assert_eq!(win.kind, "tar.gz");
-        assert!(win.asset_name.ends_with(".tar.gz"));
-        assert!(
-            !win.asset_name.contains("setup"),
-            "the setup installer must never be selected as the archive"
-        );
+    #[test]
+    fn installer_for_picks_the_exe_on_windows_only() {
+        let json = fixture_json("0.4.9", 4009, "2099-01-01T00:00:00Z");
+        let (pk, sig) = sign(json.as_bytes());
+        let m = parse_and_verify(json.as_bytes(), &sig, &[pk.as_str()]).unwrap();
+
+        // Windows resolves the self-elevating setup.exe with its signed sha.
+        let inst = m
+            .installer_for("x86_64-pc-windows-msvc")
+            .expect("a windows installer exe must be selected");
+        assert_eq!(inst.kind, "exe");
+        assert!(inst.asset_name.ends_with("-x86_64-setup.exe"));
+        assert_eq!(inst.sha256, "00000000feedface");
+
+        // A non-Windows target never offers the installer.
+        assert!(m.installer_for("x86_64-unknown-linux-gnu").is_none());
     }
 
     #[test]
     fn archive_for_never_selects_an_exe_even_when_only_exe_exists() {
         // A manifest whose only asset for the platform is an `exe` yields no
-        // in-place archive — the archive path reports "no update for this
-        // platform" rather than trying to swap in a setup installer.
+        // in-place archive — the updater reports "no update for this platform"
+        // rather than trying to swap in a setup installer.
         let m = Manifest {
             assets: vec![ManifestAsset {
                 platform: "x86_64-pc-windows-msvc".to_string(),
                 kind: "exe".to_string(),
-                asset_name: "scr1b3-v0.4.40-x86_64-setup.exe".to_string(),
+                asset_name: "scr1b3-v0.4.9-x86_64-setup.exe".to_string(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -502,36 +540,8 @@ mod tests {
     }
 
     #[test]
-    fn installer_for_selects_the_exe_by_suffix() {
-        let json = fixture_json("0.4.40", 4040, "2099-01-01T00:00:00Z");
-        let (pk, sig) = sign(json.as_bytes());
-        let m = parse_and_verify(json.as_bytes(), &sig, &[pk.as_str()]).unwrap();
-        let inst = m
-            .installer_for("-x86_64-setup.exe")
-            .expect("the installer must be selectable by suffix");
-        assert_eq!(inst.kind, "exe");
-        assert_eq!(inst.sha256, "00000000feedface");
-        assert!(inst.asset_name.ends_with("-x86_64-setup.exe"));
-    }
-
-    #[test]
-    fn installer_for_none_when_no_exe_asset() {
-        // A manifest with only archive kinds yields no installer.
-        let m = Manifest {
-            assets: vec![ManifestAsset {
-                platform: "x86_64-unknown-linux-gnu".to_string(),
-                kind: "tar.gz".to_string(),
-                asset_name: "scr1b3-x86_64-unknown-linux-gnu.tar.gz".to_string(),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(m.installer_for("-x86_64-setup.exe").is_none());
-    }
-
-    #[test]
     fn archive_for_empty_target_never_matches() {
-        let json = fixture_json("0.4.40", 4040, "2099-01-01T00:00:00Z");
+        let json = fixture_json("0.4.9", 4009, "2099-01-01T00:00:00Z");
         let (pk, sig) = sign(json.as_bytes());
         let m = parse_and_verify(json.as_bytes(), &sig, &[pk.as_str()]).unwrap();
         assert!(m.archive_for("", ".tar.gz").is_none());
@@ -574,11 +584,14 @@ mod tests {
         // Anchor the date math against known Unix timestamps.
         assert_eq!(rfc3339_to_unix("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(rfc3339_to_unix("2000-01-01T00:00:00Z"), Some(946_684_800));
+        // The schema's own example instant (2026-07-13T14:17:42Z).
         assert_eq!(rfc3339_to_unix("2026-07-13T14:17:42Z"), Some(1_783_952_262));
     }
 
     #[test]
     fn rfc3339_tolerates_fraction_and_space_separator_and_offsets() {
+        // Fractional seconds are skipped; a space separator and +00:00/-00:00
+        // zones normalize to the same instant as the canonical `Z` form.
         let base = rfc3339_to_unix("2026-07-13T14:17:42Z").unwrap();
         assert_eq!(rfc3339_to_unix("2026-07-13T14:17:42.123Z"), Some(base));
         assert_eq!(rfc3339_to_unix("2026-07-13 14:17:42Z"), Some(base));
@@ -605,8 +618,10 @@ mod tests {
 
     #[test]
     fn release_index_ordering_matches_version_ordering() {
+        // Sanity on the release_index formula's intent: a higher version yields
+        // a higher index (the total order the anti-rollback floor relies on).
         let idx = |maj: u64, min: u64, pat: u64| maj * 1_000_000 + min * 1_000 + pat;
-        assert!(idx(0, 4, 40) > idx(0, 4, 0));
+        assert!(idx(0, 4, 9) > idx(0, 4, 0));
         assert!(idx(0, 5, 0) > idx(0, 4, 999));
         assert!(idx(1, 0, 0) > idx(0, 999, 999));
     }
