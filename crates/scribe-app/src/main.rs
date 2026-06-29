@@ -12,6 +12,8 @@
 
 mod action_log;
 mod app;
+#[cfg(test)]
+mod log_capture;
 mod change_bar;
 mod cli;
 mod datetime;
