@@ -38,6 +38,12 @@ pub mod text_ops;
 pub mod theme;
 pub mod update;
 
+/// Test-only `tracing` capture harness shared by the unit-test modules that
+/// assert on the silent-failure log sites (verify-fail, anti-downgrade, corrupt
+/// session manifest, restore-path reject, corrupt-config backup, …).
+#[cfg(test)]
+pub(crate) mod test_log_capture;
+
 pub use config::{Config, ReportingConfig, ReportingMode};
 pub use document::Document;
 pub use error::{CoreError, Result};
