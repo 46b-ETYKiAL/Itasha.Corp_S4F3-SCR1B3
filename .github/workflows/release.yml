@@ -264,6 +264,103 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist
+      # Generate the Tier-1 signed-manifest payload (latest.json) BEFORE the
+      # signing step, so the existing sign loop produces `latest.json.minisig`
+      # and the fail-closed self-verify gate checks it like any other asset. The
+      # manifest declares, per platform, {asset_name, sha256, size, url} plus
+      # {version, release_index, minimum_version, valid_until_utc}; the in-app
+      # updater (Tier-1 clients) verifies THIS manifest against the embedded key
+      # and then pins each download's SHA-256 to the SIGNED digest here — making
+      # artifact identity a SIGNED HASH, not an unsigned GitHub JSON field or a
+      # tool-dependent trusted-comment string. `valid_until_utc` is the freeze
+      # beacon; `minimum_version` is the signed anti-downgrade floor;
+      # `release_index` is the monotonic anti-rollback ordinal. No extra checkout
+      # is needed — the manifest is derived purely from the staged `dist/` assets
+      # + the tag. `download-artifact` lands each asset in a per-target subdir
+      # (`dist/scr1b3-<target>/<file>`), so the walk is RECURSIVE; the published
+      # release flattens to bare names, so each asset_name + its download URL use
+      # the basename.
+      - name: Generate update manifest (latest.json, Tier 1)
+        shell: bash
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 - "$REPO" "$TAG" <<'PY'
+          import sys, os, json, hashlib, datetime
+          repo, tag = sys.argv[1], sys.argv[2]
+          ver = tag[1:] if tag.startswith("v") else tag
+          dist = "dist"
+          TRIPLES = (
+              "x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc",
+              "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu",
+              "x86_64-apple-darwin", "aarch64-apple-darwin",
+          )
+          def platform_of(name):
+              for t in TRIPLES:
+                  if t in name:
+                      return t
+              # The native CRT installer (scr1b3-<tag>-x86_64-setup.exe) carries no
+              # full triple in its name but is a Windows x64 asset.
+              if name.endswith(".exe"):
+                  return "x86_64-pc-windows-msvc"
+              return None
+          def kind_of(name):
+              if name.endswith(".zip"): return "zip"
+              if name.endswith(".tar.gz"): return "tar.gz"
+              if name.endswith(".exe"): return "exe"
+              return "other"
+          # Walk RECURSIVELY: download-artifact nests each asset under
+          # dist/<artifact-name>/<file>. Dedup by basename (an asset_name is a
+          # stable identity across the per-target subdirs).
+          seen = {}
+          for root, _dirs, files in os.walk(dist):
+              for fn in files:
+                  if not fn.endswith((".zip", ".tar.gz", ".exe")):
+                      continue          # archives/installers only (skip sidecars/SBOMs/licenses)
+                  plat = platform_of(fn)
+                  if plat is None:
+                      continue
+                  p = os.path.join(root, fn)
+                  if not os.path.isfile(p) or fn in seen:
+                      continue
+                  with open(p, "rb") as fh:
+                      digest = hashlib.sha256(fh.read()).hexdigest()
+                  seen[fn] = {
+                      "platform": plat, "kind": kind_of(fn), "asset_name": fn,
+                      "url": f"https://github.com/{repo}/releases/download/{tag}/{fn}",
+                      "size": os.path.getsize(p), "sha256": digest,
+                  }
+          assets = sorted(seen.values(), key=lambda a: (a["platform"], a["asset_name"]))
+          if not assets:
+              print("::error::manifest generation found no archive/installer assets in dist/")
+              sys.exit(1)
+          core = ver.split("+")[0].split("-")[0].split(".")
+          maj, minr, pat = (core + ["0", "0", "0"])[:3]
+          release_index = int(maj) * 1_000_000 + int(minr) * 1_000 + int(pat)
+          now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+          fmt = "%Y-%m-%dT%H:%M:%SZ"
+          manifest = {
+              "schema": "itasha.update.manifest/v1",
+              "product": "scr1b3",
+              "version": ver,
+              "release_index": release_index,
+              "minimum_version": "0.4.0",
+              "published_utc": now.strftime(fmt),
+              "valid_until_utc": (now + datetime.timedelta(days=14)).strftime(fmt),
+              "assets": assets,
+          }
+          # Write the manifest at the TOP of dist/ so the existing sign loop
+          # (`find dist -type f`) signs it and the release upload publishes it as
+          # the bare `latest.json` (+ `latest.json.minisig`) the updater fetches.
+          with open(os.path.join(dist, "latest.json"), "w", encoding="utf-8") as out:
+              json.dump(manifest, out, indent=2, sort_keys=True)
+              out.write("\n")
+          print(f"manifest: v{ver} release_index={release_index} assets={len(assets)} valid_until={manifest['valid_until_utc']}")
+          PY
+          echo "----- dist/latest.json -----"
+          cat dist/latest.json
       # Attest the BUILT artifacts (binaries, tarballs, installer) before signing
       # the sidecars — provenance covers the build outputs themselves.
       - name: Attest build provenance (SLSA)
