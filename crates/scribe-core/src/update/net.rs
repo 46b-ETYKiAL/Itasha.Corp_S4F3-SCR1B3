@@ -273,6 +273,15 @@ pub fn ensure_upgrade(candidate: &str, running: &str) -> Result<(), String> {
     let cur = semver::Version::parse(running)
         .map_err(|e| format!("internal: bad running version {running:?}: {e}"))?;
     if cand <= cur {
+        // Anti-downgrade is a TUF rollback-attack defense; a blocked downgrade
+        // is a security event that must leave a durable record. Version strings
+        // are NOT secrets (safe at warn+); never log signature/key material.
+        tracing::warn!(
+            target: "scribe::update",
+            attempted = %cand,
+            current = %cur,
+            "blocked downgrade/rollback — refusing to install a release not newer than the running version"
+        );
         return Err(format!(
             "refusing to install v{cand}: not newer than the running v{cur} (downgrade protection)"
         ));
@@ -598,6 +607,39 @@ pub fn download_verify_installer(
     }
 }
 
+/// Coarse, secret-free classification of a [`verify_artifact`] error string into
+/// a stable failure KIND token. The raw error may embed a `minisign-verify`
+/// detail; this maps it to one of a fixed set of tokens so the durable audit log
+/// records WHY verification failed without ever emitting signature/key bytes.
+fn verify_failure_kind(err: &str) -> &'static str {
+    let e = err.to_ascii_lowercase();
+    if e.contains("checksum") {
+        "checksum-mismatch"
+    } else if e.contains("no trusted") {
+        "no-trusted-keys"
+    } else if e.contains("public key") {
+        "bad-public-key"
+    } else if e.contains("bad signature") {
+        "malformed-signature"
+    } else {
+        "signature-verify-failed"
+    }
+}
+
+/// Emit the durable supply-chain audit record for a FAILED artifact
+/// verification. This gate is the last line before an unverified binary would be
+/// installed, so a failure here MUST leave a record (it previously produced
+/// none). Logs only the coarse [`verify_failure_kind`] — NEVER the signature,
+/// the expected SHA, or any artifact bytes.
+fn log_verify_failure(artifact: &str, err: &str) {
+    tracing::error!(
+        target: "scribe::update",
+        artifact,
+        failure_kind = verify_failure_kind(err),
+        "artifact verification failed — refusing to install the downloaded artifact (supply-chain gate)"
+    );
+}
+
 fn download_verify_installer_inner(
     installer: &InstallerAsset,
     staging_dir: &Path,
@@ -619,7 +661,8 @@ fn download_verify_installer_inner(
         String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
 
     // SHA-256 THEN minisign against the trusted key set. Fails closed.
-    verify_artifact(&exe_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEYS)?;
+    verify_artifact(&exe_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEYS)
+        .inspect_err(|e| log_verify_failure("installer", e))?;
 
     // Only reached when verification passed — write the verified installer out.
     let out = staging_dir.join("scr1b3-setup.exe");
@@ -652,7 +695,8 @@ fn download_verify_extract_inner(
         String::from_utf8(sig_bytes).map_err(|e| format!("minisig is not valid UTF-8: {e}"))?;
 
     // SHA-256 THEN minisign against the trusted key set. Fails closed.
-    verify_artifact(&asset_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEYS)?;
+    verify_artifact(&asset_bytes, expected_sha, &sig_str, EMBEDDED_PUBLIC_KEYS)
+        .inspect_err(|e| log_verify_failure("release-archive", e))?;
 
     // Only reached when verification passed.
     extract_binary(&asset_bytes, staging_dir)
@@ -1747,5 +1791,79 @@ mod tests {
         assert!(err.contains("download failed"), "got: {err}");
         assert!(!staging.exists(), "staging must be wiped on failure");
         let _ = server.captured();
+    }
+
+    // ---- silent-failure logging (plan: log silent supply-chain / session /
+    // config / lsp failures) ----
+
+    use crate::test_log_capture::with_captured_logs;
+    use tracing::Level;
+
+    #[test]
+    fn verify_failure_kind_classifies_without_leaking_detail() {
+        assert_eq!(
+            verify_failure_kind("checksum mismatch"),
+            "checksum-mismatch"
+        );
+        assert_eq!(
+            verify_failure_kind("no trusted public keys configured"),
+            "no-trusted-keys"
+        );
+        assert_eq!(verify_failure_kind("bad public key: x"), "bad-public-key");
+        assert_eq!(
+            verify_failure_kind("bad signature: junk"),
+            "malformed-signature"
+        );
+        assert_eq!(
+            verify_failure_kind("signature verification failed: whatever"),
+            "signature-verify-failed"
+        );
+    }
+
+    #[test]
+    fn verify_failure_logs_error_with_kind_and_never_leaks_the_raw_detail() {
+        // The supply-chain gate MUST leave a durable ERROR record on a failed
+        // verification — and it must log only the coarse KIND, never the raw
+        // error string (which could embed signature/key bytes).
+        with_captured_logs(|logs| {
+            log_verify_failure(
+                "release-archive",
+                "signature verification failed: SECRET_SIG_BYTES_DO_NOT_LEAK",
+            );
+            let records = logs.records();
+            assert!(
+                records.iter().any(|(lvl, text)| *lvl == Level::ERROR
+                    && text.contains("artifact verification failed")
+                    && text.contains("failure_kind=signature-verify-failed")
+                    && text.contains("artifact=release-archive")),
+                "expected an ERROR with the failure kind, got: {records:?}"
+            );
+            // The raw detail (a stand-in for signature bytes) must NEVER appear.
+            assert!(
+                !records
+                    .iter()
+                    .any(|(_, text)| text.contains("SECRET_SIG_BYTES_DO_NOT_LEAK")),
+                "the raw verify-error detail must not be logged"
+            );
+        });
+    }
+
+    #[test]
+    fn blocked_downgrade_emits_a_warn_with_versions_and_no_signature() {
+        with_captured_logs(|logs| {
+            let res = ensure_upgrade("v0.3.0", "0.4.9");
+            assert!(res.is_err(), "a downgrade must be refused");
+            assert!(
+                logs.has(Level::WARN, "blocked downgrade/rollback"),
+                "expected a WARN for the blocked downgrade, got: {:?}",
+                logs.records()
+            );
+            // Versions are safe at warn+; assert they are present as fields.
+            let warn_text = logs.warn_plus_text();
+            assert!(
+                warn_text.contains("attempted=0.3.0") && warn_text.contains("current=0.4.9"),
+                "version fields missing from the warn record: {warn_text}"
+            );
+        });
     }
 }

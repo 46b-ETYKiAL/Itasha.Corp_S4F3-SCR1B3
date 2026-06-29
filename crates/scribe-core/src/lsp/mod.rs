@@ -158,10 +158,41 @@ impl LspClient {
             std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            while let Ok(Some(msg)) = protocol::read_message(&mut reader) {
-                let diags = protocol::parse_publish_diagnostics(&msg);
-                if !diags.is_empty() && tx.send(diags).is_err() {
-                    break; // UI dropped the receiver
+            loop {
+                match protocol::read_message(&mut reader) {
+                    Ok(Some(msg)) => {
+                        let diags = protocol::parse_publish_diagnostics(&msg);
+                        if !diags.is_empty() && tx.send(diags).is_err() {
+                            // UI dropped the receiver — ordinary teardown, not a
+                            // failure of the server. Debug, not warn.
+                            tracing::debug!(
+                                target: "scribe::lsp",
+                                "language-server reader stopped: diagnostics receiver dropped"
+                            );
+                            break;
+                        }
+                    }
+                    // Clean EOF: the server closed stdout (exited / was reaped).
+                    // Diagnostics will no longer update — a recoverable degrade.
+                    Ok(None) => {
+                        tracing::warn!(
+                            target: "scribe::lsp",
+                            reason = "eof",
+                            "language-server reader stopped: server closed the connection (diagnostics will no longer update)"
+                        );
+                        break;
+                    }
+                    // Malformed frame or broken pipe: the diagnostics stream dies
+                    // here. Log the error KIND only (never frame/buffer content).
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "scribe::lsp",
+                            reason = "read-error",
+                            error_kind = ?e.kind(),
+                            "language-server reader stopped: unreadable frame or broken pipe (diagnostics will no longer update)"
+                        );
+                        break;
+                    }
                 }
             }
         });

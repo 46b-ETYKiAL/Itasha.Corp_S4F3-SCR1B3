@@ -16,7 +16,15 @@ pub fn install_with_backup(new: &Path, target: &Path, backup: &Path) -> io::Resu
     // Prefer atomic rename; fall back to copy across filesystems.
     match fs::rename(new, target) {
         Ok(()) => Ok(()),
-        Err(_) => {
+        Err(e) => {
+            // The atomic swap was not possible (typically a cross-volume move);
+            // the non-atomic copy fallback below succeeds, but the degrade was
+            // previously invisible. Record the error KIND only (no paths).
+            tracing::warn!(
+                target: "scribe::update",
+                error_kind = ?e.kind(),
+                "atomic install rename failed — falling back to a non-atomic copy"
+            );
             fs::copy(new, target)?;
             let _ = fs::remove_file(new);
             Ok(())

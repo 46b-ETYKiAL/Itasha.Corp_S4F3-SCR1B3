@@ -295,7 +295,23 @@ impl Config {
 /// the backup was written, for testing.
 fn backup_corrupt_config(path: &std::path::Path) -> bool {
     let bak = path.with_extension("toml.bak");
-    std::fs::copy(path, &bak).is_ok()
+    match std::fs::copy(path, &bak) {
+        Ok(_) => true,
+        Err(e) => {
+            // PERMANENT settings-loss path: the original is unreadable AND we
+            // could not preserve it, so the next settings change writes defaults
+            // over the only recoverable copy. This MUST leave a record (the
+            // result was previously discarded). Log the error KIND only; the
+            // file path is content-bearing → debug.
+            tracing::error!(
+                target: "scribe::config",
+                error_kind = ?e.kind(),
+                "could not back up the unreadable settings file — it may be overwritten on the next settings change"
+            );
+            tracing::debug!(target: "scribe::config", path = %path.display(), "corrupt-config backup source path");
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -745,6 +761,41 @@ mode = \"off\"
             path.with_extension("toml.bak").exists(),
             "the malformed original must be preserved as a .bak"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- silent-failure logging ----
+
+    use crate::test_log_capture::with_captured_logs;
+    use tracing::Level;
+
+    #[test]
+    fn backup_corrupt_config_logs_error_on_failure_without_leaking_the_path() {
+        let dir = std::env::temp_dir().join(format!("scr1b3-bad-bak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // The SOURCE does not exist, so the backup copy fails — the permanent
+        // settings-loss path that must now leave a durable ERROR record.
+        let missing = dir.join("does-not-exist.toml");
+        with_captured_logs(|logs| {
+            assert!(
+                !backup_corrupt_config(&missing),
+                "a failed backup returns false"
+            );
+            assert!(
+                logs.has(
+                    Level::ERROR,
+                    "could not back up the unreadable settings file"
+                ),
+                "expected an ERROR for the failed corrupt-config backup, got: {:?}",
+                logs.records()
+            );
+            // The file path is debug-only; it must not appear at warn+.
+            assert!(
+                !logs.warn_plus_text().contains("does-not-exist.toml"),
+                "the settings path must not appear at warn+"
+            );
+        });
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

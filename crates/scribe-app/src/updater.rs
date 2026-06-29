@@ -230,6 +230,7 @@ impl Updater {
         if self.is_busy() {
             return;
         }
+        tracing::info!("update check started (current v{})", current_version());
         self.state = UpdateState::Checking;
         self.launch_kind = kind;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -338,6 +339,13 @@ impl Updater {
         // The in-place-swap path (`apply_and_restart`) already does this; the
         // installer path must too, or the two apply routes defend asymmetrically.
         if let Err(e) = update::ensure_upgrade(&version, current_version()) {
+            // TUF anti-rollback refusal. Log version strings ONLY — never the
+            // signature or any key material.
+            tracing::warn!(
+                "anti-rollback: refused installer for non-newer release \
+                 (attempted v{version}, current v{})",
+                current_version()
+            );
             self.state = UpdateState::Failed(e);
             return;
         }
@@ -347,10 +355,17 @@ impl Updater {
         // it is reaped by `cleanup_after_update()` on the next launch.
         match launch_installer_elevated(&installer) {
             Ok(()) => {
+                tracing::info!(
+                    "update applied: installer for v{version} launched; closing to apply"
+                );
                 self.state = UpdateState::Applied { version };
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Err(e) => {
+                tracing::error!(
+                    "failed to launch staged installer for v{version} ({:?})",
+                    e.kind()
+                );
                 self.state = UpdateState::Failed(format!(
                     "couldn't launch the installer ({e}). You can run it manually: {}",
                     installer.display()
@@ -371,6 +386,13 @@ impl Updater {
         // the running build — so a tampered or replayed older-but-validly-signed
         // artifact can never be installed over us.
         if let Err(e) = update::ensure_upgrade(&version, current_version()) {
+            // TUF anti-rollback refusal on the in-place-swap route. Log version
+            // strings ONLY — never the signature or any key material.
+            tracing::warn!(
+                "anti-rollback: refused in-place apply for non-newer release \
+                 (attempted v{version}, current v{})",
+                current_version()
+            );
             self.state = UpdateState::Failed(e);
             return;
         }
@@ -398,6 +420,7 @@ impl Updater {
                         // rollback and is reaped by the relaunched build's
                         // startup cleanup once it confirms it runs).
                         clean_staging_dir();
+                        tracing::info!("update applied: v{version} swapped in and relaunching");
                         self.state = UpdateState::Applied { version };
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
@@ -406,6 +429,21 @@ impl Updater {
                         // Revert to the known-good prior binary and keep THIS
                         // process running, so the user is never left windowless.
                         let reverted = update::apply::rollback_running_executable(&backup).is_ok();
+                        if reverted {
+                            tracing::warn!(
+                                "update v{version} installed but failed to relaunch ({:?}); \
+                                 reverted to the prior version",
+                                e.kind()
+                            );
+                        } else {
+                            // Worst case: a half-updated install — the swap took
+                            // but neither the new binary nor the revert works.
+                            tracing::error!(
+                                "update v{version} installed but failed to relaunch ({:?}) AND the \
+                                 automatic revert ALSO failed — install is half-updated",
+                                e.kind()
+                            );
+                        }
                         self.state = UpdateState::Failed(if reverted {
                             format!(
                                 "v{version} was installed but couldn't be started ({e}); \
@@ -420,7 +458,10 @@ impl Updater {
                     }
                 }
             }
-            Err(e) => self.state = UpdateState::Failed(format!("install failed: {e}")),
+            Err(e) => {
+                tracing::error!("in-place install (executable swap) failed: {:?}", e.kind());
+                self.state = UpdateState::Failed(format!("install failed: {e}"));
+            }
         }
     }
 
@@ -462,6 +503,7 @@ impl Updater {
         match msg {
             UpdateMsg::CheckResult(Ok(update::UpdateOutcome::Available(info))) => {
                 let v = info.version.to_string();
+                tracing::info!("update available: v{v}");
                 let already_skipped = self.skipped_version.as_deref() == Some(v.as_str());
                 if !already_skipped {
                     match self.launch_kind {
@@ -492,6 +534,10 @@ impl Updater {
                 };
             }
             UpdateMsg::CheckResult(Err(e)) => {
+                // Operational (network / API / parse) check failure — the app's
+                // own error string is a human summary, no token (the check is an
+                // unauthenticated GET) and no signature.
+                tracing::warn!("update check failed: {e}");
                 self.launch_kind = LaunchKind::Manual;
                 self.state = UpdateState::Failed(e);
             }
@@ -503,6 +549,11 @@ impl Updater {
                 self.apply_and_restart(ctx);
             }
             UpdateMsg::Downloaded(Err(e)) => {
+                // The download path's failure is dominated by the fail-closed
+                // signature+checksum verification. Log the KIND only — never the
+                // raw error string (which could echo signature/key text) — so a
+                // tampered or replayed artifact leaves an operator-visible trail.
+                tracing::error!("update download failed to verify (checksum/signature) or stage");
                 self.state = UpdateState::Failed(e);
             }
             UpdateMsg::InstallerReady(Ok((installer, version))) => {
@@ -510,6 +561,10 @@ impl Updater {
                 self.run_installer(ctx);
             }
             UpdateMsg::InstallerReady(Err(e)) => {
+                // Same fail-closed verification as the archive path; log KIND only.
+                tracing::error!(
+                    "installer download failed to verify (checksum/signature) or stage"
+                );
                 self.state = UpdateState::Failed(e);
             }
         }
@@ -1024,5 +1079,220 @@ mod tests {
             ),
             other => panic!("expected Failed(install failed), got {other:?}"),
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // Structured-logging assertions. The crate's test-only `log_capture`
+    // helper installs an in-process subscriber for the duration of a closure
+    // and records each event's (level, message). NOTE: the capture layer only
+    // records the `message` field (not structured key/value fields), so the
+    // logs under test deliberately inline their tokens + (non-secret) version
+    // strings into the message. Security paths log version + error KIND only —
+    // never a signature, key, or token — and these tests pin that.
+    // ----------------------------------------------------------------------
+
+    /// Heuristic secret-leak tripwire: a >=32-char run of base64/hex/minisign
+    /// alphabet characters looks like signature/key material and must NEVER
+    /// appear in a log message. Version strings + `io::ErrorKind` debug never
+    /// produce such a run, so this is a safe over-approximation for the tests.
+    fn looks_like_secret(s: &str) -> bool {
+        if s.contains("minisig") || s.contains("untrusted comment") {
+            return true;
+        }
+        let mut run = 0usize;
+        for ch in s.chars() {
+            if ch.is_ascii_alphanumeric() || ch == '+' || ch == '/' || ch == '=' {
+                run += 1;
+                if run >= 32 {
+                    return true;
+                }
+            } else {
+                run = 0;
+            }
+        }
+        false
+    }
+
+    /// No captured message may look like signature/key material — asserted on
+    /// every security-path logging test.
+    fn assert_no_secret_logged(logs: &crate::log_capture::Captured) {
+        for (lvl, msg) in logs.events() {
+            assert!(
+                !looks_like_secret(&msg),
+                "a {lvl:?} log message looks like it leaked secret/signature bytes: {msg:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn download_verify_error_logs_error_without_secret() {
+        // The `Downloaded(Err)` transition is dominated by the fail-closed
+        // signature+checksum verification. It must emit an ERROR carrying
+        // "verify", and must NOT echo the raw error (which could contain
+        // signature/key text).
+        let (u, logs) = crate::log_capture::capture(|| {
+            let ctx = egui::Context::default();
+            let mut u = Updater::default();
+            u.handle_update_msg(
+                // A realistic raw verify error that embeds signature-shaped text;
+                // the log must summarize, never echo it.
+                UpdateMsg::Downloaded(Err(
+                    "bad signature: RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0STRBdvF_zXBXR"
+                        .to_string(),
+                )),
+                &ctx,
+            );
+            u
+        });
+        assert!(matches!(u.state, UpdateState::Failed(_)));
+        assert!(
+            logs.has(tracing::Level::ERROR, "verify"),
+            "expected an ERROR mentioning verify; got {:?}",
+            logs.events()
+        );
+        // The raw signature-shaped error string must NOT have been logged.
+        assert!(
+            !logs.any("RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0STRBdvF_zXBXR"),
+            "the raw (signature-shaped) error must never be logged: {:?}",
+            logs.events()
+        );
+        assert_no_secret_logged(&logs);
+    }
+
+    #[test]
+    fn installer_verify_error_logs_error_without_secret() {
+        let (u, logs) = crate::log_capture::capture(|| {
+            let ctx = egui::Context::default();
+            let mut u = Updater::default();
+            u.handle_update_msg(
+                UpdateMsg::InstallerReady(Err("checksum mismatch".to_string())),
+                &ctx,
+            );
+            u
+        });
+        assert!(matches!(u.state, UpdateState::Failed(_)));
+        assert!(
+            logs.has(tracing::Level::ERROR, "verify"),
+            "expected an ERROR mentioning verify; got {:?}",
+            logs.events()
+        );
+        assert_no_secret_logged(&logs);
+    }
+
+    #[test]
+    fn check_error_logs_warn() {
+        let (u, logs) = crate::log_capture::capture(|| {
+            let ctx = egui::Context::default();
+            let mut u = Updater {
+                launch_kind: LaunchKind::Auto,
+                ..Default::default()
+            };
+            u.handle_update_msg(
+                UpdateMsg::CheckResult(Err("rate limited".to_string())),
+                &ctx,
+            );
+            u
+        });
+        assert!(matches!(u.state, UpdateState::Failed(_)));
+        assert!(
+            logs.has(tracing::Level::WARN, "update check failed"),
+            "expected a WARN for a failed check; got {:?}",
+            logs.events()
+        );
+    }
+
+    #[test]
+    fn available_logs_info_with_version() {
+        let (_, logs) = crate::log_capture::capture(|| {
+            reduce_with_kind(LaunchKind::Manual, available_msg("9.9.9"));
+        });
+        assert!(
+            logs.has(tracing::Level::INFO, "update available"),
+            "expected an INFO lifecycle log; got {:?}",
+            logs.events()
+        );
+        assert!(
+            logs.has(tracing::Level::INFO, "9.9.9"),
+            "the available log should carry the version string; got {:?}",
+            logs.events()
+        );
+    }
+
+    #[test]
+    fn run_installer_rollback_refusal_logs_warn_without_secret() {
+        // Anti-rollback (TUF) refusal on the installer route must emit a WARN
+        // and must NEVER leak signature/key bytes — only version strings.
+        let (u, logs) = crate::log_capture::capture(|| {
+            let ctx = egui::Context::default();
+            let mut u = Updater {
+                state: UpdateState::ReadyToRunInstaller {
+                    installer: std::path::PathBuf::from("/nonexistent/scr1b3-setup.exe"),
+                    version: "0.0.1".to_string(), // older than the running build
+                },
+                ..Default::default()
+            };
+            u.run_installer(&ctx);
+            u
+        });
+        assert!(matches!(u.state, UpdateState::Failed(_)));
+        assert!(
+            logs.has(tracing::Level::WARN, "anti-rollback"),
+            "expected a WARN for the anti-rollback refusal; got {:?}",
+            logs.events()
+        );
+        // The attempted version is fine to log; a signature/key is not.
+        assert!(logs.any("0.0.1"), "the attempted version should be logged");
+        assert_no_secret_logged(&logs);
+    }
+
+    #[test]
+    fn apply_and_restart_rollback_refusal_logs_warn_without_secret() {
+        let (u, logs) = crate::log_capture::capture(|| {
+            let ctx = egui::Context::default();
+            let mut u = Updater {
+                state: UpdateState::ReadyToApply {
+                    staged: std::path::PathBuf::from("/nonexistent/scr1b3"),
+                    version: "0.0.1".to_string(),
+                },
+                ..Default::default()
+            };
+            u.apply_and_restart(&ctx);
+            u
+        });
+        assert!(matches!(u.state, UpdateState::Failed(_)));
+        assert!(
+            logs.has(tracing::Level::WARN, "anti-rollback"),
+            "expected a WARN for the anti-rollback refusal; got {:?}",
+            logs.events()
+        );
+        assert!(logs.any("0.0.1"), "the attempted version should be logged");
+        assert_no_secret_logged(&logs);
+    }
+
+    #[test]
+    fn in_place_swap_failure_logs_error() {
+        // A successful download chains into apply; with a nonexistent staged
+        // binary (but a newer version, so the anti-rollback gate passes) the
+        // in-place swap fails before any spawn — and that operational failure
+        // must surface as an ERROR.
+        let (u, logs) = crate::log_capture::capture(|| {
+            let ctx = egui::Context::default();
+            let mut u = Updater::default();
+            u.handle_update_msg(
+                UpdateMsg::Downloaded(Ok((
+                    std::path::PathBuf::from("/nonexistent/scr1b3-staged-binary"),
+                    "9.9.9".to_string(),
+                ))),
+                &ctx,
+            );
+            u
+        });
+        assert!(matches!(u.state, UpdateState::Failed(_)));
+        assert!(
+            logs.has(tracing::Level::ERROR, "install"),
+            "expected an ERROR for the failed in-place swap; got {:?}",
+            logs.events()
+        );
+        assert_no_secret_logged(&logs);
     }
 }

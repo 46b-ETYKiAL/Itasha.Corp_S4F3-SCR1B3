@@ -135,24 +135,44 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// the read and write sides are symmetric.
 fn validate_backup_name(name: &str) -> io::Result<()> {
     use std::path::Component;
+    // A rejection here is a security decision on a restore: the backup `name`
+    // arrives verbatim from the untrusted, user-writable `session.json`, so a
+    // non-bare name is an attempted path escape. Record the REASON kind at warn
+    // (the path itself only at debug — it is untrusted content).
+    fn reject(name: &str, reason: &'static str, msg: &'static str) -> io::Error {
+        tracing::warn!(
+            target: "scribe::session",
+            reason,
+            "restore path rejected — refusing a non-bare backup name from the session manifest"
+        );
+        tracing::debug!(target: "scribe::session", name = %name, "rejected backup name");
+        io::Error::new(io::ErrorKind::InvalidInput, msg)
+    }
     // A `session.json` manifest is portable across OSes, so a malicious
     // Windows-authored `backup: "..\\..\\secret"` could be opened on POSIX
     // (where `\` is a legal filename char, NOT a separator, so `components()`
     // alone would treat it as one Normal component and accept it). Reject BOTH
     // separators explicitly on every platform so the guard is OS-independent.
     if name.contains('/') || name.contains('\\') {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
+        return Err(reject(
+            name,
+            "separator",
             "backup name must not contain a path separator",
         ));
     }
+    const BARE_MSG: &str =
+        "backup name must be a single bare file component (no separators, `..`, or root/drive prefix)";
     let mut comps = Path::new(name).components();
     match (comps.next(), comps.next()) {
         (Some(Component::Normal(_)), None) => Ok(()),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "backup name must be a single bare file component (no separators, `..`, or root/drive prefix)",
-        )),
+        // `..` traversal.
+        (Some(Component::ParentDir), _) => Err(reject(name, "parent-dir-escape", BARE_MSG)),
+        // Absolute path, Windows drive, or a `\\?\` / UNC prefix.
+        (Some(Component::Prefix(_)), _) | (Some(Component::RootDir), _) => {
+            Err(reject(name, "absolute-or-unc", BARE_MSG))
+        }
+        // Empty, `.`, or a multi-component name.
+        _ => Err(reject(name, "non-bare-name", BARE_MSG)),
     }
 }
 
@@ -225,8 +245,39 @@ pub fn save_manifest(config_dir: &Path, manifest: &SessionManifest) -> io::Resul
 
 /// Load the manifest, or `None` when absent / unreadable / a newer schema.
 pub fn load_manifest(config_dir: &Path) -> Option<SessionManifest> {
-    let body = fs::read_to_string(manifest_path(config_dir)).ok()?;
-    let manifest: SessionManifest = serde_json::from_str(&body).ok()?;
+    let path = manifest_path(config_dir);
+    let body = match fs::read_to_string(&path) {
+        Ok(b) => b,
+        // Absent manifest is the normal "no prior session" case — silent.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return None,
+        // The manifest EXISTS but cannot be read (permissions, IO error, a
+        // partially-written file). The caller only sees `None` either way, so
+        // without this it is indistinguishable from "no session" and the
+        // unsaved-work recovery is silently lost. Log the error KIND only (the
+        // path is untrusted content → debug).
+        Err(e) => {
+            tracing::warn!(
+                target: "scribe::session",
+                error_kind = ?e.kind(),
+                "session manifest unreadable — unsaved-work recovery skipped"
+            );
+            tracing::debug!(target: "scribe::session", path = %path.display(), "unreadable session manifest path");
+            return None;
+        }
+    };
+    let manifest: SessionManifest = match serde_json::from_str(&body) {
+        Ok(m) => m,
+        // Corrupt JSON (disk corruption, partial write, hand-edit). Recovery is
+        // lost; the caller cannot tell this from "absent". Never log the serde
+        // error or the body — both can echo buffer CONTENT.
+        Err(_) => {
+            tracing::warn!(
+                target: "scribe::session",
+                "session manifest corrupt (unparseable JSON) — unsaved-work recovery skipped"
+            );
+            return None;
+        }
+    };
     if manifest.version > MANIFEST_VERSION {
         return None;
     }
@@ -516,5 +567,85 @@ mod tests {
         assert_eq!(prune_orphan_backups(&bdir, &m), 1);
         assert!(read_backup(&bdir, "live.bak").is_ok());
         assert!(read_backup(&bdir, "orphan.bak").is_err());
+    }
+
+    // ---- silent-failure logging ----
+
+    use crate::test_log_capture::with_captured_logs;
+    use tracing::Level;
+
+    #[test]
+    fn absent_manifest_loads_silently_without_a_warn() {
+        let dir = tempdir().unwrap();
+        with_captured_logs(|logs| {
+            assert!(load_manifest(dir.path()).is_none());
+            // A missing session is the normal first-run case — no warn noise.
+            assert!(
+                !logs.records().iter().any(|(lvl, _)| *lvl <= Level::WARN),
+                "an absent manifest must not emit a warn/error: {:?}",
+                logs.records()
+            );
+        });
+    }
+
+    #[test]
+    fn corrupt_manifest_emits_warn_and_recovery_is_skipped() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path()).unwrap();
+        // Plant a manifest that EXISTS but is unparseable JSON.
+        fs::write(manifest_path(dir.path()), b"{ this is not valid json ]]]").unwrap();
+        with_captured_logs(|logs| {
+            assert!(load_manifest(dir.path()).is_none());
+            assert!(
+                logs.has(Level::WARN, "session manifest corrupt"),
+                "expected a corrupt-manifest WARN, got: {:?}",
+                logs.records()
+            );
+            assert!(
+                logs.warn_plus_text().contains("recovery skipped"),
+                "the warn must state recovery was skipped"
+            );
+        });
+    }
+
+    #[test]
+    fn unreadable_manifest_emits_warn_without_leaking_the_path() {
+        let dir = tempdir().unwrap();
+        // A DIRECTORY at the manifest path makes `read_to_string` fail with a
+        // non-NotFound error (the "exists but unreadable" branch).
+        fs::create_dir_all(manifest_path(dir.path())).unwrap();
+        with_captured_logs(|logs| {
+            assert!(load_manifest(dir.path()).is_none());
+            assert!(
+                logs.has(Level::WARN, "session manifest unreadable"),
+                "expected an unreadable-manifest WARN, got: {:?}",
+                logs.records()
+            );
+            // The path is logged only at debug — never at warn+.
+            assert!(
+                !logs.warn_plus_text().contains("session.json"),
+                "the manifest path must not appear at warn+"
+            );
+        });
+    }
+
+    #[test]
+    fn rejected_restore_path_emits_warn_without_leaking_the_name() {
+        let dir = tempdir().unwrap();
+        let bdir = backup_dir(dir.path());
+        with_captured_logs(|logs| {
+            // A tampered manifest name that escapes the backup dir is rejected.
+            assert!(read_backup(&bdir, "../SECRET_TARGET.txt").is_err());
+            assert!(
+                logs.has(Level::WARN, "restore path rejected"),
+                "expected a restore-path-reject WARN, got: {:?}",
+                logs.records()
+            );
+            // The untrusted name is debug-only; it must not surface at warn+.
+            assert!(
+                !logs.warn_plus_text().contains("SECRET_TARGET"),
+                "the rejected name must not appear at warn+"
+            );
+        });
     }
 }
