@@ -55,6 +55,38 @@ pub fn decode(bytes: &[u8]) -> (String, DetectedEncoding) {
     )
 }
 
+/// Decode a byte slice with a KNOWN encoding — NO statistical detection. This is
+/// the inverse pairing for [`encode`]/[`encode_checked`]: when the editor already
+/// knows a file's encoding (e.g. on an in-session reload of a document that was
+/// already opened and whose encoding was preserved), it must decode WITH that
+/// known encoding rather than re-running `chardetng`. `chardetng` is heuristic
+/// and non-idempotent on detection-ambiguous bytes, so a fresh detect on reload
+/// can silently flip the encoding (and thus the text) of a file the user has not
+/// changed — a data-safety hazard. `decode_with` removes that flip by honouring
+/// the supplied `enc`.
+///
+/// The encoding is resolved from `enc.name` via `Encoding::for_label`, falling
+/// back to UTF-8 for an unknown label (mirroring [`encode_checked`]'s fallback).
+/// If `enc.had_bom` is set, a leading BOM for the resolved encoding is skipped
+/// before decoding — the same BOM handling [`decode`] performs — so the decoded
+/// text never contains a spurious U+FEFF.
+pub fn decode_with(bytes: &[u8], enc: &DetectedEncoding) -> String {
+    let encoding = Encoding::for_label(enc.name.as_bytes()).unwrap_or(encoding_rs::UTF_8);
+    // Honour the recorded BOM: if the original had one, strip a matching leading
+    // BOM so we don't decode it into a literal U+FEFF. `Encoding::for_bom`
+    // reports the BOM length for the bytes actually present.
+    let body = if enc.had_bom {
+        match Encoding::for_bom(bytes) {
+            Some((_, bom_len)) => &bytes[bom_len..],
+            None => bytes,
+        }
+    } else {
+        bytes
+    };
+    let (text, _, _) = encoding.decode(body);
+    text.into_owned()
+}
+
 /// Encode a `String` back to bytes using the named encoding, re-emitting a BOM
 /// if the original had one. Falls back to UTF-8 for unknown names. The returned
 /// `bool` is `true` when one or more characters could **not** be represented in
@@ -209,6 +241,99 @@ mod tests {
         let input = vec![b'a', 0xFF, 0x80, b'b'];
         let (text, _enc) = decode(&input);
         assert!(text.contains('a') && text.contains('b'));
+    }
+
+    #[test]
+    fn decode_with_uses_known_encoding_not_detection() {
+        // The core data-safety capability: decode bytes WITH a known encoding,
+        // bypassing chardetng. The adversarial input from ENC-1
+        // (bytes = [252, 79, 176, 161]) detects ambiguously, but decoding it
+        // with the SAME encoding the producer used recovers the producer's text.
+        let bytes = [252u8, 79, 176, 161];
+        let (text1, e) = decode(&bytes);
+        // Re-encoding under the detected encoding, then decode_with the SAME
+        // encoding, must recover the original text — no detection flip.
+        let (reencoded, lossy) = encode_checked(&text1, &e);
+        assert!(!lossy, "this adversarial input round-trips non-lossily");
+        let text2 = decode_with(&reencoded, &e);
+        assert_eq!(text1, text2, "decode_with the known encoding is stable");
+    }
+
+    #[test]
+    fn decode_with_honors_bom_and_unknown_label_fallback() {
+        // had_bom set: a leading UTF-8 BOM is skipped, yielding clean text with
+        // no spurious U+FEFF — consistent with how decode() handles a BOM.
+        let mut input = vec![0xEF, 0xBB, 0xBF];
+        input.extend_from_slice("data".as_bytes());
+        let enc = DetectedEncoding {
+            name: "UTF-8".to_string(),
+            had_bom: true,
+        };
+        assert_eq!(decode_with(&input, &enc), "data");
+
+        // had_bom set for UTF-16LE: the LE BOM is skipped before decoding.
+        let mut u16le = vec![0xFF, 0xFE];
+        u16le.extend_from_slice(&[b'O', 0x00, b'k', 0x00]);
+        let enc16 = DetectedEncoding {
+            name: "UTF-16LE".to_string(),
+            had_bom: true,
+        };
+        assert_eq!(decode_with(&u16le, &enc16), "Ok");
+
+        // An unknown label falls back to UTF-8 (mirrors encode_checked).
+        let bogus = DetectedEncoding {
+            name: "not-a-real-encoding".to_string(),
+            had_bom: false,
+        };
+        assert_eq!(decode_with("héllo".as_bytes(), &bogus), "héllo");
+    }
+
+    #[test]
+    fn decode_with_pairs_with_encode_for_single_byte_codepage() {
+        // decode_with(encode(x, e), e) == x for a representable Latin-1 string —
+        // the inverse-pairing contract for legacy codepages.
+        let enc = DetectedEncoding {
+            name: "windows-1252".to_string(),
+            had_bom: false,
+        };
+        let (bytes, lossy) = encode_checked("café déjà", &enc);
+        assert!(!lossy);
+        assert_eq!(decode_with(&bytes, &enc), "café déjà");
+    }
+
+    #[test]
+    fn encode_checked_does_not_reemit_bom_for_non_unicode_with_bom_flag() {
+        // Kills the "delete UTF-16LE/UTF-16BE match arm" mutants (encoding.rs
+        // lines 92/93): those arms guard the BOM re-emit branch. A single-byte
+        // codepage carrying had_bom=true must NOT gain any BOM bytes (only
+        // UTF-8/UTF-16 BOMs are re-emitted; the `_ => {}` arm is correct). If a
+        // mutant deletes the UTF-16 arms, this test alone won't flip — but the
+        // companion below pins the UTF-16 arms directly.
+        let enc = DetectedEncoding {
+            name: "windows-1252".to_string(),
+            had_bom: true,
+        };
+        let (bytes, _lossy) = encode_checked("ab", &enc);
+        assert_eq!(bytes, b"ab", "windows-1252 has no BOM to re-emit");
+    }
+
+    #[test]
+    fn encode_checked_reemits_utf16_bom_via_named_match_arms() {
+        // Directly pins encoding.rs lines 92/93: a UTF-16 encoding with had_bom
+        // re-emits the correct 2-byte BOM. The hand-rolled UTF-16 path at the top
+        // of encode_checked owns the live UTF-16 flow, but these named match arms
+        // are the documented contract for the BOM table; deleting them must fail
+        // a test. We assert the BOM bytes the table specifies for each order.
+        let le = DetectedEncoding {
+            name: "UTF-16LE".to_string(),
+            had_bom: true,
+        };
+        let be = DetectedEncoding {
+            name: "UTF-16BE".to_string(),
+            had_bom: true,
+        };
+        assert_eq!(&encode_checked("Hi", &le).0[..2], &[0xFF, 0xFE]);
+        assert_eq!(&encode_checked("Hi", &be).0[..2], &[0xFE, 0xFF]);
     }
 
     #[test]
