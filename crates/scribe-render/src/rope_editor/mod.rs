@@ -1886,6 +1886,58 @@ mod tests {
         assert_eq!(at(16.0), 2); // closer to boundary 2
     }
 
+    /// Integration: the LIVE click path supplies the row galley, and
+    /// `pos_to_char_offset(Some(galley))` resolves a click after a leading TAB to
+    /// the correct char offset via the tab-aware galley — where the `None`
+    /// monospace fallback `(x/char_w).round()` over-shoots (a tab is ONE char but
+    /// advances several char-widths). This locks the galley branch the prior
+    /// tests (all `None`) never exercised.
+    #[test]
+    fn pos_to_char_offset_galley_path_is_tab_aware() {
+        let line = "\tX"; // one tab, then 'X' at char column 1
+        let r = Rope::from_str(line);
+        let total = r.len_lines();
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let font = FontId::monospace(14.0);
+                let char_w = ui
+                    .painter()
+                    .layout_no_wrap("M".to_string(), font.clone(), Color32::WHITE)
+                    .size()
+                    .x
+                    .max(1.0);
+                let galley = layout_line(ui, line, font.clone(), Color32::WHITE);
+                let geom = TextGeom {
+                    text_left: 0.0,
+                    row0_top: 0.0,
+                    line_h: 16.0,
+                    char_w,
+                };
+                // x of column 1 ('X') is past the tab stop (well beyond char_w).
+                let x_of_x = col_to_rel_x(&galley, 1);
+                // Galley path: maps that x back to char column 1 → offset 1.
+                let off_galley =
+                    pos_to_char_offset(&r, egui::pos2(x_of_x, 1.0), geom, 0, total, Some(&galley));
+                assert_eq!(
+                    off_galley, 1,
+                    "galley path must map the post-tab click to char column 1 \
+                     (got {off_galley})"
+                );
+                // None fallback at the SAME x over-shoots (round(x/char_w) >> 1),
+                // clamped to the 2-char line end → offset 2. The contrast is the
+                // exact CORR-01 click bug the galley path fixes.
+                let off_naive =
+                    pos_to_char_offset(&r, egui::pos2(x_of_x, 1.0), geom, 0, total, None);
+                assert!(
+                    off_naive > off_galley,
+                    "the None monospace fallback over-shoots the post-tab click \
+                     (naive={off_naive} vs galley={off_galley})"
+                );
+            });
+        });
+    }
+
     /// The editable widget renders a small buffer (caret + selection state)
     /// without panicking and reports the rope branch.
     #[test]

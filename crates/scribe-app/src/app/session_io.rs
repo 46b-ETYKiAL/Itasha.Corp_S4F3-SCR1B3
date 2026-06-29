@@ -283,9 +283,14 @@ impl ScribeApp {
             let Some(path) = self.tabs[i].doc.path().map(|p| p.to_path_buf()) else {
                 continue;
             };
-            if let Ok(fresh) = std::fs::read_to_string(&path) {
+            // ENC-1: reload through the document's encoding-preserving path
+            // (`decode_with(self.encoding)`), NOT UTF-8-only `read_to_string` —
+            // a Shift-JIS/Latin-1 file stays in its detected encoding across an
+            // external-edit reload, and a non-UTF-8 file reloads correctly
+            // instead of silently failing the read (and stranding the change).
+            if self.tabs[i].doc.reload_from_disk().is_ok() {
+                let fresh = self.tabs[i].doc.text();
                 self.tabs[i].set_text(fresh.clone());
-                self.tabs[i].doc.set_text(&fresh);
                 self.tabs[i].disk_text = fresh;
                 if let Some(m) = file_mtime(&path) {
                     self.tabs[i].disk_mtime = Some(m);

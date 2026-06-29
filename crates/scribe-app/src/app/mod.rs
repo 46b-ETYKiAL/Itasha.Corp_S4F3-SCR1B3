@@ -1799,34 +1799,56 @@ impl ScribeApp {
             return;
         };
         // SEC-3 — clicking "Approve & run" IS explicit first-contact consent, but
-        // it must NEVER silently accept an author-key ROTATION (possible
-        // takeover). Route the approval through the same pinned-key gate the load
-        // path (`build_plugins`) uses: `decide_approval` pins a first-seen key and
-        // upgrades it to Allow, but a CHANGED key yields `BlockKeyChanged` — we
-        // then refuse to trust or load. A genuine rotation requires the explicit
-        // `replace_with_consent` path in Settings, never this button.
+        // under `require_signed` the approve path must enforce the SAME strict
+        // policy as the load path (`build_plugins`), not a weaker one:
+        //   1. a signed plugin MUST carry BOTH an `author_pubkey` AND a
+        //      `signature` — an unsigned/partial plugin is refused (the load
+        //      path's `_ => false` "require_signed is on but it is unsigned" arm);
+        //   2. the minisign signature over the entry script MUST verify;
+        //   3. the pinned-key trust gate (`decide_approval`) must allow it —
+        //      a first-seen key is pinned + upgraded to Allow, but a CHANGED key
+        //      yields `BlockKeyChanged` and is refused (rotation requires the
+        //      explicit `replace_with_consent` path in Settings, never this
+        //      button).
+        // Consent never downgrades any of these checks; it only upgrades a New
+        // first-contact key to Allow.
         if self.config.plugins.require_signed {
-            if let Some(pk) = p.manifest.author_pubkey.as_deref() {
-                let mut key_store = scribe_core::plugin::PinnedKeyStore::new(&dir);
-                match scribe_core::plugin::pinned_keys::decide_approval(&mut key_store, id, pk) {
-                    Ok(scribe_core::plugin::pinned_keys::PluginLoadDecision::BlockKeyChanged {
-                        old,
-                        new,
-                    }) => {
-                        self.toast = Some(format!(
-                            "plugin '{id}' NOT approved: author key changed \
-                             (old={old} new={new}) — possible takeover; rotate the \
-                             key in Settings → Plugins before it can run"
-                        ));
-                        return;
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        self.toast = Some(format!(
-                            "plugin '{id}' NOT approved: pinned-key store error: {e}"
-                        ));
-                        return;
-                    }
+            let (Some(pk), Some(sig)) = (
+                p.manifest.author_pubkey.as_deref(),
+                p.manifest.signature.as_deref(),
+            ) else {
+                self.toast = Some(format!(
+                    "plugin '{id}' NOT approved: signed mode requires a signed plugin \
+                     (missing author_pubkey or signature)"
+                ));
+                return;
+            };
+            if scribe_core::update::verify::verify_signature(src.as_bytes(), sig, pk).is_err() {
+                self.toast = Some(format!(
+                    "plugin '{id}' NOT approved: the signature does not verify against \
+                     the declared author key"
+                ));
+                return;
+            }
+            let mut key_store = scribe_core::plugin::PinnedKeyStore::new(&dir);
+            match scribe_core::plugin::pinned_keys::decide_approval(&mut key_store, id, pk) {
+                Ok(scribe_core::plugin::pinned_keys::PluginLoadDecision::BlockKeyChanged {
+                    old,
+                    new,
+                }) => {
+                    self.toast = Some(format!(
+                        "plugin '{id}' NOT approved: author key changed \
+                         (old={old} new={new}) — possible takeover; rotate the \
+                         key in Settings → Plugins before it can run"
+                    ));
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    self.toast = Some(format!(
+                        "plugin '{id}' NOT approved: pinned-key store error: {e}"
+                    ));
+                    return;
                 }
             }
         }
@@ -4109,9 +4131,12 @@ impl ScribeApp {
             let i = self.active;
             if want_reload {
                 if let Some(path) = self.tabs[i].doc.path().map(|p| p.to_path_buf()) {
-                    if let Ok(fresh) = std::fs::read_to_string(&path) {
+                    // ENC-1: encoding-preserving reload (see session_io.rs) — the
+                    // user's explicit "reload from disk" must honour the file's
+                    // detected encoding, not assume UTF-8.
+                    if self.tabs[i].doc.reload_from_disk().is_ok() {
+                        let fresh = self.tabs[i].doc.text();
                         self.tabs[i].set_text(fresh.clone());
-                        self.tabs[i].doc.set_text(&fresh);
                         self.tabs[i].disk_text = fresh;
                         if let Some(m) = file_mtime(&path) {
                             self.tabs[i].disk_mtime = Some(m);
@@ -6721,3 +6746,6 @@ mod appnav_keyboard_tests;
 
 #[cfg(test)]
 mod sec3_approve_keytrust_tests;
+
+#[cfg(test)]
+mod enc1_reload_wiring_tests;

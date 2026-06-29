@@ -202,4 +202,35 @@ mod tests {
             );
         }
     }
+
+    /// Wide (CJK) glyphs: the galley — not a uniform `char_w` — is the authority
+    /// for column<->x. We assert font-independent invariants that hold for ANY
+    /// glyph advances (so the test is robust whether or not the bare headless
+    /// `Context::default()` font carries CJK coverage): column x is strictly
+    /// monotonic across a mixed CJK+ASCII line, and every column round-trips
+    /// through the inverse. A naive `col * char_w` mapping cannot satisfy both
+    /// once a glyph is wider than `char_w`.
+    #[test]
+    fn cjk_mixed_line_is_monotonic_and_round_trips() {
+        // Two CJK ideographs, then ASCII. `chars().count()` columns + end.
+        let line = "日本語ab";
+        let (galley, _char_w) = galley_and_char_w(line);
+        let n = line.chars().count();
+
+        let mut prev = f32::NEG_INFINITY;
+        for col in 0..=n {
+            let x = col_to_rel_x(&galley, col);
+            assert!(
+                x > prev,
+                "column x must strictly increase across CJK+ASCII at column {col} \
+                 (got {x}, prev {prev}) — no column may collapse onto another"
+            );
+            prev = x;
+            assert_eq!(
+                rel_x_to_col(&galley, x),
+                col,
+                "CJK/ASCII column {col} must round-trip through the tab-aware galley"
+            );
+        }
+    }
 }
