@@ -2392,7 +2392,10 @@ fn toolbar_lsp_button_on_scratch_tab_sets_toast() {
     h.run();
     assert_eq!(
         h.state().toast.as_deref(),
-        Some("no language detected for this file"),
+        Some(
+            "Couldn't detect this file's language. Save it with a file extension \
+             (like .rs or .py) to enable language features."
+        ),
         "the LSP button on a scratch tab must explain why it can't start"
     );
 }
