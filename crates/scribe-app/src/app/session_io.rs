@@ -51,7 +51,14 @@ impl ScribeApp {
                 self.tabs[active].mark_change_saved();
                 self.fire_save_hooks(active);
             }
-            Err(e) => self.toast = Some(format!("save failed: {e}")),
+            Err(e) => {
+                tracing::warn!("save failed: {e}");
+                self.toast = Some(
+                    "Couldn't save the file. Check that you have permission to write here \
+                     and that the disk isn't full, then try again."
+                        .into(),
+                );
+            }
         }
     }
 
@@ -347,7 +354,14 @@ impl ScribeApp {
                     // edits, so they flip from unsaved to saved.
                     self.tabs[active].mark_change_saved();
                 }
-                Err(e) => self.toast = Some(format!("save failed: {e}")),
+                Err(e) => {
+                    tracing::warn!("save failed: {e}");
+                    self.toast = Some(
+                        "Couldn't save the file. Check that you have permission to write here \
+                     and that the disk isn't full, then try again."
+                            .into(),
+                    );
+                }
             }
         }
     }

@@ -207,7 +207,7 @@ impl ScribeApp {
             .and_then(comment_prefix_for_extension)
             .unwrap_or("");
         if prefix.is_empty() {
-            self.toast = Some("no comment prefix for this language".to_string());
+            self.toast = Some("Commenting isn't available for this file type.".to_string());
             return;
         }
         let text = &mut self.tabs[self.active].text;

@@ -972,8 +972,17 @@ impl ScribeApp {
         // F-038 — keep the parse error in a persistent banner field rather
         // than only a one-shot toast. The banner sits above the editor and
         // surfaces "Open config / Restore default / Dismiss" actions.
-        let config_error_banner: Option<String> = config_err.as_ref().cloned();
-        let mut toast = config_err.map(|e| format!("config: {e} (using defaults)"));
+        if let Some(e) = config_err.as_ref() {
+            tracing::warn!("settings file failed to load, using defaults: {e}");
+        }
+        let config_error_banner: Option<String> = config_err.as_ref().map(|_| {
+            "Your settings file couldn't be read, so the app is using default settings. \
+             Open it to check for typos, or restore the defaults."
+                .to_string()
+        });
+        let mut toast = config_err.map(|_| {
+            "Your settings file couldn't be read — using default settings for now.".to_string()
+        });
         if let Some(p) = cli_path {
             match EditorTab::from_path(PathBuf::from(&p)) {
                 Ok(t) => tabs.push(t),
@@ -1428,11 +1437,16 @@ impl ScribeApp {
             Some(t) => match (t.doc.language_hint(), t.doc.path()) {
                 (Some(lang), Some(path)) => (lang, path.to_path_buf(), t.text.clone()),
                 (None, _) => {
-                    self.toast = Some("no language detected for this file".into());
+                    self.toast = Some(
+                        "Couldn't detect this file's language. Save it with a file extension \
+                         (like .rs or .py) to enable language features."
+                            .into(),
+                    );
                     return;
                 }
                 (_, None) => {
-                    self.toast = Some("save the file before starting a language server".into());
+                    self.toast =
+                        Some("Save the file first, then start the language server.".into());
                     return;
                 }
             },
@@ -1443,7 +1457,9 @@ impl ScribeApp {
             return;
         }
         let Some(cfg) = self.lsp_registry.for_language(&lang).cloned() else {
-            self.toast = Some(format!("no language server configured for .{lang}"));
+            self.toast = Some(format!(
+                "No language server is set up for .{lang} files. You can add one in Settings."
+            ));
             return;
         };
         let root = self
@@ -1459,7 +1475,14 @@ impl ScribeApp {
                 self.diagnostics.clear();
                 self.status = format!("language server started: {}", cfg.command);
             }
-            Err(e) => self.toast = Some(format!("could not start {}: {e}", cfg.command)),
+            Err(e) => {
+                tracing::warn!("language server '{}' failed to start: {e}", cfg.command);
+                self.toast = Some(
+                    "Couldn't start the language server. Check that it's installed and \
+                     available on your PATH."
+                        .into(),
+                );
+            }
         }
     }
 
@@ -1514,7 +1537,14 @@ impl ScribeApp {
                 scribe_core::config::record_recent_file(&mut self.config.editor.recent_files, path);
                 self.save_config();
             }
-            Err(e) => self.toast = Some(format!("open failed: {e}")),
+            Err(e) => {
+                tracing::warn!("open failed for {}: {e}", path.display());
+                self.toast = Some(
+                    "Couldn't open the file. It may have been moved or deleted, or you may \
+                     not have permission to read it."
+                        .into(),
+                );
+            }
         }
     }
 
@@ -1522,7 +1552,12 @@ impl ScribeApp {
     fn reload_config_from_disk(&mut self, ctx: &egui::Context) {
         let (cfg, err) = Config::load_or_default();
         if let Some(e) = err {
-            self.toast = Some(format!("config: {e} (kept previous on disk)"));
+            tracing::warn!("settings reload failed, keeping previous settings: {e}");
+            self.toast = Some(
+                "Your settings file couldn't be read, so your previous settings are still \
+                 in use. Check it for typos."
+                    .into(),
+            );
             return;
         }
         // Skip if unchanged (e.g. our own save echoed back by the watcher).
@@ -1547,9 +1582,16 @@ impl ScribeApp {
                 }
             }
             // `e` is a `CoreError::Plugin(msg)` whose `Display` renders the bare
-            // message (no category prefix), so this `format!` reproduces the
-            // pre-A-05 toast text byte-for-byte.
-            Err(e) => self.toast = Some(format!("plugin error: {e}")),
+            // author-supplied message. Keep that short message (it is the
+            // plugin's own user-facing text), but frame it plainly and make
+            // clear the buffer was left untouched; the full error also goes to
+            // the log for diagnosis.
+            Err(e) => {
+                tracing::warn!("plugin command '{command_id}' failed: {e}");
+                self.toast = Some(
+                    "The plugin couldn't finish that action. Your text was left unchanged.".into(),
+                );
+            }
         }
     }
 
@@ -1795,7 +1837,9 @@ impl ScribeApp {
             return;
         };
         let Ok(src) = std::fs::read_to_string(p.entry_path()) else {
-            self.toast = Some(format!("could not read plugin '{id}' entry script"));
+            self.toast = Some(format!(
+                "Couldn't read the '{id}' plugin's files. Try reinstalling it."
+            ));
             return;
         };
         // SEC-3 — clicking "Approve & run" IS explicit first-contact consent, but
@@ -1836,17 +1880,20 @@ impl ScribeApp {
                     old,
                     new,
                 }) => {
+                    tracing::warn!("plugin '{id}' author key changed: old={old} new={new}");
                     self.toast = Some(format!(
-                        "plugin '{id}' NOT approved: author key changed \
-                         (old={old} new={new}) — possible takeover; rotate the \
-                         key in Settings → Plugins before it can run"
+                        "'{id}' was NOT approved — its author key changed, which can mean \
+                         the plugin was tampered with. Reinstall it from a source you \
+                         trust, or approve the new key in Settings → Plugins."
                     ));
                     return;
                 }
                 Ok(_) => {}
                 Err(e) => {
+                    tracing::warn!("plugin '{id}' approval: key store read failed: {e}");
                     self.toast = Some(format!(
-                        "plugin '{id}' NOT approved: pinned-key store error: {e}"
+                        "Couldn't approve '{id}' — its security record couldn't be read. \
+                         Try again, or reinstall the plugin."
                     ));
                     return;
                 }
@@ -1860,7 +1907,13 @@ impl ScribeApp {
                 self.pending_plugins.retain(|p| p != id);
                 self.status = format!("approved + loaded plugin '{id}'");
             }
-            Err(e) => self.toast = Some(format!("plugin '{id}' approved but failed to load: {e}")),
+            Err(e) => {
+                tracing::warn!("plugin '{id}' trusted but failed to load: {e}");
+                self.toast = Some(format!(
+                    "Approved '{id}', but it couldn't load — it may not be compatible with \
+                     this version."
+                ));
+            }
         }
     }
 
@@ -2047,7 +2100,11 @@ impl ScribeApp {
                     .map(|d| d.to_path_buf());
                 match dir {
                     Some(d) => open_in_file_manager(&d),
-                    None => self.toast = Some("This tab has no saved file to reveal.".to_string()),
+                    None => {
+                        self.toast = Some(
+                            "Save this note first to show it in your file manager.".to_string(),
+                        )
+                    }
                 }
             }
             BuiltinCommand::CopyFilePath => {
@@ -2060,9 +2117,15 @@ impl ScribeApp {
                 match path {
                     Some(p) => match write_clipboard_text(&p) {
                         Ok(()) => self.status = format!("copied path: {p}"),
-                        Err(e) => self.toast = Some(format!("could not copy path: {e}")),
+                        Err(e) => {
+                            tracing::warn!("copy file path to clipboard failed: {e}");
+                            self.toast =
+                                Some("Couldn't copy the path to the clipboard. Try again.".into());
+                        }
                     },
-                    None => self.toast = Some("This tab has no saved file path.".to_string()),
+                    None => {
+                        self.toast = Some("Save this note first to copy its file path.".to_string())
+                    }
                 }
             }
             // These three need the egui TextEditState (ctx), unavailable here;
@@ -2108,7 +2171,10 @@ impl ScribeApp {
             EditorAction::Paste => match read_clipboard_text() {
                 Ok(text) => egui::Event::Paste(text),
                 Err(e) => {
-                    self.toast = Some(format!("paste unavailable: {e}"));
+                    tracing::warn!("clipboard read for paste failed: {e}");
+                    self.toast = Some(
+                        "Couldn't read the clipboard. Copy the text again, then paste.".into(),
+                    );
                     return;
                 }
             },
@@ -2133,7 +2199,14 @@ impl ScribeApp {
                     self.active = self.tabs.len() - 1;
                     self.status = format!("opened {}", path.display());
                 }
-                Err(e) => self.toast = Some(format!("open failed: {e}")),
+                Err(e) => {
+                    tracing::warn!("open failed for {}: {e}", path.display());
+                    self.toast = Some(
+                        "Couldn't open the file. It may have been moved or deleted, or you may \
+                     not have permission to read it."
+                            .into(),
+                    );
+                }
             }
         }
     }
@@ -2217,7 +2290,13 @@ impl ScribeApp {
         {
             match std::fs::write(&path, md) {
                 Ok(()) => self.status = format!("converted to Markdown → {}", path.display()),
-                Err(e) => self.toast = Some(format!("convert failed: {e}")),
+                Err(e) => {
+                    tracing::warn!("markdown convert write failed for {}: {e}", path.display());
+                    self.toast = Some(
+                        "Couldn't save the Markdown file. Try a different folder or filename."
+                            .into(),
+                    );
+                }
             }
         }
     }
@@ -2244,7 +2323,12 @@ impl ScribeApp {
         {
             match std::fs::write(&path, html) {
                 Ok(()) => self.status = format!("exported HTML → {}", path.display()),
-                Err(e) => self.toast = Some(format!("export failed: {e}")),
+                Err(e) => {
+                    tracing::warn!("html export write failed for {}: {e}", path.display());
+                    self.toast = Some(
+                        "Couldn't save the HTML file. Try a different folder or filename.".into(),
+                    );
+                }
             }
         }
     }
@@ -6749,3 +6833,6 @@ mod sec3_approve_keytrust_tests;
 
 #[cfg(test)]
 mod enc1_reload_wiring_tests;
+
+#[cfg(test)]
+mod error_message_tests;
