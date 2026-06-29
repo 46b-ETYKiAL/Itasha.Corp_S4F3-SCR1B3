@@ -13,3 +13,16 @@
 # contract), which is stable for this input, so this pinned seed PASSES
 # deterministically on every run instead of failing intermittently.
 cc 533c99a963c43751c9c04d27578ddc50895e5afded4f4949729495b00e65dc4c
+#
+# ENC-2 (double-BOM): the `bom_tagged_roundtrips_redetect_stably` counterexample
+# s = "\u{feff}\u{feff}". The FIRST U+FEFF is the encoding MARKER; the SECOND is
+# CONTENT. The old `decode`/`decode_with` double-stripped the BOM (once via
+# `Encoding::for_bom` length-slicing, once via `Encoding::decode`'s own internal
+# BOM sniffing), eroding one content U+FEFF per decode pass — so re-detection was
+# non-idempotent and the round-trip silently lost data. Fixed by decoding the
+# post-marker body with `decode_without_bom_handling`.
+#
+# This case is pinned DETERMINISTICALLY (not as a random `cc` RNG seed, which the
+# fix means proptest can no longer regenerate) by the explicit non-proptest tests
+# `double_bom_*` in this file and `encoding::tests::double_bom_*` in the crate, so
+# it can never silently disappear regardless of proptest's seed stream.

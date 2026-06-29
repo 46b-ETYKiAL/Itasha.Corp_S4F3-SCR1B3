@@ -178,6 +178,76 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
+// ENC-2 (double-BOM): deterministic pins for the
+// `bom_tagged_roundtrips_redetect_stably` counterexample s = "\u{feff}\u{feff}".
+//
+// A `cc` RNG seed in `roundtrip_proptest.proptest-regressions` can no longer
+// regenerate this case now that the bug is fixed, so these explicit
+// non-proptest tests are the durable regression pin: they exercise the EXACT
+// encode -> decode -> re-encode -> re-detect path the proptest drives, with the
+// specific failing input hard-wired so it can never silently disappear from the
+// seed stream.
+// ---------------------------------------------------------------------------
+
+/// The proptest counterexample, asserted deterministically for both byte orders:
+/// the first U+FEFF is the marker BOM, every subsequent U+FEFF is content, and
+/// re-detection is idempotent (no content U+FEFF eroded per decode pass).
+#[test]
+fn double_bom_redetect_is_stable_and_faithful() {
+    for be in [false, true] {
+        let name = if be { "UTF-16BE" } else { "UTF-16LE" };
+        let s = "\u{feff}\u{feff}"; // marker + one content U+FEFF
+        let tagged = encoding::DetectedEncoding {
+            name: name.to_string(),
+            had_bom: true,
+        };
+        let (file_bytes, lossy) = encoding::encode_checked(s, &tagged);
+        assert!(!lossy, "{name}: UTF-16 represents U+FEFF");
+        let (text1, e) = encoding::decode(&file_bytes);
+        assert!(e.had_bom, "{name}: a BOM-tagged file detects had_bom");
+        assert_eq!(
+            text1, s,
+            "{name}: content U+FEFF after the marker must survive"
+        );
+        let (reencoded, lossy2) = encoding::encode_checked(&text1, &e);
+        assert!(!lossy2);
+        let (text2, e2) = encoding::decode(&reencoded);
+        assert!(e2.had_bom, "{name}: re-emitted marker BOM detects again");
+        assert_eq!(text1, text2, "{name}: re-detection must be idempotent");
+    }
+}
+
+/// Sibling cases: a marker BOM followed by NON-BOM content, and a triple BOM
+/// (marker + two content U+FEFF). Exactly one leading marker is consumed; all
+/// remaining U+FEFF survive across both byte orders and UTF-8.
+#[test]
+fn marker_bom_consumes_exactly_one_then_preserves_content() {
+    let cases = [
+        "\u{feff}hello",             // marker + plain content
+        "\u{feff}\u{feff}\u{feff}x", // marker + two content U+FEFF + 'x'
+        "\u{feff}\u{feff}",          // marker + one content U+FEFF
+    ];
+    for name in ["UTF-16LE", "UTF-16BE", "UTF-8"] {
+        for s in cases {
+            let tagged = encoding::DetectedEncoding {
+                name: name.to_string(),
+                had_bom: true,
+            };
+            let (bytes, lossy) = encoding::encode_checked(s, &tagged);
+            assert!(!lossy, "{name}: representable");
+            let (text, e) = encoding::decode(&bytes);
+            assert_eq!(text, s, "{name}: {s:?} must round-trip exactly");
+            // decode_with the known encoding agrees with statistical decode.
+            assert_eq!(
+                encoding::decode_with(&bytes, &e),
+                s,
+                "{name}: decode_with {s:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EOL normalization: idempotence + style round-trip
 // ---------------------------------------------------------------------------
 
