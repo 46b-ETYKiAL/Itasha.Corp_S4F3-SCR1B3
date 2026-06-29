@@ -1784,7 +1784,10 @@ impl ScribeApp {
     /// that hash in `config.plugins.trusted`, persist the config, and load the
     /// script into the live host so it runs immediately (no restart needed).
     fn approve_plugin(&mut self, id: &str) {
-        let Some(dir) = Config::config_dir() else {
+        // Resolve the per-instance config dir (production sets this to
+        // `Config::config_dir()`; tests redirect it to a temp dir) so the
+        // approval path uses the same dir as every other config/session write.
+        let Some(dir) = self.config_dir.clone() else {
             return;
         };
         let (found, _errors) = plugin::discover(&dir.join("plugins"));
@@ -1795,6 +1798,38 @@ impl ScribeApp {
             self.toast = Some(format!("could not read plugin '{id}' entry script"));
             return;
         };
+        // SEC-3 — clicking "Approve & run" IS explicit first-contact consent, but
+        // it must NEVER silently accept an author-key ROTATION (possible
+        // takeover). Route the approval through the same pinned-key gate the load
+        // path (`build_plugins`) uses: `decide_approval` pins a first-seen key and
+        // upgrades it to Allow, but a CHANGED key yields `BlockKeyChanged` — we
+        // then refuse to trust or load. A genuine rotation requires the explicit
+        // `replace_with_consent` path in Settings, never this button.
+        if self.config.plugins.require_signed {
+            if let Some(pk) = p.manifest.author_pubkey.as_deref() {
+                let mut key_store = scribe_core::plugin::PinnedKeyStore::new(&dir);
+                match scribe_core::plugin::pinned_keys::decide_approval(&mut key_store, id, pk) {
+                    Ok(scribe_core::plugin::pinned_keys::PluginLoadDecision::BlockKeyChanged {
+                        old,
+                        new,
+                    }) => {
+                        self.toast = Some(format!(
+                            "plugin '{id}' NOT approved: author key changed \
+                             (old={old} new={new}) — possible takeover; rotate the \
+                             key in Settings → Plugins before it can run"
+                        ));
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.toast = Some(format!(
+                            "plugin '{id}' NOT approved: pinned-key store error: {e}"
+                        ));
+                        return;
+                    }
+                }
+            }
+        }
         let sha = scribe_core::update::verify::sha256_hex(src.as_bytes());
         self.config.plugins.trusted.insert(id.to_string(), sha);
         self.save_config();
@@ -6683,3 +6718,6 @@ mod qa_session_scale_tests;
 
 #[cfg(test)]
 mod appnav_keyboard_tests;
+
+#[cfg(test)]
+mod sec3_approve_keytrust_tests;
