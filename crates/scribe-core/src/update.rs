@@ -9,7 +9,9 @@
 //! the network.
 
 pub mod apply;
+pub mod manifest;
 pub mod net;
+pub mod update_state;
 pub mod verify;
 
 pub use crate::config::UpdateMode;
