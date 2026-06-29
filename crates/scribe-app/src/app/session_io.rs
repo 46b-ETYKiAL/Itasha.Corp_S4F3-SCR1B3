@@ -85,9 +85,19 @@ impl ScribeApp {
             let cursor = tab.rope_state.as_ref().map(|s| s.edit.cursor).unwrap_or(0);
             let backup = if dirty || untitled_with_content {
                 let name = session::backup_name(path.as_deref(), i);
-                session::write_backup(&bdir, &name, &tab.text)
-                    .ok()
-                    .map(|()| name)
+                match session::write_backup(&bdir, &name, &tab.text) {
+                    Ok(()) => Some(name),
+                    Err(e) => {
+                        // Data-loss path: the manifest will then record this tab
+                        // as having no recoverable content, so unsaved work is
+                        // lost on the next crash. Make it visible in the log.
+                        tracing::error!(
+                            "hot-exit backup write failed for tab {i}; unsaved content \
+                             will NOT be recoverable: {e}"
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };

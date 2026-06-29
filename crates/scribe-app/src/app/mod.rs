@@ -1469,7 +1469,11 @@ impl ScribeApp {
         let root_uri = root.map(|r| path_to_uri(&r)).unwrap_or_default();
         match LspClient::spawn(&cfg, &root_uri) {
             Ok(mut client) => {
-                let _ = client.did_open(&path_to_uri(&path), &lang, &text);
+                if let Err(e) = client.did_open(&path_to_uri(&path), &lang, &text) {
+                    tracing::warn!(
+                        "language server did_open failed; diagnostics may not appear: {e}"
+                    );
+                }
                 self.lsp = Some(client);
                 self.lsp_lang = Some(lang);
                 self.diagnostics.clear();
@@ -1792,9 +1796,12 @@ impl ScribeApp {
         match self.config.save_to(&path) {
             Ok(()) => self.status = "settings saved".to_string(),
             Err(e) => {
-                let msg = format!("could not save settings: {e}");
-                crate::action_log::record("error", &msg);
-                self.toast = Some(msg);
+                tracing::warn!("settings save failed: {e}");
+                crate::action_log::record("error", &format!("settings save failed: {e}"));
+                self.toast = Some(
+                    "Couldn't save your settings. Check that the settings folder is writable."
+                        .into(),
+                );
             }
         }
     }
@@ -1861,16 +1868,19 @@ impl ScribeApp {
                 p.manifest.author_pubkey.as_deref(),
                 p.manifest.signature.as_deref(),
             ) else {
+                tracing::warn!("plugin '{id}' approval rejected: unsigned in signed-only mode");
                 self.toast = Some(format!(
-                    "plugin '{id}' NOT approved: signed mode requires a signed plugin \
-                     (missing author_pubkey or signature)"
+                    "'{id}' was NOT approved — signed-plugin mode only runs plugins that \
+                     are signed by their author. Reinstall it from a source that provides \
+                     a signed build."
                 ));
                 return;
             };
             if scribe_core::update::verify::verify_signature(src.as_bytes(), sig, pk).is_err() {
+                tracing::warn!("plugin '{id}' approval rejected: signature did not verify");
                 self.toast = Some(format!(
-                    "plugin '{id}' NOT approved: the signature does not verify against \
-                     the declared author key"
+                    "'{id}' was NOT approved — its signature couldn't be verified, so it may \
+                     have been tampered with. Reinstall it from a source you trust."
                 ));
                 return;
             }
@@ -5815,8 +5825,22 @@ impl ScribeApp {
                         tab.edit_gen = tab.edit_gen.wrapping_add(1);
                     }
                     if let Some(text) = clipboard {
-                        if let Ok(mut cb) = arboard::Clipboard::new() {
-                            let _ = cb.set_text(text);
+                        // On Cut the selection is already removed from the buffer,
+                        // so a clipboard failure here means the text is only
+                        // undo-recoverable — log it rather than swallow silently.
+                        match arboard::Clipboard::new() {
+                            Ok(mut cb) => {
+                                if let Err(e) = cb.set_text(text) {
+                                    tracing::warn!(
+                                        "clipboard write after cut/copy failed; text is \
+                                         still undo-recoverable: {e}"
+                                    );
+                                }
+                            }
+                            Err(e) => tracing::warn!(
+                                "could not open the clipboard for cut/copy; text is still \
+                                 undo-recoverable: {e}"
+                            ),
                         }
                     }
                     return;
@@ -6833,6 +6857,9 @@ mod sec3_approve_keytrust_tests;
 
 #[cfg(test)]
 mod enc1_reload_wiring_tests;
+
+#[cfg(test)]
+mod logging_tests;
 
 #[cfg(test)]
 mod error_message_tests;

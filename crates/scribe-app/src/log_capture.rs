@@ -33,7 +33,11 @@ impl Captured {
 
     /// True if any captured event (any level) contains `substr`.
     pub(crate) fn any(&self, substr: &str) -> bool {
-        self.0.lock().unwrap().iter().any(|(_, m)| m.contains(substr))
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, m)| m.contains(substr))
     }
 
     /// All captured events (for assertion diagnostics).
@@ -84,7 +88,11 @@ mod self_tests {
             tracing::warn!("save failed: disk full");
             tracing::info!("session restored 3 tabs");
         });
-        assert!(logs.has(Level::WARN, "save failed"), "events: {:?}", logs.events());
+        assert!(
+            logs.has(Level::WARN, "save failed"),
+            "events: {:?}",
+            logs.events()
+        );
         assert!(logs.has(Level::INFO, "session restored"));
         // Wrong-level / absent assertions are correctly false.
         assert!(!logs.has(Level::ERROR, "save failed"));
