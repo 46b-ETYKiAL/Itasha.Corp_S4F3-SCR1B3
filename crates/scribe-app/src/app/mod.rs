@@ -1957,6 +1957,9 @@ mod jp_glyph_tests;
 mod tab_reorder_tests;
 
 #[cfg(test)]
+mod sidetab_drop_indicator_tests;
+
+#[cfg(test)]
 mod change_bar_tests;
 
 #[cfg(test)]

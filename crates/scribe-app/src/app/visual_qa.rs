@@ -274,3 +274,68 @@ fn scene_spellcheck_code() {
     render_scene("spellcheck_code", 1100.0, 400.0, app);
     drop(f); // keep the temp file alive until after the render
 }
+
+/// #82 — rotate-ON side tabs MID-DRAG: the drop-insertion hairline must sit in
+/// the GAP between two stacked tab chips, never inside a chip's outline. Forces
+/// the drag pointer into the gap between chip 0 and chip 1 via the test hook,
+/// then renders the REAL frame so the indicator is in the PNG for visual QA.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_rotated_sidetab_drop_indicator() {
+    use super::tab_strip_render::{TEST_FORCE_SIDE_TAB_DRAG, TEST_ROTATED_TAB_RECTS};
+
+    fn rotated_app() -> ScribeApp {
+        let mut cfg = qa_config();
+        cfg.appearance.frameless = false;
+        cfg.editor.tab_bar_position = scribe_core::config::TabBarPosition::Left;
+        cfg.editor.side_tabs_rotated = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs.clear();
+        for i in 0..3 {
+            let mut t = EditorTab::scratch();
+            t.text = format!("document {i}\nbody line\n");
+            app.tabs.push(t);
+        }
+        // Active = the BOTTOM tab so the chip-0/chip-1 gap (where the drop line
+        // paints) is flanked by MUTED tabs — the accent drop hairline can't be
+        // confused with the active tab's accent outline.
+        app.active = 2;
+        app
+    }
+
+    const W: f32 = 900.0;
+    const H: f32 = 600.0;
+
+    // Phase 1 (CPU): render to capture the chip rects; aim the forced pointer at
+    // the gap between chip 0 and chip 1.
+    TEST_FORCE_SIDE_TAB_DRAG.with(|c| c.set(None));
+    TEST_ROTATED_TAB_RECTS.with(|r| r.borrow_mut().clear());
+    {
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(W, H))
+            .build_state(
+                |ctx, app: &mut ScribeApp| app.frame_tick(ctx),
+                rotated_app(),
+            );
+        h.run();
+        h.run();
+    }
+    let rects = TEST_ROTATED_TAB_RECTS.with(|r| r.borrow().clone());
+    assert!(
+        rects.len() >= 2,
+        "need >=2 rotated chips for the drop-indicator scene"
+    );
+    let pointer = egui::pos2(
+        rects[0].center().x,
+        (rects[0].center().y + rects[1].center().y) * 0.5,
+    );
+    TEST_FORCE_SIDE_TAB_DRAG.with(|c| c.set(Some(pointer)));
+
+    // Phase 2 (GPU): render the real frame with the forced drag → the insertion
+    // hairline paints in the chip-0/chip-1 gap; saved to PNG for inspection.
+    let path = render_scene("rotated_sidetab_drop_indicator", W, H, rotated_app());
+    TEST_FORCE_SIDE_TAB_DRAG.with(|c| c.set(None));
+    if let Some(p) = path {
+        eprintln!("[#82] rotated drop-indicator scene -> {}", p.display());
+    }
+}

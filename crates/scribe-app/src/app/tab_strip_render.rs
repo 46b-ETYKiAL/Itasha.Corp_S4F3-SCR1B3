@@ -2,6 +2,20 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
+#[cfg(test)]
+thread_local! {
+    /// Test hook (#82): when `Some`, `draw_rotated_side_tabs` treats this as the
+    /// live drag pointer, so the drop-insertion indicator paints deterministically
+    /// (no event-timing flake) for the regression + visual-QA tests.
+    pub(crate) static TEST_FORCE_SIDE_TAB_DRAG: std::cell::Cell<Option<egui::Pos2>> =
+        const { std::cell::Cell::new(None) };
+    /// Test hook (#82): the FULL chip rects `draw_rotated_side_tabs` fed to the
+    /// drop indicator this frame — a test asserts the insertion line lands in an
+    /// inter-chip GAP and never inside a chip outline (the bug this guards).
+    pub(crate) static TEST_ROTATED_TAB_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl ScribeApp {
     /// Render the tab strip inside a Left/Right side panel, honouring the
     /// `side_tabs_rotated` orientation option (#82). A side tab bar is always a
@@ -129,7 +143,7 @@ impl ScribeApp {
                 } else {
                     Color32::TRANSPARENT
                 });
-            chip.show(ui, |ui| {
+            let chip_resp = chip.show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     // #30 column order: grip · rotated-name · pin · close (top→bottom).
@@ -209,7 +223,6 @@ impl ScribeApp {
                             drop_pos = Some(p);
                         }
                     }
-                    rects.push((i, rect));
                     // Pin toggle (active only), then close (unpinned), BELOW the name.
                     if selected {
                         let glyph = if pinned {
@@ -239,6 +252,14 @@ impl ScribeApp {
                     }
                 });
             });
+            // #82 — record the FULL chip frame rect (grip · rotated label · pin ·
+            // close · margins), NOT the inner rotated-label rect, so the
+            // drop-insertion indicator and the nearest-chip drop resolution use the
+            // tab's real outline. Pushing the inner label rect made the inter-tab
+            // "gap" midpoint land INSIDE a neighbouring chip's outline (over its
+            // grip/close glyphs) — the drop line appeared inside the tab. Mirrors
+            // the full-chip rect pushed by `draw_tab_strip`.
+            rects.push((i, chip_resp.response.rect));
             ui.add_space(2.0);
         }
         // Centre the + add-tab button in the note-tab column (it used to hug the
@@ -253,6 +274,15 @@ impl ScribeApp {
                 add_tab = true;
             }
         });
+        // #82 test hooks (cfg(test) only): record the full chip rects the indicator
+        // consumes, and let a test force the in-flight drag pointer so the insertion
+        // line paints deterministically for the regression + visual-QA checks.
+        #[cfg(test)]
+        TEST_ROTATED_TAB_RECTS.with(|r| {
+            *r.borrow_mut() = rects.iter().map(|(_, rect)| *rect).collect();
+        });
+        #[cfg(test)]
+        let dragging = dragging.or_else(|| TEST_FORCE_SIDE_TAB_DRAG.with(|c| c.get()));
         // #59-parity insertion indicator: while a tab is in flight, paint an
         // accent hairline in the GAP the drop will land in. The rotated column is
         // always vertical, so the boundary is a horizontal line — drawn at the
@@ -266,13 +296,11 @@ impl ScribeApp {
                 let mut drawn = false;
                 for (idx, (_, rect)) in rects.iter().enumerate() {
                     if pointer.y < rect.center().y {
-                        // Drop lands ABOVE this row: paint in the gap above it
-                        // (midpoint between the previous row's bottom and this top).
-                        let y = if idx == 0 {
-                            rect.top() - 1.0
-                        } else {
-                            (rects[idx - 1].1.bottom() + rect.top()) * 0.5
-                        };
+                        // Drop lands ABOVE this row: paint in the gap above it.
+                        // Shared pure geometry with the non-rotated side strip so
+                        // the inter-chip-midpoint rule lives in exactly one place.
+                        let prev_bottom = (idx > 0).then(|| rects[idx - 1].1.bottom());
+                        let y = side_tab_insertion_y(idx, rect.top(), prev_bottom);
                         painter.hline(x_range, y, accent_line);
                         drawn = true;
                         break;
