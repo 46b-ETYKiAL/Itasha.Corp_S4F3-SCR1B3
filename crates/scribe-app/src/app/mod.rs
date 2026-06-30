@@ -837,8 +837,20 @@ pub struct ScribeApp {
     /// — read by the minimap to draw its viewport indicator (one-frame lag is fine).
     scroll_metrics: (f32, f32, f32),
     /// Memoized minimap galley keyed by text hash so a large document is laid
-    /// out once, not every frame.
+    /// out once, not every frame. This is the NATURAL (font-3.0) galley; it is
+    /// used to measure the document's intrinsic minimap height (`map_h`) from
+    /// which the fit-to-height scale is derived, and is drawn directly for short
+    /// documents (scale == 1).
     minimap_cache: std::cell::RefCell<Option<(u64, std::sync::Arc<egui::Galley>)>>,
+    /// Memoized SCALED minimap galley (font `3.0 * s`) for documents taller than
+    /// the panel, keyed additionally by the quantised panel height + word-wrap so
+    /// it re-lays-out on a window/panel resize. Separate from `minimap_cache` so a
+    /// vertical resize does not invalidate the natural-height measurement galley.
+    minimap_draw_cache: std::cell::RefCell<Option<(u64, std::sync::Arc<egui::Galley>)>>,
+    /// True while a minimap drag that BEGAN on the viewport-indicator box is in
+    /// progress → the drag scrolls the editor by pointer delta (grab-the-box),
+    /// rather than jumping absolutely to the pointer fraction. Reset on release.
+    minimap_drag_box: bool,
     /// One-shot: request keyboard focus on the find field the frame it opens.
     focus_find: bool,
     /// One-shot: request keyboard focus on the command-palette field on open.
@@ -1175,6 +1187,8 @@ impl ScribeApp {
             pending_editor_action: None,
             scroll_metrics: (0.0, 1.0, 1.0),
             minimap_cache: std::cell::RefCell::new(None),
+            minimap_draw_cache: std::cell::RefCell::new(None),
+            minimap_drag_box: false,
             focus_find: false,
             focus_palette: false,
             line_gutter: Vec::new(),

@@ -275,6 +275,72 @@ fn scene_spellcheck_code() {
     drop(f); // keep the temp file alive until after the render
 }
 
+/// Minimap viewport-indicator accuracy: a LONG document scrolled toward the
+/// bottom. The highlight box must overlay the minimap rows whose text equals the
+/// editor's visible lines (the fix: content + indicator share one fit-to-height
+/// scale). Renders the real frame so the alignment is in the PNG for inspection.
+///
+/// Each line is numbered so the visible band in the editor can be read off and
+/// cross-checked against the highlighted minimap region. Drives `pending_scroll`
+/// from inside the frame so the editor scrolls to ~70% before the capture frame.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_minimap_scrolled() {
+    if !gpu_available() {
+        eprintln!("[visual-qa] no GPU adapter; skipping `minimap_scrolled`");
+        return;
+    }
+    let mut cfg = qa_config();
+    cfg.editor.show_minimap = true;
+    cfg.editor.word_wrap = false; // exercise the no-wrap P2 mapping path
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    // 400 distinctly-numbered lines so the visible band is legible in the PNG.
+    let mut body = String::new();
+    for i in 1..=400 {
+        body.push_str(&format!(
+            "line {i:03}  fn item_{i:03}() {{ /* row {i:03} */ }}\n"
+        ));
+    }
+    t.text = body.clone();
+    t.session_baseline = body.clone();
+    t.saved_baseline = body;
+    app.tabs.push(t);
+    app.active = 0;
+
+    let mut frame = 0u32;
+    let mut harness: Harness<'static, ScribeApp> = Harness::builder()
+        .with_size(egui::vec2(1100.0, 720.0))
+        .wgpu()
+        .build_state(
+            move |ctx, app: &mut ScribeApp| {
+                app.frame_tick(ctx);
+                frame += 1;
+                // Once the editor has reported its real content height, scroll to
+                // ~70% of the scrollable range and hold there for the capture.
+                if frame >= 2 {
+                    let (_off, content_h, view_h) = app.scroll_metrics;
+                    let max_off = (content_h - view_h).max(0.0);
+                    app.pending_scroll = Some(max_off * 0.7);
+                }
+            },
+            app,
+        );
+    for _ in 0..6 {
+        harness.step();
+    }
+    let img = harness.render().expect("wgpu render");
+    let path = out_dir().join("minimap_scrolled.png");
+    img.save(&path).expect("save png");
+    eprintln!(
+        "[visual-qa] wrote {} ({}x{})",
+        path.display(),
+        img.width(),
+        img.height()
+    );
+}
+
 /// #82 — rotate-ON side tabs MID-DRAG: the drop-insertion hairline must sit in
 /// the GAP between two stacked tab chips, never inside a chip's outline. Forces
 /// the drag pointer into the gap between chip 0 and chip 1 via the test hook,
