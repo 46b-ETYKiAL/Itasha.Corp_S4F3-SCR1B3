@@ -2,7 +2,8 @@
 //! family list (so it actually renders), JetBrains Mono must stay right
 //! behind it as a fallback, every bundled face + the JP subset must be
 //! registered, and an unknown name must fall back gracefully.
-use super::{build_fonts, font_family_key, FONT_FAMILIES};
+use super::render_support::font_family_key;
+use super::{build_fonts, FONT_FAMILIES};
 
 #[test]
 fn selected_family_leads_with_jetbrains_fallback() {
