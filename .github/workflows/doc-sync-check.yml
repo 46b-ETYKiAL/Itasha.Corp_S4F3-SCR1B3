@@ -1,0 +1,159 @@
+name: doc-sync check
+
+# Deterministic documentation-drift gate. On pull_request / push it FAILS the
+# job when a code change outdates a documented invariant (the signal that a
+# doc-sync pass is needed). A weekly scheduled run opens (or updates / closes) a
+# tracking issue if drift slips onto master between PRs.
+on:
+  pull_request:
+    paths:
+      # Docs whose invariants are checked.
+      - "README.md"
+      - "CONFIG.md"
+      - "THEMING.md"
+      - "PLUGINS.md"
+      - "PRIVACY.md"
+      - "SECURITY.md"
+      - "CONTRIBUTING.md"
+      - "docs/**"
+      # Source/config the checks read the authoritative values from.
+      - "crates/scribe-core/src/config/**"
+      - "crates/scribe-core/src/theme.rs"
+      - "crates/scribe-core/src/update/**"
+      - "Cargo.toml"
+      - ".github/workflows/coverage.yml"
+      # The checker + its CI wiring themselves.
+      - "scripts/doc_sync_check.py"
+      - "scripts/test_doc_sync_check.py"
+      - ".github/workflows/doc-sync-check.yml"
+  push:
+    branches: [master]
+    paths:
+      - "README.md"
+      - "CONFIG.md"
+      - "THEMING.md"
+      - "PLUGINS.md"
+      - "PRIVACY.md"
+      - "SECURITY.md"
+      - "CONTRIBUTING.md"
+      - "docs/**"
+      - "crates/scribe-core/src/config/**"
+      - "crates/scribe-core/src/theme.rs"
+      - "crates/scribe-core/src/update/**"
+      - "Cargo.toml"
+      - ".github/workflows/coverage.yml"
+      - "scripts/doc_sync_check.py"
+      - "scripts/test_doc_sync_check.py"
+      - ".github/workflows/doc-sync-check.yml"
+  schedule:
+    # Weekly drift sweep (Mondays 06:00 UTC). Catches drift that lands on master
+    # between PR-scoped runs (e.g. an admin merge that skipped the path filter).
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: doc-sync-${{ github.ref }}
+  # Cancel only stale PR runs; never cancel master/scheduled runs so they
+  # complete and never leave a cancelled (failed-looking) check-run on the
+  # commit. Mirrors the CI / Coverage workflows' concurrency policy.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least-privilege default: read-only repo access for every job. The scheduled
+# issue-opening job elevates to `issues: write` locally.
+permissions:
+  contents: read
+
+jobs:
+  # PR / push gate: hard-fail on drift.
+  doc-sync:
+    name: doc-sync drift check
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Self-test the checker
+        # Stdlib unittest — no pip install needed on the bare setup-python env.
+        run: python scripts/test_doc_sync_check.py -v
+      - name: Doc-sync drift check
+        # Stdlib-only; exits 1 on drift, failing the job and signalling that a
+        # documentation-sync pass is required for this change.
+        run: python scripts/doc_sync_check.py
+
+  # Weekly sweep: report-only run that opens / updates / closes a tracking issue
+  # rather than failing a (non-required) scheduled job.
+  doc-sync-scheduled:
+    name: doc-sync weekly sweep
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      ISSUE_TITLE: "doc-sync drift detected"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Doc-sync drift check (capture)
+        id: check
+        continue-on-error: true
+        run: |
+          set +e
+          python scripts/doc_sync_check.py | tee doc-sync-report.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+      - name: Open or update tracking issue on drift
+        if: steps.check.outputs.exit_code != '0'
+        # Use the preinstalled `gh` CLI (no third-party action — zizmor
+        # superfluous-actions). Reuse an existing open issue if present.
+        run: |
+          set -euo pipefail
+          {
+            echo "Automated weekly doc-sync sweep detected documentation drift on \`master\`."
+            echo ""
+            echo "A code change has outdated a documented invariant. Run a doc-sync pass to reconcile."
+            echo ""
+            echo '```'
+            cat doc-sync-report.txt
+            echo '```'
+            echo ""
+            echo "_Sweep: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}_"
+          } > issue-body.txt
+
+          existing="$(gh issue list --state open --search "${ISSUE_TITLE} in:title" \
+            --json number,title --jq ".[] | select(.title == \"${ISSUE_TITLE}\") | .number" | head -n1)"
+
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body-file issue-body.txt
+          else
+            gh issue create --title "${ISSUE_TITLE}" --body-file issue-body.txt
+          fi
+      - name: Close tracking issue when no drift
+        if: steps.check.outputs.exit_code == '0'
+        run: |
+          set -euo pipefail
+          gh issue list --state open --search "${ISSUE_TITLE} in:title" \
+            --json number,title --jq ".[] | select(.title == \"${ISSUE_TITLE}\") | .number" \
+          | while read -r num; do
+              [ -n "${num}" ] || continue
+              gh issue close "${num}" \
+                --comment "Weekly doc-sync sweep is green again — closing automatically."
+            done
