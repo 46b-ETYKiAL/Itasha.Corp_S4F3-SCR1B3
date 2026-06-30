@@ -557,17 +557,23 @@ fn render_font_theme_bg_override_and_glass_paths_run() {
 }
 
 #[test]
-fn toolbar_gear_opens_settings() {
+fn caption_settings_gear_opens_settings() {
     let mut h = ui_harness(fresh_app());
     h.run();
     assert!(!h.state().settings_open);
-    // #R5: the gear is the phosphor GEAR_SIX glyph (the bare "⚙" emoji was
-    // tofu in the bundled fonts).
-    h.get_by_label(egui_phosphor::thin::GEAR_SIX).click();
+    // The settings gear was relocated from the quick-access toolbar into the
+    // window caption row (left of Minimize). It is a PAINTED caption button, so
+    // it is reached by its accessible name "Open settings" (see `caption_btn`),
+    // not the old phosphor GEAR_SIX glyph.
+    assert!(
+        h.query_by_label("Open settings").is_some(),
+        "the relocated settings gear must expose its accessible name in the caption row"
+    );
+    h.get_by_label("Open settings").click();
     h.run();
     assert!(
         h.state().settings_open,
-        "clicking the settings gear must open Settings"
+        "clicking the caption settings gear must open Settings"
     );
 }
 

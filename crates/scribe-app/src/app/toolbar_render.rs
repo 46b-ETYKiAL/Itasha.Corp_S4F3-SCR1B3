@@ -11,10 +11,11 @@ impl ScribeApp {
     // than clippy's suggested match-guard form, which would render the widget as
     // a side effect inside the guard condition.
     #[allow(clippy::collapsible_match)]
-    /// Render the quick-access toolbar contents (settings gear, command-palette
-    /// button, the user-ordered items, and the optional user-curated "⋯"
-    /// dropdown) into `ui`. Shared by the toolbar panel and the in-titlebar
-    /// placement (`appearance.toolbar_in_titlebar`).
+    /// Render the quick-access toolbar contents (command-palette button, the
+    /// user-ordered items, and the optional user-curated "⋯" dropdown) into
+    /// `ui`. Shared by the toolbar panel and the in-titlebar placement
+    /// (`appearance.toolbar_in_titlebar`). The settings gear lives in the window
+    /// caption row (left of Minimize), not here.
     pub(super) fn toolbar_contents(
         &mut self,
         ui: &mut egui::Ui,
@@ -22,13 +23,10 @@ impl ScribeApp {
         save_cfg: &mut bool,
         start_lsp: &mut bool,
     ) {
-        if ui
-            .selectable_label(self.settings_open, egui_phosphor::thin::GEAR_SIX)
-            .on_hover_text("Settings")
-            .clicked()
-        {
-            self.settings_open = !self.settings_open;
-        }
+        // NOTE: the settings "gear" used to lead this toolbar; it was RELOCATED
+        // into the window caption row (left of Minimize) — see `caption_btn` in
+        // `chrome.rs` + the titlebar caption block in `frame_tick.rs`. The
+        // command-palette ">_" button stays here as the toolbar's lead control.
         if ui
             .button(">_")
             .on_hover_text("Command palette (Ctrl+Shift+P)")

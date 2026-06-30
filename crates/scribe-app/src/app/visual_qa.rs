@@ -85,6 +85,30 @@ fn scene_default() {
     render_scene("default", 1100.0, 720.0, app);
 }
 
+/// NARROW window + a LONG status string — proves the bottom status-bar filename
+/// (right-aligned `self.status`, e.g. "opened /…/file.rs") TRUNCATES with an
+/// ellipsis instead of overflowing leftward and overlapping the left-side
+/// indicators (EOL / encoding / language / counts / caret). Read the PNG: the
+/// left segments must stay legible and the status text must end in "…" at the
+/// boundary, never paint over the left text.
+#[test]
+#[ignore = "GPU render"]
+fn scene_status_bar_narrow() {
+    let mut app = ScribeApp::new_test(qa_config());
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    t.session_baseline = SAMPLE.to_string();
+    t.saved_baseline = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    // A long status path that, on a narrow window, would previously overflow the
+    // right_to_left status segment leftward across the left indicators.
+    app.status =
+        "opened /workspace/projects/very/deep/nested/path/to/a/long_file_name.rs".to_string();
+    render_scene("status_bar_narrow", 480.0, 360.0, app);
+}
+
 /// Change bar: line 2 edited+saved (green), line 3 edited+unsaved (amber),
 /// the rest untouched (no stripe).
 #[test]

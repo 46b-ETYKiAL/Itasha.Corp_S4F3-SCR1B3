@@ -465,6 +465,18 @@ impl ScribeApp {
                             {
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                             }
+                            // Settings "gear", relocated here from the quick-access
+                            // toolbar. In this right_to_left layout, painting it AFTER
+                            // Minimize places it visually to the LEFT of Minimize — the
+                            // rightmost non-window-control button. Opens Settings, the
+                            // same effect as the old toolbar gear (the command-palette
+                            // "Open Settings" command + its shortcut are unchanged).
+                            if caption_btn(ui, CaptionIcon::Settings, muted, soft_hover, cap_h)
+                                .on_hover_text("Settings")
+                                .clicked()
+                            {
+                                self.settings_open = true;
+                            }
                             // LEFT content: wordmark + (optional) in-titlebar toolbar,
                             // laid out left-to-right in the width remaining to the left
                             // of the caption buttons. The clip rect is pinned to that
@@ -1340,7 +1352,27 @@ impl ScribeApp {
                             // isn't flush against it (right_to_left places this
                             // space at the right edge, before the text).
                             ui.add_space(8.0);
-                            ui.label(RichText::new(&self.status).color(muted).small().monospace());
+                            // The status text (e.g. "opened C:\…\file.rs") gets the
+                            // width REMAINING to the right of the left-side indicators
+                            // and TRUNCATES with an ellipsis instead of overflowing
+                            // leftward and overlapping them on a narrow window. The
+                            // full text stays available on hover. `.truncate()` clips
+                            // to the laid-out width (the remaining space in this
+                            // right_to_left child), so it never collides with the left
+                            // segments; on a wide window it has room for the whole
+                            // string and looks unchanged.
+                            if !self.status.is_empty() {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&self.status)
+                                            .color(muted)
+                                            .small()
+                                            .monospace(),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(&self.status);
+                            }
                         });
                     });
                 });

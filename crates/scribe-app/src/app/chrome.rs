@@ -70,6 +70,21 @@ pub(super) fn caption_btn(
                 stroke,
             );
         }
+        CaptionIcon::Settings => {
+            // A small "gear": a stroked hub ring + a center dot + 8 short radial
+            // teeth. Painter-drawn so it never depends on font glyph coverage
+            // (matching the other caption icons), and crisp at the caption size.
+            let r = s; // hub-ring radius
+            painter.circle_stroke(c, r, stroke);
+            painter.circle_filled(c, 1.3, col);
+            let tooth_outer = r + 2.0;
+            for i in 0..8 {
+                let ang = std::f32::consts::PI * (i as f32) / 4.0;
+                let (sin, cos) = ang.sin_cos();
+                let dir = egui::vec2(cos, sin);
+                painter.line_segment([c + dir * r, c + dir * tooth_outer], stroke);
+            }
+        }
     }
     // These caption buttons are PAINTED (not text Buttons), so egui gives them no
     // accessible name — a screen reader (and the kittest e2e harness) cannot reach
@@ -84,6 +99,7 @@ pub(super) fn caption_btn(
         CaptionIcon::Maximize => "Maximize window",
         CaptionIcon::Restore => "Restore window",
         CaptionIcon::Minimize => "Minimize window",
+        CaptionIcon::Settings => "Open settings",
     };
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
     resp
