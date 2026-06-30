@@ -361,12 +361,15 @@ jobs:
           PY
           echo "----- dist/latest.json -----"
           cat dist/latest.json
-      # Attest the BUILT artifacts (binaries, tarballs, installer) before signing
-      # the sidecars — provenance covers the build outputs themselves.
+      # Attest the BUILT artifacts before signing the sidecars — provenance
+      # covers the build outputs themselves. Tier 2: this includes the Tier 1
+      # signed manifest (dist/latest.json), not just the archives + installer,
+      # so a verifier can prove every published asset (incl. the manifest that
+      # binds them) was built by THIS workflow at THIS tag.
       - name: Attest build provenance (SLSA)
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: "dist/**/*.tar.gz, dist/**/*.exe"
+          subject-path: "dist/**/*.tar.gz, dist/**/*.exe, dist/latest.json"
       # Sign every release asset with minisign (via rsign2 — the same tool the
       # key was generated with; its signatures verify against the embedded key
       # through the app's `minisign-verify` crate). The passwordless secret key

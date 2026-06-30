@@ -1,0 +1,94 @@
+name: Post-Release Verify (tripwire)
+
+# Tier 2: an INDEPENDENT post-publish tripwire. After a release publishes, this
+# SEPARATE workflow run re-downloads the PUBLISHED assets and verifies them
+# against the SAME public key the deployed client embeds — the per-asset minisign
+# signatures, the Tier 1 signed manifest, the manifest -> asset SHA-256 binding,
+# and bare trusted comments. It deliberately does NOT trust release.yml's own
+# self-verify gate: a green build that published a bad / mismatched / wrongly
+# signed artifact (the Ollama-2026 / electron-2020 fail-open class) is caught
+# here by a second pair of eyes that only sees what users would actually download.
+# Any failure fails the run = the alert.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to verify (e.g. v0.4.46)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify published release against the embedded key
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        # step-security/harden-runner@v2.19.4
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411
+        with:
+          egress-policy: audit
+
+      - name: Checkout source (for the embedded public key)
+        # actions/checkout@v4.2.2 — single-source-of-truth for the key; read it
+        # from scribe-core/src/update/verify.rs at the verified ref (no hardcode).
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Install rsign2
+        run: cargo install rsign2 --locked --version "^0.6"
+
+      - name: Download + verify published assets (fail-closed)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify && cd verify
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" --clobber
+          pub=$(grep -oE 'RW[A-Za-z0-9+/=]{40,}' ../crates/scribe-core/src/update/verify.rs | head -1)
+          [ -n "$pub" ] || { echo "::error::could not extract the embedded public key from verify.rs"; exit 1; }
+          printf 'untrusted comment: scr1b3 minisign public key\n%s\n' "$pub" > rsign.pub
+          { [ -f latest.json ] && [ -f latest.json.minisig ]; } || { echo "::error::published release is missing latest.json / latest.json.minisig"; exit 1; }
+          rsign verify -p rsign.pub -x latest.json.minisig latest.json >/dev/null \
+            || { echo "::error::latest.json signature does NOT verify against the embedded key"; exit 1; }
+          python3 - <<'PY'
+          import json, subprocess, hashlib, sys, os
+          m = json.load(open("latest.json"))
+          fail = False
+          for a in m["assets"]:
+              name = a["asset_name"]
+              if not os.path.exists(name):
+                  print(f"::error::manifest asset {name} is not in the published release"); fail = True; continue
+              got = hashlib.sha256(open(name, "rb").read()).hexdigest()
+              if got.lower() != a["sha256"].lower():
+                  print(f"::error::{name} sha256 {got} != signed manifest {a['sha256']} (binding broken)"); fail = True
+              sig = name + ".minisig"
+              if not os.path.exists(sig):
+                  print(f"::error::{name} is missing its .minisig"); fail = True
+                  continue
+              r = subprocess.run(["rsign", "verify", "-p", "rsign.pub", "-x", sig, name],
+                                 capture_output=True, text=True)
+              if r.returncode != 0:
+                  print(f"::error::{name} signature does not verify against the embedded key: {r.stderr.strip()}"); fail = True
+              tok = ""
+              for line in open(sig, encoding="utf-8", errors="replace").read().splitlines():
+                  if line.startswith("trusted comment:"):
+                      for field in line.split("\t"):
+                          if field.strip().startswith("file:"):
+                              tok = field.strip()[5:]
+              if "/" in tok or "\\" in tok:
+                  print(f"::error::{name} trusted comment carries a path, not a bare name: {tok}"); fail = True
+              elif tok and tok != name:
+                  print(f"::error::{name} trusted comment file:{tok} != asset name {name}"); fail = True
+          if fail:
+              sys.exit(1)
+          print(f"tripwire OK: {len(m['assets'])} published assets verified against the embedded key "
+                f"(manifest sig + per-asset sig + bare identity + signed-sha256 binding)")
+          PY
+          rm -f rsign.pub
