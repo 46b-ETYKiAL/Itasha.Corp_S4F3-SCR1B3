@@ -15,7 +15,6 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 serde_json = "1"   # update_json_parse: parse the GitHub Releases API response
-semver = "1"       # update_json_parse: select_best version compare
 
 [dependencies.scribe-core]
 path = "../crates/scribe-core"
@@ -46,9 +45,10 @@ test = false
 doc = false
 bench = false
 
-# The auto-updater parses the GitHub Releases API JSON BEFORE any signature
-# check — it is untrusted network input. Parsing it + the highest-semver
-# decision (`select_best`) must never panic on arbitrary bytes.
+# The auto-updater parses untrusted bytes BEFORE trust: the GitHub Releases API
+# JSON (discovery) and the signed `latest.json` manifest fed to the
+# signature-first `manifest::parse_and_verify`. Both must never panic on
+# arbitrary bytes (the manifest path returns Err on unverifiable input).
 [[bin]]
 name = "update_json_parse"
 path = "fuzz_targets/update_json_parse.rs"
