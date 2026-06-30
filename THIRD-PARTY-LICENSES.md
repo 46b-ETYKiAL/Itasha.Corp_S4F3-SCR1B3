@@ -17,28 +17,28 @@ index.
 
 - **Source**: https://github.com/adobe-fonts/source-code-pro
 - **License**: SIL Open Font License 1.1 (OFL-1.1)
-- **Text**: [`crates/scribe-app/assets/fonts/SourceCodePro/OFL.txt`](crates/scribe-app/assets/fonts/SourceCodePro/OFL.txt)
+- **Text**: [`assets/fonts/SourceCodePro/OFL.txt`](assets/fonts/SourceCodePro/OFL.txt)
 - **Copyright**: © 2023 Adobe, with Reserved Font Name 'Source'
 
 ### B612 Mono
 
 - **Source**: https://github.com/polarsys/b612
 - **License**: SIL Open Font License 1.1 (OFL-1.1)
-- **Text**: [`crates/scribe-app/assets/fonts/B612Mono/OFL.txt`](crates/scribe-app/assets/fonts/B612Mono/OFL.txt)
+- **Text**: [`assets/fonts/B612Mono/OFL.txt`](assets/fonts/B612Mono/OFL.txt)
 - **Copyright**: Copyright 2012 The B612 Project Authors
 
 ### Share Tech Mono
 
 - **Source**: https://github.com/google/fonts/tree/main/ofl/sharetechmono
 - **License**: SIL Open Font License 1.1 (OFL-1.1)
-- **Text**: [`crates/scribe-app/assets/fonts/ShareTechMono/OFL.txt`](crates/scribe-app/assets/fonts/ShareTechMono/OFL.txt)
+- **Text**: [`assets/fonts/ShareTechMono/OFL.txt`](assets/fonts/ShareTechMono/OFL.txt)
 - **Copyright**: Copyright 2012 Carrois Type Design, Ralph du Carrois, with Reserved Font Name 'Share'
 
 ### VT323
 
 - **Source**: https://github.com/google/fonts/tree/main/ofl/vt323
 - **License**: SIL Open Font License 1.1 (OFL-1.1)
-- **Text**: [`crates/scribe-app/assets/fonts/VT323/OFL.txt`](crates/scribe-app/assets/fonts/VT323/OFL.txt)
+- **Text**: [`assets/fonts/VT323/OFL.txt`](assets/fonts/VT323/OFL.txt)
 - **Copyright**: Copyright 2011 The VT323 Project Authors
 
 ### Doto
@@ -124,6 +124,41 @@ index.
 - **License**: SIL Open Font License 1.1 (OFL-1.1)
 - **Text**: [`assets/fonts/SplineSansMono/OFL.txt`](assets/fonts/SplineSansMono/OFL.txt)
 - **Copyright**: Copyright 2022 The Spline Sans Mono Project Authors
+
+### Cousine
+
+- **Source**: https://github.com/googlefonts/cousine
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/Cousine/OFL.txt`](assets/fonts/Cousine/OFL.txt)
+- **Copyright**: Copyright 2026 The Cousine Project Authors
+
+### Fira Mono
+
+- **Source**: https://github.com/mozilla/Fira
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/FiraMono/OFL.txt`](assets/fonts/FiraMono/OFL.txt)
+- **Copyright**: Copyright (c) 2012-2013, The Mozilla Corporation and Telefonica S.A.
+
+### IBM Plex Mono
+
+- **Source**: https://github.com/IBM/plex
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/IBMPlexMono/OFL.txt`](assets/fonts/IBMPlexMono/OFL.txt)
+- **Copyright**: Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"
+
+### Noto Sans JP
+
+- **Source**: https://github.com/notofonts/noto-cjk
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/NotoSansJP/OFL.txt`](assets/fonts/NotoSansJP/OFL.txt)
+- **Copyright**: Copyright 2014-2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'
+
+### Space Mono
+
+- **Source**: https://github.com/googlefonts/spacemono
+- **License**: SIL Open Font License 1.1 (OFL-1.1)
+- **Text**: [`assets/fonts/SpaceMono/OFL.txt`](assets/fonts/SpaceMono/OFL.txt)
+- **Copyright**: Copyright 2016 The Space Mono Project Authors
 
 ### Hack (via `epaint_default_fonts`)
 
