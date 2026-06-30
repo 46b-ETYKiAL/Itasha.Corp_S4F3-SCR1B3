@@ -1869,6 +1869,7 @@ mod editor_overlays;
 mod file_ops;
 mod find_nav;
 mod find_replace;
+mod frame_modals;
 mod frame_tick;
 mod grid_methods;
 mod grid_render;
