@@ -971,7 +971,7 @@ impl ScribeApp {
             // BUG-APP-01 fix: build the filtered command list ONCE up front so
             // keyboard nav (Up/Down/Enter) and the rendered rows agree on the
             // same set — mirroring the fuzzy-file-finder's "rank once up front"
-            // pattern (mod.rs `if self.fuzzy_open`). Each entry carries what to
+            // pattern (frame_modals.rs `if self.fuzzy_open`). Each entry carries what to
             // run; the index into this Vec is the selectable highlight.
             enum PaletteAction {
                 Builtin(BuiltinCommand),
