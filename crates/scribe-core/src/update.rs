@@ -157,11 +157,14 @@ where
     }
 }
 
-/// The single permitted version-check endpoint. Documented here so the
-/// telemetry-free guarantee is auditable: GitHub Releases, unauthenticated,
-/// zero PII. (Used by the `net` feature implementation.)
+/// The single permitted version-check host, documented here so the
+/// telemetry-free guarantee is auditable: the GitHub Releases API,
+/// unauthenticated, zero PII. The live query is built in
+/// [`crate::update::net`] as `…/repos/{owner}/{repo}/releases?per_page=100`
+/// from the app's `UPDATE_OWNER`/`UPDATE_REPO`; this constant pins the canonical
+/// repo so a reader can confirm the only outbound host.
 pub const RELEASES_ENDPOINT: &str =
-    "https://api.github.com/repos/itasha-corp/scr1b3/releases/latest";
+    "https://api.github.com/repos/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/releases";
 
 #[cfg(test)]
 mod tests {

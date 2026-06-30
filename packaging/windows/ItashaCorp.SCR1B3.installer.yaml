@@ -10,7 +10,7 @@ InstallModes:
   - silent
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/itasha-corp/scr1b3/releases/download/v0.1.0/scr1b3-x86_64-pc-windows-msvc.msi
+    InstallerUrl: https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/releases/download/v0.1.0/scr1b3-x86_64-pc-windows-msvc.msi
     InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
 ManifestType: installer
 ManifestVersion: 1.6.0

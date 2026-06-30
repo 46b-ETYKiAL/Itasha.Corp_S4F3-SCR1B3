@@ -25,7 +25,7 @@ GPU-rendered, modern, telemetry-free; deep customization without bloat. Sibling
 of the C0PL4ND terminal; same wired-noir visual system.
 """
 license  = "MIT OR Apache-2.0"
-homepage = "https://github.com/itasha-corp/scr1b3"
+homepage = "https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3"
 vendor   = "Itasha.Corp"
 icon     = "assets/icons/scr1b3.png"
 icon_ico = "assets/icons/scr1b3.ico"
@@ -37,10 +37,10 @@ icon_svg = "assets/svg/app-icon.svg"
 # the in-app auto-updater uses; both verify against the embedded ed25519
 # public key (minisign).
 source         = "github-releases"
-repo           = "itasha-corp/scr1b3"
+repo           = "46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3"
 channel        = "stable"
 verify_method  = "minisign"
-verify_pubkey  = "apps/scribe/packaging/minisign.pub"
+verify_pubkey  = "packaging/minisign.pub"
 
 [[artifact]]
 target  = "windows-x86_64"
