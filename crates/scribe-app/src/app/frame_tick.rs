@@ -135,6 +135,7 @@ impl ScribeApp {
         *self.hl_cache.borrow_mut() = None;
         *self.hl_galley_cache.borrow_mut() = None;
         *self.minimap_cache.borrow_mut() = None;
+        *self.minimap_draw_cache.borrow_mut() = None;
     }
 
     /// One per-frame tick of the editor UI. Separated from `eframe::App::ui` so
