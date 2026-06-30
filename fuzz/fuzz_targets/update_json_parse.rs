@@ -1,27 +1,40 @@
 #![no_main]
-//! Fuzz the auto-updater's UNTRUSTED-INPUT path. The GitHub Releases API
-//! response is the only data the app parses BEFORE any signature check can help
-//! (we parse the JSON to discover the asset/sig/sha URLs; minisign runs later,
-//! on the downloaded tarball). A panic here is an update-channel DoS; a logic
-//! bug could steer the download. Invariants: parsing arbitrary bytes as the
-//! release JSON must never panic, and `select_best` must never panic on any
-//! parsed release list.
+//! Fuzz the auto-updater's UNTRUSTED-INPUT path. Two surfaces parse bytes the
+//! app does not yet trust:
+//!   1. The GitHub Releases API response (`RawRelease` JSON) — parsed to
+//!      discover the asset/sig/sha/manifest URLs BEFORE any signature check.
+//!   2. The signed update manifest (`latest.json`) — fed to
+//!      [`manifest::parse_and_verify`], which runs minisign over the RAW bytes
+//!      against the embedded key set BEFORE deserialization (signature-first,
+//!      fail-closed). On arbitrary fuzz bytes the verify fails and the call
+//!      returns `Err` — the invariant under test is that it NEVER PANICS.
+//! A panic on either surface is an update-channel DoS. (The legacy `select_best`
+//! highest-semver selector was removed with the Tier-1 fail-closed flow — the
+//! manifest is now the only path that decides an install, so the manifest
+//! verify/parse surface replaces it here.)
 use libfuzzer_sys::fuzz_target;
-use scribe_core::update::net::{select_best, RawRelease};
+use scribe_core::update::manifest;
+use scribe_core::update::net::RawRelease;
+use scribe_core::update::verify::EMBEDDED_PUBLIC_KEYS;
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(s) = std::str::from_utf8(data) else {
-        return;
+    // Manifest verify+parse over arbitrary bytes: partition on the first NUL
+    // into (json, signature) so both halves take fuzz input; a NUL-free input
+    // drives the whole blob as the json with an empty signature. Either way the
+    // signature-first gate must reject without panicking (it never reaches serde
+    // on unverifiable bytes; verification itself must also be panic-free).
+    let (json_bytes, sig_bytes) = match data.iter().position(|&b| b == 0) {
+        Some(i) => (&data[..i], &data[i + 1..]),
+        None => (data, &b""[..]),
     };
-    // `/releases/latest` shape — a single release object.
-    let _ = serde_json::from_str::<RawRelease>(s);
-    // `/releases` shape — a list — then the pure highest-semver decision over it
-    // for a couple of real target triples (the path that turns untrusted JSON
-    // into "which asset to download").
-    if let Ok(releases) = serde_json::from_str::<Vec<RawRelease>>(s) {
-        let current = semver::Version::new(0, 4, 0);
-        let _ = select_best(&releases, &current, "x86_64-pc-windows-msvc");
-        let _ = select_best(&releases, &current, "x86_64-unknown-linux-gnu");
-        let _ = select_best(&releases, &current, "aarch64-apple-darwin");
+    let sig_str = String::from_utf8_lossy(sig_bytes);
+    let _ = manifest::parse_and_verify(json_bytes, &sig_str, EMBEDDED_PUBLIC_KEYS);
+
+    // GitHub Releases JSON discovery surface: both the single-object
+    // (`/releases/latest`) and the list (`/releases`) shapes must parse
+    // arbitrary UTF-8 without panicking.
+    if let Ok(s) = std::str::from_utf8(data) {
+        let _ = serde_json::from_str::<RawRelease>(s);
+        let _ = serde_json::from_str::<Vec<RawRelease>>(s);
     }
 });

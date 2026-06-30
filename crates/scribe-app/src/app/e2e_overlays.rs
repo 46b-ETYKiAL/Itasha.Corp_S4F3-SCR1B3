@@ -477,6 +477,8 @@ fn arm_update_prompt(app: &mut ScribeApp) {
         sig_url: "https://example.invalid/scr1b3.tar.gz.minisig".to_string(),
         sha_url: "https://example.invalid/scr1b3.tar.gz.sha256".to_string(),
         html_url: "https://example.invalid/releases/tag/v99.0.0".to_string(),
+        pinned_sha256: "deadbeef".to_string(),
+        release_index: Some(99_000_000),
         installer: None,
     };
     app.updater.state = UpdateState::Available(info);

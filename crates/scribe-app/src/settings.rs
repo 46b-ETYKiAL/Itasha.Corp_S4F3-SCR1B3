@@ -2300,7 +2300,9 @@ const UPDATE_STATUS_MSG_WIDTH: f32 = 340.0;
 fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater) {
     use crate::updater::UpdateState;
     enum Act {
-        Download(scribe_core::update::ReleaseInfo),
+        // Boxed: `ReleaseInfo` now carries the signed-manifest pin + ordinal, so
+        // it is the largest variant; box it to keep the enum small.
+        Download(Box<scribe_core::update::ReleaseInfo>),
         Apply,
         RunInstaller,
         Recheck,
@@ -2361,7 +2363,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
         UpdateState::Available(info) => {
             ui.label(format!("v{} is available.", info.version));
             if ui.button("Update now").clicked() {
-                act = Some(Act::Download(info.clone()));
+                act = Some(Act::Download(Box::new(info.clone())));
             }
             if ui
                 .link("changelog")
@@ -2429,7 +2431,7 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
         }
     }
     match act {
-        Some(Act::Download(info)) => updater.start_download(ui.ctx(), info),
+        Some(Act::Download(info)) => updater.start_download(ui.ctx(), *info),
         Some(Act::Apply) => updater.apply_and_restart(ui.ctx()),
         Some(Act::RunInstaller) => updater.run_installer(ui.ctx()),
         Some(Act::Recheck) => updater.start_check(ui.ctx(), crate::updater::LaunchKind::Manual),
@@ -3345,6 +3347,8 @@ mod update_status_states {
             sig_url: "https://example.invalid/a.tar.gz.minisig".to_string(),
             sha_url: "https://example.invalid/a.tar.gz.sha256".to_string(),
             html_url: "https://example.invalid/releases/tag".to_string(),
+            pinned_sha256: "deadbeef".to_string(),
+            release_index: Some(4_044),
             installer: None,
         }
     }

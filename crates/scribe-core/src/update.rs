@@ -9,7 +9,9 @@
 //! the network.
 
 pub mod apply;
+pub mod manifest;
 pub mod net;
+pub mod update_state;
 pub mod verify;
 
 pub use crate::config::UpdateMode;
@@ -22,7 +24,7 @@ pub use crate::config::UpdateMode;
 // descriptor the pure offline [`evaluate`] decision path operates on.
 pub use net::{
     check_for_update, download_verify_extract, download_verify_installer, ensure_upgrade,
-    fetch_releases, select_best, select_update, InstallerAsset, ReleaseInfo, UpdateOutcome,
+    fetch_releases, InstallerAsset, ReleaseInfo, UpdateOutcome,
 };
 
 /// Minimal latest-release descriptor for the pure, offline [`evaluate`]
