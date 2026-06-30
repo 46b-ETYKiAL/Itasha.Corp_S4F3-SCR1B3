@@ -16,8 +16,8 @@ use scribe_core::{Config, ReportingMode};
 
 /// Left-nav categories, in display order. Look-and-feel groups first
 /// (Appearance, Fonts, Window, Toolbar, Motion), then editing behaviour
-/// (Editor, Spellcheck), then system (Plugins, Updates) — with Updates pinned
-/// last and Plugins just above it.
+/// (Editor, Spellcheck), then system (Plugins, Default app, Updates, Privacy) —
+/// with "Default app" sitting directly below Plugins, then Updates and Privacy.
 const CATEGORIES: &[&str] = &[
     "Appearance",
     "Fonts",
@@ -27,9 +27,9 @@ const CATEGORIES: &[&str] = &[
     "Editor",
     "Spellcheck",
     "Plugins",
+    "Default app",
     "Updates",
     "Privacy",
-    "Default app",
 ];
 
 /// egui temp-data key the Plugins section sets when "Manage plugins…" is

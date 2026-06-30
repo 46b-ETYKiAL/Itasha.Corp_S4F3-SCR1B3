@@ -1842,6 +1842,9 @@ enum CaptionIcon {
     Maximize,
     Restore,
     Close,
+    /// The settings "gear", relocated into the caption row (left of Minimize)
+    /// from the quick-access toolbar. Painter-drawn like the others.
+    Settings,
 }
 
 /// How many of `n` equal-width toolbar items fit in `avail` logical px before
