@@ -22,6 +22,7 @@ mod find_cache;
 mod find_in_files;
 mod fuzzy;
 mod grid;
+mod integration;
 mod issue_intake;
 #[cfg(test)]
 mod log_capture;

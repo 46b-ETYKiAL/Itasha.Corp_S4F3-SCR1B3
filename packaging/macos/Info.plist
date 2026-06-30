@@ -17,7 +17,7 @@
     <dict>
       <key>CFBundleTypeName</key><string>Text Document</string>
       <key>CFBundleTypeRole</key><string>Editor</string>
-      <key>LSItemContentTypes</key><array><string>public.plain-text</string><string>public.source-code</string></array>
+      <key>LSItemContentTypes</key><array><string>public.plain-text</string><string>public.source-code</string><string>public.json</string><string>net.daringfireball.markdown</string></array>
     </dict>
   </array>
 </dict>
