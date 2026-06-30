@@ -11,7 +11,7 @@
 //! `.on_hover_text` tooltip.
 
 use eframe::egui;
-use scribe_core::config::{ToolbarConfig, UpdateMode};
+use scribe_core::config::{ClaimType, ToolbarConfig, UpdateMode};
 use scribe_core::{Config, ReportingMode};
 
 /// Left-nav categories, in display order. Look-and-feel groups first
@@ -29,6 +29,7 @@ const CATEGORIES: &[&str] = &[
     "Plugins",
     "Updates",
     "Privacy",
+    "Default app",
 ];
 
 /// egui temp-data key the Plugins section sets when "Manage plugins…" is
@@ -36,6 +37,13 @@ const CATEGORIES: &[&str] = &[
 /// own plugin-manager modal — settings owns no modal state of its own.
 fn open_plugin_manager_id() -> egui::Id {
     egui::Id::new("scr1b3_open_plugin_manager")
+}
+
+/// egui temp-data key holding the last default-app registration status message,
+/// so the "Default app" section can show the result of the most recent attempt
+/// across frames (settings owns no persistent state of its own).
+fn default_app_status_id() -> egui::Id {
+    egui::Id::new("scr1b3_default_app_status")
 }
 
 /// Parse a `#rrggbb` (or `rrggbb`) hex string into an opaque `Color32` (#88).
@@ -2037,6 +2045,96 @@ fn render_sections(
         changed |= render_toolbar_editor(ui, config);
     }
 
+    // ---- Default app (file-type associations) ----
+    if section_visible(
+        sel,
+        q,
+        "Default app",
+        &[
+            "default",
+            "file type",
+            "association",
+            "open with",
+            "handler",
+        ],
+    ) {
+        head(
+            ui,
+            "Default app",
+            "Open text & code files in SCR1B3 by default.",
+        );
+        group(
+            ui,
+            "File types",
+            "Choose which kinds of file SCR1B3 should handle.",
+        );
+
+        // Checklist bound to the persisted claim set (empty ⇒ all selected).
+        let mut selected = config.integration.claimed_types();
+        for ct in ClaimType::ALL {
+            let mut on = selected.contains(&ct);
+            if ui.checkbox(&mut on, ct.label()).changed() {
+                if on {
+                    if !selected.contains(&ct) {
+                        selected.push(ct);
+                    }
+                } else {
+                    selected.retain(|c| *c != ct);
+                }
+                // Persist the EXPLICIT selection (resolved order) so a later load
+                // reflects exactly what the user picked.
+                config.integration.claimed_types = ClaimType::ALL
+                    .into_iter()
+                    .filter(|c| selected.contains(c))
+                    .map(|c| c.key().to_string())
+                    .collect();
+                changed = true;
+            }
+        }
+        space(ui);
+
+        // Honest per-OS copy: on Windows the app can register + deep-link, but
+        // only the user can confirm the default in the system UI.
+        let os_note = if cfg!(windows) {
+            "Windows requires you to confirm the choice in its Settings window — \
+             SCR1B3 will open it for you. (No app can change the default for you.)"
+        } else if cfg!(target_os = "macos") {
+            "SCR1B3 will be registered for these types; macOS asks you to confirm \
+             the default once in Finder (Get Info ▸ Open With ▸ Change All)."
+        } else {
+            "SCR1B3 will be set as the default for these file types."
+        };
+        ui.label(egui::RichText::new(os_note).weak().small());
+
+        let enabled = !selected.is_empty();
+        let btn = ui.add_enabled(
+            enabled,
+            egui::Button::new(if cfg!(windows) {
+                "Register SCR1B3 & open Default Apps…"
+            } else {
+                "Set SCR1B3 as the default"
+            }),
+        );
+        if btn.clicked() {
+            config.integration.register_file_types = true;
+            let report = crate::integration::register(&selected);
+            config.integration.last_registration_unix = Some(crate::app::now_unix());
+            changed = true;
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(default_app_status_id(), report.message.clone()));
+        }
+
+        // Surface the most-recent attempt's status.
+        if let Some(msg) = ui
+            .ctx()
+            .data(|d| d.get_temp::<String>(default_app_status_id()))
+        {
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new(msg).small());
+        }
+        space(ui);
+    }
+
     changed
 }
 
@@ -3236,6 +3334,7 @@ mod pane_render {
             ("Plugins", "Plugins"),
             ("Updates", "Updates"),
             ("Privacy", "Privacy"),
+            ("Default app", "Default app"),
         ];
         // Guard: the table must stay in lockstep with the real nav list, so a
         // newly-added category can't silently skip its render-coverage here.
