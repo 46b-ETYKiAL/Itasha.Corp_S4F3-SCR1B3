@@ -4,7 +4,7 @@
 //! lives in `effective_wrap_width`: infinite width when wrap is off (galley
 //! lays out on one line, the ScrollArea scrolls horizontally), the given
 //! viewport width when on.
-use super::effective_wrap_width;
+use super::render_support::effective_wrap_width;
 
 #[test]
 fn rotated_tab_geometry_swaps_axes_and_anchors_top_right() {

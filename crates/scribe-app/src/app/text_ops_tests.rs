@@ -6,9 +6,10 @@
 //! cover `byte_to_char_index`, `effective_wrap_width`, `use_rope_editor`,
 //! `apply_indent`, `line_col_from_char_index`, and `pick_bookmark`.
 
+use super::render_support::font_family_key;
 use super::{
-    char_to_byte, font_family_key, font_state_key, matching_bracket_char_indices, now_unix,
-    path_to_uri, session_signature, EditorTab,
+    char_to_byte, font_state_key, matching_bracket_char_indices, now_unix, path_to_uri,
+    session_signature, EditorTab,
 };
 
 // ---- char_to_byte (the inverse of byte_to_char_index) ----
