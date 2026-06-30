@@ -82,7 +82,8 @@ jobs:
         with:
           python-version: "3.12"
       - name: Self-test the checker
-        run: python -m pytest scripts/test_doc_sync_check.py -q
+        # Stdlib unittest — no pip install needed on the bare setup-python env.
+        run: python scripts/test_doc_sync_check.py -v
       - name: Doc-sync drift check
         # Stdlib-only; exits 1 on drift, failing the job and signalling that a
         # documentation-sync pass is required for this change.
