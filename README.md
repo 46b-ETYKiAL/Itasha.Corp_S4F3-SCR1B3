@@ -33,7 +33,7 @@
 
 SCR1B3 (pronounced "scribe") is a code and text editor built in Rust for people who want a fast, native editor that respects them. It opens multi-gigabyte files without freezing, themes all the way down, and never phones home.
 
-The text engine is a rope buffer, and memory-mapped read-only browsing means files far larger than RAM open instantly and stay smooth to scroll. Syntax highlighting comes from syntect with 100+ bundled languages and no per-language build step, with a native tree-sitter grammar (Rust today) starting to layer structural awareness on top. Everything — appearance, fonts, behavior, themes — is driven by a single live-reloading TOML config. No webview, no account, no bloat.
+The text engine is a rope buffer, and memory-mapped read-only browsing means files far larger than RAM open instantly and stay smooth to scroll. Syntax highlighting runs on an engine-agnostic backend: a native tree-sitter grammar (Rust today) drives structure-aware coloring where one is wired, with syntect covering 100+ more languages with no per-language build step. Everything — appearance, fonts, behavior, themes — is driven by a single live-reloading TOML config. No webview, no account, no bloat.
 
 The name is a nod to *Serial Experiments Lain*. Good tools don't call attention to themselves. They just work when you reach for them — present day, present text.
 
@@ -97,7 +97,7 @@ Or launch SCR1B3 and open files from the editor. On first run it writes nothing 
 
 - **Large files without the freeze** — a rope buffer plus `mmap` read-only browse open multi-GB logs and files that defeat the 2 GB cap and 4×-RAM blowups of legacy editors, and stay responsive while you scroll.
 - **GPU-rendered** — smooth scrolling on a hardware-accelerated egui surface, with no system webview in the loop.
-- **100+ languages** — syntect-backed syntax highlighting out of the box; standard TextMate / Sublime syntaxes work unchanged, with a native tree-sitter grammar (Rust today) beginning to add structure-aware highlighting; broader tree-sitter coverage and folding are in progress.
+- **100+ languages** — engine-agnostic highlighting: a native tree-sitter grammar (Rust today) gives structure-aware coloring where one is wired, with syntect covering 100+ more TextMate / Sublime syntaxes unchanged; broader tree-sitter coverage and folding are in progress.
 - **Power editing surfaces** — split view over a shared buffer, a document minimap with click-to-jump, brace-aware code folding, and an identifier completion popup (Ctrl/Cmd+Space) — all toggleable from the View menu.
 - **Telemetry-free by default** — no account, no analytics, no usage beacons. Your file contents never leave your device.
 - **Deep theming** — live-reload Helix-style `[palette]` / `[ui]` / `[syntax]` TOML themes, including glass / transparency effects; ship your own without recompiling. Broken themes fall back to the compiled-in default, so the editor never blanks.

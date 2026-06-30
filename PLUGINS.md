@@ -4,7 +4,8 @@ SCR1B3 is extensible by ordinary users — **no build step, no toolchain.** Drop
 folder with a `plugin.toml` and a `.rhai` script into your plugins directory and
 SCR1B3 loads it on the next launch.
 
-> Plugins directory: `<config>/scr1b3/plugins/` — e.g.
+> Plugins directory: `<config>/plugins/` (a `plugins/` folder inside SCR1B3's
+> config directory) — e.g.
 > `%APPDATA%\ItashaCorp\scr1b3\config\plugins\` (Windows),
 > `~/.config/scr1b3/plugins/` (Linux),
 > `~/Library/Application Support/com.ItashaCorp.scr1b3/plugins/` (macOS).
