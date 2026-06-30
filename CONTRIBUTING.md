@@ -9,12 +9,15 @@ SCR1B3 is a Cargo workspace:
 ```
 scr1b3/
 ├── crates/
-│   ├── scribe-core    # engine: rope buffer, file I/O + mmap, encoding/EOL,
-│   │                  #         config, theme, syntect highlighting, search,
-│   │                  #         update logic. No UI dependency.
-│   ├── scribe-render  # maps the engine Theme onto egui Visuals; CRT params.
-│   └── scribe-app     # the binary: egui/eframe shell, tabs, find bar,
-│                      #             status bar, frameless titlebar.
+│   ├── scribe-core         # engine: rope buffer, file I/O + mmap, encoding/EOL,
+│   │                       #         config, theme, syntax highlighting
+│   │                       #         (tree-sitter primary, syntect fallback),
+│   │                       #         search, update logic. No UI dependency.
+│   ├── scribe-render       # maps the engine Theme onto egui Visuals; CRT params.
+│   ├── scribe-app          # the binary: egui/eframe shell, tabs, find bar,
+│   │                       #             status bar, frameless titlebar.
+│   └── scribe-win32-chrome # Win32 FFI for the frameless titlebar (Windows).
+│                           # The only unsafe-permitted crate; rest forbid unsafe.
 ├── assets/            # SVG identity, bundled themes, fonts, media
 ├── docs/adr/          # architecture decision records
 └── packaging/         # per-OS install recipes

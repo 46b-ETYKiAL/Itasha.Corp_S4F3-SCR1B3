@@ -101,7 +101,7 @@ See [PLUGINS.md](PLUGINS.md) for the capability-consent model.
 |---|---|---|---|
 | `enabled` | boolean | `true` | Master toggle for the plugin system. |
 | `disabled` | array of strings | `[]` | Plugin ids you have explicitly disabled. |
-| `require_signed` | boolean | `false` | Strict mode: when on, a plugin must additionally carry a valid minisign signature over its manifest from a pinned author key. Off by default so existing unsigned local script plugins keep working under the trust-on-first-use (TOFU) gate. |
+| `require_signed` | boolean | `false` | Strict mode: when on, a plugin must additionally carry a valid minisign signature over its entry script (the exact bytes that execute) from a pinned author key. Off by default so existing unsigned local script plugins keep working under the trust-on-first-use (TOFU) gate. |
 | `trusted` | table | `{}` | Trust-on-first-use approvals (`plugin id` → approved entry-script SHA-256). TOFU-managed state — populated when you approve a discovered plugin; not normally hand-edited. |
 
 ## `[toolbar]` — customizable quick-access toolbar

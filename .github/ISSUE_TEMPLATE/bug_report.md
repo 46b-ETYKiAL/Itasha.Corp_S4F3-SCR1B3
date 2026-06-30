@@ -27,5 +27,5 @@ What you expected to happen.
 
 ## Logs
 
-Run with `SCR1B3_LOG=debug` and paste relevant output (redact anything private —
+Run with `RUST_LOG=debug` and paste relevant output (redact anything private —
 SCR1B3 never transmits this; you control what you share).
