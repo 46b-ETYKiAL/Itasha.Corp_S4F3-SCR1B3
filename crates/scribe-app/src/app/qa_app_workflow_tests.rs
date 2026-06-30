@@ -642,7 +642,7 @@ fn command_palette_filter_then_click_executes_command() {
 
 /// BUG-APP-01 regression-lock (FIXED): the command palette now has full
 /// Enter-to-execute keyboard nav, mirroring the sibling fuzzy-file-finder modal
-/// (`fuzzy_open`, mod.rs ~L4757). Root cause of the original gap: the palette
+/// (`fuzzy_open`, frame_modals.rs::render_picker_modals). Root cause of the original gap: the palette
 /// render path ran commands solely via `.clicked()` with no `key_pressed(Enter)`
 /// handler and no selected-index state. Now a keyboard user can type to filter
 /// the palette to a single command and press Enter to run it — no mouse needed.
@@ -685,7 +685,7 @@ fn bug_app_01_command_palette_enter_does_not_execute() {
 /// doc starts at the default LF (`Eol::default()`), so observing the doc's eol
 /// become `Crlf` proves Down-then-Enter ran the second match, not the first
 /// (which would have set `Cr`) and not the unmoved top (also `Cr`). Mirrors the
-/// fuzzy-finder Up/Down/Enter model (mod.rs ~L4757).
+/// fuzzy-finder Up/Down/Enter model (frame_modals.rs::render_picker_modals).
 #[test]
 fn command_palette_arrow_down_then_enter_runs_second_match() {
     let app = app_ready();

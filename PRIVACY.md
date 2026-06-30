@@ -15,7 +15,7 @@ stored, and how to clear it.
 | Does SCR1B3 ship usage analytics? | **No.** No analytics, no usage counters, no background reporting of any kind. Usage telemetry is out of scope. |
 | Does SCR1B3 report crashes? | **Only if you opt in.** Crash/error reporting is **off by default**, per-stream, and nothing is captured for transmission until you turn it on **and** consent to a specific report. See [Opt-in reporting](#opt-in-crash--error-reporting). |
 | Does SCR1B3 have an account system? | **No.** There is no account, no sign-in, no profile. |
-| Does SCR1B3 phone home on its own? | **No.** The update check is opt-in-by-action (default `manual`), and reporting is default-OFF. A default install makes **no** network call at startup. |
+| Does SCR1B3 phone home on its own? | **Only a single update version-check.** The update check defaults to `notify` — a single telemetry-free GitHub-Releases version check at startup (no PII, no auto-download) — and reporting is default-OFF. Set `[updates] mode = "off"` for **zero** startup network calls. |
 | Does SCR1B3 collect a unique identifier? | **No** install-id, no fingerprint, no per-session ID — for either the update check or a report. |
 | Where is my data stored? | **Locally only.** Reports are spooled on your machine and leave it **only** on your explicit consent. |
 | Can I run fully offline? | **Yes.** With `[updates] mode = "off"` and reporting left off (the default), SCR1B3 makes zero outbound connections. |
@@ -33,8 +33,8 @@ The update version-check:
   | Mode | Behavior |
   |---|---|
   | `off` | No update check ever. Zero network calls. |
-  | `manual` | **Default.** No automatic check; SCR1B3 checks only when you click *Check for updates* in Settings. |
-  | `notify` | Check once at startup; if a newer version exists, show a passive notification. Never auto-download. |
+  | `notify` | **Default.** Check once at startup; if a newer version exists, show a passive notification. Never auto-download. |
+  | `manual` | No automatic check; SCR1B3 checks only when you click *Check for updates* in Settings. |
   | `auto` | Check once at startup; if newer, ask yes/no before downloading + verifying + installing. |
 
   Change in [`CONFIG.md`](CONFIG.md); the change takes effect on next start (or
@@ -123,12 +123,12 @@ SCR1B3 stores state in standard per-OS directories (resolved via the
 
 | Class | Windows | macOS | Linux |
 |---|---|---|---|
-| Config (TOML) | `%APPDATA%\scr1b3\config.toml` | `~/Library/Application Support/scr1b3/config.toml` | `~/.config/scr1b3/config.toml` |
-| Themes | `…\scr1b3\themes\` | `…/scr1b3/themes/` | `~/.config/scr1b3/themes/` |
-| Plugin pinned keys (TOFU) | `…\scr1b3\plugin-keys\` | `…/scr1b3/plugin-keys/` | `~/.config/scr1b3/plugin-keys/` |
-| Crash/error report spool | `…\scr1b3\reports\` | `…/scr1b3/reports/` | `~/.config/scr1b3/reports/` |
-| Recent files / session | `%LOCALAPPDATA%\scr1b3\session.toml` | `~/Library/Caches/scr1b3/session.toml` | `~/.cache/scr1b3/session.toml` |
-| Logs | `%LOCALAPPDATA%\scr1b3\logs\` | `~/Library/Logs/scr1b3/` | `~/.cache/scr1b3/logs/` |
+| Config (TOML) | `%APPDATA%\ItashaCorp\scr1b3\config\scr1b3.toml` | `~/Library/Application Support/com.ItashaCorp.scr1b3/scr1b3.toml` | `~/.config/scr1b3/scr1b3.toml` |
+| Themes | `%APPDATA%\ItashaCorp\scr1b3\config\themes\` | `~/Library/Application Support/com.ItashaCorp.scr1b3/themes/` | `~/.config/scr1b3/themes/` |
+| Plugin pinned keys (TOFU) | `%APPDATA%\ItashaCorp\scr1b3\config\plugin-keys\` | `~/Library/Application Support/com.ItashaCorp.scr1b3/plugin-keys/` | `~/.config/scr1b3/plugin-keys/` |
+| Crash/error report spool | `%APPDATA%\ItashaCorp\scr1b3\config\reports\` | `~/Library/Application Support/com.ItashaCorp.scr1b3/reports/` | `~/.config/scr1b3/reports/` |
+| Recent files / session | `%LOCALAPPDATA%\ItashaCorp\scr1b3\cache\session.toml` | `~/Library/Caches/com.ItashaCorp.scr1b3/session.toml` | `~/.cache/scr1b3/session.toml` |
+| Logs | `%LOCALAPPDATA%\ItashaCorp\scr1b3\cache\logs\` | `~/Library/Caches/com.ItashaCorp.scr1b3/logs/` | `~/.cache/scr1b3/logs/` |
 
 A spooled report stays in `reports/` until you consent to send it or you clear
 local state. No data is written outside these directories.
@@ -158,12 +158,11 @@ To erase everything SCR1B3 ever wrote on disk (including any spooled reports):
 
 ```bash
 # Windows (PowerShell)
-Remove-Item -Recurse "$env:APPDATA\scr1b3", "$env:LOCALAPPDATA\scr1b3"
+Remove-Item -Recurse "$env:APPDATA\ItashaCorp\scr1b3", "$env:LOCALAPPDATA\ItashaCorp\scr1b3"
 
 # macOS
-rm -rf ~/Library/Application\ Support/scr1b3 \
-       ~/Library/Caches/scr1b3 \
-       ~/Library/Logs/scr1b3
+rm -rf ~/Library/Application\ Support/com.ItashaCorp.scr1b3 \
+       ~/Library/Caches/com.ItashaCorp.scr1b3
 
 # Linux
 rm -rf ~/.config/scr1b3 ~/.cache/scr1b3

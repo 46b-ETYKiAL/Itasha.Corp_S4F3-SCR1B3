@@ -1,6 +1,9 @@
-//! The SCR1B3 application shell: frameless brand titlebar, tab strip, syntect-
-//! highlighted editor surface, find bar, and status bar. v1 keeps the shell in
-//! one focused module; later phases split tabs/titlebar/chrome into submodules.
+//! The SCR1B3 application shell: frameless brand titlebar, tab strip, syntax-
+//! highlighted editor surface, find bar, and status bar. The shell is decomposed
+//! into sibling modules under app/ (frame_tick, frame_modals, render_support,
+//! builtins, file_ops, editor_overlays, text_analysis, grid_methods, commands,
+//! tabs/tab_strip_render, toolbar_render, modals, session_io, …); mod.rs now
+//! holds the ScribeApp struct + shared glue.
 
 // egui 0.34 deprecated the top-level `Panel::show(ctx, …)` / `CentralPanel::show(ctx, …)`
 // forms in favour of `show_inside(ui, …)` — but `show_inside` requires a parent

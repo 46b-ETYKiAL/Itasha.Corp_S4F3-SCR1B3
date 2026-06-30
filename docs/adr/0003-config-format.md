@@ -16,11 +16,11 @@ Configuration uses **TOML** with **live reload**.
 - **Live reload** via a filesystem watcher (`notify` + a debouncer), so saving the config applies changes immediately.
 - **Per-OS location** resolved via the `directories` crate: `%APPDATA%\ItashaCorp\scr1b3\config\scr1b3.toml` (Windows), `~/.config/scr1b3/scr1b3.toml` (Linux), `~/Library/Application Support/com.ItashaCorp.scr1b3/scr1b3.toml` (macOS).
 
-Config is partitioned into seven tables — `[editor]`, `[appearance]`, `[fonts]`, `[effects]`, `[updates]`, `[spellcheck]`, `[plugins]` — each with serde defaults. Themes use a separate TOML schema (see ADR 0005).
+Config is partitioned into twelve tables — `[editor]`, `[appearance]`, `[fonts]`, `[window]`, `[updates]`, `[spellcheck]`, `[plugins]`, `[toolbar]`, `[motion]`, `[scroll]`, `[reporting]`, `[integration]` — each with serde defaults. (The originally-envisioned `[effects]` table was removed rather than shipped as dead toggles — see ADR 0005.) Themes use a separate TOML schema (see ADR 0005).
 
 ## Consequences
 
 - Config is **data, not code** — no execution surface, satisfying the security posture.
 - Robust against partial and malformed input; the editor is never bricked by a bad config.
 - Customization is discoverable and documented key-by-key (see `CONFIG.md`).
-- A schema is versioned from v1 with a documented stability contract; new keys are additive with defaults so old config files keep working.
+- The schema is versioned (`CURRENT_SCHEMA_VERSION = 4`) with a documented stability contract and a one-time `migrate()` step applied on load (v3 added `[reporting]`, v4 added `[integration]`; both default OFF). New keys are additive with defaults so old config files keep working.

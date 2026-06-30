@@ -4,8 +4,9 @@
 //! Extracted from the `app` god-module (coverage WU-1) so the registries and
 //! their pure routing/lookup logic live in one cohesive, directly unit-testable
 //! module. The thin egui glue that renders these tables (the F1 cheatsheet, the
-//! Ctrl+Shift+P palette, the quick-access toolbar) stays in `app/mod.rs` and
-//! calls into the pure functions here. Every item is re-exported from
+//! Ctrl+Shift+P palette, the quick-access toolbar) renders in app/frame_tick.rs
+//! (cheatsheet + palette) and app/toolbar_render.rs (toolbar), each calling into
+//! the pure functions here. Every item is re-exported from
 //! `app/mod.rs` via `pub(crate) use commands::*;` so existing call sites
 //! (`crate::app::BUILTIN_COMMANDS`, `super::*`, …) are unchanged.
 
@@ -212,7 +213,7 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
 // is exposed in the Ctrl+Shift+P palette so the editor is self-discoverable
 // on first launch (the old "plugin only" palette showed nothing on a fresh
 // install). The shortcut column displays the key chord when one is wired.
-// Invocation routes through `execute_builtin` (in app/mod.rs) so the palette
+// Invocation routes through `execute_builtin` (in app/builtins.rs) so the palette
 // and the keyboard chord produce identical state changes.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

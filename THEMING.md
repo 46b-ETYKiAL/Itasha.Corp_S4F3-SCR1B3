@@ -8,19 +8,20 @@ The fastest path: **Settings → Appearance → Theme** picks one of the built-i
 
 ```toml
 [appearance]
-theme = "wired-noir"
+theme = "itasha-corp"
 ```
 
 The value is either a **built-in name** (see below) or the **file stem** of a theme file you drop in your themes directory. If the file exists it overrides the built-in of the same name; otherwise the built-in with that name renders; otherwise the editor falls back to `wired-noir` so a misnamed entry never blanks the UI.
 
 ## Built-in themes
 
-SCR1B3 ships **19 themes** (all compiled into the binary — no asset path needed). The catalogue is organised in three lines:
+SCR1B3 ships **32 themes** (all compiled into the binary — no asset path needed). The catalogue is organised in four lines:
 
 ### Calm-canon line (DECISION-2026-005 brand canon)
 | Name | Appearance | Voice | Notes |
 |---|---|---|---|
-| `wired-noir` | dark | teal `#34E0D0` | **Default**. Cool near-black, off-white text, one teal accent, Akira-red reserved for alarms. |
+| `itasha-corp` | dark | teal `#34E0D0` | **Default**. The shared Itasha.Corp house-brand palette: cool near-black layers, off-white text, one teal accent, Akira-red reserved for alarms. |
+| `wired-noir` | dark | teal `#34E0D0` | The compiled-in **fallback** for any broken theme. Cool near-black, off-white text, one teal accent, Akira-red reserved for alarms. |
 | `phosphor-amber` | dark | amber `#FFC04A` | BBS / hairline-terminal heritage. |
 | `lain-mauve` | dark | mauve `#C89AE8` | Wired-era violet melancholy (pastel-leaning). |
 | `ghost-paper` | light | teal (darker) | Warm paper background, ink-grey text. WCAG AA. |
@@ -48,7 +49,23 @@ SCR1B3 ships **19 themes** (all compiled into the binary — no asset path neede
 | `mecha-armour` | dark | chrome `#A8B0C0` | Gundam RX-78-2 colour-spec | Federation white/blue/red/yellow on graphite-black. |
 | `shutoko-night` | dark | Bayside `#0C2D6A` | 80s–2000s JDM (Itasha brand root) | Documented period paint codes (Honda NH-547 / Nissan BT2 / Mazda Soul-Red-Crystal precedent). |
 
-All 19 themes keep the **one-accent-equals-system-voice** principle: a single accent colour carries every interactive signal (cursor, hover, selection, active line-number, OK status). Akira-red is **alarm-only** across the family — never decorative — with the two documented exceptions above (`akira-redshift`, `atompunk-sodium`) cabined to opt-in-only themes.
+### Wave-4 line (brand-fonts-themes spec — influence palettes)
+| Name | Notes |
+|---|---|
+| `dialup-glow` | Early-web dial-up CRT warmth. |
+| `present-day` | "Present day, present time" — Lain-adjacent neutral. |
+| `thermoptic` | Ghost-in-the-Shell thermoptic-camouflage shimmer. |
+| `capsule-mono` | Capsule-corp monochrome. |
+| `jet-age` | Mid-century jet-age instrument panel. |
+| `packet-trace` | Network packet-trace greens. |
+| `cockpit-amber` | Amber cockpit instrumentation. |
+| `nerv-magi` | NERV / MAGI command-console reds and blacks. |
+| `colony-drift` | Space-colony drift palette. |
+| `kanjo-loop` | Kanjozoku loop-racer night. |
+| `yaksha-ink` | Ink-wash yaksha tones. |
+| `datamosh-haze` | Datamosh compression-artifact haze. |
+
+All 32 themes keep the **one-accent-equals-system-voice** principle: a single accent colour carries every interactive signal (cursor, hover, selection, active line-number, OK status). Akira-red is **alarm-only** across the family — never decorative — with the two documented exceptions above (`akira-redshift`, `atompunk-sodium`) cabined to opt-in-only themes.
 
 ## Color values
 
@@ -124,9 +141,9 @@ Syntax keys color code tokens. Lookups use **longest-matching-scope-wins** fallb
 
 `keyword` · `function` · `string` · `comment` · `type` · `constant` · `number` · `variable`
 
-## The brand default: `wired-noir`
+## The compiled-in fallback: `wired-noir`
 
-`wired-noir` is the compiled-in default and the fallback for any broken theme. It is the lore-council-approved (DECISION-2026-005) palette: **cool near-black layers, off-white text, one teal accent (the system voice), Akira-red reserved for alarms, restrained amber for warnings**. Written as a TOML theme it looks like this:
+`wired-noir` is the compiled-in fallback for any broken or missing theme (the user-facing default theme is `itasha-corp`). It is the lore-council-approved (DECISION-2026-005) palette: **cool near-black layers, off-white text, one teal accent (the system voice), Akira-red reserved for alarms, restrained amber for warnings**. Written as a TOML theme it looks like this:
 
 ```toml
 name = "wired-noir"

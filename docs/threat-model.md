@@ -15,10 +15,14 @@ model is grounded in that reality:
   user's other processes, and the user's filesystem are assumed not hostile. We do not
   defend a host that is already fully compromised.
 - The editor stores everything **locally only** (config, themes, session snapshots,
-  unsaved-buffer backups, logs — see PRIVACY.md § "Local state"). Nothing is transmitted.
-- The **only** outbound network call is the optional GitHub Releases update check
-  (`crates/scribe-core/src/update/net.rs`), fully controllable via `[updates] mode`
-  (`off` / `manual` / `notify` / `auto`).
+  unsaved-buffer backups, logs — see PRIVACY.md § "Local state"). Nothing is transmitted
+  without your explicit consent.
+- There are **two** outbound network surfaces (PRIVACY.md): (1) the GitHub Releases update
+  check (`crates/scribe-core/src/update/net.rs`), default `notify`, fully controllable via
+  `[updates] mode` (`off` / `notify` / `manual` / `auto`); and (2) the **opt-in, default-OFF**
+  W1TN3SS crash/error reporting stream (`crates/scribe-app/src/reporting.rs`), which
+  transmits nothing unless you turn it on and consent per-report. With `[updates] mode = "off"`
+  and reporting left off (the default), SCR1B3 makes zero outbound connections.
 
 Within that scope, the threats we actively defend are:
 
@@ -48,7 +52,7 @@ graph TD
     end
 
     subgraph Disk["Local on-disk state (trust boundary)"]
-        CFG["config.toml / themes/ (TOML = data)"]
+        CFG["scr1b3.toml / themes/ (TOML = data)"]
         SESS["session.json + backup/*.bak"]
         PINS["plugins/pinned-keys.toml (TOFU)"]
         LOGS["logs/ (RUST_LOG, off by default)"]
@@ -80,7 +84,7 @@ user by OS file permissions only (see boundary (e)).
 | **Spoofing** | An attacker serves a forged "latest release" / forged binary from a MITM position or a compromised mirror. | **minisign (ed25519) signature** verified against `EMBEDDED_PUBLIC_KEY` (`verify.rs`) — the public key is compiled into the binary; only the holder of the CI-secret private key can produce an accepted signature. `verify_artifact` runs SHA-256 **then** minisign and **fails closed**; a verify failure wipes the staging dir and never returns the binary (`download_verify_extract`). |
 | **Tampering** | The download is corrupted or modified in flight. | **SHA-256 checksum** (`verify_checksum`) from the `.sha256` sidecar is checked first (friendly "corrupted" path), then the signature. A decompression-bomb / disk-fill archive is bounded by `MAX_EXTRACTED_BINARY_BYTES` (512 MiB) and **non-regular tar entries (symlink/hardlink/dir) are rejected** — the TARmageddon / zip-slip class is closed even on an already-signature-valid archive. |
 | **Repudiation** | Cannot prove which build produced an artifact. | **SLSA build-provenance attestation** (GitHub OIDC + Sigstore) is additive to minisign — minisign attests author, provenance attests build (see SECURITY.md § Supply chain). |
-| **Info disclosure** | The update check leaks user identity / telemetry. | The request is an **unauthenticated GET** with `User-Agent: scr1b3-updater/<version>` only — no install-id, token, or fingerprint (`net.rs` `USER_AGENT`). Default mode is `manual` (no startup call); `off` removes the surface entirely. |
+| **Info disclosure** | The update check leaks user identity / telemetry. | The request is an **unauthenticated GET** with `User-Agent: scr1b3-updater/<version>` only — no install-id, token, or fingerprint (`net.rs` `USER_AGENT`). Default mode is `notify` (a single startup version-check); `manual` and `off` remove the startup call. |
 | **DoS** | A false "up to date" hides a security fix; rate-limiting blocks checks. | `select_best` picks the **highest semver across the full release list** (not GitHub's mutable, cacheable `/releases/latest`), sends `Cache-Control: no-cache` + a cache-buster, and uses a **tri-state outcome** (`Available` / `UpToDate` / `NewerButNoAsset`) so a missing platform asset never reads as "up to date". A 403/429 is surfaced distinctly as a rate-limit, never folded into "up to date" (`map_github_error`). |
 | **Elevation** | The updater gains privilege it shouldn't. | The updater runs with **the user's permissions, no setuid** (SECURITY.md). For a Program-Files install, the self-elevating `setup.exe` is offered only when its full verifiable triple (`.minisig` + `.sha256`) is present (`find_installer`, fail-closed); UAC is the OS's consent gate. A prior binary is retained (`apply.rs install_with_backup`) for one-step rollback. |
 
@@ -99,7 +103,7 @@ user by OS file permissions only (see boundary (e)).
 
 | STRIDE | Threat | Mitigation |
 |---|---|---|
-| **Spoofing / Elevation** | A config-injected command string is reinterpreted by a shell (e.g. Windows `.bat` argument splitting, CVE-2024-24576 "BatBadBut"). | The server is spawned with `std::process::Command::new(cmd).args(&cfg.args)` — **argv array, no shell** (`LspClient::spawn`). The MSRV pin (`rust-version = 1.80`, above the 1.77.2 floor) makes Windows `.bat`/`.cmd` arg-escaping unconditional. The server runs **under the user's identity**, no elevation. |
+| **Spoofing / Elevation** | A config-injected command string is reinterpreted by a shell (e.g. Windows `.bat` argument splitting, CVE-2024-24576 "BatBadBut"). | The server is spawned with `std::process::Command::new(cmd).args(&cfg.args)` — **argv array, no shell** (`LspClient::spawn`). The MSRV pin (`rust-version = 1.92`, above the 1.77.2 floor) makes Windows `.bat`/`.cmd` arg-escaping unconditional. The server runs **under the user's identity**, no elevation. |
 | **Tampering** | Hostile LSP output corrupts editor state. | Only `publishDiagnostics` is parsed (`parse_publish_diagnostics`); LSP output is treated as untrusted display data routed over an `mpsc` channel, never executed. The editor — not the server — is the trust boundary (SECURITY.md). |
 | **Repudiation / Info disclosure** | A chatty server pollutes logs or leaks via stderr. | The child's **stderr is dropped** (`Stdio::null()`), so a noisy server cannot pollute the editor's own log channel. |
 | **DoS** | A server hangs the editor or leaks as an orphaned process. | The reader runs on a **dedicated thread** (non-blocking to the UI); `Drop for LspClient` sends graceful `shutdown`+`exit` then `kill`+`wait` to **guarantee reaping** (no orphan rust-analyzer/clangd). A missing/unspawnable server **degrades gracefully** to "no LSP for this language" rather than crashing (`spawn_missing_server_errors_gracefully`). |

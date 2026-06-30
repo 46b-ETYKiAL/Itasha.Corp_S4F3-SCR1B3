@@ -79,8 +79,11 @@ when Phase 18 adds the multi-note grid.
   Slint is the secondary alt if AccessKit a11y becomes a v1 hard
   requirement.
 - If egui 0.34 → 0.35+ introduces a breaking change so disruptive it
-  exceeds the rewrite-cost of switching, revisit. (No such change is
-  on the egui roadmap as of this ADR.)
+  exceeds the rewrite-cost of switching, revisit. (egui 0.35 released
+  2026-06-25; SCR1B3 stays pinned at 0.34, upstream-blocked by
+  `egui-phosphor` 0.12 which requires egui `^0.34`. The 0.35 bump
+  follows once `egui-phosphor` tracks it — no disruptive breaking
+  change forces an earlier move.)
 
 ## Consequences
 

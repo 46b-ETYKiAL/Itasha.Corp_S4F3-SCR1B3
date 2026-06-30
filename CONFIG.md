@@ -17,7 +17,7 @@ SCR1B3 is configured by a single, live-reloading **TOML** file. Great defaults o
 - **A missing file is fine.** Absent config silently uses defaults.
 - **Live reload.** Saving the file applies changes without a restart.
 
-All settings are grouped into six tables: `[editor]`, `[appearance]`, `[fonts]`, `[updates]`, `[spellcheck]`, `[plugins]`.
+All settings are grouped into twelve tables: `[editor]`, `[appearance]`, `[fonts]`, `[window]`, `[updates]`, `[spellcheck]`, `[plugins]`, `[toolbar]`, `[motion]`, `[scroll]`, `[reporting]`, `[integration]`.
 
 ---
 
@@ -30,7 +30,7 @@ All settings are grouped into six tables: `[editor]`, `[appearance]`, `[fonts]`,
 | `show_line_numbers` | boolean | `true` | Show the line-number gutter. |
 | `show_change_bar` | boolean | `true` | Notepad++-style change bar in the gutter: amber marks lines edited but unsaved, green marks edited-then-saved lines, untouched lines have none. |
 | `show_minimap` | boolean | `true` | Show the minimap. |
-| `word_wrap` | boolean | `false` | Soft-wrap long lines to the viewport width. |
+| `word_wrap` | boolean | `true` | Soft-wrap long lines to the viewport width. |
 | `highlight_selection_occurrences` | boolean | `true` | When text is selected, faintly box every other matching run in the viewport. |
 | `highlight_trailing_whitespace` | boolean | `false` | Tint trailing spaces/tabs on each line (distinct from rendering all whitespace). |
 | `rulers` | array of integers | `[]` | Vertical guide rulers at these 1-based columns, e.g. `[80, 100]`. Empty = none. |
@@ -41,23 +41,35 @@ All settings are grouped into six tables: `[editor]`, `[appearance]`, `[fonts]`,
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `theme` | string | `"wired-noir"` | Theme name: a built-in scheme or the file stem of a user theme in your themes directory. See [THEMING.md](THEMING.md). |
+| `theme` | string | `"itasha-corp"` | Theme name: a built-in scheme or the file stem of a user theme in your themes directory. A broken/unknown theme falls back to `wired-noir`. See [THEMING.md](THEMING.md). |
 | `follow_os_theme` | boolean | `true` | Follow the OS dark/light preference. |
 | `frameless` | boolean | `true` | Use a frameless window with the custom brand titlebar (no OS title bar). Set `false` for standard OS window decorations. |
 | `toolbar_icons` | boolean | `false` | Render the quick-access toolbar as Phosphor (Thin) icon glyphs instead of text labels. |
 | `jp_glyph_labels` | boolean | `false` | Append a small, dim, English-redundant kanji to each toolbar action whose canonical Japanese term is verified (e.g. New → 新, Save → 保, Find → 検). Actions whose canonical kanji is uncertain (open-folder, palette, CRT, LSP) stay English-only — Folklore-Consultant gate (DECISION-2026-005). |
 
-## `[fonts]` — typography
+## `[window]` — window translucency and chrome
 
-JetBrains Mono Regular is **bundled** with the binary (OFL-1.1, see `assets/fonts/JetBrainsMono/OFL.txt`) and registered as the primary Monospace family. egui renders via ab_glyph which does not perform OpenType shaping, so JetBrains Mono ligatures are inherently OFF (no config knob; the shaper does not support enabling them).
+Translucency is **off by default** — a normal opaque window. When enabled, the mode and tint control the glass/blur look.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `editor_family` | array of strings | `["JetBrains Mono", "Cascadia Code", "Consolas"]` | Ordered fallback list of monospace families for the editing surface. JetBrains Mono ships bundled; other entries fall through to the system font registry. |
-| `ui_family` | array of strings | `["Inter"]` | Ordered fallback list of families for UI chrome (tabs, status bar, menus). |
+| `transparency_enabled` | boolean | `false` | Master toggle for window translucency. |
+| `mode` | string | `"opaque"` | One of: `opaque`, `transparent`, `glass`, `mica`, `vibrancy`. |
+| `opacity` | float | `0.92` | Window opacity when translucent (0.0–1.0). |
+| `tint` | string | `"#08060d"` | Hex `#rrggbb` colour tint overlaid on the translucent window. |
+| `tint_strength` | float | `0.0` | Strength of the tint overlay (0.0 = none). |
+| `always_on_top` | boolean | `false` | Keep the window above other windows. |
+
+## `[fonts]` — typography
+
+IBM Plex Mono is **bundled** with the binary and used as the default editor and UI face. egui renders via ab_glyph which does not perform OpenType shaping, so there is **no `ligatures` option** — ligature substitution requires a shaping engine egui does not have, so the flag could never do anything.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `editor_family` | string | `"IBM Plex Mono"` | Monospace "font theme" for the editing surface. One of the bundled (OFL-licensed) family display names; an unknown value falls back to the default. |
+| `ui_family` | string | `"IBM Plex Mono"` | UI-chrome font family (toolbar, settings, status bar, menus). A bundled family name, or `"System default"` to keep egui's built-in UI font. |
 | `editor_size` | float | `14.0` | Editor font size in points. |
-| `line_height` | float | `1.4` | Line height as a multiple of the font size. |
-| `ligatures` | boolean | `true` | Enable programming ligatures where the font supports them. |
+| `line_height` | float | `1.2` | Line height as a multiple of the font size. |
 
 ## `[updates]` — telemetry-free auto-update
 
@@ -70,11 +82,11 @@ The update check contacts **only** the public GitHub Releases API and sends **ze
 
 ## `[spellcheck]` — privacy-respecting offline spellcheck
 
-Spellcheck is **off by default** and **fully offline** when enabled — no network, no cloud. It is code-aware: it can check comments and strings while leaving code identifiers alone.
+Spellcheck is **on by default** and **fully offline** — no network, no cloud. It is code-aware: it checks comments and strings while leaving code identifiers alone.
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | boolean | `false` | Master toggle for spellcheck. |
+| `enabled` | boolean | `true` | Master toggle for spellcheck. |
 | `language` | string | `"en_US"` | Dictionary language code. |
 | `check_comments` | boolean | `true` | Spellcheck inside comments. |
 | `check_strings` | boolean | `true` | Spellcheck inside string literals. |
@@ -89,6 +101,71 @@ See [PLUGINS.md](PLUGINS.md) for the capability-consent model.
 |---|---|---|---|
 | `enabled` | boolean | `true` | Master toggle for the plugin system. |
 | `disabled` | array of strings | `[]` | Plugin ids you have explicitly disabled. |
+| `require_signed` | boolean | `false` | Strict mode: when on, a plugin must additionally carry a valid minisign signature over its manifest from a pinned author key. Off by default so existing unsigned local script plugins keep working under the trust-on-first-use (TOFU) gate. |
+| `trusted` | table | `{}` | Trust-on-first-use approvals (`plugin id` → approved entry-script SHA-256). TOFU-managed state — populated when you approve a discovered plugin; not normally hand-edited. |
+
+## `[toolbar]` — customizable quick-access toolbar
+
+`items` is an ordered list of action ids (the id `"sep"` renders a divider). Reorder/add/remove entries from Settings → Toolbar; the layout persists here.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `items` | array of strings | `["new","open","save","sep","find","palette","sep","split","minimap","wrap","sep","spellcheck"]` | Ordered toolbar action ids; `"sep"` is a divider. |
+| `menu` | array of strings | `[]` | Action ids parked in a single "⋯" overflow dropdown instead of taking a slot. |
+| `show_dropdown` | boolean | `true` | Show the "⋯" overflow dropdown (when `menu` is non-empty). |
+| `button_size_px` | float | `24.0` | Minimum button height in logical pixels (clamped 16–64). |
+| `button_spacing_px` | float | `6.0` | Horizontal spacing between items in logical pixels (clamped 0–24). |
+| `icon_size_px` | float | `14.0` | Icon glyph size in logical pixels (clamped 10–32; only used when `appearance.toolbar_icons` is on). |
+
+## `[motion]` — animation and CRT ambience
+
+Subtle motion is **on by default**; the CRT/VHS effects are individually **off by default**. Turn `enabled` off for a fully static surface.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enabled` | boolean | `true` | Master toggle for animations/motion. |
+| `intensity` | float | `0.6` | Overall motion intensity. |
+| `cursor_blink` | boolean | `true` | Blink the text caret. |
+| `crt_scanlines` | boolean | `false` | CRT scanline overlay. |
+| `scanline_darkness` | float | _(tuned)_ | Strength of the scanline overlay. |
+| `flicker` | boolean | `false` | CRT flicker. |
+| `flicker_strength` | float | _(tuned)_ | Strength of the flicker. |
+| `vhs_tracking` | boolean | `false` | VHS tracking-line artifact. |
+| `wired_ambient` | boolean | `false` | Ambient "wired" mesh background. |
+| `mesh_density` | float | _(tuned)_ | Density of the ambient mesh. |
+| `caret_trail` | boolean | `false` | Trailing afterglow on the caret. |
+| `boot_glitch` | boolean | `false` | One-shot glitch on launch. |
+
+## `[scroll]` — scrolling behavior
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `speed` | float | `75.0` | Mouse-wheel scroll speed (clamped to the settings band). |
+| `animate_jumps` | boolean | `true` | Animate large scroll jumps. |
+| `autoscroll` | boolean | `true` | Middle-button autoscroll. |
+| `autoscroll_sensitivity` | float | `6.0` | Autoscroll speed sensitivity. |
+| `autoscroll_dead_zone` | float | `12.0` | Pixels of dead-zone around the autoscroll origin. |
+
+## `[reporting]` — opt-in W1TN3SS crash/error reporting
+
+Both streams default **`off`** — SCR1B3 stays telemetry-free unless you opt in. See [PRIVACY.md](PRIVACY.md) § opt-in reporting. The two streams are never bundled under one toggle.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `crash_reports` | string | `"off"` | Consent posture for the crash-report stream. One of `off`, `ask_each_time`, `always`. |
+| `manual_issues` | string | `"off"` | Consent posture for the user-initiated "Report an issue" stream. One of `off`, `ask_each_time`, `always`. |
+| `issue_intake.repo` | string | `"46b-ETYKiAL/Itasha.Corp_S4F3-W1TN3SS"` | `owner/repo` the prefilled GitHub Issue-Form deep link targets (operator-editable). |
+| `issue_intake.mailto_alias` | string | _(support alias)_ | `mailto:` support alias for the "Email feedback instead" fallback. Empty disables it. |
+
+## `[integration]` — OS default-app / file associations
+
+Defaults **off** — SCR1B3 never registers as a file handler without an explicit action in **Settings → Default app**. Claim groups are `plain_text`, `markdown`, `json`, and `source_code`; registration is per-OS (Windows ProgID / macOS UTI / Linux MIME).
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `register_file_types` | boolean | `false` | Whether SCR1B3 is registered as a default file-type handler. No registration is performed until you turn this on in Settings. |
+| `claimed_types` | array of strings | `[]` | Persisted claim-group keys (`plain_text`, `markdown`, `json`, `source_code`). Empty while registered means "the default set" (all four). |
+| `last_registration_unix` | integer | _(unset)_ | Unix seconds of the last successful registration (status only). |
 
 ---
 
@@ -103,28 +180,35 @@ insert_spaces = true
 show_line_numbers = true
 show_change_bar = true
 show_minimap = true
-word_wrap = false
+word_wrap = true
 auto_save = false
 restore_session = true
 
 [appearance]
-theme = "wired-noir"
+theme = "itasha-corp"
 follow_os_theme = true
 frameless = true
 
+[window]
+transparency_enabled = false
+mode = "opaque"
+opacity = 0.92
+tint = "#08060d"
+tint_strength = 0.0
+always_on_top = false
+
 [fonts]
-editor_family = ["JetBrains Mono", "Cascadia Code", "Consolas"]
-ui_family = ["Inter"]
+editor_family = "IBM Plex Mono"
+ui_family = "IBM Plex Mono"
 editor_size = 14.0
-line_height = 1.4
-ligatures = true
+line_height = 1.2
 
 [updates]
 mode = "notify"
 check_interval_hours = 24
 
 [spellcheck]
-enabled = false
+enabled = true
 language = "en_US"
 check_comments = true
 check_strings = true
@@ -134,6 +218,41 @@ check_identifiers = false
 [plugins]
 enabled = true
 disabled = []
+require_signed = false
+
+[toolbar]
+items = ["new", "open", "save", "sep", "find", "palette", "sep", "split", "minimap", "wrap", "sep", "spellcheck"]
+menu = []
+show_dropdown = true
+button_size_px = 24.0
+button_spacing_px = 6.0
+icon_size_px = 14.0
+
+[motion]
+enabled = true
+intensity = 0.6
+cursor_blink = true
+crt_scanlines = false
+flicker = false
+vhs_tracking = false
+wired_ambient = false
+caret_trail = false
+boot_glitch = false
+
+[scroll]
+speed = 75.0
+animate_jumps = true
+autoscroll = true
+autoscroll_sensitivity = 6.0
+autoscroll_dead_zone = 12.0
+
+[reporting]
+crash_reports = "off"
+manual_issues = "off"
+
+[integration]
+register_file_types = false
+claimed_types = []
 ```
 
 ### Minimal example
@@ -142,7 +261,7 @@ A real config rarely needs more than a few lines:
 
 ```toml
 [appearance]
-theme = "wired-noir"
+theme = "itasha-corp"
 
 [editor]
 tab_width = 2

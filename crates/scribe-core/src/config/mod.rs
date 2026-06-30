@@ -45,6 +45,11 @@ pub(crate) fn default_true() -> bool {
 ///   existing config that has never seen the section upgrades with reporting
 ///   fully OFF and with NO stored value overwritten (the opt-in, never-opt-out
 ///   invariant).
+/// - v4 (default-app / file-association): adds the [`IntegrationConfig`]
+///   `integration` section. Purely ADDITIVE and re-applies nothing — a pre-v4
+///   config deserializes it to the all-off default (`register_file_types =
+///   false`), mirroring the v3 reporting opt-in so the app never surprises the
+///   OS by claiming file types the user did not ask for.
 pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 /// Root config. `#[serde(default)]` everywhere so a partial user file merges
@@ -153,8 +158,10 @@ impl Config {
         std::fs::rename(&tmp, path)
     }
 
-    /// Default per-OS config directory: e.g. `%APPDATA%/scr1b3` /
-    /// `~/.config/scr1b3` / `~/Library/Application Support/scr1b3`.
+    /// Default per-OS config directory (via `ProjectDirs::from("com",
+    /// "ItashaCorp", "scr1b3")`): e.g. `%APPDATA%/ItashaCorp/scr1b3/config` /
+    /// `~/.config/scr1b3` / `~/Library/Application Support/com.ItashaCorp.scr1b3`.
+    /// The config file itself is `scr1b3.toml` inside this directory.
     ///
     /// `SCR1B3_CONFIG_DIR` overrides the resolved path when set to a non-empty
     /// value. This enables a portable / "bring your own config dir" mode and is

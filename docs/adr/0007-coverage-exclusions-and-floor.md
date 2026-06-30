@@ -103,8 +103,8 @@ less-common-token-rule backlog, not a structural exclusion.
 - **Measured testable line coverage rises from 82.77% → 84.61%** once the four
   whole-file structural exclusions are applied (the 674 excluded lines, of which
   604 were uncovered, no longer drag the denominator).
-- **The CI floor (`--fail-under-lines`) is raised from 74 → 83**, locking in the
-  84.61% achieved level with a ~1.6-point safety margin for normal fluctuation.
+- **The CI floor (`--fail-under-lines`) is raised from 74 → 85**, locking in the
+  achieved level with a safety margin for normal fluctuation.
   RAISE this floor as future testing WUs reach the `app/mod.rs` backlog; never
   lower it to make a red build pass.
 - The reported percentage now reflects the **testable** surface. The excluded
