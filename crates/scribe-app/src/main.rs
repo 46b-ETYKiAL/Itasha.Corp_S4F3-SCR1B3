@@ -194,9 +194,12 @@ fn main() -> ExitCode {
 
     // Re-parse here so we can hand the path to ScribeApp::new. (Parsing is
     // pure and idempotent — same args, same Action.)
-    let cli_path = match cli::parse(std::env::args().skip(1)) {
-        cli::Action::Launch { path: Some(p), .. } => p.to_string_lossy().into_owned().into(),
-        _ => None,
+    let cli_paths: Vec<String> = match cli::parse(std::env::args().skip(1)) {
+        cli::Action::Launch { paths, .. } => paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
+        _ => Vec::new(),
     };
 
     let result = eframe::run_native(
@@ -204,7 +207,7 @@ fn main() -> ExitCode {
         native_options,
         Box::new(move |cc| {
             Ok(Box::new(app::ScribeApp::new(
-                cc, config, config_err, cli_path,
+                cc, config, config_err, cli_paths,
             )))
         }),
     );
