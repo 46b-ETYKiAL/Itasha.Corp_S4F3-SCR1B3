@@ -5,7 +5,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: Itasha.Corp <scr1b3@itasha-corp.example>
 Depends: libc6, libgtk-3-0, libxkbcommon0
-Homepage: https://github.com/itasha-corp/scr1b3
+Homepage: https://github.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3
 Description: Fast, telemetry-free, cross-platform code/text editor
  SCR1B3 is a modern, lightweight code and text editor — large-file capable,
  privacy-respecting (no telemetry), deeply themeable, with a sandboxed mod

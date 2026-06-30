@@ -1,6 +1,6 @@
 #!/bin/sh
 # SCR1B3 one-line installer (Linux/macOS).
-#   curl -fsSL https://raw.githubusercontent.com/itasha-corp/scr1b3/main/packaging/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3/main/packaging/install.sh | sh
 #
 # Downloads the release artifact matching this OS/arch from GitHub Releases,
 # verifies its SHA-256, and installs the `scr1b3` binary to a bin dir on PATH.
@@ -8,7 +8,7 @@
 # the GitHub download itself.
 set -eu
 
-REPO="itasha-corp/scr1b3"
+REPO="46b-ETYKiAL/Itasha.Corp_S4F3-SCR1B3"
 BIN="scr1b3"
 
 os=$(uname -s)
