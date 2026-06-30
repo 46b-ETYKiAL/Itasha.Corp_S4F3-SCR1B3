@@ -86,7 +86,7 @@ cargo deny check   # license + advisory policy
 
 ## Architecture decisions
 
-Read the [ADRs](docs/adr/) before proposing structural changes — they explain why the stack is Rust + egui/wgpu, why the config is TOML, why syntect is the v1 syntax engine (with tree-sitter as a planned structural enhancement), and how the telemetry-free auto-update is designed.
+Read the [ADRs](docs/adr/) before proposing structural changes — they explain why the stack is Rust + egui/wgpu, why the config is TOML, why both syntax engines ship in v1 (tree-sitter primary where a native grammar is wired, syntect as the pure-Rust fallback), and how the telemetry-free auto-update is designed.
 
 ## Code of conduct
 

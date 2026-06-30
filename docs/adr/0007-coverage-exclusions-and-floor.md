@@ -116,5 +116,5 @@ less-common-token-rule backlog, not a structural exclusion.
 
 - The coverage initiative's per-file gap-map assessment (WU planning artifact).
 - `.github/workflows/coverage.yml` — the gate (exclusion regex + floor).
-- ADR 0006 (`0006-syntax-engine.md`) — the syntect-first / tree-sitter engine
+- ADR 0006 (`0006-syntax-engine.md`) — the tree-sitter-primary / syntect-fallback engine
   decision referenced by the verification correction above.
