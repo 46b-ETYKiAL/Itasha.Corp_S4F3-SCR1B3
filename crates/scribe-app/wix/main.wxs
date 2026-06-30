@@ -6,8 +6,12 @@
   the literal flags are described in prose here rather than written out.
 
   Produces target/wix/scr1b3-<version>-x86_64.msi: a standard MSI that installs
-  scr1b3.exe to Program Files, adds a Start-Menu shortcut, and (optionally) puts
-  it on PATH. Per-machine install; clean upgrade and uninstall.
+  scr1b3.exe to %LOCALAPPDATA%\Programs\SCR1B3, adds a (per-user) Start-Menu
+  shortcut, and (optionally) puts it on the per-user PATH. PER-USER install (no
+  admin / no UAC), so the install dir stays writable by the app — which lets the
+  in-app self-updater apply updates with the silent in-place swap instead of the
+  elevated installer path (see select_apply_strategy in updater.rs). Clean
+  upgrade and uninstall.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product
@@ -26,7 +30,7 @@
       InstallerVersion="450"
       Languages="1033"
       Compressed="yes"
-      InstallScope="perMachine"
+      InstallScope="perUser"
       SummaryCodepage="1252" />
 
     <MajorUpgrade
@@ -37,23 +41,28 @@
     <Property Id="DiskPrompt" Value="SCR1B3 Installation" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFiles64Folder" Name="PFiles">
-        <Directory Id="APPLICATIONFOLDER" Name="SCR1B3">
-          <Component Id="MainExecutable" Guid="*">
-            <File Id="scr1b3.exe"
-              Name="scr1b3.exe"
-              DiskId="1"
-              Source="$(var.CargoTargetBinDir)\scr1b3.exe"
-              KeyPath="yes" />
-            <!-- Optional PATH entry (machine-wide). -->
-            <Environment Id="PATH"
-              Name="PATH"
-              Value="[APPLICATIONFOLDER]"
-              Permanent="no"
-              Part="last"
-              Action="set"
-              System="yes" />
-          </Component>
+      <!-- Per-user install root: %LOCALAPPDATA%\Programs\SCR1B3 (the same
+           convention VS Code / Squirrel / Velopack use). Writable by the app,
+           so the in-app updater can self-replace in place without elevation. -->
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="ProgramsFolder" Name="Programs">
+          <Directory Id="APPLICATIONFOLDER" Name="SCR1B3">
+            <Component Id="MainExecutable" Guid="*">
+              <File Id="scr1b3.exe"
+                Name="scr1b3.exe"
+                DiskId="1"
+                Source="$(var.CargoTargetBinDir)\scr1b3.exe"
+                KeyPath="yes" />
+              <!-- Optional PATH entry (per-user, no admin). -->
+              <Environment Id="PATH"
+                Name="PATH"
+                Value="[APPLICATIONFOLDER]"
+                Permanent="no"
+                Part="last"
+                Action="set"
+                System="no" />
+            </Component>
+          </Directory>
         </Directory>
       </Directory>
 
