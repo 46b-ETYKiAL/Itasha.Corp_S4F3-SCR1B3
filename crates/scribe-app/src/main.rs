@@ -215,8 +215,57 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("scr1b3: fatal: {e}");
+            // The Windows release build is a GUI-subsystem app (no console — see
+            // the `windows_subsystem = "windows"` attribute above), so a bare
+            // stderr line is INVISIBLE: a double-clicked launch that fails to
+            // bring up the window would appear to silently "do nothing". Surface
+            // the fatal startup failure (most often: no compatible GPU adapter or
+            // out-of-date graphics drivers — wgpu found no hardware OR software
+            // adapter) in a native dialog so the user gets actionable feedback,
+            // and STILL log to stderr for console launches.
+            let detail = e.to_string();
+            eprintln!("scr1b3: fatal: {detail}");
+            rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("SCR1B3 couldn't start")
+                .set_description(fatal_startup_message(&detail))
+                .show();
             ExitCode::FAILURE
         }
+    }
+}
+
+/// User-facing copy for a fatal startup failure (the eframe/wgpu window couldn't
+/// be created). Pure so it is unit-testable without provoking a real GPU
+/// failure. Keeps the raw error for diagnosis and adds an actionable hint —
+/// the dominant cause is a missing/old graphics driver with no usable adapter.
+fn fatal_startup_message(detail: &str) -> String {
+    format!(
+        "SCR1B3 couldn't open its graphics window.\n\n{detail}\n\nThis usually \
+         means no compatible graphics adapter was found, or the graphics drivers \
+         are out of date. Try updating your graphics drivers, then launch SCR1B3 \
+         again."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fatal_startup_message;
+
+    #[test]
+    fn fatal_startup_message_keeps_detail_and_adds_actionable_hint() {
+        let msg = fatal_startup_message("no suitable wgpu adapter found");
+        assert!(
+            msg.contains("no suitable wgpu adapter found"),
+            "the raw error must be preserved for diagnosis: {msg}"
+        );
+        assert!(
+            msg.contains("graphics drivers"),
+            "the message must give an actionable next step: {msg}"
+        );
+        assert!(
+            msg.contains("SCR1B3"),
+            "the message must name the app: {msg}"
+        );
     }
 }
