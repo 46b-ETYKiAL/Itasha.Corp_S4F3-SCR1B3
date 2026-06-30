@@ -11,13 +11,17 @@ SCR1B3 collects **nothing** about you and transmits **no** file contents, ever.
 - **File contents never leave your device.** Editing, search, syntax highlighting, and spellcheck are entirely local.
 - **Local logs only.** Structured logs are written locally with off-by-default verbosity (controlled by the `RUST_LOG` environment variable) and are never transmitted.
 
-### The single network surface
+### The two network surfaces
 
-The **only** outbound network call SCR1B3 ever makes is the optional update version-check. It:
+SCR1B3 has exactly **two** outbound network surfaces. The first runs by default; the second is opt-in and default-OFF. Both are under your explicit control and the full transparency record is in [PRIVACY.md](PRIVACY.md).
+
+**1. The update version-check (default `notify`).** It:
 
 - Contacts **only** the public GitHub Releases API.
 - Sends **zero PII** — it is an unauthenticated request that asks "what is the latest release?" and nothing else. No identifiers, no telemetry, no shipped token.
-- Is **fully user-controllable** via `[updates] mode` in your config: `off`, `notify`, `manual`, or `auto`. Set it to `off` to disable all network activity. (See [CONFIG.md](CONFIG.md).)
+- Is **fully user-controllable** via `[updates] mode` in your config: `off`, `notify` (default — a single startup version-check), `manual`, or `auto`. Set it to `off` to disable the check. (See [CONFIG.md](CONFIG.md).)
+
+**2. Opt-in W1TN3SS crash/error reporting (default OFF).** A per-stream, consent-gated crash/error + manual-issue reporting stream that transmits **nothing** unless you turn it on **and** consent to a specific report. It is off by default, local-first (spooled on your machine), previewable, and sends no persistent identifier. See [PRIVACY.md](PRIVACY.md) § Opt-in crash / error reporting for the full posture. With `[updates] mode = "off"` and reporting left off (the default), SCR1B3 makes zero outbound connections.
 
 ## Signed-update verification
 

@@ -18,14 +18,15 @@ gpu-accelerated large-files themeable crt retro desktop-app lain
 
 ## Social preview image
 
-Upload `assets/svg/social-preview.svg` (rasterize to 1280×640 PNG via any
+Upload `.github/assets/social-preview.svg` (rasterize to 1280×640 PNG via any
 SVG→PNG tool) under Settings → Social preview. This is the card shown when the
 repo is shared.
 
 ## README hero
 
-`README.md` references `assets/svg/banner.svg` as the hero image and links the
-per-OS install one-liners high above the fold.
+`README.md` embeds `.github/assets/header.svg` as the hero image (and
+`.github/assets/footer.svg` at the foot) and links the per-OS install
+one-liners high above the fold.
 
 ## Release artifacts
 
