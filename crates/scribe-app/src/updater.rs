@@ -140,6 +140,43 @@ fn running_exe_dir_writable() -> bool {
     }
 }
 
+/// How an update is applied once downloaded + verified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApplyStrategy {
+    /// Writable install dir (portable / per-user) → download the tar.gz and
+    /// swap the running binary in place, then relaunch. SILENT: no installer
+    /// UI, no elevation, one click — the streamlined path. This is the path a
+    /// per-user (`%LOCALAPPDATA%\Programs\…`) install always takes.
+    InPlaceSwap,
+    /// Admin-owned dir (e.g. `C:\Program Files`) WITH a shipped self-elevating
+    /// installer → run the verified `setup.exe` (prompts for admin via UAC).
+    RunInstaller,
+    /// Admin-owned dir WITHOUT an installer for this platform → an actionable
+    /// failure ("download it from the releases page").
+    NoInstallerAvailable,
+}
+
+/// Choose the apply strategy from whether the install dir is writable and
+/// whether the release ships a platform installer. The in-place swap is
+/// PREFERRED whenever the dir is writable — so a per-user install never routes
+/// through the elevated installer (no UAC + no installer click-through). Pure
+/// (no filesystem / no `self`) so the routing is unit-testable: a regression
+/// that re-routes a writable install through the installer — re-introducing the
+/// friction the silent swap exists to avoid — is caught by
+/// [`tests::writable_dir_selects_in_place_swap_not_installer`]. The streamlined
+/// solution is therefore a deployment choice (ship a per-user install so this
+/// returns `InPlaceSwap` by default), not an updater rewrite — the silent path
+/// already exists here.
+pub(crate) fn select_apply_strategy(dir_writable: bool, has_installer: bool) -> ApplyStrategy {
+    if dir_writable {
+        ApplyStrategy::InPlaceSwap
+    } else if has_installer {
+        ApplyStrategy::RunInstaller
+    } else {
+        ApplyStrategy::NoInstallerAvailable
+    }
+}
+
 /// Why a check was started — decides what a found update does on completion.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LaunchKind {
@@ -287,12 +324,14 @@ impl Updater {
         self.rx = Some(rx);
         let ctx = ctx.clone();
 
-        // Pick the apply strategy by whether the install dir is writable:
-        //  • writable (portable / per-user) → download the tar.gz, swap in place.
+        // Pick the apply strategy (pure, testable) by whether the install dir is
+        // writable and whether the release ships an installer:
+        //  • writable (portable / per-user) → InPlaceSwap: download the tar.gz,
+        //    swap the running binary in place + relaunch. SILENT, no elevation.
         //  • admin-owned (Program Files) WITH a self-elevating installer →
-        //    download the verified setup.exe and run it (prompts for admin).
+        //    RunInstaller: download the verified setup.exe and run it (UAC).
         //  • admin-owned WITHOUT an installer → an actionable failure.
-        let use_installer = !running_exe_dir_writable();
+        let strategy = select_apply_strategy(running_exe_dir_writable(), info.installer.is_some());
         let installer = info.installer.clone();
 
         std::thread::spawn(move || {
@@ -300,39 +339,45 @@ impl Updater {
             let _ = std::fs::remove_dir_all(&staging);
             let version = info.version.to_string();
 
-            if use_installer {
-                match installer {
-                    Some(inst) => {
-                        let ptx = tx.clone();
-                        let pctx = ctx.clone();
-                        let result = std::fs::create_dir_all(&staging)
-                            .map_err(|e| format!("cannot create staging dir: {e}"))
-                            .and_then(|()| {
-                                update::download_verify_installer(
-                                    &inst,
-                                    &staging,
-                                    move |received, total| {
-                                        let _ = ptx.send(UpdateMsg::Progress { received, total });
-                                        pctx.request_repaint();
-                                    },
-                                )
-                            })
-                            .map(|path| (path, version));
-                        let _ = tx.send(UpdateMsg::InstallerReady(result));
-                    }
-                    None => {
-                        let _ = tx.send(UpdateMsg::InstallerReady(Err(format!(
-                            "v{version} can't be installed in place — SCR1B3 is in a \
-                             protected location (e.g. Program Files) and this release \
-                             has no installer for your platform. Download it from the \
-                             releases page and run it as administrator."
-                        ))));
-                    }
+            match strategy {
+                ApplyStrategy::RunInstaller => {
+                    // Only chosen when an installer is present, so the take holds.
+                    let inst = installer
+                        .expect("RunInstaller is only selected when an installer is present");
+                    let ptx = tx.clone();
+                    let pctx = ctx.clone();
+                    let result = std::fs::create_dir_all(&staging)
+                        .map_err(|e| format!("cannot create staging dir: {e}"))
+                        .and_then(|()| {
+                            update::download_verify_installer(
+                                &inst,
+                                &staging,
+                                move |received, total| {
+                                    let _ = ptx.send(UpdateMsg::Progress { received, total });
+                                    pctx.request_repaint();
+                                },
+                            )
+                        })
+                        .map(|path| (path, version));
+                    let _ = tx.send(UpdateMsg::InstallerReady(result));
+                    ctx.request_repaint();
+                    return;
                 }
-                ctx.request_repaint();
-                return;
+                ApplyStrategy::NoInstallerAvailable => {
+                    let _ = tx.send(UpdateMsg::InstallerReady(Err(format!(
+                        "v{version} can't be installed in place — SCR1B3 is in a \
+                         protected location (e.g. Program Files) and this release \
+                         has no installer for your platform. Download it from the \
+                         releases page and run it as administrator."
+                    ))));
+                    ctx.request_repaint();
+                    return;
+                }
+                ApplyStrategy::InPlaceSwap => {}
             }
 
+            // InPlaceSwap (silent, no elevation, no installer UI): download the
+            // verified tar.gz and chain into the in-place swap + relaunch.
             let result = match std::fs::create_dir_all(&staging) {
                 Ok(()) => {
                     let ptx = tx.clone();
@@ -1106,6 +1151,47 @@ mod tests {
         // without panicking — exercising the current_exe() → parent → probe path
         // and its unknown→assume-yes fallback.
         let _ = running_exe_dir_writable();
+    }
+
+    // --- apply-strategy routing (the "no installer click-through for per-user
+    // installs" guarantee) ------------------------------------------------------
+
+    #[test]
+    fn writable_dir_selects_in_place_swap_not_installer() {
+        // The streamlined-update contract: a writable (portable / per-user)
+        // install ALWAYS takes the silent in-place swap — never the elevated
+        // installer — regardless of whether a setup.exe was published. A
+        // regression here is exactly the UAC + installer-click-through friction
+        // the silent path exists to avoid.
+        assert_eq!(
+            select_apply_strategy(true, true),
+            ApplyStrategy::InPlaceSwap,
+            "writable dir + installer present must STILL swap in place (silent), \
+             not run the installer"
+        );
+        assert_eq!(
+            select_apply_strategy(true, false),
+            ApplyStrategy::InPlaceSwap,
+            "writable dir + no installer must swap in place"
+        );
+    }
+
+    #[test]
+    fn admin_dir_with_installer_runs_installer() {
+        assert_eq!(
+            select_apply_strategy(false, true),
+            ApplyStrategy::RunInstaller,
+            "admin-owned dir with a shipped installer runs it (UAC)"
+        );
+    }
+
+    #[test]
+    fn admin_dir_without_installer_is_actionable_failure() {
+        assert_eq!(
+            select_apply_strategy(false, false),
+            ApplyStrategy::NoInstallerAvailable,
+            "admin-owned dir with no installer is an actionable failure, not a swap"
+        );
     }
 
     #[test]
