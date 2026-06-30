@@ -220,10 +220,15 @@ jobs:
       - name: Build native installer (.exe)
         shell: bash
         env:
-          TAG: ${{ github.ref_name }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           mkdir -p dist
+          # Sanitise the ref for use in a filename: a real release tag (v0.4.47)
+          # is unchanged; a workflow_dispatch validation run carries the branch
+          # name (which may contain a `/`) — without this the `.exe` would land
+          # in a `dist/<branch>/` subdir and the checksum glob would miss it.
+          TAG="${REF_NAME//\//-}"
           python framework/scripts/build_native_installer.py \
             --app scribe \
             --binary-dir payload \
@@ -305,7 +310,9 @@ jobs:
           printf 'Installed-Size: %s\n' "$size_kb" >> "$deb/DEBIAN/control"
           dpkg-deb --build --root-owner-group "$deb" "dist/scr1b3-${TAG}-amd64.deb"
           echo "----- .deb info -----"; dpkg-deb --info "dist/scr1b3-${TAG}-amd64.deb"
-          dpkg-deb --contents "dist/scr1b3-${TAG}-amd64.deb" | head -40
+          # Full listing (no `| head`: under `set -o pipefail` an early-closing
+          # head gives dpkg-deb's internal tar an EPIPE and fails the step).
+          echo "----- .deb contents -----"; dpkg-deb --contents "dist/scr1b3-${TAG}-amd64.deb"
           # Best-effort lint (style nits must not fail a release).
           command -v desktop-file-validate >/dev/null && \
             desktop-file-validate "$deb/usr/share/applications/scr1b3.desktop" || true
