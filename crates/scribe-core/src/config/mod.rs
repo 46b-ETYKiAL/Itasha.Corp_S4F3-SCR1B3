@@ -8,6 +8,7 @@
 
 mod appearance;
 mod editor;
+mod file_assoc;
 mod motion;
 mod reporting;
 mod system;
@@ -15,6 +16,7 @@ mod window;
 
 pub use appearance::*;
 pub use editor::*;
+pub use file_assoc::*;
 pub use motion::*;
 pub use reporting::*;
 pub use system::*;
@@ -43,7 +45,7 @@ pub(crate) fn default_true() -> bool {
 ///   existing config that has never seen the section upgrades with reporting
 ///   fully OFF and with NO stored value overwritten (the opt-in, never-opt-out
 ///   invariant).
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 /// Root config. `#[serde(default)]` everywhere so a partial user file merges
 /// onto defaults rather than failing.
@@ -76,6 +78,12 @@ pub struct Config {
     /// means a config written before v3 reads the whole section as `Off`.
     #[serde(default)]
     pub reporting: ReportingConfig,
+    /// OS default-app / file-association preferences (schema v4). Defaults OFF —
+    /// SCR1B3 never registers as a file handler without an explicit Settings
+    /// action. `#[serde(default)]` means a config written before v4 reads the
+    /// whole section as the all-off default.
+    #[serde(default)]
+    pub integration: IntegrationConfig,
 }
 
 impl Default for Config {
@@ -97,6 +105,7 @@ impl Default for Config {
             motion: MotionConfig::default(),
             scroll: ScrollConfig::default(),
             reporting: ReportingConfig::default(),
+            integration: IntegrationConfig::default(),
         }
     }
 }
@@ -228,6 +237,18 @@ impl Config {
         // version so the additive section is recorded as migrated.
         if self.schema_version < 3 {
             self.schema_version = 3;
+            changed = true;
+        }
+
+        // v3 → v4: the OS default-app / file-association `integration` section
+        // landed. PURELY ADDITIVE and re-applies NOTHING — `integration` is a new
+        // `#[serde(default)]` section that a pre-v4 config already deserialized to
+        // the all-off default (`register_file_types = false`). Like the v3
+        // reporting step, forcing any value would be the default-on anti-pattern
+        // the opt-in contract forbids: SCR1B3 must never claim a file type without
+        // an explicit Settings action. The step only stamps the version.
+        if self.schema_version < 4 {
+            self.schema_version = 4;
             changed = true;
         }
 
@@ -500,9 +521,12 @@ mode = \"off\"
         assert_eq!(c.reporting.crash_reports, ReportingMode::Off);
         assert_eq!(c.reporting.manual_issues, ReportingMode::Off);
 
-        assert!(c.migrate(), "a v2 config must report a change to reach v3");
+        assert!(
+            c.migrate(),
+            "a v2 config must report a change to reach the current schema"
+        );
         assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
-        assert_eq!(c.schema_version, 3);
+        assert_eq!(c.schema_version, 4);
 
         // Reporting stayed OFF (additive, never default-on).
         assert_eq!(
@@ -531,7 +555,55 @@ mode = \"off\"
         );
 
         // Idempotent: a second pass changes nothing.
-        assert!(!c.migrate(), "an already-v3 config must not migrate again");
+        assert!(
+            !c.migrate(),
+            "an already-current config must not migrate again"
+        );
+    }
+
+    #[test]
+    fn v3_config_migrates_to_v4_with_integration_off_and_stored_values_preserved() {
+        // The same opt-in invariant for the v4 OS-integration section: a v3
+        // config (which predates `integration`) upgrades to v4 with
+        // `register_file_types` OFF and no claimed types — SCR1B3 must never
+        // register as a file handler without an explicit Settings action — while
+        // every previously-stored value (incl. an opted-in reporting choice) is
+        // untouched.
+        let toml = "\
+schema_version = 3
+
+[editor]
+tab_width = 3
+
+[reporting]
+crash_reports = \"always\"
+";
+        let mut c = Config::from_toml_str(toml).unwrap();
+        assert_eq!(c.schema_version, 3, "fixture loads as a v3 config");
+        // The integration section is absent → all-off default.
+        assert!(!c.integration.register_file_types);
+        assert!(c.integration.claimed_types.is_empty());
+
+        assert!(c.migrate(), "a v3 config must migrate to v4 (additive)");
+        assert_eq!(c.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(c.schema_version, 4);
+
+        // Integration stayed OFF (additive, never default-on).
+        assert!(
+            !c.integration.register_file_types,
+            "v3->v4 migrate must leave file-type registration OFF (opt-in only)"
+        );
+        assert!(c.integration.claimed_types.is_empty());
+        // Prior values (incl. the opted-in reporting choice) survive untouched.
+        assert_eq!(c.editor.tab_width, 3, "stored tab_width preserved");
+        assert_eq!(
+            c.reporting.crash_reports,
+            ReportingMode::Always,
+            "v3->v4 migrate must not clobber an opted-in reporting choice"
+        );
+
+        // Idempotent.
+        assert!(!c.migrate(), "an already-v4 config must not migrate again");
     }
 
     #[test]

@@ -126,9 +126,9 @@ mod tests {
     #[test]
     fn reporting_modes_round_trip_through_toml() {
         // A user who has opted a stream into Always/AskEachTime must have that
-        // choice persist across save/load — and the v2->v3 migrate must NOT
-        // clobber it. Build a v3 config with explicit reporting modes, serialize,
-        // reload, and assert the modes survive AND migrate() is a no-op.
+        // choice persist across save/load — and a later migrate must NOT clobber
+        // it. Build a v3 config with explicit reporting modes, serialize, reload,
+        // and assert the modes survive the (additive) v3->v4 migrate.
         let toml = "\
 schema_version = 3
 
@@ -139,9 +139,11 @@ manual_issues = \"ask_each_time\"
         let mut c = Config::from_toml_str(toml).unwrap();
         assert_eq!(c.reporting.crash_reports, ReportingMode::Always);
         assert_eq!(c.reporting.manual_issues, ReportingMode::AskEachTime);
+        // v3 now migrates ADDITIVELY to v4 (the OS-integration section) — a
+        // version stamp only, so the opted-in reporting choice is NOT clobbered.
         assert!(
-            !c.migrate(),
-            "a v3 config must not migrate (no clobber of an opted-in choice)"
+            c.migrate(),
+            "a v3 config migrates additively to v4 (version stamp; no clobber)"
         );
         assert_eq!(c.reporting.crash_reports, ReportingMode::Always);
         assert_eq!(c.reporting.manual_issues, ReportingMode::AskEachTime);

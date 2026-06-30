@@ -25,11 +25,15 @@ use std::path::PathBuf;
 /// Parsed CLI invocation.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Launch the editor. Optional file to open and optional `(line, column)`
-    /// to jump to on open. `column` is `None` when the user passed only
-    /// `path:line`.
+    /// Launch the editor. `paths` are the files to open, in order — the FIRST
+    /// becomes the active tab (and honours `jump`), the rest open as background
+    /// tabs; an empty list opens a scratch buffer. This is what makes an OS that
+    /// passes several paths (a `.desktop` `%F`, a Finder/Explorer multi-select,
+    /// a default-app open of multiple files) open them ALL. `jump` is an optional
+    /// `(line, column)` to jump to in the first file (`column` is `None` for
+    /// `path:line`).
     Launch {
-        path: Option<PathBuf>,
+        paths: Vec<PathBuf>,
         jump: Option<(usize, Option<usize>)>,
     },
     /// Print help text and exit 0.
@@ -58,20 +62,23 @@ where
             _ => positional.push(a),
         }
     }
-    match positional.len() {
-        0 => Action::Launch {
-            path: None,
+    if positional.is_empty() {
+        return Action::Launch {
+            paths: Vec::new(),
             jump: None,
-        },
-        1 => {
-            let (path, jump) = split_path_jump(&positional[0]);
-            Action::Launch {
-                path: Some(path),
-                jump,
-            }
-        }
-        n => Action::Error(format!("expected 0 or 1 positional argument, got {n}")),
+        };
     }
+    // The FIRST positional may carry a `:line[:col]` jump target (applied to the
+    // active file). The remaining positionals are whole paths — they are NOT
+    // jump-split, since a trailing file may legitimately contain a colon (e.g. a
+    // Windows drive `D:\notes.txt`) and there is only one active file to jump in.
+    let (first, jump) = split_path_jump(&positional[0]);
+    let mut paths = Vec::with_capacity(positional.len());
+    paths.push(first);
+    for p in &positional[1..] {
+        paths.push(PathBuf::from(p));
+    }
+    Action::Launch { paths, jump }
 }
 
 /// Split `arg` into a path and an optional `(line, column)` jump target.
@@ -158,7 +165,7 @@ mod tests {
         assert_eq!(
             parse_strs(&[]),
             Action::Launch {
-                path: None,
+                paths: Vec::new(),
                 jump: None
             }
         );
@@ -189,11 +196,8 @@ mod tests {
     #[test]
     fn parses_plain_path() {
         match parse_strs(&["foo.rs"]) {
-            Action::Launch {
-                path: Some(p),
-                jump: None,
-            } => {
-                assert_eq!(p, PathBuf::from("foo.rs"));
+            Action::Launch { paths, jump: None } => {
+                assert_eq!(paths, vec![PathBuf::from("foo.rs")]);
             }
             other => panic!("expected Launch, got {other:?}"),
         }
@@ -203,10 +207,10 @@ mod tests {
     fn parses_path_with_line() {
         match parse_strs(&["foo.rs:42"]) {
             Action::Launch {
-                path: Some(p),
+                paths,
                 jump: Some((42, None)),
             } => {
-                assert_eq!(p, PathBuf::from("foo.rs"));
+                assert_eq!(paths, vec![PathBuf::from("foo.rs")]);
             }
             other => panic!("expected Launch+jump, got {other:?}"),
         }
@@ -216,10 +220,10 @@ mod tests {
     fn parses_path_with_line_and_column() {
         match parse_strs(&["src/main.rs:42:10"]) {
             Action::Launch {
-                path: Some(p),
+                paths,
                 jump: Some((42, Some(10))),
             } => {
-                assert_eq!(p, PathBuf::from("src/main.rs"));
+                assert_eq!(paths, vec![PathBuf::from("src/main.rs")]);
             }
             other => panic!("expected Launch+jump, got {other:?}"),
         }
@@ -229,11 +233,8 @@ mod tests {
     fn windows_drive_letter_path_is_preserved() {
         // `C:\path\file.rs` must NOT be misparsed as `(C, \path\file.rs)`.
         match parse_strs(&[r"C:\foo\bar.rs"]) {
-            Action::Launch {
-                path: Some(p),
-                jump: None,
-            } => {
-                assert_eq!(p, PathBuf::from(r"C:\foo\bar.rs"));
+            Action::Launch { paths, jump: None } => {
+                assert_eq!(paths, vec![PathBuf::from(r"C:\foo\bar.rs")]);
             }
             other => panic!("expected Launch, got {other:?}"),
         }
@@ -243,10 +244,10 @@ mod tests {
     fn windows_drive_letter_with_line_jump() {
         match parse_strs(&[r"C:\foo\bar.rs:42"]) {
             Action::Launch {
-                path: Some(p),
+                paths,
                 jump: Some((42, None)),
             } => {
-                assert_eq!(p, PathBuf::from(r"C:\foo\bar.rs"));
+                assert_eq!(paths, vec![PathBuf::from(r"C:\foo\bar.rs")]);
             }
             other => panic!("expected Launch+jump, got {other:?}"),
         }
@@ -256,20 +257,36 @@ mod tests {
     fn windows_drive_letter_with_line_and_column() {
         match parse_strs(&[r"C:\foo\bar.rs:42:10"]) {
             Action::Launch {
-                path: Some(p),
+                paths,
                 jump: Some((42, Some(10))),
             } => {
-                assert_eq!(p, PathBuf::from(r"C:\foo\bar.rs"));
+                assert_eq!(paths, vec![PathBuf::from(r"C:\foo\bar.rs")]);
             }
             other => panic!("expected Launch+jump, got {other:?}"),
         }
     }
 
     #[test]
-    fn too_many_positional_args_is_error() {
-        match parse_strs(&["foo.rs", "bar.rs"]) {
-            Action::Error(msg) => assert!(msg.contains("0 or 1"), "{msg}"),
-            other => panic!("expected Error, got {other:?}"),
+    fn multiple_positional_args_open_all_files() {
+        // An OS multi-select / a `.desktop` `%F` / a default-app open of several
+        // files passes multiple paths — ALL open, the first active (and the only
+        // one that may carry a jump). The trailing paths are kept whole so a
+        // Windows drive colon is preserved.
+        match parse_strs(&["foo.rs:42", "bar.rs", r"C:\baz\qux.txt"]) {
+            Action::Launch {
+                paths,
+                jump: Some((42, None)),
+            } => {
+                assert_eq!(
+                    paths,
+                    vec![
+                        PathBuf::from("foo.rs"),
+                        PathBuf::from("bar.rs"),
+                        PathBuf::from(r"C:\baz\qux.txt"),
+                    ]
+                );
+            }
+            other => panic!("expected multi-file Launch, got {other:?}"),
         }
     }
 
@@ -302,10 +319,9 @@ mod tests {
         // A lone "-" (len == 1) is NOT a flag — it falls through to a positional
         // (the conventional stdin sentinel). It parses as a plain path here.
         match parse_strs(&["-"]) {
-            Action::Launch {
-                path: Some(p),
-                jump: None,
-            } => assert_eq!(p, PathBuf::from("-")),
+            Action::Launch { paths, jump: None } => {
+                assert_eq!(paths, vec![PathBuf::from("-")])
+            }
             other => panic!("expected Launch with '-' path, got {other:?}"),
         }
     }

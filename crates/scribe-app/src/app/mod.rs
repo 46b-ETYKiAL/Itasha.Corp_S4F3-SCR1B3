@@ -877,9 +877,9 @@ impl ScribeApp {
         cc: &eframe::CreationContext<'_>,
         config: Config,
         config_err: Option<String>,
-        cli_path: Option<String>,
+        cli_paths: Vec<String>,
     ) -> Self {
-        let mut app = Self::build(config, config_err, cli_path, true);
+        let mut app = Self::build(config, config_err, cli_paths, true);
         // W1TN3SS opt-in crash reporting: drain the local spool of any reports
         // captured by a prior session's panic hook. PRODUCTION-only — `new_test`
         // never calls this, so a unit test that builds the app never touches the
@@ -936,7 +936,7 @@ impl ScribeApp {
         // specifically exercises the updater sets the mode explicitly and drives
         // the harness with `run_steps`/`step`.
         config.updates.mode = scribe_core::config::UpdateMode::Off;
-        let mut app = Self::build(config, None, None, false);
+        let mut app = Self::build(config, None, Vec::new(), false);
         // Redirect ALL config/session writes to a per-instance temp dir so a
         // test's periodic hot-exit snapshot never touches the real user config
         // dir. Without this, `session_backup`-on tests wrote their fixture text
@@ -957,7 +957,7 @@ impl ScribeApp {
     fn build(
         config: Config,
         config_err: Option<String>,
-        cli_path: Option<String>,
+        cli_paths: Vec<String>,
         watch_config: bool,
     ) -> Self {
         let theme = load_theme(&config.appearance.theme);
@@ -965,7 +965,7 @@ impl ScribeApp {
         // when the user passed a file on the command line OR the recent-
         // files list is already populated (they've been here before).
         let welcome_on_launch = !config.editor.first_run_completed
-            && cli_path.is_none()
+            && cli_paths.is_empty()
             && config.editor.recent_files.is_empty();
 
         let mut tabs = Vec::new();
@@ -983,10 +983,17 @@ impl ScribeApp {
         let mut toast = config_err.map(|_| {
             "Your settings file couldn't be read — using default settings for now.".to_string()
         });
-        if let Some(p) = cli_path {
-            match EditorTab::from_path(PathBuf::from(&p)) {
+        // Open every file passed on the command line / by the OS (multi-select,
+        // `.desktop` `%F`, a default-app open of several files), in order. The
+        // FIRST becomes the active tab (`restored_active` stays 0); the rest open
+        // as background tabs. Any non-empty `cli_paths` suppresses session
+        // restore below (the `tabs.is_empty()` guards) — explicit files win.
+        for p in &cli_paths {
+            match EditorTab::from_path(PathBuf::from(p)) {
                 Ok(t) => tabs.push(t),
-                Err(e) => toast = Some(format!("could not open {p}: {e}")),
+                Err(e) => {
+                    toast = Some(format!("could not open {p}: {e}"));
+                }
             }
         }
         // Restore the previous session when launched bare. With session
@@ -1958,6 +1965,9 @@ mod tab_reorder_tests;
 
 #[cfg(test)]
 mod sidetab_drop_indicator_tests;
+
+#[cfg(test)]
+mod multi_file_open_tests;
 
 #[cfg(test)]
 mod change_bar_tests;
