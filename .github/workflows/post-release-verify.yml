@@ -11,8 +11,14 @@ name: Post-Release Verify (tripwire)
 # Any failure fails the run = the alert.
 
 on:
-  release:
-    types: [published]
+  # NOT `release: published` — a release created by release.yml's GITHUB_TOKEN
+  # does NOT trigger `release` events (GitHub suppresses workflow cascades from
+  # token-created events to prevent recursion), so the tripwire would never fire
+  # automatically. `workflow_run` fires after the Release workflow completes
+  # regardless of how Release was triggered.
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -26,6 +32,11 @@ jobs:
   verify:
     name: Verify published release against the embedded key
     runs-on: ubuntu-latest
+    # Only verify a SUCCESSFUL, tag-triggered Release run (or a manual dispatch).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     steps:
       - name: Harden the runner (egress audit)
         # step-security/harden-runner@v2.19.4
@@ -46,7 +57,8 @@ jobs:
       - name: Download + verify published assets (fail-closed)
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          # For a tag-triggered Release run, workflow_run.head_branch is the tag.
+          TAG: ${{ github.event.workflow_run.head_branch || inputs.tag }}
         run: |
           set -euo pipefail
           mkdir -p verify && cd verify
