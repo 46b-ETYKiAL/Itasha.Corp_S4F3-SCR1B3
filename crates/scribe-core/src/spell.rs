@@ -88,19 +88,30 @@ impl SpellEngine for HashSetEngine {
 
     fn suggest(&self, word: &str, max: usize) -> Vec<String> {
         let w = word.to_lowercase();
-        let mut scored: Vec<(usize, &String)> = self
+        // `damerau_levenshtein` measures CHARACTER edits, so the cheap length
+        // pre-filter and the tie-break must compare CHARACTER counts, not byte
+        // lengths. A multibyte dictionary word (accented Latin, Cyrillic, CJK)
+        // has more bytes than chars, so a byte-length window wrongly pruned valid
+        // candidates that are within 2 edits — `café`/`cafe` differ by 1 char but
+        // 0 bytes, `naïve`/`naive` by 1 char but 1 byte, etc.
+        let w_len = w.chars().count();
+        let mut scored: Vec<(usize, usize, &String)> = self
             .words
             .iter()
-            .filter(|cand| (cand.len() as isize - w.len() as isize).abs() <= 2)
-            .map(|cand| (damerau_levenshtein(&w, cand), cand))
-            .filter(|(d, _)| *d > 0 && *d <= 2)
+            .filter_map(|cand| {
+                let cand_len = cand.chars().count();
+                if cand_len.abs_diff(w_len) > 2 {
+                    return None;
+                }
+                let d = damerau_levenshtein(&w, cand);
+                (d > 0 && d <= 2).then_some((d, cand_len, cand))
+            })
             .collect();
-        scored
-            .sort_by_key(|(d, cand)| (*d, (cand.len() as isize - w.len() as isize).unsigned_abs()));
+        scored.sort_by_key(|(d, cand_len, _)| (*d, cand_len.abs_diff(w_len)));
         scored
             .into_iter()
             .take(max)
-            .map(|(_, c)| c.clone())
+            .map(|(_, _, c)| c.clone())
             .collect()
     }
 }
@@ -368,6 +379,21 @@ mod tests {
         let e = engine();
         assert!(check_text(&e, "zzzz wrongg", false).is_empty());
         assert!(!check_text(&e, "zzzz wrongg", true).is_empty());
+    }
+
+    #[test]
+    fn suggest_uses_char_length_not_byte_length_for_multibyte_words() {
+        // "приветик" is 8 chars / 16 bytes; "привет" is 6 chars / 12 bytes — a
+        // 2-char (2-edit) deletion but a 4-BYTE difference. The old byte-length
+        // pre-filter (|Δbytes| <= 2) wrongly pruned the candidate; the char-count
+        // filter (|Δchars| <= 2) keeps it. Cyrillic = 2 bytes/char, so this is a
+        // realistic multibyte dictionary case.
+        let e = HashSetEngine::from_word_list("приветик\nпока\n");
+        let s = e.suggest("привет", 5);
+        assert!(
+            s.contains(&"приветик".to_string()),
+            "a 2-edit multibyte candidate must survive the length pre-filter: {s:?}"
+        );
     }
 
     #[test]
