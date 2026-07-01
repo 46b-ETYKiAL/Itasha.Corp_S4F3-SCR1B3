@@ -31,6 +31,18 @@ impl ScribeApp {
         if let Some(c) = note_bg {
             v.extreme_bg_color = c;
         }
+        // Tint the editor-well + window backgrounds by the SAME amount the chrome
+        // panels are tinted (see `render_support::apply_window_tint` /
+        // `panel_fill`), so the whole background surface — chrome AND the central
+        // editor well — shifts toward the tint colour while glyph/text colours
+        // (a separate `foreground` path) stay untinted. Applied to the final fills
+        // whether or not an override set them, and BEFORE the translucency alpha
+        // so the tint composes correctly with glass/mica window modes.
+        v.panel_fill = super::render_support::apply_window_tint(v.panel_fill, &self.config.window);
+        v.window_fill =
+            super::render_support::apply_window_tint(v.window_fill, &self.config.window);
+        v.extreme_bg_color =
+            super::render_support::apply_window_tint(v.extreme_bg_color, &self.config.window);
         if self.config.window.effective_translucent() {
             scribe_render::apply_window_opacity(&mut v, self.config.window.opacity);
         }

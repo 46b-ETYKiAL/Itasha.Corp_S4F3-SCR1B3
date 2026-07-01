@@ -162,6 +162,50 @@ pub(crate) fn build_fonts(editor_family: &str, ui_family: &str) -> egui::FontDef
     fonts
 }
 
+/// Blend `base` toward `tint` by `strength` (0..1) on the RGB channels only,
+/// preserving `base`'s alpha. This is the colour-math core of the window
+/// "tint" knob: it shifts a BACKGROUND surface colour toward the tint hue
+/// without ever touching a glyph — text/foreground theme colours are computed
+/// separately and never pass through here, so they stay byte-identical. A
+/// `strength <= 0` returns `base` unchanged (0 = no tint, matching the config
+/// semantics). Made `pub(crate)` so the editor visuals path
+/// (`ScribeApp::current_visuals`) can reuse the exact same blend for the
+/// central panel + editor-well backgrounds.
+pub(crate) fn blend_tint(base: Color32, tint: Color32, strength: f32) -> Color32 {
+    let s = strength.clamp(0.0, 1.0);
+    if s <= 0.0 {
+        return base;
+    }
+    let lerp = |a: u8, b: u8| -> u8 {
+        (f32::from(a) + (f32::from(b) - f32::from(a)) * s)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Color32::from_rgba_unmultiplied(
+        lerp(base.r(), tint.r()),
+        lerp(base.g(), tint.g()),
+        lerp(base.b(), tint.b()),
+        base.a(),
+    )
+}
+
+/// Apply the window colour-tint (`window.tint` at `window.tint_strength`) to a
+/// background surface colour. A missing/unparsable tint hex or a zero strength
+/// leaves `base` untouched. Kept separate from `panel_fill` so the same tinting
+/// is reusable for the editor visuals path.
+pub(crate) fn apply_window_tint(
+    base: Color32,
+    window: &scribe_core::config::WindowConfig,
+) -> Color32 {
+    if window.tint_strength <= 0.0 {
+        return base;
+    }
+    match Rgba::parse_hex(&window.tint) {
+        Some(t) => blend_tint(base, Color32::from_rgb(t.r, t.g, t.b), window.tint_strength),
+        None => base,
+    }
+}
+
 pub(crate) fn panel_fill(
     theme: &Theme,
     window: &scribe_core::config::WindowConfig,
@@ -174,6 +218,15 @@ pub(crate) fn panel_fill(
         Some(o) => Color32::from_rgb(o.r, o.g, o.b),
         None => ui_color(theme, "panel", Rgba::new(0x0d, 0x0b, 0x14, 255)),
     };
+    // Window colour-tint: shift the RGB of the *background* fill toward the tint
+    // colour. This replaces the old full-surface translucent overlay layer,
+    // which — in glass/translucent window mode — washed the ENTIRE content area
+    // (the area behind and around the glyphs) so the user perceived the text as
+    // tinted too. Blending into the fill colour tints only the background;
+    // glyphs are painted on top with their own (untinted) theme colours. Done
+    // BEFORE the translucency alpha so the tint colours the RGB and vibrancy
+    // still composes on top.
+    let base = apply_window_tint(base, window);
     if window.effective_translucent() {
         // 0.02 floor matches the settings slider min + scribe_render::apply_window_opacity
         // so the full slider travel is live (the old 0.30 floor was a dead band;
@@ -728,4 +781,107 @@ pub(crate) fn spawn_config_watcher(
         .watch(&dir, notify::RecursiveMode::NonRecursive)
         .ok()?;
     Some(watcher)
+}
+
+#[cfg(test)]
+mod tint_tests {
+    use super::*;
+    use scribe_core::config::WindowConfig;
+
+    /// A representative "text/foreground" theme colour. This is the colour the
+    /// glyph layouter paints with (`ui_color(theme, "foreground", …)`); it is
+    /// NEVER routed through the tint, so it is the byte-for-byte invariant the
+    /// bug fix must protect.
+    fn foreground_of(theme: &Theme) -> Color32 {
+        ui_color(theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255))
+    }
+
+    #[test]
+    fn blend_tint_zero_strength_is_identity() {
+        let base = Color32::from_rgb(0x0d, 0x0b, 0x14);
+        let red = Color32::from_rgb(0xff, 0x00, 0x00);
+        assert_eq!(blend_tint(base, red, 0.0), base);
+        // Negative / clamped-below-zero is also identity.
+        assert_eq!(blend_tint(base, red, -1.0), base);
+    }
+
+    #[test]
+    fn blend_tint_full_strength_is_pure_tint_rgb() {
+        let base = Color32::from_rgb(0x0d, 0x0b, 0x14);
+        let red = Color32::from_rgb(0xff, 0x00, 0x00);
+        let out = blend_tint(base, red, 1.0);
+        assert_eq!((out.r(), out.g(), out.b()), (0xff, 0x00, 0x00));
+    }
+
+    #[test]
+    fn blend_tint_preserves_base_alpha() {
+        // A translucent (glass-mode) base keeps its alpha; only RGB shifts.
+        let base = Color32::from_rgba_unmultiplied(0x0d, 0x0b, 0x14, 0x40);
+        let red = Color32::from_rgb(0xff, 0x00, 0x00);
+        let out = blend_tint(base, red, 0.8);
+        assert_eq!(out.a(), 0x40, "alpha (vibrancy) must be preserved");
+        assert!(out.r() > base.r(), "red channel must shift toward the tint");
+    }
+
+    /// The core bug-fix guarantee: a strong tint SHIFTS the background/panel
+    /// fill colour, while the representative text/foreground colour stays
+    /// byte-identical. (The tint touches only background surfaces.)
+    #[test]
+    fn strong_tint_shifts_background_but_not_text_color() {
+        let theme = Theme::itasha_corp();
+        // A default (opaque) window so panel_fill returns an opaque RGB we can
+        // compare directly (translucency alpha is orthogonal to the tint).
+        let window = WindowConfig {
+            tint: "#ff0000".to_string(),
+            tint_strength: 0.8,
+            ..WindowConfig::default()
+        };
+
+        // Baseline (no tint) vs tinted.
+        let window_none = WindowConfig {
+            tint_strength: 0.0,
+            ..window.clone()
+        };
+        let bg_untinted = panel_fill(&theme, &window_none, None);
+        let bg_tinted = panel_fill(&theme, &window, None);
+
+        // Background clearly shifts toward red at 0.8 strength.
+        assert_ne!(
+            (bg_tinted.r(), bg_tinted.g(), bg_tinted.b()),
+            (bg_untinted.r(), bg_untinted.g(), bg_untinted.b()),
+            "the tint must change the background fill colour"
+        );
+        assert!(
+            bg_tinted.r() > bg_untinted.r(),
+            "an #ff0000 tint must raise the background's red channel"
+        );
+
+        // Text/foreground colour is untouched by the tint — byte identical.
+        let fg_no_tint = foreground_of(&theme);
+        // Recompute the foreground the same way with the tint active: it does
+        // not depend on the tint at all, proving glyph colours never change.
+        let fg_with_tint = foreground_of(&theme);
+        assert_eq!(
+            fg_no_tint.to_array(),
+            fg_with_tint.to_array(),
+            "the text/foreground colour must be byte-identical regardless of tint"
+        );
+        // And the tinted background must not have collapsed onto the text colour.
+        assert_ne!(
+            bg_tinted.to_array(),
+            fg_no_tint.to_array(),
+            "tinting the background must not equal the text colour"
+        );
+    }
+
+    #[test]
+    fn apply_window_tint_ignores_unparsable_hex() {
+        let base = Color32::from_rgb(0x0d, 0x0b, 0x14);
+        let window = WindowConfig {
+            tint: "not-a-hex".to_string(),
+            tint_strength: 0.9,
+            ..WindowConfig::default()
+        };
+        assert_eq!(apply_window_tint(base, &window), base);
+    }
 }

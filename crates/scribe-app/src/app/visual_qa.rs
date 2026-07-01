@@ -365,6 +365,50 @@ fn scene_minimap_scrolled() {
     );
 }
 
+/// Tint OFF baseline — a note with visible body text, no window tint. Read this
+/// alongside `tint_strong_red` below: the background surfaces (titlebar,
+/// toolbar, gutter, status bar) are the theme's dark chrome and the body text is
+/// the theme foreground. It is the BEFORE frame for the tint bug fix.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tint_off() {
+    let mut cfg = qa_config();
+    cfg.window.tint = "#ff0000".to_string();
+    cfg.window.tint_strength = 0.0; // OFF
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    t.session_baseline = SAMPLE.to_string();
+    t.saved_baseline = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    render_scene("tint_off", 1100.0, 720.0, app);
+}
+
+/// Tint ON, STRONG red (#ff0000 @ 0.8) — the AFTER frame. The fix blends the
+/// tint into the BACKGROUND fill colours (`panel_fill` chrome), so the chrome
+/// surfaces shift clearly toward red while the body-text glyphs keep their
+/// original theme foreground hue (the tint never touches glyph colours). Read
+/// this next to `tint_off`: chrome background = clearly red-shifted; the code
+/// glyphs (`fn`, `let`, `println!`, identifiers) = unchanged hue.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tint_strong_red() {
+    let mut cfg = qa_config();
+    cfg.window.tint = "#ff0000".to_string();
+    cfg.window.tint_strength = 0.8; // STRONG
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    t.session_baseline = SAMPLE.to_string();
+    t.saved_baseline = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    render_scene("tint_strong_red", 1100.0, 720.0, app);
+}
+
 /// #82 — rotate-ON side tabs MID-DRAG: the drop-insertion hairline must sit in
 /// the GAP between two stacked tab chips, never inside a chip's outline. Forces
 /// the drag pointer into the gap between chip 0 and chip 1 via the test hook,
