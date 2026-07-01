@@ -80,9 +80,12 @@ impl ScribeApp {
         // `goto_line` scroll pipe. Modelled on the recent-files modal.
         if self.goto_symbol_open {
             let active = self.active.min(self.tabs.len().saturating_sub(1));
-            // Bound the scan like the breadcrumb/sticky path does.
+            // Bound the scan like the breadcrumb/sticky path does. For markdown /
+            // text notes this yields the heading OUTLINE (P1-1); code files keep
+            // the brace-delimited definition scopes.
             let symbols = if !self.tabs.is_empty() && self.tabs[active].text.len() <= 500_000 {
-                crate::editor_features::symbol_scopes(&self.tabs[active].text)
+                let lang = self.tabs[active].doc.language_hint();
+                crate::editor_features::outline_symbols(&self.tabs[active].text, lang.as_deref())
             } else {
                 Vec::new()
             };

@@ -35,6 +35,36 @@ impl SnippetSet {
     pub fn is_empty(&self) -> bool {
         self.snippets.is_empty()
     }
+
+    /// Append the built-in note snippets (P3-4) the user has not already defined
+    /// (user snippets win on a prefix collision). Makes the checkbox + table
+    /// affordances discoverable with no new code path.
+    #[must_use]
+    pub fn with_note_builtins(mut self) -> Self {
+        for b in builtin_note_snippets() {
+            if self.lookup(&b.prefix).is_none() {
+                self.snippets.push(b);
+            }
+        }
+        self
+    }
+}
+
+/// The built-in note snippets: `[]` → an unchecked task line, `table` → a 2×2
+/// markdown table skeleton with tab-stops.
+pub fn builtin_note_snippets() -> Vec<Snippet> {
+    vec![
+        Snippet {
+            prefix: "[]".to_string(),
+            body: "- [ ] $0".to_string(),
+            description: "task checkbox".to_string(),
+        },
+        Snippet {
+            prefix: "table".to_string(),
+            body: "| $1 | $2 |\n| --- | --- |\n| $3 | $4 |\n$0".to_string(),
+            description: "2×2 markdown table".to_string(),
+        },
+    ]
 }
 
 /// Result of expanding a snippet body: the literal text to insert (stop markers
