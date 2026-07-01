@@ -48,6 +48,11 @@ pub struct AppearanceConfig {
     /// render identically to the standalone toolbar row).
     #[serde(default = "default_true")]
     pub toolbar_in_titlebar: bool,
+    /// Show the bottom status bar (cursor position, encoding, EOL, spellcheck,
+    /// diagnostics). Default ON. Turning it OFF reclaims the bottom row for a
+    /// more distraction-free editing surface without entering full zen mode.
+    #[serde(default = "default_true")]
+    pub show_status_bar: bool,
 }
 
 impl Default for AppearanceConfig {
@@ -62,6 +67,7 @@ impl Default for AppearanceConfig {
             note_background_override: None,
             link_backgrounds: true,
             toolbar_in_titlebar: true,
+            show_status_bar: true,
         }
     }
 }
@@ -156,6 +162,19 @@ mod tests {
         assert!(
             cfg.toolbar_in_titlebar,
             "missing toolbar_in_titlebar key must default ON"
+        );
+    }
+
+    #[test]
+    fn show_status_bar_defaults_on() {
+        // The bottom status bar is shown by default; the toggle only turns it OFF.
+        assert!(AppearanceConfig::default().show_status_bar);
+        // A config that OMITS the key must default ON (via `default_true`), so an
+        // older config file never silently hides the status bar on upgrade.
+        let cfg: AppearanceConfig = toml::from_str("").unwrap();
+        assert!(
+            cfg.show_status_bar,
+            "missing show_status_bar key must default ON"
         );
     }
 

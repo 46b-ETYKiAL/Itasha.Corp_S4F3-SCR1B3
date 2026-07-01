@@ -564,6 +564,17 @@ fn render_sections(
             changed |= grid_bool(
                 ui,
                 q,
+                "status bar bottom show hide",
+                "Show the bottom status bar",
+                "Show the status bar along the bottom of the window (cursor position, encoding, \
+                 line endings, spellcheck and diagnostics counts). Turn it off for a more \
+                 distraction-free editing surface without entering full zen mode.",
+                &mut config.appearance.show_status_bar,
+                &def.appearance.show_status_bar,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
                 "toolbar icons words phosphor",
                 "Toolbar shows icons instead of words",
                 "When off, the quick-access toolbar renders text labels (the default). When on, \

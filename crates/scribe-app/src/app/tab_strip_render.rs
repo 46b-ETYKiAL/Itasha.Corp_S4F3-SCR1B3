@@ -339,7 +339,16 @@ impl ScribeApp {
             }
         }
         if let Some(i) = switch_to {
+            // Persist the outgoing note's scroll offset and restore the incoming
+            // note's, so each tab remembers its own viewport position across
+            // switches (per-tab persistence — pairs with the doc_id-salted
+            // editor Id that keeps selection/caret per note).
+            let cur_scroll = self.scroll_metrics.0;
+            if let Some(prev) = self.tabs.get_mut(self.active) {
+                prev.scroll_y = cur_scroll;
+            }
             self.active = i;
+            self.pending_scroll = self.tabs.get(i).map(|t| t.scroll_y);
         }
         if let Some(i) = close {
             self.close_tab(i);
@@ -701,7 +710,16 @@ impl ScribeApp {
         }
 
         if let Some(i) = switch_to {
+            // Persist the outgoing note's scroll offset and restore the incoming
+            // note's, so each tab remembers its own viewport position across
+            // switches (per-tab persistence — pairs with the doc_id-salted
+            // editor Id that keeps selection/caret per note).
+            let cur_scroll = self.scroll_metrics.0;
+            if let Some(prev) = self.tabs.get_mut(self.active) {
+                prev.scroll_y = cur_scroll;
+            }
             self.active = i;
+            self.pending_scroll = self.tabs.get(i).map(|t| t.scroll_y);
         }
         if let Some(i) = close {
             self.close_tab(i);
