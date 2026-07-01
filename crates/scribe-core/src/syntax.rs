@@ -165,6 +165,168 @@ fn capture_to_scope(name: &str) -> &'static str {
 /// Foreground RGB the syntect `theme` assigns to the scope most representative
 /// of a tree-sitter capture `name` — so the tree-sitter highlight path matches
 /// the syntect path under the same theme (#104).
+/// Reserved theme-slot name under which the synthesized scribe-core theme is
+/// registered by [`Highlighter::set_core_theme`]. Bracketed so it can never
+/// collide with a real syntect/note-theme name.
+const CORE_THEME_SLOT: &str = "<scribe-core-theme>";
+
+/// Build a syntect highlighting `Theme` from a scribe-core [`crate::theme::Theme`]
+/// so the documented TOML `[syntax]` schema drives in-editor token colours for
+/// EVERY language (markdown included) — closing the gap where editor colours came
+/// only from the separate syntect `note_theme`. Each scope resolves through the
+/// theme's own `[syntax]` map first (longest-match, via the same rule as
+/// [`crate::theme::Theme::syntax_color`]); the `markup.*` scopes additionally
+/// fall back to a sensible code token, so a theme that defines only code colours
+/// still gets coherent markdown colours. The `markup.bold` / `markup.italic`
+/// rules carry `FontStyle` so emphasis renders with real weight/slant.
+pub fn syntect_theme_from(core: &crate::theme::Theme) -> syntect::highlighting::Theme {
+    use std::str::FromStr;
+    use syntect::highlighting::{
+        Color as SynColor, FontStyle, ScopeSelectors, StyleModifier, Theme as SynTheme, ThemeItem,
+        ThemeSettings,
+    };
+
+    let default_fg = crate::theme::Rgba::new(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2], 0xff);
+    // Longest-match lookup over the core `[syntax]` map; `None` when absent.
+    fn lookup(core: &crate::theme::Theme, scope: &str) -> Option<crate::theme::Rgba> {
+        let mut probe = scope;
+        loop {
+            if let Some(c) = core.syntax.get(probe) {
+                return Some(*c);
+            }
+            match probe.rfind('.') {
+                Some(i) => probe = &probe[..i],
+                None => return None,
+            }
+        }
+    }
+    let to_syn = |c: crate::theme::Rgba| SynColor {
+        r: c.r,
+        g: c.g,
+        b: c.b,
+        a: 0xff,
+    };
+    // The scope's own colour if present, else the fallback code token's colour,
+    // else the default foreground.
+    let pick = |scope: &str, fallback: &str| -> SynColor {
+        let rgba = lookup(core, scope)
+            .or_else(|| lookup(core, fallback))
+            .unwrap_or(default_fg);
+        to_syn(rgba)
+    };
+    fn rule(scope: &str, c: SynColor, fs: Option<FontStyle>) -> ThemeItem {
+        ThemeItem {
+            scope: ScopeSelectors::from_str(scope).unwrap_or_default(),
+            style: StyleModifier {
+                foreground: Some(c),
+                background: None,
+                font_style: fs,
+            },
+        }
+    }
+
+    let fg = to_syn(core.ui.get("foreground").copied().unwrap_or(default_fg));
+    let settings = ThemeSettings {
+        foreground: Some(fg),
+        background: core.ui.get("background").copied().map(to_syn),
+        caret: core.ui.get("cursor").copied().map(to_syn),
+        selection: core.ui.get("selection").copied().map(to_syn),
+        ..Default::default()
+    };
+
+    let mut scopes = vec![
+        rule("comment", pick("comment", "comment"), None),
+        rule(
+            "keyword, storage, keyword.control",
+            pick("keyword", "keyword"),
+            None,
+        ),
+        rule("string, string.quoted", pick("string", "string"), None),
+        rule(
+            "constant.numeric, constant.language, constant.character",
+            pick("number", "constant"),
+            None,
+        ),
+        rule(
+            "entity.name.function, support.function",
+            pick("function", "function"),
+            None,
+        ),
+        rule(
+            "entity.name.type, storage.type, support.type, support.class",
+            pick("type", "type"),
+            None,
+        ),
+        rule(
+            "variable, variable.parameter",
+            pick("variable", "variable"),
+            None,
+        ),
+        rule(
+            "keyword.operator, punctuation",
+            pick("punctuation", "variable"),
+            None,
+        ),
+        // Markdown markup — the `markup.*` TOML key first, then a code-token
+        // fallback, so markdown is coloured under every theme.
+        rule(
+            "markup.heading, entity.name.section",
+            pick("markup.heading", "type"),
+            None,
+        ),
+        rule(
+            "markup.bold, markup.bold.markdown",
+            pick("markup.bold", "keyword"),
+            Some(FontStyle::BOLD),
+        ),
+        rule(
+            "markup.italic, markup.italic.markdown",
+            pick("markup.italic", "variable"),
+            Some(FontStyle::ITALIC),
+        ),
+        rule("markup.quote", pick("markup.quote", "comment"), None),
+        rule(
+            "markup.list, markup.list.numbered, markup.list.unnumbered",
+            pick("markup.list", "variable"),
+            None,
+        ),
+        rule(
+            "markup.raw, markup.raw.inline, markup.raw.block",
+            pick("markup.raw", "string"),
+            None,
+        ),
+        rule(
+            "markup.underline.link, markup.link, meta.link",
+            pick("markup.link", "function"),
+            None,
+        ),
+        rule(
+            "meta.separator, punctuation.definition.thematic-break",
+            pick("markup.separator", "comment"),
+            None,
+        ),
+    ];
+
+    // #E P3 — per-level heading colours. syntect's Markdown grammar tags ATX
+    // levels (`markup.heading.1.markdown` … `.6`), and a MORE-specific theme rule
+    // wins, so a theme that sets `markup.heading.3` recolours just level-3
+    // headings while the rest inherit `markup.heading`. `pick` resolves each
+    // level via the core map's own longest-match fallback
+    // (`markup.heading.N` → `markup.heading` → `type`), so these are no-ops until
+    // a per-level key is set.
+    for n in 1..=6u8 {
+        let level = format!("markup.heading.{n}");
+        scopes.push(rule(&level, pick(&level, "type"), None));
+    }
+
+    SynTheme {
+        name: Some(CORE_THEME_SLOT.to_string()),
+        author: Some("SCR1B3".to_string()),
+        settings,
+        scopes,
+    }
+}
+
 fn color_from_theme(theme: &syntect::highlighting::Theme, name: &str) -> [u8; 3] {
     use std::str::FromStr;
     let hl = syntect::highlighting::Highlighter::new(theme);
@@ -291,25 +453,30 @@ impl Highlighter {
     fn add_bundled_themes(themes: &mut ThemeSet) {
         use std::str::FromStr;
         use syntect::highlighting::{
-            Color as SynColor, ScopeSelectors, StyleModifier, Theme as SynTheme, ThemeItem,
-            ThemeSettings,
+            Color as SynColor, FontStyle, ScopeSelectors, StyleModifier, Theme as SynTheme,
+            ThemeItem, ThemeSettings,
         };
 
         fn col(r: u8, g: u8, b: u8) -> SynColor {
             SynColor { r, g, b, a: 0xFF }
         }
-        // One scope→colour rule. An unparsable selector falls back to the empty
-        // selector (matches nothing) rather than panicking — the global
+        // One scope→colour rule, optionally carrying a `font_style` (bold/italic
+        // for the markdown emphasis scopes). An unparsable selector falls back to
+        // the empty selector (matches nothing) rather than panicking — the global
         // foreground still covers that token.
-        fn item(scope: &str, c: SynColor) -> ThemeItem {
+        fn item_styled(scope: &str, c: SynColor, fs: Option<FontStyle>) -> ThemeItem {
             ThemeItem {
                 scope: ScopeSelectors::from_str(scope).unwrap_or_default(),
                 style: StyleModifier {
                     foreground: Some(c),
                     background: None,
-                    font_style: None,
+                    font_style: fs,
                 },
             }
+        }
+        // Colour-only rule (no font-style change) — the common case.
+        fn item(scope: &str, c: SynColor) -> ThemeItem {
+            item_styled(scope, c, None)
         }
         // (background, foreground, caret, selection, line_highlight) + the 8
         // syntax rules in a fixed order: comment, keyword, string, constant,
@@ -347,6 +514,34 @@ impl Highlighter {
                 ),
                 item("variable, variable.parameter", rules[6]),
                 item("keyword.operator, punctuation", rules[7]),
+                // Markdown markup scopes (#D/E) — syntect's Markdown grammar emits
+                // these; with no rule they fall through to the global foreground
+                // and markdown renders uncolored under a brand theme. Map each to
+                // an existing palette colour (no palette growth) so markdown reads
+                // like Notepad++ everywhere, and set `font_style` so **bold** and
+                // *italic* carry real weight/slant, not just colour.
+                item("markup.heading, entity.name.section", rules[5]),
+                item_styled(
+                    "markup.bold, markup.bold.markdown",
+                    rules[1],
+                    Some(FontStyle::BOLD),
+                ),
+                item_styled(
+                    "markup.italic, markup.italic.markdown",
+                    rules[6],
+                    Some(FontStyle::ITALIC),
+                ),
+                item("markup.quote", rules[0]),
+                item(
+                    "markup.list, markup.list.numbered, markup.list.unnumbered",
+                    rules[7],
+                ),
+                item("markup.raw, markup.raw.inline, markup.raw.block", rules[2]),
+                item("markup.underline.link, markup.link, meta.link", rules[4]),
+                item(
+                    "meta.separator, punctuation.definition.thematic-break",
+                    rules[7],
+                ),
             ];
             SynTheme {
                 name: Some(name.to_string()),
@@ -464,6 +659,20 @@ impl Highlighter {
             .iter()
             .map(|n| color_from_theme(theme, n))
             .collect();
+    }
+
+    /// Register the synthesized scribe-core theme (built by
+    /// [`syntect_theme_from`]) under the reserved [`CORE_THEME_SLOT`] and select
+    /// it as the active highlight theme, so the chrome theme's documented
+    /// `[syntax]` map (incl. the `markup.*` keys) drives in-editor token colours
+    /// for every language. The caller must invalidate the highlight caches after
+    /// this (a theme switch), exactly as the `note_theme` path already does.
+    pub fn set_core_theme(&mut self, core: &crate::theme::Theme) {
+        let synth = syntect_theme_from(core);
+        self.themes
+            .themes
+            .insert(CORE_THEME_SLOT.to_string(), synth);
+        self.set_theme(CORE_THEME_SLOT);
     }
 
     /// Resolve a syntect syntax by file extension/token, falling back to plain.
@@ -905,6 +1114,79 @@ mod tests {
             a.highlight_document("let x = 1;\n", Some("rs")),
             b.highlight_document("let x = 1;\n", Some("rs")),
             "a brand note theme must recolour the text"
+        );
+    }
+
+    #[test]
+    fn brand_themes_color_markdown_markup() {
+        // #D/E P0 — the brand note themes now carry `markup.*` rules, so a
+        // markdown buffer is colored (heading != default fg) and emphasis carries
+        // real weight (bold span `bold == true`, italic span `italic == true`)
+        // under every brand theme — previously markdown rendered uncolored.
+        let md = "# Heading\n**bold** and *italic*\n> quote\n- item\n`code`\n";
+        for brand in ["Wired Noir", "Phosphor Amber", "Operator Violet"] {
+            let mut hl = Highlighter::new();
+            hl.set_theme(brand);
+            let lines = hl.highlight_document(md, Some("md"));
+            // Heading line: at least one span must differ from the default fg.
+            let heading_colored = lines[0].iter().any(|s| s.color != DEFAULT_FG);
+            assert!(heading_colored, "{brand}: heading must be colored");
+            // Emphasis line carries a bold and an italic span.
+            let has_bold = lines[1].iter().any(|s| s.bold);
+            let has_italic = lines[1].iter().any(|s| s.italic);
+            assert!(has_bold, "{brand}: **bold** must set the bold font style");
+            assert!(
+                has_italic,
+                "{brand}: *italic* must set the italic font style"
+            );
+        }
+    }
+
+    #[test]
+    fn core_theme_bridge_drives_editor_colors() {
+        // #E P1 — `set_core_theme` makes the documented scribe-core `[syntax]` map
+        // (incl. the new `markup.*` keys) the source of in-editor token colours
+        // for the syntect path (markdown + ~100 bundled languages). Bespoke
+        // `markup.heading` / `markup.raw` colours set in the core theme must
+        // appear verbatim in the highlighted output, proving the bridge is live.
+        let mut core = crate::theme::Theme::wired_noir();
+        core.syntax.insert(
+            "markup.heading".into(),
+            crate::theme::Rgba::new(0x00, 0xff, 0x33, 0xff),
+        );
+        core.syntax.insert(
+            "markup.raw".into(),
+            crate::theme::Rgba::new(0xff, 0x00, 0x7f, 0xff),
+        );
+
+        // Baseline (default note theme) does NOT carry these bespoke colours.
+        let base = Highlighter::new();
+        let md_src = "# Title\nsome `code` here\n";
+        let before = base.highlight_document(md_src, Some("md"));
+        assert!(
+            !before
+                .iter()
+                .flatten()
+                .any(|s| s.color == [0x00, 0xff, 0x33]),
+            "precondition: bespoke colour absent before the bridge"
+        );
+
+        let mut hl = Highlighter::new();
+        hl.set_core_theme(&core);
+        let after = hl.highlight_document(md_src, Some("md"));
+        assert!(
+            after
+                .iter()
+                .flatten()
+                .any(|s| s.color == [0x00, 0xff, 0x33]),
+            "core theme `markup.heading` must drive markdown: {after:?}"
+        );
+        assert!(
+            after
+                .iter()
+                .flatten()
+                .any(|s| s.color == [0xff, 0x00, 0x7f]),
+            "core theme `markup.raw` must drive inline code: {after:?}"
         );
     }
 

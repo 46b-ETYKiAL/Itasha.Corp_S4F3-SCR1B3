@@ -150,6 +150,22 @@ impl Theme {
         syntax.insert("constant".into(), p("sand"));
         syntax.insert("number".into(), p("sand"));
         syntax.insert("variable".into(), p("text"));
+        // Markdown markup scopes (#D/E) — documented `[syntax]` keys so a user can
+        // recolour headings/emphasis/quotes/etc. directly. Mapped onto the
+        // existing cool palette (no palette growth). `syntax_color`'s longest-match
+        // fallback means a theme that defines only `markup` still colours every
+        // markdown token; absent keys fall back to the matching code token.
+        syntax.insert("markup.heading".into(), p("steel"));
+        syntax.insert("markup.bold".into(), p("slate"));
+        syntax.insert("markup.italic".into(), p("sage"));
+        syntax.insert("markup.quote".into(), p("dim"));
+        syntax.insert("markup.list".into(), p("teal"));
+        syntax.insert("markup.raw".into(), p("sand"));
+        syntax.insert("markup.link".into(), p("teal"));
+        syntax.insert("markup.separator".into(), p("muted"));
+        // #D — themeable colour for autolinked http(s):// URLs in editor text.
+        // Falls back to the `accent` UI colour when a theme omits it.
+        syntax.insert("url".into(), p("teal"));
 
         Theme {
             name: "wired-noir".into(),
@@ -1581,8 +1597,20 @@ impl Theme {
         let render_map = |buf: &mut String, header: &str, m: &BTreeMap<String, Rgba>| {
             buf.push_str(&format!("[{header}]\n"));
             for (k, c) in m {
+                // TOML bare keys allow only [A-Za-z0-9_-]; scope keys that
+                // contain a dot (e.g. the `markup.heading` markdown scopes) must
+                // be quoted, else TOML reads `markup.heading = "..."` as a nested
+                // table and the round-trip parse fails.
+                let key = if k
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                {
+                    k.clone()
+                } else {
+                    format!("\"{k}\"")
+                };
                 buf.push_str(&format!(
-                    "{k} = \"#{:02X}{:02X}{:02X}{:02X}\"\n",
+                    "{key} = \"#{:02X}{:02X}{:02X}{:02X}\"\n",
                     c.r, c.g, c.b, c.a
                 ));
             }

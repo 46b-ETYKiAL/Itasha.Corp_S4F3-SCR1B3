@@ -350,6 +350,12 @@ impl ScribeApp {
         let hl = &self.hl;
         let word_wrap = self.config.editor.word_wrap;
         let layout_fg = ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
+        // #D — themeable URL colour + link-detection toggle (fold view).
+        let detect_links = self.config.editor.detect_links;
+        let url_color = scribe_render::color32(self.theme.syntax_color(
+            "url",
+            self.theme.ui("accent", Rgba::new(0x4c, 0xc2, 0xff, 255)),
+        ));
         let mut layouter = make_layouter(
             hl,
             &self.hl_cache,
@@ -360,6 +366,8 @@ impl ScribeApp {
             line_height,
             word_wrap,
             layout_fg,
+            url_color,
+            detect_links,
         );
         egui::ScrollArea::both()
             .id_salt("fold-scroll")

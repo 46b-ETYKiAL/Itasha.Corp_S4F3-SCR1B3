@@ -137,9 +137,47 @@ UI keys color the editor frame and gutter. Each value is a palette name **or** a
 
 ### `[syntax]` — token-scope colors
 
-Syntax keys color code tokens. Lookups use **longest-matching-scope-wins** fallback: a token scoped `function.builtin.static` resolves to `function.builtin`, then `function`, then the default. So you can define broad scopes (`function`, `keyword`) and optionally refine specific ones. Common scopes:
+Syntax keys color code tokens. Lookups use **longest-matching-scope-wins** fallback: a token scoped `function.builtin.static` resolves to `function.builtin`, then `function`, then the default. So you can define broad scopes (`function`, `keyword`) and optionally refine specific ones. Common code scopes:
 
 `keyword` · `function` · `string` · `comment` · `type` · `constant` · `number` · `variable`
+
+#### Markdown markup scopes
+
+Markdown source is colored like Notepad++ under every theme. These `markup.*` keys
+color the structural tokens; each falls back to a matching code token when omitted,
+so markdown is colored even in a theme that only sets code colors:
+
+`markup.heading` · `markup.bold` · `markup.italic` · `markup.quote` · `markup.list` · `markup.raw` · `markup.link` · `markup.separator`
+
+`markup.bold` and `markup.italic` also render with real weight/slant, not just color.
+Per-level heading colors are supported via `markup.heading.1` … `markup.heading.6`
+(longest-match fallback to `markup.heading`).
+
+#### Autolinked URLs
+
+`url` colors `http(s)://` links detected in editor text (they are also underlined and
+open in your browser on Ctrl/Cmd-click). Falls back to the `accent` UI color when omitted.
+
+#### Making `[syntax]` drive the editor
+
+By default the in-editor colors come from the separate `editor.note_theme` syntect
+preset. Set **`editor.syntax_from_theme = true`** to make the active theme's `[syntax]`
+map (including all the keys above) the source of in-editor token colors for every
+language. Example:
+
+```toml
+[syntax]
+keyword        = "#79A0B0"
+markup.heading = "#A9C2CC"
+markup.bold    = "#79A0B0"
+markup.italic  = "#8DA88C"
+markup.quote   = "#4F5E66"
+markup.list    = "#34E0D0"
+markup.raw     = "#C9A86A"
+markup.link    = "#34E0D0"
+markup.separator = "#5A6B73"
+url            = "#34E0D0"
+```
 
 ## The compiled-in fallback: `wired-noir`
 

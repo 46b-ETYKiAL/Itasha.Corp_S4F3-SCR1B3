@@ -242,6 +242,7 @@ pub(crate) fn grip_handle(
 
 /// Build a syntect-colored `LayoutJob` for the editor surface. Free function so
 /// the egui `layouter` closure captures only the highlighter, not `self`.
+#[allow(clippy::too_many_arguments)]
 fn highlight_job(
     hl: &Highlighter,
     text: &str,
@@ -250,6 +251,8 @@ fn highlight_job(
     line_height_mult: f32,
     inc_cache: &mut IncrementalHighlightState,
     fg: Color32,
+    url_color: Color32,
+    detect_links: bool,
 ) -> LayoutJob {
     let mut job = LayoutJob::default();
     let lines = hl.highlight_document_incremental(text, ext, inc_cache);
@@ -261,19 +264,74 @@ fn highlight_job(
         f.line_height = lh;
         f
     };
-    let mut char_cursor = 0usize;
+    // #D — the format for a URL span: the themeable `url` colour + a persistent
+    // underline (the affordance that the text is a link). Built once per job.
+    let url_fmt = {
+        let mut f = plain(url_color);
+        f.underline = egui::Stroke::new(1.0, url_color);
+        f
+    };
+    // Append `line[range]` to the job, sub-segmenting at URL byte-boundaries so
+    // the portion inside a URL gets `url_fmt` and the rest keeps `base`. When
+    // there are no URLs on the line (the common case) this is a single append.
+    fn append_split(
+        job: &mut LayoutJob,
+        line: &str,
+        range: std::ops::Range<usize>,
+        base: &TextFormat,
+        urls: &[std::ops::Range<usize>],
+        url_fmt: &TextFormat,
+    ) {
+        if urls.is_empty() {
+            if let Some(seg) = line.get(range.clone()) {
+                if !seg.is_empty() {
+                    job.append(seg, 0.0, base.clone());
+                }
+            }
+            return;
+        }
+        let mut pos = range.start;
+        while pos < range.end {
+            let in_url = urls.iter().find(|u| u.start <= pos && pos < u.end);
+            let (next, fmt) = match in_url {
+                Some(u) => (u.end.min(range.end), url_fmt),
+                None => {
+                    let next_start = urls
+                        .iter()
+                        .map(|u| u.start)
+                        .filter(|&st| st > pos)
+                        .min()
+                        .unwrap_or(range.end)
+                        .min(range.end);
+                    (next_start, base)
+                }
+            };
+            if let Some(piece) = line.get(pos..next) {
+                if !piece.is_empty() {
+                    job.append(piece, 0.0, fmt.clone());
+                }
+            }
+            pos = next;
+        }
+    }
     // Reconstruct text with colored spans line by line.
     for (li, line) in text.split_inclusive('\n').enumerate() {
+        // Per-line URL byte-ranges (empty when detection is off). URLs never
+        // span newlines, so per-line scanning is correct and cheap.
+        let urls = if detect_links {
+            scribe_core::url_scan::detect_urls(line)
+        } else {
+            Vec::new()
+        };
         if let Some(spans) = lines.get(li) {
             let mut byte = 0usize;
             for s in spans {
-                let seg = &line.get(s.range.clone()).unwrap_or("");
-                if !seg.is_empty() {
+                if !s.range.is_empty() {
                     let mut fmt = plain(scribe_render::syntax_color32(s.color));
                     if s.italic {
                         fmt.italics = true;
                     }
-                    job.append(seg, 0.0, fmt);
+                    append_split(&mut job, line, s.range.clone(), &fmt, &urls, &url_fmt);
                 }
                 byte = s.range.end;
             }
@@ -283,17 +341,20 @@ fn highlight_job(
             // Use `get(..)` (like the per-span slice above) rather than a direct
             // `&line[byte..]`: if the highlighter ever emits a span boundary that
             // is not a UTF-8 char boundary, a direct slice would panic → abort.
-            if let Some(tail) = line.get(byte..) {
-                if !tail.is_empty() {
-                    job.append(tail, 0.0, plain(fg));
-                }
+            if byte < line.len() && line.get(byte..).is_some() {
+                append_split(
+                    &mut job,
+                    line,
+                    byte..line.len(),
+                    &plain(fg),
+                    &urls,
+                    &url_fmt,
+                );
             }
         } else {
-            job.append(line, 0.0, plain(fg));
+            append_split(&mut job, line, 0..line.len(), &plain(fg), &urls, &url_fmt);
         }
-        char_cursor += line.len();
     }
-    let _ = char_cursor;
     job
 }
 
@@ -442,6 +503,8 @@ pub(crate) fn make_layouter<'a>(
     line_height: f32,
     word_wrap: bool,
     fg: Color32,
+    url_color: Color32,
+    detect_links: bool,
 ) -> impl FnMut(&egui::Ui, &dyn egui::TextBuffer, f32) -> std::sync::Arc<egui::Galley> + 'a {
     // egui 0.34: TextEdit::layouter callback now receives `&dyn TextBuffer`
     // instead of `&str` (so non-String buffers can be hosted). We still want
@@ -468,6 +531,14 @@ pub(crate) fn make_layouter<'a>(
         g.hash(&mut hasher);
         b.hash(&mut hasher);
         a.hash(&mut hasher);
+        // #D — fold the URL colour + detection toggle into the key so a theme
+        // switch or toggling link-detection invalidates the cached job.
+        let [ur, ug, ub, ua] = url_color.to_array();
+        ur.hash(&mut hasher);
+        ug.hash(&mut hasher);
+        ub.hash(&mut hasher);
+        ua.hash(&mut hasher);
+        detect_links.hash(&mut hasher);
         let key = hasher.finish();
         let eff_wrap = effective_wrap_width(word_wrap, wrap);
         // Wave-3: full galley hit — same content key AND same wrap width. Return
@@ -494,6 +565,8 @@ pub(crate) fn make_layouter<'a>(
                         line_height,
                         &mut inc_cache.borrow_mut(),
                         fg,
+                        url_color,
+                        detect_links,
                     ));
                     *slot = Some((key, arc.clone()));
                     arc

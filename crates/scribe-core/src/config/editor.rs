@@ -33,6 +33,19 @@ pub struct EditorConfig {
     /// syntect themes; an unknown value falls back to the default.
     #[serde(default = "default_note_theme")]
     pub note_theme: String,
+    /// #E P1 — when true, the active chrome theme's documented `[syntax]` map
+    /// (incl. the `markup.*` keys) drives in-editor token colours, unifying the
+    /// two colour systems so editing your theme TOML actually recolours the
+    /// editor. Default OFF — the `note_theme` syntect preset stays authoritative
+    /// unless the user opts in, so existing setups are unchanged.
+    #[serde(default)]
+    pub syntax_from_theme: bool,
+    /// #D — detect bare `http(s)://` URLs in editor text and render them as a
+    /// colored, underlined, Ctrl/Cmd-click-to-open link (scheme allow-listed to
+    /// http/https). Default ON — links are a calm, low-risk affordance and the
+    /// open is gated on an explicit modifier-click.
+    #[serde(default = "default_true")]
+    pub detect_links: bool,
     /// Phase 18 T18.2 — enable the multi-note grid. When ON, the central
     /// editor surface renders every open tab as a movable, resizable pane
     /// inside an egui_tiles tree (up to 6 panes). Default OFF — the
@@ -286,6 +299,8 @@ impl Default for EditorConfig {
             restore_cursor_position: true,
             cursor_positions: std::collections::HashMap::new(),
             render_whitespace: false,
+            syntax_from_theme: false,
+            detect_links: true,
             snippets_enabled: true,
             current_line_highlight: false,
             caret_style: CaretStyle::Bar,

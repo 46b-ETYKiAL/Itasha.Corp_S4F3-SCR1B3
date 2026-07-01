@@ -41,6 +41,13 @@ impl ScribeApp {
         let hl_inc_cache = &self.hl_inc_cache;
         // Wave-3: theme foreground for the highlighter tail colour (per-pane).
         let layout_fg = ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
+        // #D — themeable URL colour + link-detection toggle for the per-pane
+        // layouter (same source as the single-pane editor).
+        let detect_links = self.config.editor.detect_links;
+        let url_color = scribe_render::color32(self.theme.syntax_color(
+            "url",
+            self.theme.ui("accent", Rgba::new(0x4c, 0xc2, 0xff, 255)),
+        ));
         // #R5: theme colours + focused-pane id for the chip-styled pane headers
         // (the per-pane note bar now mirrors the top tab strip's chip look).
         let accent = ui_color(&self.theme, "accent", Rgba::new(0, 255, 254, 255));
@@ -89,6 +96,8 @@ impl ScribeApp {
                     line_height,
                     word_wrap,
                     layout_fg,
+                    url_color,
+                    detect_links,
                 );
                 egui::ScrollArea::both()
                     .id_salt(("scr1b3-grid-pane", doc_id.raw()))
