@@ -169,6 +169,29 @@ pub struct EditorConfig {
     /// Scrollbar chrome style for the editor surface.
     #[serde(default)]
     pub scrollbar_style: ScrollbarStyle,
+    /// Smart list continuation on Enter for note files (`.md`/`.txt`/`.markdown`):
+    /// continue `-`/`*`/`+`/`N.` markers (and `- [ ]` task boxes), terminate the
+    /// list on an empty item. Default ON. Code files are unaffected regardless.
+    #[serde(default = "default_true")]
+    pub smart_lists: bool,
+    /// Paste a clipboard URL over a non-URL selection as a markdown link
+    /// `[selection](url)` in note files. Default ON (mirrors VS Code's
+    /// `pasteUrlAsFormattedLink` smartWithSelection).
+    #[serde(default = "default_true")]
+    pub paste_url_as_link: bool,
+    /// Auto-pair brackets/quotes/backticks: wrap a selection on an opening char,
+    /// insert the closing partner on an empty caret, and type over a closing
+    /// char. Default OFF — auto-pair is contested, so it is strictly opt-in.
+    #[serde(default)]
+    pub auto_pair: bool,
+    /// Typewriter scrolling preference (keep the caret line vertically centred).
+    /// Default OFF. Config surface for the view nicety.
+    #[serde(default)]
+    pub typewriter_scroll: bool,
+    /// Pinned / favourite file paths surfaced above the recent-files MRU.
+    /// Independent of `recent_files`; a pin survives MRU eviction.
+    #[serde(default)]
+    pub pinned_files: Vec<PathBuf>,
 }
 
 /// Caret shape rendered over the editor's native caret. `Bar` reproduces egui's
@@ -312,6 +335,11 @@ impl Default for EditorConfig {
             rulers: Vec::new(),
             smooth_scroll: true,
             scrollbar_style: ScrollbarStyle::Auto,
+            smart_lists: true,
+            paste_url_as_link: true,
+            auto_pair: false,
+            typewriter_scroll: false,
+            pinned_files: Vec::new(),
         }
     }
 }
@@ -544,6 +572,33 @@ mod tests {
         // Side-tab rotation defaults OFF — labels stay horizontal (the familiar
         // look) until the user opts into vertical text.
         assert!(!EditorConfig::default().side_tabs_rotated);
+    }
+
+    #[test]
+    fn note_feature_flag_defaults_and_round_trip() {
+        let e = EditorConfig::default();
+        // Note-friendly defaults: smart lists + smart link-paste ON; auto-pair +
+        // typewriter OFF (opt-in); no pinned files.
+        assert!(e.smart_lists);
+        assert!(e.paste_url_as_link);
+        assert!(!e.auto_pair);
+        assert!(!e.typewriter_scroll);
+        assert!(e.pinned_files.is_empty());
+        // Absent keys keep the defaults (older configs don't error).
+        let older: EditorConfig = toml::from_str("tab_width = 2\n").unwrap();
+        assert!(older.smart_lists && older.paste_url_as_link && !older.auto_pair);
+        // Round-trip through the full config.
+        let mut c = Config::default();
+        c.editor.auto_pair = true;
+        c.editor.smart_lists = false;
+        c.editor.pinned_files = vec![PathBuf::from("/notes/today.md")];
+        let back: Config = toml::from_str(&c.to_toml_string()).expect("round-trip");
+        assert!(back.editor.auto_pair);
+        assert!(!back.editor.smart_lists);
+        assert_eq!(
+            back.editor.pinned_files,
+            vec![PathBuf::from("/notes/today.md")]
+        );
     }
 
     #[test]

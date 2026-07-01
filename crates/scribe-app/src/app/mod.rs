@@ -676,6 +676,15 @@ pub struct ScribeApp {
     pending_jump_bracket: bool,
     pending_insert_datetime: bool,
     pending_dup_selection: bool,
+    /// P0-1 — toggle the GFM task checkbox on the caret / selection lines.
+    pending_toggle_task: bool,
+    /// P0-4 — wrap the selection in this inline marker (`**`, `*`, `` ` ``,
+    /// `~~`). Drained in `frame_tick` where the caret range is reachable.
+    pending_wrap_marker: Option<&'static str>,
+    /// P1-4 — case-convert the selection: 0 = lower, 1 = upper, 2 = title.
+    pending_case: Option<u8>,
+    /// P2-1 — format the markdown pipe table under the caret.
+    pending_format_table: bool,
     /// F-013 from docs/audits/overlooked-surfaces-2026-05-29.md: when true,
     /// the welcome modal renders this frame. Auto-opened on first launch
     /// (when `config.editor.first_run_completed` is false); reachable
@@ -1141,6 +1150,10 @@ impl ScribeApp {
             pending_jump_bracket: false,
             pending_insert_datetime: false,
             pending_dup_selection: false,
+            pending_toggle_task: false,
+            pending_wrap_marker: None,
+            pending_case: None,
+            pending_format_table: false,
             welcome_open: welcome_on_launch,
             fuzzy_open: false,
             fuzzy_query: String::new(),

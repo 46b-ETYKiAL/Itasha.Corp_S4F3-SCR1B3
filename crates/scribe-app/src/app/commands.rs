@@ -205,6 +205,22 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
         chord: "Ctrl+U / Ctrl+Shift+U",
         action: "Lowercase / uppercase the selection (experimental editor)",
     },
+    ShortcutEntry {
+        chord: "Ctrl+Enter",
+        action: "Toggle the task checkbox on the caret / selected lines",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+B / Ctrl+I",
+        action: "Toggle bold / italic on the selection",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+`",
+        action: "Toggle inline code on the selection",
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+X",
+        action: "Toggle strikethrough on the selection",
+    },
 ];
 
 // ---- Built-in command palette registry (F-004) ----
@@ -270,6 +286,24 @@ pub(crate) enum BuiltinCommand {
     NextBookmark,
     PrevBookmark,
     GoToSymbol,
+    // ---- Note-usability actions (P0–P3) ----
+    /// P0-1 — toggle / insert the GFM task checkbox on the caret / selection.
+    ToggleTaskCheckbox,
+    /// P0-4 — wrap-toggle the selection with an inline emphasis marker.
+    ToggleBold,
+    ToggleItalic,
+    ToggleInlineCode,
+    ToggleStrikethrough,
+    /// P1-4 — case-convert the selection.
+    UppercaseSelection,
+    LowercaseSelection,
+    TitlecaseSelection,
+    /// P2-1 — format the markdown table under the caret.
+    FormatTable,
+    /// P3-3 — open a new note seeded from a built-in template.
+    NewChecklistNote,
+    NewMeetingNote,
+    NewDailyNote,
 }
 
 /// A clipboard / history action the palette requests; drained in `frame_tick`
@@ -554,6 +588,67 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Undo",
         shortcut: "Ctrl+Z",
         action: BuiltinCommand::Undo,
+    },
+    // ---- Note-usability actions (P0–P3) ----
+    BuiltinEntry {
+        label: "Toggle task checkbox",
+        shortcut: "Ctrl+Enter",
+        action: BuiltinCommand::ToggleTaskCheckbox,
+    },
+    BuiltinEntry {
+        label: "Toggle bold",
+        shortcut: "Ctrl+B",
+        action: BuiltinCommand::ToggleBold,
+    },
+    BuiltinEntry {
+        label: "Toggle italic",
+        shortcut: "Ctrl+I",
+        action: BuiltinCommand::ToggleItalic,
+    },
+    BuiltinEntry {
+        label: "Toggle inline code",
+        shortcut: "Ctrl+`",
+        action: BuiltinCommand::ToggleInlineCode,
+    },
+    BuiltinEntry {
+        label: "Toggle strikethrough",
+        shortcut: "Ctrl+Shift+X",
+        action: BuiltinCommand::ToggleStrikethrough,
+    },
+    BuiltinEntry {
+        label: "Uppercase selection",
+        shortcut: "",
+        action: BuiltinCommand::UppercaseSelection,
+    },
+    BuiltinEntry {
+        label: "Lowercase selection",
+        shortcut: "",
+        action: BuiltinCommand::LowercaseSelection,
+    },
+    BuiltinEntry {
+        label: "Title Case selection",
+        shortcut: "",
+        action: BuiltinCommand::TitlecaseSelection,
+    },
+    BuiltinEntry {
+        label: "Format markdown table",
+        shortcut: "",
+        action: BuiltinCommand::FormatTable,
+    },
+    BuiltinEntry {
+        label: "New note from checklist template",
+        shortcut: "",
+        action: BuiltinCommand::NewChecklistNote,
+    },
+    BuiltinEntry {
+        label: "New note from meeting template",
+        shortcut: "",
+        action: BuiltinCommand::NewMeetingNote,
+    },
+    BuiltinEntry {
+        label: "New note from daily template",
+        shortcut: "",
+        action: BuiltinCommand::NewDailyNote,
     },
 ];
 

@@ -3,6 +3,39 @@
 
 use super::*;
 
+/// P3-3 — built-in "new note from template" seeds (ride the plain-buffer path,
+/// no new subsystem). Bodies are checklist-first so the task features are
+/// discoverable immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum NoteTemplate {
+    Checklist,
+    Meeting,
+    Daily,
+}
+
+impl NoteTemplate {
+    fn label(self) -> &'static str {
+        match self {
+            NoteTemplate::Checklist => "checklist",
+            NoteTemplate::Meeting => "meeting",
+            NoteTemplate::Daily => "daily",
+        }
+    }
+
+    fn body(self) -> &'static str {
+        match self {
+            NoteTemplate::Checklist => "# Checklist\n\n- [ ] \n- [ ] \n- [ ] \n",
+            NoteTemplate::Meeting => {
+                "# Meeting notes\n\n**Date:** \n**Attendees:** \n\n\
+                 ## Agenda\n\n- \n\n## Decisions\n\n- \n\n## Action items\n\n- [ ] \n"
+            }
+            NoteTemplate::Daily => {
+                "# Daily note\n\n## Focus\n\n- [ ] \n\n## Notes\n\n- \n\n## Done\n\n- [x] \n"
+            }
+        }
+    }
+}
+
 impl ScribeApp {
     /// Replace the active editor's selection (or insert at the caret) with
     /// `tab_width` spaces, then advance the caret — the Tab-key handler when
@@ -54,6 +87,23 @@ impl ScribeApp {
             return false;
         }
         let cursor = range.primary.index;
+
+        // P0-2 — smart list continuation: for note files with smart-lists on,
+        // continue the list marker (or terminate on an empty item) when Enter is
+        // pressed at the end of a list line.
+        if self.config.editor.smart_lists && self.note_file_active(active) {
+            if let Some((new_text, new_idx)) = self.smart_list_newline(active, cursor) {
+                self.tabs[active].set_text(new_text);
+                state
+                    .cursor
+                    .set_char_range(Some(egui::text::CCursorRange::one(
+                        egui::text::CCursor::new(new_idx),
+                    )));
+                state.store(ctx, id);
+                return true;
+            }
+        }
+
         let (new_text, new_idx) = newline_with_indent(&self.tabs[active].text, cursor);
         // No indent to carry → let egui insert the plain newline (cheaper, and
         // keeps egui's own undo grouping for the common case).
@@ -68,6 +118,40 @@ impl ScribeApp {
             )));
         state.store(ctx, id);
         true
+    }
+
+    /// P0-2 helper — compute the `(new_text, new_caret)` for a smart list
+    /// continuation, or `None` when the current line is not a list item, or the
+    /// caret is not at the end of the line's content (fall back to plain Enter).
+    fn smart_list_newline(&self, active: usize, cursor: usize) -> Option<(String, usize)> {
+        let text = &self.tabs.get(active)?.text;
+        let bcur = char_to_byte(text, cursor);
+        let line_start_b = text[..bcur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let line_end_b = text[bcur..]
+            .find('\n')
+            .map(|i| bcur + i)
+            .unwrap_or(text.len());
+        // Only continue when the caret is at the end of the line's content — a
+        // mid-line Enter should split normally.
+        if bcur != line_end_b {
+            return None;
+        }
+        let line = &text[line_start_b..line_end_b];
+        let cont = scribe_core::md_ops::continue_list_marker(line);
+        if cont.clear_current_line {
+            // Empty item → drop the dangling marker (exit the list). The line
+            // becomes blank and the caret lands at its start.
+            let mut new_text = String::with_capacity(text.len());
+            new_text.push_str(&text[..line_start_b]);
+            new_text.push_str(&text[line_end_b..]);
+            let new_caret = text[..line_start_b].chars().count();
+            return Some((new_text, new_caret));
+        }
+        let marker = cont.marker_to_insert?;
+        let insert = format!("\n{marker}");
+        let mut new_text = text.to_string();
+        new_text.insert_str(bcur, &insert);
+        Some((new_text, cursor + insert.chars().count()))
     }
 
     /// Move the caret to the bracket paired with the one at/next to the caret
@@ -333,6 +417,364 @@ impl ScribeApp {
         }
         let i = self.active;
         self.tabs[i].edit_gen = self.tabs[i].edit_gen.wrapping_add(1);
+    }
+
+    // -------------------------------------------------------------------
+    // Note-usability caret operations (P0–P2). Each loads the live
+    // `TextEditState`, calls a pure `scribe_core::md_ops` transform, writes the
+    // result back, and restores a sensible caret — mirroring the existing
+    // caret-command methods above.
+    // -------------------------------------------------------------------
+
+    /// True when the active document is a note-shaped file (markdown / plain
+    /// text / untitled scratch) — the surface where smart-lists, list-aware
+    /// indent, and smart link-paste apply. Code files are excluded so their
+    /// indentation/behaviour is unchanged.
+    pub(super) fn note_file_active(&self, active: usize) -> bool {
+        match self.tabs.get(active).and_then(|t| t.doc.language_hint()) {
+            None => true,
+            Some(l) => matches!(l.as_str(), "md" | "markdown" | "txt" | "text"),
+        }
+    }
+
+    /// The active editor's selection substring, or `None` when there is no
+    /// selection (collapsed caret) or no live state.
+    pub(super) fn active_selection_text(
+        &self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        active: usize,
+    ) -> Option<String> {
+        let state = egui::TextEdit::load_state(ctx, id)?;
+        let range = state.cursor.char_range()?;
+        let (lo, hi) = (
+            range.primary.index.min(range.secondary.index),
+            range.primary.index.max(range.secondary.index),
+        );
+        if lo == hi {
+            return None;
+        }
+        let text = &self.tabs.get(active)?.text;
+        let lo_b = char_to_byte(text, lo);
+        let hi_b = char_to_byte(text, hi);
+        Some(text[lo_b..hi_b].to_string())
+    }
+
+    /// The 0-based `(lo_line, hi_line)` line span touched by the current
+    /// caret/selection, plus the primary caret char index. `None` on no state.
+    fn active_line_span(
+        &self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        active: usize,
+    ) -> Option<(usize, usize, usize)> {
+        let state = egui::TextEdit::load_state(ctx, id)?;
+        let range = state.cursor.char_range()?;
+        let (lo, hi) = (
+            range.primary.index.min(range.secondary.index),
+            range.primary.index.max(range.secondary.index),
+        );
+        let text = &self.tabs.get(active)?.text;
+        let line_of = |ci: usize| -> usize {
+            let b = char_to_byte(text, ci);
+            text[..b].bytes().filter(|&c| c == b'\n').count()
+        };
+        let lo_line = line_of(lo);
+        let mut hi_line = line_of(hi);
+        // A selection ending exactly at a line start should not pull in the next
+        // line (its char just before `hi` is the newline).
+        if hi > lo {
+            let hb = char_to_byte(text, hi);
+            if text[..hb].ends_with('\n') {
+                hi_line = hi_line.saturating_sub(1);
+            }
+        }
+        Some((lo_line, hi_line, range.primary.index))
+    }
+
+    /// True when any line the caret/selection touches is a list item (bullet /
+    /// ordered / task) AND the active file is note-shaped with smart-lists on.
+    pub(super) fn active_selection_on_list(
+        &self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        active: usize,
+    ) -> bool {
+        if !self.config.editor.smart_lists || !self.note_file_active(active) {
+            return false;
+        }
+        let Some((lo, hi, _)) = self.active_line_span(ctx, id, active) else {
+            return false;
+        };
+        let Some(text) = self.tabs.get(active).map(|t| &t.text) else {
+            return false;
+        };
+        let lines: Vec<&str> = text.split('\n').collect();
+        (lo..=hi).any(|idx| {
+            lines
+                .get(idx)
+                .is_some_and(|l| scribe_core::md_ops::parse_list_marker(l).is_some())
+        })
+    }
+
+    /// P0-3 — list-aware indent (`dir > 0`) / outdent (`dir < 0`) of the
+    /// touched list lines, with ordered renumber. Returns true when it changed
+    /// the buffer (so a Tab handler knows not to fall back to space-indent).
+    pub(super) fn indent_list_lines_active(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        active: usize,
+        dir: i32,
+    ) -> bool {
+        let Some((lo, hi, caret)) = self.active_line_span(ctx, id, active) else {
+            return false;
+        };
+        let width = self.config.editor.tab_width;
+        let Some(new_text) =
+            scribe_core::md_ops::indent_list_lines(&self.tabs[active].text, lo, hi, width, dir)
+        else {
+            return false;
+        };
+        let new_len = new_text.chars().count();
+        self.tabs[active].set_text(new_text);
+        self.store_caret(ctx, id, caret.min(new_len));
+        true
+    }
+
+    /// P0-1 — toggle / insert the GFM task checkbox on the caret / selection
+    /// lines. Surfaces a toast when no list item was touched.
+    pub(super) fn toggle_task_checkbox_active(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        active: usize,
+    ) {
+        let Some((lo, hi, caret)) = self.active_line_span(ctx, id, active) else {
+            return;
+        };
+        match scribe_core::md_ops::toggle_task_on_lines(&self.tabs[active].text, lo, hi) {
+            Some(new_text) => {
+                let new_len = new_text.chars().count();
+                self.tabs[active].set_text(new_text);
+                self.tabs[active].doc.mark_dirty();
+                self.store_caret(ctx, id, caret.min(new_len));
+            }
+            None => {
+                self.toast = Some("No list item on this line to make a checkbox.".to_string());
+            }
+        }
+    }
+
+    /// P0-4 — wrap-toggle the selection with `marker` (`**`/`*`/`` ` ``/`~~`).
+    pub(super) fn wrap_selection_active(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        active: usize,
+        marker: &str,
+    ) {
+        let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+            return;
+        };
+        let Some(range) = state.cursor.char_range() else {
+            return;
+        };
+        let (lo, hi) = (
+            range.primary.index.min(range.secondary.index),
+            range.primary.index.max(range.secondary.index),
+        );
+        let (new_text, new_lo, new_hi) =
+            scribe_core::md_ops::toggle_wrap(&self.tabs[active].text, lo, hi, marker);
+        self.tabs[active].set_text(new_text);
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(new_lo),
+                egui::text::CCursor::new(new_hi),
+            )));
+        state.store(ctx, id);
+    }
+
+    /// P1-4 — case-convert the selection: 0 = lower, 1 = upper, 2 = title.
+    pub(super) fn case_selection_active(
+        &mut self,
+        ctx: &egui::Context,
+        id: egui::Id,
+        active: usize,
+        op: u8,
+    ) {
+        let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+            return;
+        };
+        let Some(range) = state.cursor.char_range() else {
+            return;
+        };
+        let (lo, hi) = (
+            range.primary.index.min(range.secondary.index),
+            range.primary.index.max(range.secondary.index),
+        );
+        if lo == hi {
+            self.toast = Some("Select some text first to change its case.".to_string());
+            return;
+        }
+        let text = &self.tabs[active].text;
+        let lo_b = char_to_byte(text, lo);
+        let hi_b = char_to_byte(text, hi);
+        let sel = &text[lo_b..hi_b];
+        let converted = match op {
+            1 => scribe_core::text_ops::to_case(sel, true),
+            2 => scribe_core::md_ops::to_title_case(sel),
+            _ => scribe_core::text_ops::to_case(sel, false),
+        };
+        let mut new_text = String::with_capacity(text.len());
+        new_text.push_str(&text[..lo_b]);
+        new_text.push_str(&converted);
+        new_text.push_str(&text[hi_b..]);
+        let new_hi = lo + converted.chars().count();
+        self.tabs[active].set_text(new_text);
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(lo),
+                egui::text::CCursor::new(new_hi),
+            )));
+        state.store(ctx, id);
+    }
+
+    /// P2-1 — format the markdown pipe table under the caret (align columns).
+    pub(super) fn format_table_active(&mut self, ctx: &egui::Context, id: egui::Id, active: usize) {
+        let Some((caret_line, _, caret)) = self.active_line_span(ctx, id, active) else {
+            return;
+        };
+        let text = self.tabs[active].text.clone();
+        let Some((lo, hi)) = scribe_core::md_ops::table_block_bounds(&text, caret_line) else {
+            self.toast = Some("Put the caret inside a markdown table first.".to_string());
+            return;
+        };
+        let lines: Vec<&str> = text.split('\n').collect();
+        let block = lines[lo..=hi].join("\n");
+        let formatted = scribe_core::md_ops::format_markdown_table(&block);
+        if formatted == block {
+            return;
+        }
+        let mut new_lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+        new_lines.splice(lo..=hi, formatted.split('\n').map(str::to_string));
+        let new_text = new_lines.join("\n");
+        let new_len = new_text.chars().count();
+        self.tabs[active].set_text(new_text);
+        self.tabs[active].doc.mark_dirty();
+        self.store_caret(ctx, id, caret.min(new_len));
+        self.status = "formatted table".to_string();
+    }
+
+    /// P3-3 — open a fresh note tab seeded from a built-in template.
+    pub(super) fn new_note_from_template(&mut self, kind: NoteTemplate) {
+        self.new_tab();
+        let active = self.active;
+        self.tabs[active].set_text(kind.body().to_string());
+        self.status = format!("new note: {}", kind.label());
+    }
+
+    /// P2-2 — auto-pair (default-OFF `editor.auto_pair`). When an opening or
+    /// closing bracket/quote/backtick is typed, apply the pure
+    /// [`scribe_core::md_ops::auto_pair_action`] decision: wrap a selection,
+    /// insert the pair (caret between), or type over an existing closing char.
+    /// Consumes the originating `Event::Text` so egui does not also insert it.
+    pub(super) fn handle_auto_pair(&mut self, ctx: &egui::Context, id: egui::Id, active: usize) {
+        if !self.config.editor.auto_pair {
+            return;
+        }
+        // A single-char Text event that is a pair-relevant char.
+        let typed: Option<char> = ctx.input(|i| {
+            i.events.iter().find_map(|e| {
+                let egui::Event::Text(s) = e else { return None };
+                let mut it = s.chars();
+                let c = it.next()?;
+                if it.next().is_some() {
+                    return None;
+                }
+                if scribe_core::md_ops::auto_pair_close(c).is_some() || matches!(c, ')' | ']' | '}')
+                {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+        });
+        let Some(c) = typed else {
+            return;
+        };
+        let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+            return;
+        };
+        let Some(range) = state.cursor.char_range() else {
+            return;
+        };
+        let (lo, hi) = (
+            range.primary.index.min(range.secondary.index),
+            range.primary.index.max(range.secondary.index),
+        );
+        let text = &self.tabs[active].text;
+        let char_after = text.chars().nth(hi);
+        let action = scribe_core::md_ops::auto_pair_action(c, lo != hi, char_after);
+        if matches!(action, scribe_core::md_ops::AutoPairAction::Passthrough) {
+            return;
+        }
+        // Consume the char so egui's TextEdit does not ALSO insert it.
+        ctx.input_mut(|i| {
+            i.events.retain(|e| {
+                !matches!(e, egui::Event::Text(s)
+                    if s.chars().count() == 1 && s.starts_with(c))
+            });
+        });
+        let lo_b = char_to_byte(text, lo);
+        let hi_b = char_to_byte(text, hi);
+        use scribe_core::md_ops::AutoPairAction as A;
+        let (new_text, sel_lo, sel_hi) = match action {
+            A::Wrap { open, close } => {
+                let mut s = String::with_capacity(text.len() + 2);
+                s.push_str(&text[..lo_b]);
+                s.push(open);
+                s.push_str(&text[lo_b..hi_b]);
+                s.push(close);
+                s.push_str(&text[hi_b..]);
+                (s, lo + 1, hi + 1)
+            }
+            A::InsertPair { open, close } => {
+                let mut s = String::with_capacity(text.len() + 2);
+                s.push_str(&text[..lo_b]);
+                s.push(open);
+                s.push(close);
+                s.push_str(&text[lo_b..]);
+                (s, lo + 1, lo + 1)
+            }
+            A::TypeOver => {
+                // No text change; step the caret over the existing closing char.
+                (text.clone(), lo + 1, lo + 1)
+            }
+            A::Passthrough => return,
+        };
+        self.tabs[active].set_text(new_text);
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(sel_lo),
+                egui::text::CCursor::new(sel_hi),
+            )));
+        state.store(ctx, id);
+    }
+
+    /// Store a single collapsed caret at `char_idx` in the editor state for `id`.
+    fn store_caret(&self, ctx: &egui::Context, id: egui::Id, char_idx: usize) {
+        if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(char_idx),
+                )));
+            state.store(ctx, id);
+        }
     }
 
     /// F-017 — Join the cursor line with the next: trims the trailing

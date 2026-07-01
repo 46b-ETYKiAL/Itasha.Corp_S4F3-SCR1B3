@@ -125,7 +125,9 @@ impl ScribeApp {
             BuiltinCommand::FoldAll => {
                 if self.active < self.tabs.len() {
                     let text = self.tabs[self.active].text.clone();
-                    let regions = crate::editor_features::fold_regions(&text);
+                    // P2-4: markdown/text notes fold by heading section.
+                    let lang = self.tabs[self.active].doc.language_hint();
+                    let regions = crate::editor_features::fold_regions_for(&text, lang.as_deref());
                     self.folds = regions.iter().map(|r| r.start_line).collect();
                     self.fold_view = true;
                     self.status = format!("folded {} region(s)", regions.len());
@@ -233,6 +235,26 @@ impl ScribeApp {
                 self.focus_goto_symbol = true;
                 self.goto_symbol_selected = 0;
                 self.goto_symbol_query.clear();
+            }
+            // ---- Note-usability actions (need the egui caret; drained in
+            // frame_tick like the other pending_* caret commands) ----
+            BuiltinCommand::ToggleTaskCheckbox => self.pending_toggle_task = true,
+            BuiltinCommand::ToggleBold => self.pending_wrap_marker = Some("**"),
+            BuiltinCommand::ToggleItalic => self.pending_wrap_marker = Some("*"),
+            BuiltinCommand::ToggleInlineCode => self.pending_wrap_marker = Some("`"),
+            BuiltinCommand::ToggleStrikethrough => self.pending_wrap_marker = Some("~~"),
+            BuiltinCommand::UppercaseSelection => self.pending_case = Some(1),
+            BuiltinCommand::LowercaseSelection => self.pending_case = Some(0),
+            BuiltinCommand::TitlecaseSelection => self.pending_case = Some(2),
+            BuiltinCommand::FormatTable => self.pending_format_table = true,
+            BuiltinCommand::NewChecklistNote => {
+                self.new_note_from_template(super::text_ops_methods::NoteTemplate::Checklist)
+            }
+            BuiltinCommand::NewMeetingNote => {
+                self.new_note_from_template(super::text_ops_methods::NoteTemplate::Meeting)
+            }
+            BuiltinCommand::NewDailyNote => {
+                self.new_note_from_template(super::text_ops_methods::NoteTemplate::Daily)
             }
         }
     }

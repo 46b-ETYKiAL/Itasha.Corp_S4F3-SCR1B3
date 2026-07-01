@@ -1530,6 +1530,15 @@ impl ScribeApp {
                 .unwrap_or(false);
             if is_md {
                 let md = self.tabs[active].text.clone();
+                // P0-1 / P1-3: task progress + reading-time + heading count, shown
+                // in the preview header (computed via pure scribe-core fns).
+                let (done, total) = scribe_core::md_ops::tasks_progress(&md);
+                let words = md.split_whitespace().count();
+                let mins = scribe_core::md_ops::reading_time_minutes(words);
+                let headings = scribe_core::md_ops::heading_outline(&md).len();
+                // Source lines whose checkbox was clicked this frame (applied
+                // after the panel closes so the borrow on `md` is released).
+                let mut toggled: Vec<usize> = Vec::new();
                 egui::SidePanel::right("md-preview")
                     .default_width(360.0)
                     .frame(egui::Frame::default().fill(panel).inner_margin(8.0))
@@ -1545,13 +1554,37 @@ impl ScribeApp {
                                 },
                             );
                         });
+                        // Note metrics line: "~N min · H headings · ☑ done/total".
+                        ui.horizontal_wrapped(|ui| {
+                            let mut bits = format!("~{mins} min · {headings} headings");
+                            if total > 0 {
+                                bits.push_str(&format!(" · ☑ {done}/{total}"));
+                            }
+                            ui.label(RichText::new(bits).color(muted).small().monospace());
+                        });
                         ui.separator();
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                crate::md_preview::show(ui, &md, accent, muted);
+                                toggled = crate::md_preview::show(ui, &md, accent, muted);
                             });
                     });
+                // Apply any preview checkbox clicks to the SOURCE (edits the real
+                // `[ ]`/`[x]` line, never a hidden state).
+                if !toggled.is_empty() && active < self.tabs.len() {
+                    let mut text = self.tabs[active].text.clone();
+                    for line in toggled {
+                        if let Some(next) =
+                            scribe_core::md_ops::toggle_task_on_lines(&text, line, line)
+                        {
+                            text = next;
+                        }
+                    }
+                    if text != self.tabs[active].text {
+                        self.tabs[active].set_text(text);
+                        self.tabs[active].doc.mark_dirty();
+                    }
+                }
             }
         }
 
@@ -1851,16 +1884,32 @@ impl ScribeApp {
                     }
                 }
 
-                // Tab inserts the configured number of spaces (when insert_spaces is
-                // on) rather than a literal tab — honours editor.tab_width /
-                // insert_spaces. Consume the key before the TextEdit can see it.
+                // Tab / Shift+Tab. On a list item (note files, smart-lists on)
+                // Tab indents / Shift+Tab outdents the whole item (P0-3). Off a
+                // list, Tab inserts the configured spaces (when insert_spaces is
+                // on) — the pre-existing behaviour is unchanged for code files.
                 let editor_id = egui::Id::new("scr1b3-central-editor");
-                if !read_only
-                    && self.config.editor.insert_spaces
-                    && ctx.memory(|m| m.has_focus(editor_id))
-                    && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
-                {
-                    self.indent_with_spaces(ctx, editor_id, active);
+                let editor_focused = ctx.memory(|m| m.has_focus(editor_id));
+                if !read_only && editor_focused && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+                    let shift = ctx.input(|i| i.modifiers.shift);
+                    let on_list = self.active_selection_on_list(ctx, editor_id, active);
+                    if shift {
+                        if on_list {
+                            ctx.input_mut(|i| {
+                                i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                            });
+                            self.indent_list_lines_active(ctx, editor_id, active, -1);
+                        }
+                    } else if on_list {
+                        ctx.input_mut(|i| {
+                            i.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                        });
+                        self.indent_list_lines_active(ctx, editor_id, active, 1);
+                    } else if self.config.editor.insert_spaces
+                        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
+                    {
+                        self.indent_with_spaces(ctx, editor_id, active);
+                    }
                 }
 
                 // #107 — auto-indent on Enter: the new line keeps the current
@@ -1878,6 +1927,59 @@ impl ScribeApp {
                     });
                 }
 
+                // P2-2 — auto-pair (default-OFF). Runs before the editor sees
+                // the typed char so it can consume/rewrite the insertion.
+                if !read_only && editor_focused {
+                    self.handle_auto_pair(ctx, editor_id, active);
+                }
+
+                // Note-usability caret CHORDS (Ctrl+Enter / Ctrl+B / Ctrl+I /
+                // Ctrl+` / Ctrl+Shift+X). Route to the same pending_* the palette
+                // uses; consume the key so egui's TextEdit does not also see it.
+                if !read_only && editor_focused {
+                    ctx.input_mut(|i| {
+                        use egui::{Key, Modifiers};
+                        let ctrl = Modifiers::COMMAND;
+                        let ctrl_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+                        if i.consume_key(ctrl, Key::Enter) {
+                            self.pending_toggle_task = true;
+                        }
+                        if i.consume_key(ctrl, Key::B) {
+                            self.pending_wrap_marker = Some("**");
+                        }
+                        if i.consume_key(ctrl, Key::I) {
+                            self.pending_wrap_marker = Some("*");
+                        }
+                        if i.consume_key(ctrl, Key::Backtick) {
+                            self.pending_wrap_marker = Some("`");
+                        }
+                        if i.consume_key(ctrl_shift, Key::X) {
+                            self.pending_wrap_marker = Some("~~");
+                        }
+                    });
+
+                    // P1-2 — smart paste: rewrite a clipboard-URL Paste event that
+                    // lands over a non-empty selection into `[selection](url)`, so
+                    // egui's native paste replaces the selection with a md link.
+                    if self.config.editor.paste_url_as_link && self.note_file_active(active) {
+                        if let Some(sel) = self.active_selection_text(ctx, editor_id, active) {
+                            if !sel.is_empty() {
+                                ctx.input_mut(|i| {
+                                    for ev in i.events.iter_mut() {
+                                        if let egui::Event::Paste(txt) = ev {
+                                            if scribe_core::md_ops::looks_like_url(txt) {
+                                                *txt = scribe_core::md_ops::make_markdown_link(
+                                                    &sel, txt,
+                                                );
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // Caret commands from the keyboard (`act.*`) or the command
                 // palette (`self.pending_*`). They need the egui TextEditState,
                 // so they run here — after the editor stored its state this
@@ -1891,6 +1993,20 @@ impl ScribeApp {
                     }
                     if std::mem::take(&mut self.pending_dup_selection) {
                         self.duplicate_selection(ctx, editor_id, active);
+                    }
+                    // Note-usability caret ops (palette + chord) — P0-1 / P0-4 /
+                    // P1-4 / P2-1.
+                    if std::mem::take(&mut self.pending_toggle_task) {
+                        self.toggle_task_checkbox_active(ctx, editor_id, active);
+                    }
+                    if let Some(marker) = self.pending_wrap_marker.take() {
+                        self.wrap_selection_active(ctx, editor_id, active, marker);
+                    }
+                    if let Some(op) = self.pending_case.take() {
+                        self.case_selection_active(ctx, editor_id, active, op);
+                    }
+                    if std::mem::take(&mut self.pending_format_table) {
+                        self.format_table_active(ctx, editor_id, active);
                     }
                 }
 

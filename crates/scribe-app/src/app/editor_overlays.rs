@@ -317,7 +317,8 @@ impl ScribeApp {
         // toolbar closure below only captures `self.folds` (disjoint from
         // `self.tabs` under edition-2021 closure capture), so the borrow holds.
         let text = &self.tabs[self.active].text;
-        let regions = crate::editor_features::fold_regions(text);
+        // P2-4: markdown/text notes fold by heading section; code by braces.
+        let regions = crate::editor_features::fold_regions_for(text, ext);
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("FOLDS").small().monospace());
             if ui.small_button("fold all").clicked() {

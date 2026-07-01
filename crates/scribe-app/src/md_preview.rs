@@ -19,7 +19,7 @@
 //! `Tag::Link { dest_url, .. }`; `Tag::CodeBlock(CodeBlockKind)`).
 
 use egui::{Color32, RichText};
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// Render markdown source to a standalone, self-contained HTML document (for the
 /// "Export as HTML" command). Uses pulldown-cmark's own HTML writer — pure Rust,
@@ -138,6 +138,15 @@ pub enum MdBlock {
         marker: String,
         runs: Vec<MdRun>,
     },
+    /// A GFM task-list item (`- [ ]` / `- [x]`). `checked` is the box state;
+    /// `source_line` is the 0-based line of the box in the source so a click in
+    /// the preview can edit that exact line. `depth` is 0-based nesting.
+    TaskItem {
+        depth: u8,
+        checked: bool,
+        source_line: usize,
+        runs: Vec<MdRun>,
+    },
     /// A block-quoted paragraph.
     Quote(Vec<MdRun>),
     /// A horizontal rule (`---`).
@@ -162,6 +171,55 @@ struct ListLevel {
     ordinal: Option<u64>,
 }
 
+/// An open list item being accumulated. Flushed to a [`MdBlock::ListItem`] or
+/// [`MdBlock::TaskItem`] (when `task` is set) once its text is complete.
+struct PendingItem {
+    depth: u8,
+    marker: String,
+    flushed: bool,
+    /// `Some((checked, source_line))` when a `TaskListMarker` was seen.
+    task: Option<(bool, usize)>,
+}
+
+impl PendingItem {
+    /// Build the block for this item from its accumulated `runs`.
+    fn to_block(&self, runs: Vec<MdRun>) -> MdBlock {
+        match self.task {
+            Some((checked, source_line)) => MdBlock::TaskItem {
+                depth: self.depth,
+                checked,
+                source_line,
+                runs,
+            },
+            None => MdBlock::ListItem {
+                depth: self.depth,
+                marker: self.marker.clone(),
+                runs,
+            },
+        }
+    }
+}
+
+/// Byte offsets where each source line starts (index 0 = line 0).
+fn compute_line_starts(src: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (i, b) in src.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
+/// Map a byte offset to its 0-based source line via the precomputed line-start
+/// table (binary search — the table is sorted ascending).
+fn byte_to_line(line_starts: &[usize], offset: usize) -> usize {
+    match line_starts.binary_search(&offset) {
+        Ok(idx) => idx,
+        Err(idx) => idx.saturating_sub(1),
+    }
+}
+
 /// Parse markdown into the block model. Never panics; malformed or truncated
 /// input yields a best-effort block list.
 ///
@@ -179,11 +237,14 @@ pub fn parse(src: &str) -> Vec<MdBlock> {
 
     // Open list levels (outermost first). Used for depth + ordinal markers.
     let mut lists: Vec<ListLevel> = Vec::new();
-    // Stack of open list items as `(depth, marker, flushed)`. An item's own text
-    // is flushed (emitted) when a nested list begins, so a parent item appears
-    // BEFORE its children in reading order; `flushed` guards against a second
-    // emit at item-end.
-    let mut pending: Vec<(u8, String, bool)> = Vec::new();
+    // Stack of open list items. An item's own text is flushed (emitted) when a
+    // nested list begins, so a parent item appears BEFORE its children in
+    // reading order; `flushed` guards against a second emit at item-end. `task`
+    // is set (with the box state + source line) when a `TaskListMarker` event
+    // follows the item start, turning the flushed block into a `TaskItem`.
+    let mut pending: Vec<PendingItem> = Vec::new();
+    // Map a source byte offset → 0-based line, for `TaskItem.source_line`.
+    let line_starts = compute_line_starts(src);
     // Block-quote nesting depth; > 0 means the next flushed runs are a Quote.
     let mut quote_depth: u32 = 0;
 
@@ -212,7 +273,7 @@ pub fn parse(src: &str) -> Vec<MdBlock> {
         }
     }
 
-    for ev in Parser::new(src) {
+    for (ev, range) in Parser::new_ext(src, Options::ENABLE_TASKLISTS).into_offset_iter() {
         match ev {
             // ---- Headings ---------------------------------------------------
             Event::Start(Tag::Heading { .. }) => runs.clear(),
@@ -269,14 +330,10 @@ pub fn parse(src: &str) -> Vec<MdBlock> {
             Event::Start(Tag::List(start)) => {
                 // A nested list begins inside the current item: flush that item's
                 // own text first so the parent is emitted before its children.
-                if let Some((depth, marker, flushed)) = pending.last_mut() {
-                    if !*flushed && !runs.is_empty() {
-                        blocks.push(MdBlock::ListItem {
-                            depth: *depth,
-                            marker: marker.clone(),
-                            runs: std::mem::take(&mut runs),
-                        });
-                        *flushed = true;
+                if let Some(item) = pending.last_mut() {
+                    if !item.flushed && !runs.is_empty() {
+                        blocks.push(item.to_block(std::mem::take(&mut runs)));
+                        item.flushed = true;
                     }
                 }
                 lists.push(ListLevel { ordinal: start });
@@ -299,16 +356,26 @@ pub fn parse(src: &str) -> Vec<MdBlock> {
                     None => "•".to_string(),
                 };
                 runs.clear();
-                pending.push((depth, marker, false));
+                pending.push(PendingItem {
+                    depth,
+                    marker,
+                    flushed: false,
+                    task: None,
+                });
+            }
+            // GFM task box: `ENABLE_TASKLISTS` emits this right after the item
+            // start. Record the box state + source line on the open item so it
+            // flushes as a `TaskItem` (click-to-source edits this exact line).
+            Event::TaskListMarker(checked) => {
+                if let Some(item) = pending.last_mut() {
+                    let line = byte_to_line(&line_starts, range.start);
+                    item.task = Some((checked, line));
+                }
             }
             Event::End(TagEnd::Item) => {
-                if let Some((depth, marker, flushed)) = pending.pop() {
-                    if !flushed {
-                        blocks.push(MdBlock::ListItem {
-                            depth,
-                            marker,
-                            runs: std::mem::take(&mut runs),
-                        });
+                if let Some(item) = pending.pop() {
+                    if !item.flushed {
+                        blocks.push(item.to_block(std::mem::take(&mut runs)));
                     } else {
                         // Trailing text after a nested list (uncommon) is dropped
                         // rather than leaking into the next sibling item.
@@ -383,9 +450,34 @@ fn heading_to_u8(level: HeadingLevel) -> u8 {
 /// theme's colours from the call site. This function parses on every call — for
 /// a preview pane that is fine; cache the [`parse`] result if the source is
 /// large and unchanged between frames.
-pub fn show(ui: &mut egui::Ui, md: &str, accent: Color32, muted: Color32) {
+///
+/// Returns the source line(s) of any task checkbox the user CLICKED this frame
+/// (empty when none). The caller toggles those source lines via
+/// [`scribe_core::md_ops::toggle_task_on_lines`] so the click edits the real
+/// markdown source (GitHub/GitLab "click edits source" behaviour), never a
+/// hidden state.
+pub fn show(ui: &mut egui::Ui, md: &str, accent: Color32, muted: Color32) -> Vec<usize> {
+    let mut clicked_lines: Vec<usize> = Vec::new();
     for block in parse(md) {
         match block {
+            MdBlock::TaskItem {
+                depth,
+                checked,
+                source_line,
+                runs,
+            } => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(depth as f32 * 16.0);
+                    // A clickable checkbox; the boolean is local (the source is
+                    // the single point of truth) — a click is reported up so the
+                    // caller flips the source line.
+                    let mut state = checked;
+                    if ui.checkbox(&mut state, "").changed() {
+                        clicked_lines.push(source_line);
+                    }
+                    render_runs(ui, &runs, accent, muted);
+                });
+            }
             MdBlock::Heading { level, text } => {
                 let size = match level {
                     1 => 26.0,
@@ -403,11 +495,23 @@ pub fn show(ui: &mut egui::Ui, md: &str, accent: Color32, muted: Color32) {
                 ui.add_space(4.0);
             }
             MdBlock::Quote(runs) => {
-                ui.indent("md_quote", |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        render_runs(ui, &runs, accent, muted);
+                // GFM/Obsidian callout: a blockquote whose first run begins with
+                // `[!type]` renders with an accent title + indented body (no tag
+                // DB — purely presentational).
+                if let Some((title, body)) = callout_split(&runs) {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        ui.label(RichText::new(title).color(accent).strong().small());
+                        if !body.is_empty() {
+                            ui.horizontal_wrapped(|ui| render_runs(ui, &body, accent, muted));
+                        }
                     });
-                });
+                } else {
+                    ui.indent("md_quote", |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            render_runs(ui, &runs, accent, muted);
+                        });
+                    });
+                }
                 ui.add_space(4.0);
             }
             MdBlock::CodeBlock { code, .. } => {
@@ -433,6 +537,47 @@ pub fn show(ui: &mut egui::Ui, md: &str, accent: Color32, muted: Color32) {
                 ui.separator();
             }
         }
+    }
+    clicked_lines
+}
+
+/// If a blockquote's flattened runs begin with a callout marker `[!type]`,
+/// return `(title, body_runs)` where `title` is the upper-cased type and
+/// `body` is the remaining content (the `[!type]` token + an optional inline
+/// title stripped). Returns `None` for an ordinary blockquote.
+fn callout_split(runs: &[MdRun]) -> Option<(String, Vec<MdRun>)> {
+    let first = runs.first()?;
+    let text = first.text.trim_start();
+    let rest = text.strip_prefix("[!")?;
+    let close = rest.find(']')?;
+    let kind = &rest[..close];
+    if kind.is_empty() || !kind.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let title = format!("{} {}", callout_icon(kind), kind.to_uppercase());
+    // The first run's remaining text after `[!type]` becomes part of the body.
+    let after = rest[close + 1..].trim_start().to_string();
+    let mut body: Vec<MdRun> = Vec::new();
+    if !after.is_empty() {
+        body.push(MdRun {
+            text: after,
+            ..first.clone()
+        });
+    }
+    body.extend(runs.iter().skip(1).cloned());
+    Some((title, body))
+}
+
+/// A small phosphor icon for a callout type (decorative; unknown types use a
+/// neutral note glyph).
+fn callout_icon(kind: &str) -> &'static str {
+    use egui_phosphor::thin as ph;
+    match kind.to_ascii_lowercase().as_str() {
+        "warning" | "caution" | "danger" => ph::WARNING,
+        "tip" | "hint" | "important" => ph::LIGHTBULB,
+        "todo" => ph::CHECK_SQUARE,
+        "question" | "faq" => ph::QUESTION,
+        _ => ph::NOTE,
     }
 }
 
@@ -570,6 +715,14 @@ fn render_runs(ui: &mut egui::Ui, runs: &[MdRun], accent: Color32, muted: Color3
                 continue;
             }
         }
+        // `#tag` highlight (preview-only, no tag DB): a plain (non-code) run that
+        // contains a `#tag` token is split so each tag renders in the accent
+        // colour while the surrounding prose keeps the default style. URLs took
+        // the branch above, so a run reaching here has no clickable link.
+        if !r.code && !r.bold && !r.italic && contains_tag(&r.text) {
+            render_text_with_tags(ui, &r.text, accent);
+            continue;
+        }
         let mut rt = RichText::new(&r.text);
         if r.bold {
             rt = rt.strong();
@@ -584,6 +737,62 @@ fn render_runs(ui: &mut egui::Ui, runs: &[MdRun], accent: Color32, muted: Color3
     }
 }
 
+/// True when `text` contains at least one `#tag` token (a `#` at a word
+/// boundary followed by a tag char).
+fn contains_tag(text: &str) -> bool {
+    tag_spans(text).iter().any(|(_, _, is_tag)| *is_tag)
+}
+
+/// Split `text` into `(start, end, is_tag)` byte spans, where a tag is a `#`
+/// preceded by start-of-string/whitespace and followed by 1+ tag chars
+/// (alphanumeric / `-` / `_` / `/`). A bare `#` or `# heading` is not a tag.
+fn tag_spans(text: &str) -> Vec<(usize, usize, bool)> {
+    let bytes = text.as_bytes();
+    let mut spans: Vec<(usize, usize, bool)> = Vec::new();
+    let mut i = 0;
+    let mut seg_start = 0;
+    while i < bytes.len() {
+        let at_boundary = i == 0 || bytes[i - 1].is_ascii_whitespace();
+        if bytes[i] == b'#' && at_boundary {
+            // Measure the tag body.
+            let mut j = i + 1;
+            while j < bytes.len() && is_tag_char(bytes[j]) {
+                j += 1;
+            }
+            if j > i + 1 {
+                if seg_start < i {
+                    spans.push((seg_start, i, false));
+                }
+                spans.push((i, j, true));
+                i = j;
+                seg_start = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if seg_start < bytes.len() {
+        spans.push((seg_start, bytes.len(), false));
+    }
+    spans
+}
+
+fn is_tag_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'/'
+}
+
+/// Render `text` with each `#tag` token coloured `accent`.
+fn render_text_with_tags(ui: &mut egui::Ui, text: &str, accent: Color32) {
+    for (start, end, is_tag) in tag_spans(text) {
+        let slice = &text[start..end];
+        if is_tag {
+            ui.label(RichText::new(slice).color(accent).strong());
+        } else {
+            ui.label(RichText::new(slice));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,6 +800,81 @@ mod tests {
     /// Collect a run-bearing block's text into one string for assertions.
     fn runs_text(runs: &[MdRun]) -> String {
         runs.iter().map(|r| r.text.as_str()).collect()
+    }
+
+    #[test]
+    fn parses_task_items_with_state_and_source_line() {
+        // Task boxes become TaskItem blocks carrying their checked state and the
+        // 0-based source line of the box (for click-to-source editing).
+        let src = "intro\n\n- [ ] unchecked\n- [x] checked\n- plain bullet\n";
+        let b = parse(src);
+        let tasks: Vec<(&bool, &usize)> = b
+            .iter()
+            .filter_map(|blk| match blk {
+                MdBlock::TaskItem {
+                    checked,
+                    source_line,
+                    ..
+                } => Some((checked, source_line)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tasks.len(), 2, "got {b:?}");
+        assert_eq!((*tasks[0].0, *tasks[0].1), (false, 2));
+        assert_eq!((*tasks[1].0, *tasks[1].1), (true, 3));
+        // The plain bullet stays a ListItem (not a task).
+        assert!(b
+            .iter()
+            .any(|blk| matches!(blk, MdBlock::ListItem { runs, .. }
+            if runs_text(runs).contains("plain bullet"))));
+    }
+
+    #[test]
+    fn callout_split_detects_admonition() {
+        let runs = vec![MdRun {
+            text: "[!warning] be careful".into(),
+            bold: false,
+            italic: false,
+            code: false,
+            link: None,
+        }];
+        let (title, body) = callout_split(&runs).expect("callout");
+        assert!(title.contains("WARNING"));
+        assert_eq!(runs_text(&body), "be careful");
+        // A plain quote is not a callout.
+        let plain = vec![MdRun {
+            text: "just a quote".into(),
+            bold: false,
+            italic: false,
+            code: false,
+            link: None,
+        }];
+        assert!(callout_split(&plain).is_none());
+    }
+
+    #[test]
+    fn tag_spans_isolates_hashtags() {
+        let spans = tag_spans("see #idea and #to-do/now end");
+        let tags: Vec<&str> = spans
+            .iter()
+            .filter(|(_, _, t)| *t)
+            .map(|(s, e, _)| &"see #idea and #to-do/now end"[*s..*e])
+            .collect();
+        assert_eq!(tags, vec!["#idea", "#to-do/now"]);
+        // A `#` not at a word boundary (e.g. a fragment) or a bare heading `# ` is
+        // not a tag.
+        assert!(!contains_tag("# heading"));
+        assert!(!contains_tag("a#b"));
+        assert!(contains_tag("#tag"));
+    }
+
+    #[test]
+    fn byte_to_line_maps_offsets() {
+        let starts = compute_line_starts("a\nbb\nccc\n");
+        assert_eq!(byte_to_line(&starts, 0), 0);
+        assert_eq!(byte_to_line(&starts, 2), 1); // start of "bb"
+        assert_eq!(byte_to_line(&starts, 3), 1);
+        assert_eq!(byte_to_line(&starts, 5), 2); // start of "ccc"
     }
 
     #[test]
@@ -938,7 +1222,9 @@ mod tests {
         let muted = Color32::from_rgb(0x80, 0x80, 0x80);
         let mut h = egui_kittest::Harness::builder()
             .with_size(egui::Vec2::new(600.0, 800.0))
-            .build_ui(move |ui| show(ui, md, accent, muted));
+            .build_ui(move |ui| {
+                show(ui, md, accent, muted);
+            });
         h.run();
         // The heading text and the link text reached the accessibility tree.
         assert!(h.query_by_label("Big Heading").is_some());
@@ -967,7 +1253,7 @@ mod tests {
                     md,
                     Color32::from_rgb(0, 0xd0, 0xa0),
                     Color32::from_rgb(0x80, 0x80, 0x80),
-                )
+                );
             });
         h.run();
         assert!(
@@ -983,8 +1269,9 @@ mod tests {
 
     #[test]
     fn show_empty_source_renders_nothing_without_panic() {
-        let mut h = egui_kittest::Harness::builder()
-            .build_ui(|ui| show(ui, "", Color32::WHITE, Color32::GRAY));
+        let mut h = egui_kittest::Harness::builder().build_ui(|ui| {
+            show(ui, "", Color32::WHITE, Color32::GRAY);
+        });
         h.run();
     }
 

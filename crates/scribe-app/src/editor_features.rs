@@ -84,6 +84,27 @@ pub fn fold_regions(text: &str) -> Vec<FoldRegion> {
     out
 }
 
+/// Language-aware foldable regions (P2-4): markdown / text notes fold by
+/// heading SECTION (a heading line to the line before the next same-or-higher
+/// heading), everything else folds by brace balance. Reuses the existing fold
+/// gutter + [`project_folded`] verbatim — only the region source differs.
+pub fn fold_regions_for(text: &str, lang: Option<&str>) -> Vec<FoldRegion> {
+    let is_note = matches!(
+        lang,
+        Some("md") | Some("markdown") | Some("txt") | Some("text")
+    );
+    if !is_note {
+        return fold_regions(text);
+    }
+    scribe_core::md_ops::heading_fold_regions(text)
+        .into_iter()
+        .map(|(start_line, end_line)| FoldRegion {
+            start_line,
+            end_line,
+        })
+        .collect()
+}
+
 /// Project `text` with the given folded regions collapsed. Each folded region
 /// keeps its header line (with a ` …` marker appended) and drops the body
 /// through `end_line`. Returns the display string and a map from each display
@@ -310,6 +331,50 @@ pub fn symbol_scopes(text: &str) -> Vec<SymbolScope> {
     }
 
     out.sort_by_key(|s| s.start_line);
+    out
+}
+
+/// Symbols for the Go-to-symbol modal (P1-1): for markdown / plain-text notes,
+/// the ATX heading outline; for everything else, the brace-delimited definition
+/// scopes. `lang` is the active document's language hint (extension).
+///
+/// This lets the existing Ctrl+Shift+O modal double as a document outline for
+/// prose — the heading data comes from [`scribe_core::md_ops::heading_outline`],
+/// so there is no new panel or UI subsystem. Heading levels map to the modal's
+/// `depth` indent (level 1 = depth 0).
+pub fn outline_symbols(text: &str, lang: Option<&str>) -> Vec<SymbolScope> {
+    let is_note = matches!(
+        lang,
+        Some("md") | Some("markdown") | Some("txt") | Some("text")
+    );
+    if !is_note {
+        return symbol_scopes(text);
+    }
+    let headings = scribe_core::md_ops::heading_outline(text);
+    // Each heading's scope runs to the line before the next same-or-higher
+    // heading (so `breadcrumb_at`/`sticky_chain_at` still make sense if reused).
+    let total_lines = text.split('\n').count();
+    let mut out: Vec<SymbolScope> = Vec::with_capacity(headings.len());
+    for (i, h) in headings.iter().enumerate() {
+        let mut end = total_lines.saturating_sub(1);
+        for next in &headings[i + 1..] {
+            if next.level <= h.level {
+                end = next.line.saturating_sub(1).max(h.line);
+                break;
+            }
+        }
+        let title = if h.title.is_empty() {
+            format!("{} (untitled)", "#".repeat(h.level as usize))
+        } else {
+            h.title.clone()
+        };
+        out.push(SymbolScope {
+            start_line: h.line,
+            end_line: end,
+            label: title,
+            depth: (h.level as usize).saturating_sub(1),
+        });
+    }
     out
 }
 
