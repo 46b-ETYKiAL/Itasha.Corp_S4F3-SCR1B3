@@ -31,16 +31,20 @@ impl ScribeApp {
         if let Some(c) = note_bg {
             v.extreme_bg_color = c;
         }
-        // Tint the editor-well + window backgrounds by the SAME amount the chrome
+        // Tint the MAIN-APP background surfaces by the same amount the chrome
         // panels are tinted (see `render_support::apply_window_tint` /
-        // `panel_fill`), so the whole background surface — chrome AND the central
-        // editor well — shifts toward the tint colour while glyph/text colours
-        // (a separate `foreground` path) stay untinted. Applied to the final fills
-        // whether or not an override set them, and BEFORE the translucency alpha
-        // so the tint composes correctly with glass/mica window modes.
+        // `panel_fill`): the central editor panel (`panel_fill`) and the editor
+        // well (`extreme_bg_color`) shift toward the tint colour while glyph/text
+        // colours (a separate `foreground` path) stay untinted. Applied before the
+        // translucency alpha so the tint composes with glass/mica window modes.
+        //
+        // `window_fill` is deliberately NOT tinted: floating windows — the
+        // Settings popup (which pins its frame opaque, so a tinted window_fill
+        // showed a bold tint over the whole dialog) and any other egui::Window —
+        // use it, and the colour tint is a MAIN-APP-window effect only. Tinting
+        // window_fill was the v0.4.48 regression where the Settings popup tinted
+        // while the (translucent) main window looked comparatively untinted.
         v.panel_fill = super::render_support::apply_window_tint(v.panel_fill, &self.config.window);
-        v.window_fill =
-            super::render_support::apply_window_tint(v.window_fill, &self.config.window);
         v.extreme_bg_color =
             super::render_support::apply_window_tint(v.extreme_bg_color, &self.config.window);
         if self.config.window.effective_translucent() {

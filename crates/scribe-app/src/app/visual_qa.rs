@@ -409,6 +409,51 @@ fn scene_tint_strong_red() {
     render_scene("tint_strong_red", 1100.0, 720.0, app);
 }
 
+/// DIAGNOSTIC — strong tint with the SETTINGS WINDOW OPEN (opaque mode). The
+/// bug report: the tint appears on the Settings popup but NOT the main app.
+/// Read the PNG: the main app chrome + editor well must be tinted AND the
+/// Settings window must NOT be tinted.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tint_settings_open() {
+    let mut cfg = qa_config();
+    cfg.window.tint = "#ff0000".to_string();
+    cfg.window.tint_strength = 0.8;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    t.session_baseline = SAMPLE.to_string();
+    t.saved_baseline = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    app.settings_open = true;
+    render_scene("tint_settings_open", 1100.0, 720.0, app);
+}
+
+/// DIAGNOSTIC — strong tint in GLASS (translucent) mode. Reproduces the mode
+/// where the tinted panel fill is composited at reduced opacity, to check
+/// whether the main-app tint washes out vs the opaque Settings window.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tint_glass_settings_open() {
+    let mut cfg = qa_config();
+    cfg.window.tint = "#ff0000".to_string();
+    cfg.window.tint_strength = 0.8;
+    cfg.window.transparency_enabled = true;
+    cfg.window.opacity = 0.5;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    t.session_baseline = SAMPLE.to_string();
+    t.saved_baseline = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    app.settings_open = true;
+    render_scene("tint_glass_settings_open", 1100.0, 720.0, app);
+}
+
 /// #82 — rotate-ON side tabs MID-DRAG: the drop-insertion hairline must sit in
 /// the GAP between two stacked tab chips, never inside a chip's outline. Forces
 /// the drag pointer into the gap between chip 0 and chip 1 via the test hook,

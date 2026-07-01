@@ -1124,11 +1124,16 @@ impl ScribeApp {
 
         // ---- Settings window (deep customization, live preview) ----
         if self.settings_open {
+            // The Settings window is exempt from the app colour-tint; pass the
+            // theme's UN-tinted text-field background so its inputs don't inherit
+            // the tinted global `extreme_bg_color`.
+            let untinted_field_bg = scribe_render::theme_to_visuals(&self.theme).extreme_bg_color;
             let changed = crate::settings::show(
                 ctx,
                 &mut self.config,
                 &mut self.settings_open,
                 &mut self.updater,
+                untinted_field_bg,
             );
             // F-039 — the Plugins section's "Manage plugins…" button stashes a
             // request flag; pick it up and open the plugin-manager modal.

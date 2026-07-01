@@ -200,6 +200,11 @@ pub fn show(
     config: &mut Config,
     open: &mut bool,
     updater: &mut crate::updater::Updater,
+    // The theme's UN-tinted text-field background. The app colour-tint shifts the
+    // global `extreme_bg_color` (the editor well), which would otherwise also
+    // tint the Settings text inputs; the Settings window is exempt from the tint,
+    // so its fields are reset to this untinted colour.
+    field_bg: egui::Color32,
 ) -> bool {
     let mut changed = false;
     let mut keep_open = *open;
@@ -248,6 +253,11 @@ pub fn show(
             egui::Frame::window(&style).fill(egui::Color32::from_rgb(f.r(), f.g(), f.b()))
         })
         .show(ctx, |ui| {
+            // Exempt the Settings window from the app colour-tint: the frame fill
+            // above is the un-tinted window colour, and resetting the field
+            // background here un-tints every text input in the window (search box,
+            // theme-name fields) so the tint stays a MAIN-APP-only effect.
+            ui.visuals_mut().extreme_bg_color = field_bg;
             // The window size is explicit (default_size, user-resizable), so the
             // content fills the available width responsively — no fixed pin is
             // needed and none of the old per-page width jump can occur.
