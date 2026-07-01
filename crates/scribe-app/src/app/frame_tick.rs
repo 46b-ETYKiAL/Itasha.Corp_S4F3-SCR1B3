@@ -1247,8 +1247,9 @@ impl ScribeApp {
         // ---- Status bar ----
         let mut cycle_eol_for_active = false;
         let mut open_settings_for = None;
-        // Hidden in zen / distraction-free mode and in F11 fullscreen.
-        if !chrome_hidden {
+        // Hidden in zen / distraction-free mode and in F11 fullscreen, and when
+        // the user has turned the status bar off in Appearance settings.
+        if !chrome_hidden && self.config.appearance.show_status_bar {
             egui::TopBottomPanel::bottom("status")
                 .frame(egui::Frame::default().fill(panel))
                 .show(ctx, |ui| {
@@ -1706,10 +1707,20 @@ impl ScribeApp {
                                 // 3.5px stripe flush to the gutter's right edge
                                 // (Notepad++/VS Code use ~3px; a touch wider here
                                 // so it reads clearly at the gutter boundary).
+                                // Extend the stripe down to the NEXT logical line's
+                                // Y so that a word-wrapped modified line (which
+                                // occupies several visual rows) shows a full-height
+                                // marker spanning every wrapped row, not just a
+                                // single-row tick. `rows` holds one Y per logical
+                                // line, so `rows[i+1]` is the bottom of line i's
+                                // wrapped block; the last line falls back to one
+                                // row height. When word-wrap is off this is exactly
+                                // one row, so no visual change there.
+                                let bottom = rows.get(i + 1).copied().unwrap_or(y + gutter_row_h);
                                 painter.rect_filled(
                                     egui::Rect::from_min_max(
                                         egui::pos2(bar_r - 3.5, y),
-                                        egui::pos2(bar_r, y + gutter_row_h),
+                                        egui::pos2(bar_r, bottom),
                                     ),
                                     0.0,
                                     col,
@@ -1888,7 +1899,13 @@ impl ScribeApp {
                 // Tab indents / Shift+Tab outdents the whole item (P0-3). Off a
                 // list, Tab inserts the configured spaces (when insert_spaces is
                 // on) — the pre-existing behaviour is unchanged for code files.
-                let editor_id = egui::Id::new("scr1b3-central-editor");
+                // Per-tab editor Id: salt the constant base with the tab's stable
+                // `doc_id` so egui keys the TextEdit's `TextEditState` (selection,
+                // caret, undo history) PER NOTE. With a single constant Id the
+                // selection made in one note leaked into every other note (phantom
+                // highlight) and undo history bled across tabs — the reported bug.
+                let editor_id =
+                    egui::Id::new("scr1b3-central-editor").with(self.tabs[active].doc_id);
                 let editor_focused = ctx.memory(|m| m.has_focus(editor_id));
                 if !read_only && editor_focused && ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
                     let shift = ctx.input(|i| i.modifiers.shift);
@@ -2055,11 +2072,16 @@ impl ScribeApp {
                         url_color,
                         detect_links,
                     );
-                    let mut sa = if word_wrap {
+                    // Per-tab scroll: salt the ScrollArea Id with the tab's stable
+                    // `doc_id` so egui keeps each note's scroll offset independently.
+                    // Without a salt every tab shared one offset, so switching notes
+                    // jumped the viewport to the previous note's position.
+                    let mut sa = (if word_wrap {
                         egui::ScrollArea::vertical()
                     } else {
                         egui::ScrollArea::both()
-                    };
+                    })
+                    .id_salt(("scr1b3-editor-scroll", self.tabs[active].doc_id));
                     if let Some(off) = self.pending_scroll.take() {
                         sa = sa.vertical_scroll_offset(off);
                     }
