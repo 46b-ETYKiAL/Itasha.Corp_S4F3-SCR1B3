@@ -339,16 +339,15 @@ impl ScribeApp {
             }
         }
         if let Some(i) = switch_to {
-            // Persist the outgoing note's scroll offset and restore the incoming
-            // note's, so each tab remembers its own viewport position across
-            // switches (per-tab persistence — pairs with the doc_id-salted
-            // editor Id that keeps selection/caret per note).
-            let cur_scroll = self.scroll_metrics.0;
-            if let Some(prev) = self.tabs.get_mut(self.active) {
-                prev.scroll_y = cur_scroll;
-            }
+            // Per-tab scroll + selection are preserved by the doc_id-salted editor
+            // ScrollArea / TextEdit Ids (see frame_tick.rs), which egui retains per
+            // note across EVERY switch path — so the switch itself only moves the
+            // active index. (An earlier explicit scroll_y save/restore lived here
+            // but was removed: it went stale on keyboard/palette/"already open"
+            // switches that bypass this handler, then clobbered egui's correct
+            // retained offset on the next tab-strip click. See the 2026-07-01
+            // render/persistence audit.)
             self.active = i;
-            self.pending_scroll = self.tabs.get(i).map(|t| t.scroll_y);
         }
         if let Some(i) = close {
             self.close_tab(i);
@@ -710,16 +709,15 @@ impl ScribeApp {
         }
 
         if let Some(i) = switch_to {
-            // Persist the outgoing note's scroll offset and restore the incoming
-            // note's, so each tab remembers its own viewport position across
-            // switches (per-tab persistence — pairs with the doc_id-salted
-            // editor Id that keeps selection/caret per note).
-            let cur_scroll = self.scroll_metrics.0;
-            if let Some(prev) = self.tabs.get_mut(self.active) {
-                prev.scroll_y = cur_scroll;
-            }
+            // Per-tab scroll + selection are preserved by the doc_id-salted editor
+            // ScrollArea / TextEdit Ids (see frame_tick.rs), which egui retains per
+            // note across EVERY switch path — so the switch itself only moves the
+            // active index. (An earlier explicit scroll_y save/restore lived here
+            // but was removed: it went stale on keyboard/palette/"already open"
+            // switches that bypass this handler, then clobbered egui's correct
+            // retained offset on the next tab-strip click. See the 2026-07-01
+            // render/persistence audit.)
             self.active = i;
-            self.pending_scroll = self.tabs.get(i).map(|t| t.scroll_y);
         }
         if let Some(i) = close {
             self.close_tab(i);

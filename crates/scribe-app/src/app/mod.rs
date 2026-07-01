@@ -319,11 +319,6 @@ struct EditorTab {
     /// `Some(edit_gen)` the `change_states` cache was computed for, or `None`
     /// to force a recompute (initial, post-save, post-reload).
     change_gen: Option<u64>,
-    /// Per-tab saved vertical scroll offset (px). Saved when switching AWAY from
-    /// this tab and re-applied via `pending_scroll` when switching back, so each
-    /// note remembers its own viewport position across tab switches (belt-and-
-    /// suspenders alongside the per-tab `doc_id`-salted editor ScrollArea Id).
-    scroll_y: f32,
 }
 
 /// A recently-closed tab kept on the reopen stack (Ctrl+Shift+T), so an
@@ -381,7 +376,6 @@ impl EditorTab {
             saved_baseline: String::new(),
             change_states: Vec::new(),
             change_gen: None,
-            scroll_y: 0.0,
         }
     }
 
@@ -407,7 +401,6 @@ impl EditorTab {
             saved_baseline: text,
             change_states: Vec::new(),
             change_gen: None,
-            scroll_y: 0.0,
         })
     }
 
@@ -439,7 +432,6 @@ impl EditorTab {
                     external_change: false,
                     change_states: Vec::new(),
                     change_gen: None,
-                    scroll_y: 0.0,
                 };
             }
         }

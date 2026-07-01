@@ -1531,12 +1531,30 @@ impl ScribeApp {
                 .unwrap_or(false);
             if is_md {
                 let md = self.tabs[active].text.clone();
+                // The live preview re-parses the whole document and rebuilds the
+                // widget tree every frame it is open. Bound that cost: above this
+                // size the metric scans + full markdown parse are skipped and a
+                // notice is shown, so a multi-MiB note can't peg a core at single-
+                // digit FPS. (Mirrors the highlighter's own large-buffer cap.)
+                const PREVIEW_MAX_BYTES: usize = 1 << 20; // 1 MiB
+                let preview_too_large = md.len() > PREVIEW_MAX_BYTES;
                 // P0-1 / P1-3: task progress + reading-time + heading count, shown
-                // in the preview header (computed via pure scribe-core fns).
-                let (done, total) = scribe_core::md_ops::tasks_progress(&md);
-                let words = md.split_whitespace().count();
-                let mins = scribe_core::md_ops::reading_time_minutes(words);
-                let headings = scribe_core::md_ops::heading_outline(&md).len();
+                // in the preview header (computed via pure scribe-core fns). Skipped
+                // for an oversized note (each is a full-document scan).
+                let (done, total) = if preview_too_large {
+                    (0, 0)
+                } else {
+                    scribe_core::md_ops::tasks_progress(&md)
+                };
+                let (mins, headings) = if preview_too_large {
+                    (0, 0)
+                } else {
+                    let words = md.split_whitespace().count();
+                    (
+                        scribe_core::md_ops::reading_time_minutes(words),
+                        scribe_core::md_ops::heading_outline(&md).len(),
+                    )
+                };
                 // Source lines whose checkbox was clicked this frame (applied
                 // after the panel closes so the borrow on `md` is released).
                 let mut toggled: Vec<usize> = Vec::new();
@@ -1556,18 +1574,34 @@ impl ScribeApp {
                             );
                         });
                         // Note metrics line: "~N min · H headings · ☑ done/total".
-                        ui.horizontal_wrapped(|ui| {
-                            let mut bits = format!("~{mins} min · {headings} headings");
-                            if total > 0 {
-                                bits.push_str(&format!(" · ☑ {done}/{total}"));
-                            }
-                            ui.label(RichText::new(bits).color(muted).small().monospace());
-                        });
+                        if !preview_too_large {
+                            ui.horizontal_wrapped(|ui| {
+                                let mut bits = format!("~{mins} min · {headings} headings");
+                                if total > 0 {
+                                    bits.push_str(&format!(" · ☑ {done}/{total}"));
+                                }
+                                ui.label(RichText::new(bits).color(muted).small().monospace());
+                            });
+                        }
                         ui.separator();
                         egui::ScrollArea::vertical()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                toggled = crate::md_preview::show(ui, &md, accent, muted);
+                                if preview_too_large {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Note is {:.1} MiB — live preview is disabled above \
+                                             {} MiB to keep editing responsive. Editing, syntax \
+                                             highlighting and all other features stay active.",
+                                            md.len() as f64 / (1024.0 * 1024.0),
+                                            PREVIEW_MAX_BYTES / (1024 * 1024),
+                                        ))
+                                        .color(muted)
+                                        .small(),
+                                    );
+                                } else {
+                                    toggled = crate::md_preview::show(ui, &md, accent, muted);
+                                }
                             });
                     });
                 // Apply any preview checkbox clicks to the SOURCE (edits the real

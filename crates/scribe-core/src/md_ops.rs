@@ -244,7 +244,9 @@ pub fn continue_list_marker(line: &str) -> ListContinuation {
 
     let mut marker = match &m.kind {
         MarkerKind::Bullet(c) => format!("{}{} ", m.indent, c),
-        MarkerKind::Ordered { num, delim } => format!("{}{}{} ", m.indent, num + 1, delim),
+        MarkerKind::Ordered { num, delim } => {
+            format!("{}{}{} ", m.indent, num.saturating_add(1), delim)
+        }
     };
     if task.is_some() {
         marker.push_str("[ ] ");
@@ -352,7 +354,7 @@ fn renumber_ordered_lists(lines: &mut [String]) {
                     format!("{new_token} {}", m.content)
                 };
                 *line = body;
-                *n += 1;
+                *n = n.saturating_add(1);
             }
             MarkerKind::Bullet(_) => {
                 // A bullet at this indent breaks any ordered run at this level.
@@ -377,8 +379,10 @@ fn renumber_ordered_lists(lines: &mut [String]) {
 /// Returns `(new_text, new_lo, new_hi)` as char indices selecting the inner
 /// content (so the caller can restore a sensible selection).
 pub fn toggle_wrap(text: &str, lo: usize, hi: usize, marker: &str) -> (String, usize, usize) {
-    let lo = lo.min(hi);
-    let hi = lo.max(hi).max(lo);
+    // Normalise a possibly-reversed range from the ORIGINAL endpoints. (Computing
+    // `hi` from the already-minimised `lo` collapsed a reversed range to an empty
+    // one instead of swapping — latent, since callers pre-normalise today.)
+    let (lo, hi) = (lo.min(hi), lo.max(hi));
     let chars: Vec<char> = text.chars().collect();
     let mlen = marker.chars().count();
     let sel: String = chars[lo..hi.min(chars.len())].iter().collect();
@@ -897,6 +901,30 @@ mod tests {
         let c = continue_list_marker("just prose");
         assert!(c.marker_to_insert.is_none());
         assert!(!c.clear_current_line);
+    }
+
+    #[test]
+    fn continue_ordered_marker_saturates_at_u64_max() {
+        // A ordinal at u64::MAX must not overflow to `0.` (which wrapped in
+        // release, where overflow-checks are off, and panicked in debug).
+        let line = format!("{}. last", u64::MAX);
+        let c = continue_list_marker(&line);
+        assert_eq!(
+            c.marker_to_insert.as_deref(),
+            Some(format!("{}. ", u64::MAX).as_str()),
+            "the next ordinal must saturate at u64::MAX, not wrap to 0"
+        );
+    }
+
+    #[test]
+    fn toggle_wrap_normalises_reversed_range() {
+        // A reversed (hi < lo) selection must wrap the same inner text as the
+        // forward range, not collapse to an empty insertion. Regression: `hi`
+        // was derived from the already-minimised `lo`, yielding (min,min).
+        let (fwd, _, _) = toggle_wrap("hello", 1, 4, "*");
+        let (rev, _, _) = toggle_wrap("hello", 4, 1, "*");
+        assert_eq!(fwd, "h*ell*o");
+        assert_eq!(rev, fwd, "reversed range must wrap identically to forward");
     }
 
     // ---- P0-3 indent / outdent + renumber ----

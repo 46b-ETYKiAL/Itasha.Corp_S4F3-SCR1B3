@@ -67,7 +67,7 @@ criteria = "safe-to-run"
 notes = "criterion dev-bench dependency tree (dev-only, never shipped)"
 
 [[exemptions.anyhow]]
-version = "1.0.102"
+version = "1.0.103"
 criteria = "safe-to-deploy"
 
 [[exemptions.arboard]]
