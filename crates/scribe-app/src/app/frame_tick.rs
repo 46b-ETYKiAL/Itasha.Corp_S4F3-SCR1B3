@@ -274,14 +274,29 @@ impl ScribeApp {
             ctx.request_repaint();
         }
 
-        // #104 — apply the note syntax colour theme to the highlighter when it
-        // changes (also runs once on the first frame to honour the saved
-        // config). Clearing the highlight cache forces a re-colour next render.
-        if self.config.editor.note_theme != self.applied_note_theme {
-            self.hl.set_theme(&self.config.editor.note_theme);
+        // #104 / #E P1 — apply the editor highlight theme when it changes (also
+        // runs once on the first frame to honour the saved config). When
+        // `syntax_from_theme` is ON the active CHROME theme's documented
+        // `[syntax]` map (incl. the `markup.*` keys) drives editor colours;
+        // otherwise the `note_theme` syntect preset does. The applied marker
+        // reuses `applied_note_theme`: a NUL-prefixed `\0core:<name>` sentinel
+        // (which can never equal a real note-theme name) keys off the chrome
+        // theme so a theme switch — or toggling the flag — re-applies. Clearing
+        // the highlight cache forces a re-colour next render.
+        let desired_hl_theme = if self.config.editor.syntax_from_theme {
+            format!("\u{0}core:{}", self.theme.name)
+        } else {
+            self.config.editor.note_theme.clone()
+        };
+        if desired_hl_theme != self.applied_note_theme {
+            if self.config.editor.syntax_from_theme {
+                self.hl.set_core_theme(&self.theme);
+            } else {
+                self.hl.set_theme(&self.config.editor.note_theme);
+            }
             *self.hl_cache.borrow_mut() = None;
             *self.hl_galley_cache.borrow_mut() = None;
-            self.applied_note_theme = self.config.editor.note_theme.clone();
+            self.applied_note_theme = desired_hl_theme;
         }
 
         // Live-reload config when the file changes on disk (external edit).
@@ -1903,6 +1918,14 @@ impl ScribeApp {
                     let ext_ref = ext.as_deref();
                     let layout_fg =
                         ui_color(&self.theme, "foreground", Rgba::new(0xc8, 0xd6, 0xdc, 255));
+                    // #D — the themeable URL colour: the chrome theme's `[syntax]`
+                    // `url` token, falling back to the `accent` UI colour so every
+                    // theme colours links coherently without extra config.
+                    let detect_links = self.config.editor.detect_links;
+                    let url_color = scribe_render::color32(self.theme.syntax_color(
+                        "url",
+                        self.theme.ui("accent", Rgba::new(0x4c, 0xc2, 0xff, 255)),
+                    ));
                     let mut layouter = make_layouter(
                         hl,
                         &self.hl_cache,
@@ -1913,6 +1936,8 @@ impl ScribeApp {
                         line_height,
                         word_wrap,
                         layout_fg,
+                        url_color,
+                        detect_links,
                     );
                     let mut sa = if word_wrap {
                         egui::ScrollArea::vertical()
@@ -1959,6 +1984,75 @@ impl ScribeApp {
                         // Bump the gen counter so the minimap + spell caches refresh.
                         if out.response.changed() {
                             self.tabs[active].edit_gen = self.tabs[active].edit_gen.wrapping_add(1);
+                        }
+                        // #D — clickable-URL overlay pass. The persistent colour +
+                        // underline is painted by the syntax layer (highlight_job);
+                        // here we add the hover affordance (P1) and the click-open
+                        // (P0). Detect http(s):// URLs as GLOBAL byte ranges, map the
+                        // pointer to a char via the galley, and on Ctrl/Cmd-click
+                        // over a URL open it in the OS browser — scheme-allow-listed
+                        // to http/https (a URL in a file is untrusted data; open only
+                        // on an explicit modifier-click, never on render). Bounded by
+                        // a buffer-size cap like the other per-frame overlays.
+                        if self.config.editor.detect_links
+                            && self.tabs[active].text.len() <= 1_000_000
+                        {
+                            let text_ref = &self.tabs[active].text;
+                            let mut url_spans: Vec<(usize, usize, &str)> = Vec::new();
+                            let mut base = 0usize;
+                            for line in text_ref.split_inclusive('\n') {
+                                for r in scribe_core::url_scan::detect_urls(line) {
+                                    url_spans.push((base + r.start, base + r.end, &line[r]));
+                                }
+                                base += line.len();
+                            }
+                            if !url_spans.is_empty() {
+                                if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
+                                    if out.response.rect.contains(p) {
+                                        let rel = p - out.galley_pos;
+                                        let ci = out.galley.cursor_from_pos(rel).index;
+                                        let byte = char_to_byte(text_ref, ci);
+                                        if let Some(&(_, _, url)) = url_spans
+                                            .iter()
+                                            .find(|(s, e, _)| byte >= *s && byte < *e)
+                                        {
+                                            let cmd = ui.input(|i| i.modifiers.command);
+                                            // P1 — pointer affordance when the follow
+                                            // modifier is held.
+                                            if cmd {
+                                                ui.ctx().set_cursor_icon(
+                                                    egui::CursorIcon::PointingHand,
+                                                );
+                                            }
+                                            // P1 — anti-phishing hover preview of the
+                                            // destination (so the user sees where a
+                                            // link goes before opening it).
+                                            egui::show_tooltip_at_pointer(
+                                                ui.ctx(),
+                                                out.response.layer_id,
+                                                egui::Id::new("scr1b3-url-tooltip"),
+                                                |ui| {
+                                                    ui.label(if cmd {
+                                                        url.to_string()
+                                                    } else {
+                                                        format!("{url}  —  Ctrl+click to open")
+                                                    });
+                                                },
+                                            );
+                                            // P0 — open only on explicit modifier-click,
+                                            // and only for an http/https scheme.
+                                            if cmd
+                                                && ui.input(|i| i.pointer.primary_clicked())
+                                                && scribe_core::url_scan::is_clickable_url(url)
+                                            {
+                                                ui.ctx().open_url(egui::OpenUrl::new_tab(
+                                                    url.to_string(),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         // #78 — paint a red squiggle under each misspelling. Map
                         // the byte span to galley cursor rects and draw a wavy

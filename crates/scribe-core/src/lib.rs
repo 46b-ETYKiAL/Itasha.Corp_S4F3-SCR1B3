@@ -37,6 +37,7 @@ pub mod syntax;
 pub mod text_ops;
 pub mod theme;
 pub mod update;
+pub mod url_scan;
 
 /// Test-only `tracing` capture harness shared by the unit-test modules that
 /// assert on the silent-failure log sites (verify-fail, anti-downgrade, corrupt

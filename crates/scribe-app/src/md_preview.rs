@@ -528,6 +528,48 @@ fn render_runs(ui: &mut egui::Ui, runs: &[MdRun], accent: Color32, muted: Color3
             }
             continue;
         }
+        // #D P2 — bare-autolink parity: pulldown-cmark does not turn a plain-text
+        // `http(s)://…` (not wrapped in `<>` or `[]()`) into a link, so such URLs
+        // in body text were inert in the preview while the editor made them
+        // clickable. Reuse the editor's `detect_urls` + the same http/https
+        // scheme allow-list here so preview matches the editor. Only for plain
+        // (non-code, non-emphasis-mixed) runs; a run already carrying `link` took
+        // the branch above.
+        if !r.code {
+            let ranges = scribe_core::url_scan::detect_urls(&r.text);
+            if !ranges.is_empty() {
+                // Emphasis carries onto the non-URL sub-segments.
+                let styled = |s: &str| {
+                    let mut rt = RichText::new(s);
+                    if r.bold {
+                        rt = rt.strong();
+                    }
+                    if r.italic {
+                        rt = rt.italics();
+                    }
+                    rt
+                };
+                let mut pos = 0usize;
+                for rng in ranges {
+                    if rng.start > pos {
+                        ui.label(styled(&r.text[pos..rng.start]));
+                    }
+                    let url = &r.text[rng.clone()];
+                    // Bare autolinks are http/https by construction, but re-check
+                    // the allow-list as defence-in-depth (mirrors the link branch).
+                    if scribe_core::url_scan::is_clickable_url(url) {
+                        ui.hyperlink_to(RichText::new(url).color(accent), url);
+                    } else {
+                        ui.label(styled(url));
+                    }
+                    pos = rng.end;
+                }
+                if pos < r.text.len() {
+                    ui.label(styled(&r.text[pos..]));
+                }
+                continue;
+            }
+        }
         let mut rt = RichText::new(&r.text);
         if r.bold {
             rt = rt.strong();
@@ -902,6 +944,41 @@ mod tests {
         assert!(h.query_by_label("Big Heading").is_some());
         assert!(h.query_by_label("Small Heading").is_some());
         assert!(h.query_by_label("a link").is_some());
+    }
+
+    /// #D P2 — a BARE `http(s)://` URL in body text (not `[]()` nor `<>`) must
+    /// render as a clickable hyperlink in the preview, matching the editor.
+    /// `ui.hyperlink_to` exposes a `Link` role node in the AccessKit tree, while
+    /// a plain `ui.label` would not — so a queryable Link node proves the fix.
+    #[test]
+    fn preview_makes_bare_autolinks_clickable() {
+        // A bare `http(s)://` URL is split out of the surrounding paragraph text
+        // into its OWN `hyperlink_to` node (proven by the URL becoming an
+        // independently-labelled node). Without the D-P2 fix the whole line is a
+        // single plain label and the URL sub-string is not a queryable node — so
+        // this label-split is the discriminating signal that the fix is live.
+        use egui_kittest::kittest::Queryable as _;
+        let md = "see http://bare.example.com/x for details\n";
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::Vec2::new(600.0, 400.0))
+            .build_ui(move |ui| {
+                show(
+                    ui,
+                    md,
+                    Color32::from_rgb(0, 0xd0, 0xa0),
+                    Color32::from_rgb(0x80, 0x80, 0x80),
+                )
+            });
+        h.run();
+        assert!(
+            h.query_by_label("http://bare.example.com/x").is_some(),
+            "a bare URL must be split into its own clickable link node"
+        );
+        // The surrounding prose is present as its own (non-URL) node too.
+        assert!(
+            h.query_by_label_contains("for details").is_some(),
+            "surrounding prose must still render"
+        );
     }
 
     #[test]
