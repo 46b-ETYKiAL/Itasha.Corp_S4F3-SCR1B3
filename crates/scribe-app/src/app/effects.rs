@@ -4,29 +4,22 @@
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
-/// Paint a translucent color tint over the whole window (portable; works in
-/// every mode and on every OS). Strength scales the alpha.
-pub(super) fn paint_tint_overlay(ctx: &egui::Context, tint_hex: &str, strength: f32) {
-    let Some(c) = Rgba::parse_hex(tint_hex) else {
-        return;
-    };
-    let a = (strength.clamp(0.0, 1.0) * 90.0).round() as u8;
-    // #77 — paint the tint at the BACKMOST layer so it washes the app
-    // background only. At Order::Foreground it painted OVER every window
-    // (including the Settings window), which is exactly the "transparency
-    // applies to the settings window" bug the user reported. Behind the panels,
-    // it shows through translucent (glass-mode) chrome but never over a window.
-    let painter = ctx.layer_painter(egui::LayerId::new(
-        egui::Order::Background,
-        egui::Id::new("tint-overlay"),
-    ));
-    painter.rect_filled(
-        // egui 0.34: screen_rect -> content_rect (same window-content footprint).
-        ctx.content_rect(),
-        0.0,
-        Color32::from_rgba_unmultiplied(c.r, c.g, c.b, a),
-    );
-}
+/// Window colour-tint — now an inert no-op.
+///
+/// The tint used to be painted here as a translucent full-window rect at
+/// `Order::Background`. That was an OVERLAY layer whose visibility depended on
+/// the panel-fill alpha: in an opaque window it did nothing, and in a
+/// translucent/glass window it washed the ENTIRE content area — the background
+/// behind AND around every glyph — so the user perceived the text itself as
+/// tinted ("it tints the ENTIRE app including the text").
+///
+/// The tint is now applied as COLOUR MATH on the background surfaces instead:
+/// `render_support::apply_window_tint` blends the tint into the chrome panel
+/// fill (`panel_fill`) and into the editor visuals (`current_visuals`). That
+/// shifts only background colours; glyphs are painted on top with their own
+/// untinted theme colours, so text is never affected. This function is kept as
+/// a no-op purely so its existing call site stays valid without change.
+pub(super) fn paint_tint_overlay(_ctx: &egui::Context, _tint_hex: &str, _strength: f32) {}
 
 /// Paint translucent horizontal CRT scanlines over the window — a calm retro
 /// post-effect ported from C0PL4ND. Dark bands a few points apart at `darkness`
