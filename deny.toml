@@ -11,6 +11,18 @@ ignore = [
     # to migrate; evaluate tree-sitter-only fallback at the 90-day
     # mark. Documented in docs/audits/deep-scan-2026-05-29.md.
     "RUSTSEC-2025-0141",
+    # RUSTSEC-2026-0194 + RUSTSEC-2026-0195 — quick-xml 0.39.4 DoS advisories
+    # (quadratic attribute-dedup runtime; unbounded NsReader namespace
+    # allocation). quick-xml is a BUILD-TIME proc-macro dependency ONLY, via
+    # wayland-scanner (Linux Wayland bindings, winit → egui/eframe). It parses
+    # the TRUSTED Wayland protocol XML shipped with the crate at build time and
+    # never processes untrusted input at runtime, so the memory-exhaustion /
+    # quadratic-parse vectors are not reachable in our usage. wayland-scanner
+    # 0.31.x pins quick-xml 0.39.x (no patched 0.39 release reachable without
+    # bumping the whole winit/egui windowing stack). Re-evaluate when winit/
+    # egui update wayland-scanner past the patched quick-xml.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [licenses]

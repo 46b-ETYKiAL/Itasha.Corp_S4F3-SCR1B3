@@ -335,6 +335,73 @@ fn color_from_theme(theme: &syntect::highlighting::Theme, name: &str) -> [u8; 3]
     [c.r, c.g, c.b]
 }
 
+/// Resolve the foreground RGB a syntect `theme` assigns to a literal `scope`
+/// (e.g. `meta.separator`, `markup.heading`). Used by the decorative-divider
+/// overlay to colour dividers with the active note theme's own colours.
+fn scope_color(theme: &syntect::highlighting::Theme, scope: &str) -> [u8; 3] {
+    use std::str::FromStr;
+    let hl = syntect::highlighting::Highlighter::new(theme);
+    let stack = ScopeStack::from_str(scope).unwrap_or_default();
+    let c = hl.style_for_stack(stack.as_slice()).foreground;
+    [c.r, c.g, c.b]
+}
+
+/// Markdown / note file extensions that get the decorative-divider overlay.
+fn is_markdown_ext(ext: Option<&str>) -> bool {
+    matches!(
+        ext,
+        Some("md" | "markdown" | "mdown" | "mkd" | "mkdn" | "mdwn" | "mdtxt" | "text")
+    )
+}
+
+/// The "divider alphabet": characters (besides ASCII spaces) a decorative
+/// divider line may contain. A line built ONLY from these, with NO letters or
+/// digits, reads as a visual separator that no markdown grammar scopes.
+const DIVIDER_CHARS: &[char] = &[
+    '-', '=', '*', '_', '~', '/', '\\', '+', '.', '|', '#', '<', '>', ':',
+];
+
+/// True when `trimmed` (leading/trailing whitespace already removed) is a
+/// decorative divider run like `----`, `====//====//`, `* * *`, `~~~~`,
+/// `-=-=-=`, or a box-drawing rule (`────`, `═══`). Deliberately conservative:
+/// the "no letters/digits" guard means real prose, code, list items, and table
+/// rows (which always contain alphanumerics) can never match. See
+/// [`Highlighter::apply_divider_overlay`].
+pub fn is_decorative_divider(trimmed: &str) -> bool {
+    let non_space: Vec<char> = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+    // CommonMark thematic-break floor.
+    if non_space.len() < 3 {
+        return false;
+    }
+    // Box-drawing rule (─ ━ ═ ┄ ╌ ║ …): a line that is >=80% U+2500..=U+257F.
+    let box_n = non_space
+        .iter()
+        .filter(|c| ('\u{2500}'..='\u{257F}').contains(c))
+        .count();
+    if box_n * 100 >= non_space.len() * 80 {
+        return true;
+    }
+    // Strong guard: any letter or digit disqualifies the line.
+    if trimmed.chars().any(char::is_alphanumeric) {
+        return false;
+    }
+    // Every non-space char must be in the small divider alphabet.
+    if !non_space.iter().all(|c| DIVIDER_CHARS.contains(c)) {
+        return false;
+    }
+    // Tiny distinct alphabet — a real symbol expression uses more variety.
+    let distinct: std::collections::BTreeSet<char> = non_space.iter().copied().collect();
+    if distinct.len() > 4 {
+        return false;
+    }
+    // punct_ratio >= 0.50 tolerates the interior spaces in `* * *` / `- - -`
+    // (a CommonMark thematic break allows spaces between the marks) while still
+    // rejecting a line that is mostly whitespace. The no-alphanumeric guard above
+    // is the real protection against prose/code; this is a secondary sanity bound.
+    let total = trimmed.chars().count().max(1);
+    non_space.len() * 100 >= total * 50
+}
+
 /// Map a capture name to an RGB color by longest-meaningful prefix.
 fn color_for(name: &str) -> [u8; 3] {
     if name.starts_with("keyword") {
@@ -617,6 +684,161 @@ impl Highlighter {
                 ],
             ),
         );
+
+        // Popular note colour palettes (canonical upstream hexes), mapped onto
+        // the same markup scopes the brand themes use — so every markup.* token
+        // AND the decorative-divider overlay colour for free under each. `#rrggbb`
+        // kept verbatim so a reader can diff against the upstream scheme.
+        fn hex(s: &str) -> SynColor {
+            let n = u32::from_str_radix(s.trim_start_matches('#'), 16).unwrap_or(0);
+            SynColor {
+                r: (n >> 16) as u8,
+                g: (n >> 8) as u8,
+                b: n as u8,
+                a: 0xFF,
+            }
+        }
+        // roles → the 8 scope slots + chrome. `sep` colours selection/line; the
+        // divider/thematic-break colour is the `list` slot (rules[7]), which is
+        // the most visible palette accent (the Notepad++ "operator-run" look).
+        #[allow(clippy::too_many_arguments)]
+        fn palette(
+            name: &str,
+            bg: &str,
+            fg: &str,
+            heading: &str,
+            bold: &str,
+            italic: &str,
+            quote: &str,
+            list: &str,
+            code: &str,
+            link: &str,
+            sep: &str,
+            tag: &str,
+        ) -> SynTheme {
+            theme(
+                name,
+                hex(bg),
+                hex(fg),
+                hex(heading),
+                hex(sep),
+                hex(sep),
+                [
+                    hex(quote),
+                    hex(bold),
+                    hex(code),
+                    hex(tag),
+                    hex(link),
+                    hex(heading),
+                    hex(italic),
+                    hex(list),
+                ],
+            )
+        }
+        for t in [
+            palette(
+                "Dracula", "#282a36", "#f8f8f2", "#bd93f9", "#ffb86c", "#8be9fd", "#6272a4",
+                "#50fa7b", "#f1fa8c", "#ff79c6", "#44475a", "#ff5555",
+            ),
+            palette(
+                "Nord", "#2e3440", "#d8dee9", "#88c0d0", "#d08770", "#8fbcbb", "#4c566a",
+                "#a3be8c", "#ebcb8b", "#81a1c1", "#434c5e", "#b48ead",
+            ),
+            palette(
+                "Gruvbox Dark",
+                "#282828",
+                "#ebdbb2",
+                "#fabd2f",
+                "#fe8019",
+                "#8ec07c",
+                "#928374",
+                "#b8bb26",
+                "#d3869b",
+                "#83a598",
+                "#504945",
+                "#fb4934",
+            ),
+            palette(
+                "Tokyo Night",
+                "#1a1b26",
+                "#c0caf5",
+                "#7aa2f7",
+                "#ff9e64",
+                "#7dcfff",
+                "#565f89",
+                "#9ece6a",
+                "#e0af68",
+                "#b4f9f8",
+                "#3b4261",
+                "#bb9af7",
+            ),
+            palette(
+                "Monokai", "#272822", "#f8f8f2", "#66d9ef", "#fd971f", "#ae81ff", "#75715e",
+                "#a6e22e", "#e6db74", "#f92672", "#49483e", "#fd5ff0",
+            ),
+            palette(
+                "One Dark", "#282c34", "#abb2bf", "#61afef", "#e5c07b", "#c678dd", "#5c6370",
+                "#98c379", "#56b6c2", "#61afef", "#3e4451", "#e06c75",
+            ),
+            palette(
+                "Catppuccin Mocha",
+                "#1e1e2e",
+                "#cdd6f4",
+                "#89b4fa",
+                "#fab387",
+                "#f5c2e7",
+                "#6c7086",
+                "#a6e3a1",
+                "#f9e2af",
+                "#89dceb",
+                "#45475a",
+                "#cba6f7",
+            ),
+            palette(
+                "Rosé Pine",
+                "#191724",
+                "#e0def4",
+                "#9ccfd8",
+                "#f6c177",
+                "#ebbcba",
+                "#6e6a86",
+                "#31748f",
+                "#f6c177",
+                "#c4a7e7",
+                "#403d52",
+                "#eb6f92",
+            ),
+            palette(
+                "GitHub Light",
+                "#ffffff",
+                "#24292f",
+                "#0969da",
+                "#953800",
+                "#1a7f37",
+                "#6e7781",
+                "#116329",
+                "#0a3069",
+                "#0969da",
+                "#afb8c1",
+                "#cf222e",
+            ),
+            palette(
+                "Catppuccin Latte",
+                "#eff1f5",
+                "#4c4f69",
+                "#1e66f5",
+                "#fe640b",
+                "#179299",
+                "#8c8fa1",
+                "#40a02b",
+                "#df8e1d",
+                "#8839ef",
+                "#bcc0cc",
+                "#d20f39",
+            ),
+        ] {
+            themes.themes.insert(t.name.clone().unwrap_or_default(), t);
+        }
     }
 
     /// Number of bundled syntect languages (sanity / about-box).
@@ -693,7 +915,9 @@ impl Highlighter {
                 return spans;
             }
         }
-        self.highlight_syntect(text, ext)
+        let mut spans = self.highlight_syntect(text, ext);
+        self.apply_divider_overlay(&mut spans, text, ext);
+        spans
     }
 
     /// Incremental form of [`highlight_document`](Self::highlight_document): reuses
@@ -718,7 +942,89 @@ impl Highlighter {
                 return spans;
             }
         }
-        self.highlight_syntect_incremental(text, ext, cache)
+        let mut spans = self.highlight_syntect_incremental(text, ext, cache);
+        self.apply_divider_overlay(&mut spans, text, ext);
+        spans
+    }
+
+    /// Post-highlight overlay for markdown/note files: recolour lines that are
+    /// DECORATIVE DIVIDERS so `----`, `====//====//`, `~~~~`, `* * *`, and
+    /// setext underlines get a visible colour — the Notepad++ "operator-run"
+    /// effect. syntect's Markdown grammar scopes none of these (or scopes `----`
+    /// only as a muted thematic-break), so without this they read as plain text.
+    /// A no-op for non-markdown files. Never touches lines inside a fenced code
+    /// block. A pure `=`/`-` run directly under a paragraph line is a SETEXT
+    /// underline → heading colour; every other divider → separator colour.
+    fn apply_divider_overlay(&self, per_line: &mut [Vec<HlSpan>], text: &str, ext: Option<&str>) {
+        if !is_markdown_ext(ext) {
+            return;
+        }
+        let Some(theme) = self.themes.themes.get(&self.theme_name) else {
+            return;
+        };
+        // Resolve a VISIBLE divider colour: many themes (the syntect base16 set)
+        // don't distinguish `meta.separator`, so it resolves to the plain
+        // foreground and a recolour would be a no-op. Walk progressively more
+        // prominent scopes and take the first whose colour actually differs from
+        // the theme's default foreground — this reproduces the Notepad++
+        // operator-colour look under every theme.
+        let theme_fg = theme
+            .settings
+            .foreground
+            .map_or(DEFAULT_FG, |c| [c.r, c.g, c.b]);
+        let first_distinct = |scopes: &[&str], fallback: [u8; 3]| -> [u8; 3] {
+            scopes
+                .iter()
+                .map(|s| scope_color(theme, s))
+                .find(|c| *c != theme_fg)
+                .unwrap_or(fallback)
+        };
+        let sep = first_distinct(
+            &[
+                "meta.separator",
+                "punctuation.definition.thematic-break",
+                "keyword.operator",
+                "punctuation",
+                "markup.list",
+                "keyword",
+            ],
+            scope_color(theme, "markup.heading"),
+        );
+        let head = first_distinct(&["markup.heading", "entity.name.type"], sep);
+        let mut in_fence = false;
+        // Whether the previous non-blank, non-fence line was ordinary paragraph
+        // text (has letters/digits) — a following pure `=`/`-` line is its setext
+        // underline.
+        let mut prev_is_text = false;
+        for (i, raw) in LinesWithEndings::from(text).enumerate() {
+            let line = raw.trim_end_matches(['\n', '\r']);
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+                in_fence = !in_fence;
+                prev_is_text = false;
+                continue;
+            }
+            if in_fence || trimmed.is_empty() {
+                prev_is_text = false;
+                continue;
+            }
+            if is_decorative_divider(trimmed) {
+                let pure = |ch: char| trimmed.chars().all(|x| x == ch || x.is_whitespace());
+                let is_setext = prev_is_text && (pure('=') || pure('-'));
+                let color = if is_setext { head } else { sep };
+                if let Some(spans) = per_line.get_mut(i) {
+                    *spans = vec![HlSpan {
+                        range: 0..line.len(),
+                        color,
+                        bold: false,
+                        italic: false,
+                    }];
+                }
+                prev_is_text = false;
+            } else {
+                prev_is_text = true;
+            }
+        }
     }
 
     /// syntect incremental pass — resumes from the nearest snapshot at/below the
@@ -1078,6 +1384,82 @@ fn span_from(style: SynStyle, range: Range<usize>) -> HlSpan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decorative_divider_matches_dividers_not_prose() {
+        // Dividers that no markdown grammar scopes — all must match.
+        for s in [
+            "----",
+            "====",
+            "====//====//====//",
+            "****",
+            "~~~~",
+            "-=-=-=",
+            "* * *",
+            "- - -",
+            "________",
+            "////////",
+            "────────", // box-drawing
+            "═══════",  // box-drawing double
+        ] {
+            assert!(
+                is_decorative_divider(s.trim()),
+                "should be a divider: {s:?}"
+            );
+        }
+        // Prose / code / structure — must NOT match (the no-alnum guard etc.).
+        for s in [
+            "--",                // below the length floor
+            "note ----",         // has letters
+            "let x = 1;",        // code
+            "| col a | col b |", // table row (letters)
+            "TODO: ====",        // has letters
+            "a/b/c",             // has letters
+            "https://x",         // has letters
+            "",                  // empty
+        ] {
+            assert!(
+                !is_decorative_divider(s.trim()),
+                "should NOT be a divider: {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn added_note_palettes_are_registered_and_selectable() {
+        // The new popular palettes must load into the ThemeSet and be selectable.
+        let mut hl = Highlighter::new();
+        for name in [
+            "Dracula",
+            "Nord",
+            "Tokyo Night",
+            "Catppuccin Mocha",
+            "GitHub Light",
+        ] {
+            hl.set_theme(name);
+            // set_theme is a no-op for an unknown name, so an applied name proves
+            // the palette registered into the ThemeSet.
+            assert_eq!(
+                hl.theme_name(),
+                name,
+                "note theme should be selectable: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn divider_overlay_recolours_a_bare_decorative_line() {
+        // A `====//====//` line has no markdown scope, so without the overlay its
+        // span is the default foreground; the overlay must recolour it to the
+        // theme's separator colour (distinct from the default fg).
+        let hl = Highlighter::new();
+        let md = "text\n\n====//====//\n";
+        let lines = hl.highlight_document(md, Some("md"));
+        // line index 2 is the divider.
+        let div = &lines[2];
+        assert_eq!(div.len(), 1, "divider line should be one recoloured span");
+        assert_ne!(div[0].color, DEFAULT_FG, "divider must not stay default fg");
+    }
 
     #[test]
     fn note_theme_switch_is_applied_and_validated() {
