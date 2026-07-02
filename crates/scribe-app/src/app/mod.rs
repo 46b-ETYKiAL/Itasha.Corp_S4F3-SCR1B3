@@ -1779,6 +1779,17 @@ pub(crate) const NOTE_THEMES: &[&str] = &[
     "Wired Noir",
     "Phosphor Amber",
     "Operator Violet",
+    // Popular note palettes (see `Highlighter::add_bundled_themes`).
+    "Dracula",
+    "Nord",
+    "Gruvbox Dark",
+    "Tokyo Night",
+    "Monokai",
+    "One Dark",
+    "Catppuccin Mocha",
+    "Rosé Pine",
+    "GitHub Light",
+    "Catppuccin Latte",
 ];
 
 impl eframe::App for ScribeApp {

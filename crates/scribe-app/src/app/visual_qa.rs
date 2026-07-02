@@ -85,6 +85,80 @@ fn scene_default() {
     render_scene("default", 1100.0, 720.0, app);
 }
 
+/// A markdown-rich note sample used by the note-colouring QA scenes — exercises
+/// headings, setext underlines, `----` thematic breaks, decorative `====//`
+/// dividers, bold/italic/code/strike, quotes, lists, task boxes, links, `#tags`,
+/// and tables.
+const MD_COLOR_SAMPLE: &str = r#"# ATX Heading 1
+## ATX Heading 2
+### ATX Heading 3
+
+Setext Heading 1
+================
+
+Setext Heading 2
+----------------
+
+Thematic break below:
+
+----
+
+Decorative divider:
+
+====//====//====//
+
+Some **bold**, *italic*, `inline code` and ~~strikethrough~~ text.
+
+> A blockquote line.
+
+- bullet item
+- [ ] unchecked task
+- [x] checked task
+1. numbered item
+
+```rust
+fn code() { let x = 1; }
+```
+
+A [link](https://example.com), a #tag, and a bare https://bare.example.com URL.
+
+| col a | col b |
+|:-----:|-------|
+| 1     | 2     |
+"#;
+
+/// Render the markdown sample under a given note theme. Writes a temp `.md` so
+/// `language_hint` routes to the markdown grammar; sets `note_theme` so the
+/// frame applies the chosen palette.
+fn render_markdown_scene(scene: &str, note_theme: &str) {
+    let path = out_dir().join(format!("{scene}.md"));
+    std::fs::write(&path, MD_COLOR_SAMPLE).expect("write md sample");
+    let mut cfg = qa_config();
+    cfg.editor.note_theme = note_theme.to_string();
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let t = EditorTab::from_path(path).expect("open md sample");
+    app.tabs.push(t);
+    app.active = 0;
+    render_scene(scene, 1100.0, 900.0, app);
+}
+
+/// The default note theme — confirms `----`, `====//====//`, and setext
+/// underlines are now coloured by the decorative-divider overlay.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_markdown_coloring() {
+    render_markdown_scene("markdown_coloring", "base16-eighties.dark");
+}
+
+/// A newly-added popular palette (Dracula) — confirms the new note themes load
+/// and colour markdown (headings/bold/italic/link/code/divider).
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_markdown_dracula() {
+    render_markdown_scene("markdown_dracula", "Dracula");
+}
+
 /// NARROW window + a LONG status string — proves the bottom status-bar filename
 /// (right-aligned `self.status`, e.g. "opened /…/file.rs") TRUNCATES with an
 /// ellipsis instead of overflowing leftward and overlapping the left-side
