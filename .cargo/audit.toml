@@ -1,0 +1,24 @@
+# cargo-audit configuration for SCR1B3.
+#
+# The CANONICAL advisory gate is cargo-deny (deny.toml) + cargo-auditable (the
+# release build embeds a scannable SBOM for `cargo audit bin`). This file keeps a
+# plain source-tree `cargo audit` in sync with deny.toml so BOTH tools agree —
+# the ignore list below mirrors deny.toml's `[advisories].ignore` exactly, with
+# the same justifications. Keep the two in lockstep.
+[advisories]
+ignore = [
+    # bincode 1.x unmaintained. Transitive via syntect 5.x; not consumed
+    # directly. NOT a vulnerability — bincode 1.3.3 is intentionally complete.
+    "RUSTSEC-2025-0141",
+    # quick-xml 0.39.4 DoS advisories (quadratic attribute-dedup runtime;
+    # unbounded NsReader namespace allocation). quick-xml is a BUILD-TIME
+    # proc-macro dependency ONLY, via wayland-scanner (Linux Wayland bindings,
+    # winit -> egui/eframe). It parses the TRUSTED Wayland protocol XML shipped
+    # with the crate at build time and never processes untrusted input at
+    # runtime, so the memory-exhaustion / quadratic-parse vectors are not
+    # reachable in our usage. wayland-scanner 0.31.x pins quick-xml 0.39.x (no
+    # patched 0.39 release reachable without bumping the winit/egui windowing
+    # stack). Re-evaluate when winit/egui update wayland-scanner.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
