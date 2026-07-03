@@ -729,6 +729,69 @@ fn render_sections(
                     reset_to_default(ui, &mut config.editor.note_theme, &def.editor.note_theme);
                 ui.end_row();
             }
+            changed |= grid_bool(
+                ui,
+                q,
+                "rich markdown note colouring tokens master switch",
+                "Rich markdown colouring",
+                "Colour extra note tokens the syntax grammar leaves plain — divider \
+                 lines, #tags, ~~strikethrough~~, task boxes and table pipes. The \
+                 per-token switches below tune individual passes; turn this off to \
+                 disable them all at once.",
+                &mut config.editor.md_rich_coloring,
+                &def.editor.md_rich_coloring,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "markdown colour divider lines separators rules setext",
+                "  • Divider lines (----  ====//)",
+                "Colour decorative divider lines: ----, ====//====//, * * *, setext \
+                 underlines, and box-drawing rules. Active when Rich markdown \
+                 colouring is on.",
+                &mut config.editor.md_color_dividers,
+                &def.editor.md_color_dividers,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "markdown colour hashtags tags",
+                "  • #tags",
+                "Colour #tag tokens in the editor. Active when Rich markdown \
+                 colouring is on.",
+                &mut config.editor.md_color_tags,
+                &def.editor.md_color_tags,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "markdown colour strikethrough",
+                "  • ~~strikethrough~~",
+                "Colour ~~strikethrough~~ spans. Active when Rich markdown \
+                 colouring is on.",
+                &mut config.editor.md_color_strikethrough,
+                &def.editor.md_color_strikethrough,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "markdown colour task boxes checkboxes",
+                "  • Task boxes [ ] [x]",
+                "Colour GFM task checkboxes at the start of a list item. Active when \
+                 Rich markdown colouring is on.",
+                &mut config.editor.md_color_task_boxes,
+                &def.editor.md_color_task_boxes,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "markdown colour table pipes cell separators",
+                "  • Table pipes |",
+                "Colour the | cell separators in table rows. Active when Rich \
+                 markdown colouring is on.",
+                &mut config.editor.md_color_table_pipes,
+                &def.editor.md_color_table_pipes,
+            );
             if row_visible(q, "editor size") {
                 ui.label("Size")
                     .on_hover_text("Font size of the editor text, in points.");

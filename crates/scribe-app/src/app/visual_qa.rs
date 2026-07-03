@@ -130,11 +130,12 @@ A [link](https://example.com), a #tag, and a bare https://bare.example.com URL.
 /// Render the markdown sample under a given note theme. Writes a temp `.md` so
 /// `language_hint` routes to the markdown grammar; sets `note_theme` so the
 /// frame applies the chosen palette.
-fn render_markdown_scene(scene: &str, note_theme: &str) {
+fn render_markdown_scene(scene: &str, note_theme: &str, rich: bool) {
     let path = out_dir().join(format!("{scene}.md"));
     std::fs::write(&path, MD_COLOR_SAMPLE).expect("write md sample");
     let mut cfg = qa_config();
     cfg.editor.note_theme = note_theme.to_string();
+    cfg.editor.md_rich_coloring = rich;
     let mut app = ScribeApp::new_test(cfg);
     app.tabs.clear();
     let t = EditorTab::from_path(path).expect("open md sample");
@@ -143,20 +144,30 @@ fn render_markdown_scene(scene: &str, note_theme: &str) {
     render_scene(scene, 1100.0, 900.0, app);
 }
 
-/// The default note theme — confirms `----`, `====//====//`, and setext
-/// underlines are now coloured by the decorative-divider overlay.
+/// The default note theme with ALL markdown-colouring passes on — confirms
+/// `----` / `====//` dividers, `#tags`, `~~strikethrough~~`, task boxes, and
+/// table pipes are all coloured.
 #[test]
 #[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
 fn scene_markdown_coloring() {
-    render_markdown_scene("markdown_coloring", "base16-eighties.dark");
+    render_markdown_scene("markdown_coloring", "base16-eighties.dark", true);
+}
+
+/// Master switch OFF — proves every extra pass can be disabled: the same note
+/// falls back to plain syntect grammar highlighting (dividers/tags/strike/tasks/
+/// tables uncoloured).
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_markdown_no_coloring() {
+    render_markdown_scene("markdown_no_coloring", "base16-eighties.dark", false);
 }
 
 /// A newly-added popular palette (Dracula) — confirms the new note themes load
 /// and colour markdown (headings/bold/italic/link/code/divider).
 #[test]
-#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+#[ignore = "GPU render; run with --ignore on a host with a wgpu adapter"]
 fn scene_markdown_dracula() {
-    render_markdown_scene("markdown_dracula", "Dracula");
+    render_markdown_scene("markdown_dracula", "Dracula", true);
 }
 
 /// NARROW window + a LONG status string — proves the bottom status-bar filename

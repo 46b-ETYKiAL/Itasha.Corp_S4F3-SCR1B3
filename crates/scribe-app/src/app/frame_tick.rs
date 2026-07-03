@@ -283,17 +283,42 @@ impl ScribeApp {
         // (which can never equal a real note-theme name) keys off the chrome
         // theme so a theme switch — or toggling the flag — re-applies. Clearing
         // the highlight cache forces a re-colour next render.
-        let desired_hl_theme = if self.config.editor.syntax_from_theme {
+        // Extra markdown token-colouring passes — the master switch gates all;
+        // each per-token switch gates its pass.
+        let md_opts = if self.config.editor.md_rich_coloring {
+            scribe_core::syntax::MdColorOpts {
+                dividers: self.config.editor.md_color_dividers,
+                tags: self.config.editor.md_color_tags,
+                strikethrough: self.config.editor.md_color_strikethrough,
+                task_boxes: self.config.editor.md_color_task_boxes,
+                table_pipes: self.config.editor.md_color_table_pipes,
+            }
+        } else {
+            scribe_core::syntax::MdColorOpts::none()
+        };
+        let base_hl_theme = if self.config.editor.syntax_from_theme {
             format!("\u{0}core:{}", self.theme.name)
         } else {
             self.config.editor.note_theme.clone()
         };
+        // Fold the markdown-colour flags into the applied marker so toggling one
+        // in Settings re-applies + clears the highlight cache (a colour-only
+        // change that does not bump `edit_gen`).
+        let desired_hl_theme = format!(
+            "{base_hl_theme}\u{0}md:{}{}{}{}{}",
+            u8::from(md_opts.dividers),
+            u8::from(md_opts.tags),
+            u8::from(md_opts.strikethrough),
+            u8::from(md_opts.task_boxes),
+            u8::from(md_opts.table_pipes),
+        );
         if desired_hl_theme != self.applied_note_theme {
             if self.config.editor.syntax_from_theme {
                 self.hl.set_core_theme(&self.theme);
             } else {
                 self.hl.set_theme(&self.config.editor.note_theme);
             }
+            self.hl.set_md_colors(md_opts);
             *self.hl_cache.borrow_mut() = None;
             *self.hl_galley_cache.borrow_mut() = None;
             self.applied_note_theme = desired_hl_theme;

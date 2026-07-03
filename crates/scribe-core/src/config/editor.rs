@@ -46,6 +46,29 @@ pub struct EditorConfig {
     /// open is gated on an explicit modifier-click.
     #[serde(default = "default_true")]
     pub detect_links: bool,
+    /// Master switch for the extra markdown/note token-colouring passes that
+    /// colour tokens the grammar leaves plain: `----` & decorative dividers,
+    /// `#tags`, `~~strikethrough~~`, task boxes `[ ]`/`[x]`, and table `|` cell
+    /// separators. Default ON. Turn OFF to disable them all at once; the
+    /// per-token switches below disable individual passes when the master is on.
+    #[serde(default = "default_true")]
+    pub md_rich_coloring: bool,
+    /// Colour decorative divider lines (`----`, `====//====//`, `* * *`, setext
+    /// underlines, box-drawing rules). Only active when `md_rich_coloring`.
+    #[serde(default = "default_true")]
+    pub md_color_dividers: bool,
+    /// Colour `#tag` tokens in the editor. Only active when `md_rich_coloring`.
+    #[serde(default = "default_true")]
+    pub md_color_tags: bool,
+    /// Colour `~~strikethrough~~` spans. Only active when `md_rich_coloring`.
+    #[serde(default = "default_true")]
+    pub md_color_strikethrough: bool,
+    /// Colour task checkboxes `[ ]`/`[x]`. Only active when `md_rich_coloring`.
+    #[serde(default = "default_true")]
+    pub md_color_task_boxes: bool,
+    /// Colour table `|` cell separators. Only active when `md_rich_coloring`.
+    #[serde(default = "default_true")]
+    pub md_color_table_pipes: bool,
     /// Phase 18 T18.2 — enable the multi-note grid. When ON, the central
     /// editor surface renders every open tab as a movable, resizable pane
     /// inside an egui_tiles tree (up to 6 panes). Default OFF — the
@@ -324,6 +347,12 @@ impl Default for EditorConfig {
             render_whitespace: false,
             syntax_from_theme: false,
             detect_links: true,
+            md_rich_coloring: true,
+            md_color_dividers: true,
+            md_color_tags: true,
+            md_color_strikethrough: true,
+            md_color_task_boxes: true,
+            md_color_table_pipes: true,
             snippets_enabled: true,
             current_line_highlight: false,
             caret_style: CaretStyle::Bar,
