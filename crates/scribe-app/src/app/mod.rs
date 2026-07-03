@@ -548,6 +548,11 @@ pub struct ScribeApp {
     tabs: Vec<EditorTab>,
     active: usize,
     visuals_applied: bool,
+    /// Hash of the visuals-affecting config the current egui visuals were built
+    /// from (theme, window tint / strength / opacity / translucency, background
+    /// overrides). When it changes — e.g. the user drags the tint slider — the
+    /// visuals are rebuilt so the change shows live, instead of only at startup.
+    applied_visuals_sig: u64,
     /// The note (editor) syntax colour theme currently applied to `hl` (#104).
     /// When `config.editor.note_theme` diverges, the highlighter is re-themed and
     /// the highlight cache invalidated so colours refresh live.
@@ -1101,6 +1106,7 @@ impl ScribeApp {
             active: restored_active.min(tabs.len().saturating_sub(1)),
             tabs,
             visuals_applied: false,
+            applied_visuals_sig: 0,
             applied_font_family: String::new(),
             font_rebuild_pending: false,
             applied_note_theme: String::new(),

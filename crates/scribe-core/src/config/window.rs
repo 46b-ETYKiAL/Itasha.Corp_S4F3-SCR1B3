@@ -30,9 +30,14 @@ pub struct WindowConfig {
     /// Surface opacity for translucent modes (0.05..=1.0; the 0.05 floor keeps
     /// the window from becoming fully invisible).
     pub opacity: f32,
-    /// Tint color (`#RRGGBB`) painted over the window at `tint_strength`.
+    /// Master on/off switch for the window colour tint. When `false` no tint is
+    /// applied regardless of `tint`/`tint_strength`, so the user can toggle the
+    /// effect without losing their chosen colour + strength. Default ON (the
+    /// tint only shows once `tint_strength` is raised above 0).
+    pub tint_enabled: bool,
+    /// Tint color (`#RRGGBB`) blended into the window background at `tint_strength`.
     pub tint: String,
-    /// Tint overlay strength (0.0 = none .. 1.0 = strong).
+    /// Tint strength (0.0 = none .. 1.0 = strong).
     pub tint_strength: f32,
     /// F-035 from docs/audits/overlooked-surfaces-2026-05-29.md: keep the
     /// SCR1B3 window on top of other windows. Default OFF.
@@ -61,6 +66,7 @@ impl Default for WindowConfig {
             transparency_enabled: false,
             mode: WindowMode::Opaque,
             opacity: 0.92,
+            tint_enabled: true,
             tint: "#08060d".to_string(),
             tint_strength: 0.0,
             always_on_top: false,

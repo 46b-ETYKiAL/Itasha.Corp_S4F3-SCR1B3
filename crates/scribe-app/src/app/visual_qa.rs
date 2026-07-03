@@ -494,6 +494,28 @@ fn scene_tint_strong_red() {
     render_scene("tint_strong_red", 1100.0, 720.0, app);
 }
 
+/// Same strong-red tint but the `Enable window tint` toggle is OFF — proves the
+/// master switch removes the tint from the main window even with a colour +
+/// strength set. Read the PNG: the app background must be the plain (dark) theme
+/// colour, not red.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tint_disabled() {
+    let mut cfg = qa_config();
+    cfg.window.tint = "#ff0000".to_string();
+    cfg.window.tint_strength = 0.8;
+    cfg.window.tint_enabled = false; // toggle OFF
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    t.session_baseline = SAMPLE.to_string();
+    t.saved_baseline = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    render_scene("tint_disabled", 1100.0, 720.0, app);
+}
+
 /// DIAGNOSTIC — strong tint with the SETTINGS WINDOW OPEN (opaque mode). The
 /// bug report: the tint appears on the Settings popup but NOT the main app.
 /// Read the PNG: the main app chrome + editor well must be tinted AND the
