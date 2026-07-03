@@ -9,7 +9,7 @@ SCR1B3 collects **nothing** about you and transmits **no** file contents, ever.
 - **No account, no login, no cloud.** The editor works fully offline.
 - **No analytics, no usage counters, no crash beacons.** There is no phone-home.
 - **File contents never leave your device.** Editing, search, syntax highlighting, and spellcheck are entirely local.
-- **Local logs only.** Structured logs are written locally with off-by-default verbosity (controlled by the `RUST_LOG` environment variable) and are never transmitted.
+- **Logs to stderr only.** Structured logs are emitted to stderr (never a file, never transmitted); verbosity defaults to `warn` and is controlled by `RUST_LOG`.
 
 ### The two network surfaces
 
@@ -43,7 +43,7 @@ The user plugin/mod system is opt-in and sandboxed (see [PLUGINS.md](PLUGINS.md)
 
 - **A plugin only runs after you approve it.** Dropping a folder into the plugins dir does **not** auto-execute it. By default the editor uses **trust-on-first-use**: it records the SHA-256 of the *exact* entry script you approved (in `[plugins] trusted`) and refuses to run a brand-new **or silently modified** script until you approve it again (Settings → Plugins → Manage plugins → **Approve & run**). A held-back plugin is shown as "not running — needs your approval".
 - **Strict signed mode.** Set `[plugins] require_signed = true` and a plugin runs only when it carries a valid **minisign** signature over its entry script from a **pinned author key** (TOFU key-pinning; a changed key is refused). This authenticates the *code that runs*, not just metadata, via the same `update::verify` cryptographic surface as the auto-updater.
-- **Sandbox.** The scripting "easy mode" runs in a restricted Rhai engine with seven caps wired (operations, call depth, string size, array size, map size, modules, expression depth) plus a wall-clock deadline. Both the `eval` and `import` keywords are removed from the parser and the module resolver is a no-op — a script using them fails to **compile**, never just at runtime. (Compiled WASM extensions run in a WASM sandbox.)
+- **Sandbox.** The scripting "easy mode" runs in a restricted Rhai engine with seven caps wired (operations, call depth, string size, array size, map size, modules, expression depth) plus a wall-clock deadline. Both the `eval` and `import` keywords are removed from the parser and the module resolver is a no-op — a script using them fails to **compile**, never just at runtime. (A compiled-WASM power track is a documented future design — `PluginKind::Wasm` is reserved but no WASM runtime ships in v1; only the Rhai easy-mode is executable today.)
 - **Capability surface.** The v1 host exposes only buffer-text operations to scripts — there is **no** ambient filesystem, network, or process access for a script to reach, so a plugin cannot silently exfiltrate files or open the network. Privileged host capabilities (and the per-capability consent prompt the manifest models) are not yet exposed; any future privileged capability will be gated behind explicit consent before it ships.
 - You can disable any plugin via `[plugins] disabled` or turn the whole system off with `[plugins] enabled = false`.
 
@@ -73,11 +73,12 @@ The signed unit is the **whole gzipped tarball** — no metadata extraction, no 
 
 ## Unsafe-code discipline
 
-Every SCR1B3 crate carries a crate-root attribute that gates `unsafe` usage:
+Each crate declares its `unsafe` posture:
 
 - **`scribe-render`** — `#![forbid(unsafe_code)]`. Pure-safe Rust: theme → egui `Visuals` mapping, color math, CRT parameter conversion. Forbid is unconditional; no local override is reachable.
 - **`scribe-app`** — `#![forbid(unsafe_code)]`. The egui/eframe shell never needs `unsafe`.
 - **`scribe-core`** — `#![deny(unsafe_code)]` with a single documented exception in `document.rs` for the read-only `memmap2::Mmap::map` on the multi-GB-open path. The exception carries an explicit `#[allow(unsafe_code)]` annotation and a `SAFETY:` comment naming the invariants (read-only handle; dropped before any edit).
+- **`scribe-win32-chrome`** — the quarantined Win32 FFI crate for the frameless titlebar; it is unsafe by design (no forbid/deny attribute) and is the single crate where `unsafe` blocks live outside scribe-core's mmap exception. Each block carries a `SAFETY:` rationale.
 
 `forbid` is preferred where it is reachable because it **cannot be locally overridden** — a new `unsafe` block cannot land via `#[allow]`. `deny` is used only where a documented exception exists; the `#[allow(unsafe_code)]` is then visible per call-site so the unsafe budget is explicit, not implicit.
 
@@ -109,7 +110,7 @@ cleaner, more deterministic output.
 ## Supply chain
 
 - All dependencies are pinned via `Cargo.lock`.
-- `cargo-audit` (advisory database) and `cargo-deny` (license + advisory policy) gate the build in CI.
+- `cargo-audit` (advisory database) and `cargo-deny` (license + advisory policy) gate the build in CI, and `cargo-vet` (supply-chain dependency review) runs as a dedicated `supply-chain-audit` job.
 - **The telemetry-free posture is enforced at the dependency-graph level.** [`deny.toml`](deny.toml) `[bans]` denies every alternative HTTP client / async runtime (`reqwest`, `hyper`, `isahc`, `curl`, `surf`, `tokio`) and every analytics / crash-reporting crate (`sentry`, `opentelemetry`, `posthog-rs`, `mixpanel`, …). The *only* sanctioned network stack is the synchronous, runtime-free `ureq` + `rustls` used by the opt-out update check; the `cargo-deny bans` gate (a required status check) fails the build if a second egress path or any telemetry crate ever enters the tree.
 - **An unused dependency fails CI.** `cargo-machete` runs in CI and blocks any dependency that is declared but unused — keeping the dependency graph (and the attack surface) minimal.
 - A CycloneDX 1.6 SBOM is produced at release, **and the shipped binary embeds its own scannable SBOM** via `cargo-auditable`: the exact released artifact can be vuln-scanned offline with `cargo audit bin scr1b3.exe`, trivy, grype, or osv-scanner — not just a detached side-file.

@@ -55,7 +55,7 @@ graph TD
         CFG["scr1b3.toml / themes/ (TOML = data)"]
         SESS["session.json + backup/*.bak"]
         PINS["plugins/pinned-keys.toml (TOFU)"]
-        LOGS["logs/ (RUST_LOG, off by default)"]
+        LOGS["logs (stderr, RUST_LOG,<br/>default warn — not written to disk)"]
         BIN["installed binary + .bak"]
     end
 

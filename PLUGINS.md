@@ -15,7 +15,7 @@ SCR1B3 loads it on the next launch.
 | Track | Language | Build step | Use for |
 |-------|----------|-----------|---------|
 | **Easy mode** (this guide) | [Rhai](https://rhai.rs) script | **none** | commands, on-save/open hooks, buffer transforms |
-| **Power track** | any → WASM component (wasmtime/WIT) | yes (compile to `wasm32-wasip2`) | language grammars, LSP wiring, heavier extensions |
+| **Power track** | any → WASM component (wasmtime/WIT) | yes (compile to `wasm32-wasip2`) | language grammars, LSP wiring, heavier extensions (reserved — not yet shipped; only the Rhai easy-mode runs today) |
 
 The easy mode is sandboxed by construction: Rhai scripts have **no filesystem,
 network, or process access**. They can only transform buffer text and surface

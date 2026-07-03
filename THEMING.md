@@ -67,6 +67,22 @@ SCR1B3 ships **32 themes** (all compiled into the binary — no asset path neede
 
 All 32 themes keep the **one-accent-equals-system-voice** principle: a single accent colour carries every interactive signal (cursor, hover, selection, active line-number, OK status). Akira-red is **alarm-only** across the family — never decorative — with the two documented exceptions above (`akira-redshift`, `atompunk-sodium`) cabined to opt-in-only themes.
 
+## Note (editor text) colour themes
+
+The 32 themes above are the **chrome theme** (`[appearance].theme`) — they colour the app frame, gutter, panels, and titlebar. The colours of the **note text itself** (the syntax highlighting in the editing surface) come from a **separate note-colour theme**, `editor.note_theme` (see [CONFIG.md](CONFIG.md)). The two are independent: you can pair any chrome theme with any note theme.
+
+Pick one live from **Settings → Appearance → Note colour theme** — the combo applies immediately to the note text, separate from the app theme. An unknown value falls back to the default (`base16-eighties.dark`).
+
+SCR1B3 bundles **20 note themes** (all compiled in):
+
+| Group | Themes |
+|---|---|
+| Syntect base presets | `base16-eighties.dark` (**default**), `base16-mocha.dark`, `base16-ocean.dark`, `base16-ocean.light`, `InspiredGitHub`, `Solarized (dark)`, `Solarized (light)` |
+| Brand | `Wired Noir`, `Phosphor Amber`, `Operator Violet` |
+| Popular palettes | `Dracula`, `Nord`, `Gruvbox Dark`, `Tokyo Night`, `Monokai`, `One Dark`, `Catppuccin Mocha`, `Rosé Pine`, `GitHub Light`, `Catppuccin Latte` |
+
+To instead drive the in-editor colours from the active **chrome** theme's `[syntax]` map — keeping note text and app chrome in one palette — set `editor.syntax_from_theme = true` (see [Making `[syntax]` drive the editor](#making-syntax-drive-the-editor) below).
+
 ## Color values
 
 Every color is written one of two ways:
@@ -157,6 +173,8 @@ Per-level heading colors are supported via `markup.heading.1` … `markup.headin
 
 `url` colors `http(s)://` links detected in editor text (they are also underlined and
 open in your browser on Ctrl/Cmd-click). Falls back to the `accent` UI color when omitted.
+Link detection is controlled by `editor.detect_links` (default on); turn it off to render
+URLs as plain text.
 
 #### Making `[syntax]` drive the editor
 
@@ -178,6 +196,28 @@ markup.link    = "#34E0D0"
 markup.separator = "#5A6B73"
 url            = "#34E0D0"
 ```
+
+## Rich markdown token colouring (note files)
+
+Separate from the theme `[syntax] markup.*` keys above — which recolour tokens the
+grammar already knows — SCR1B3 runs five extra **overlay passes** over note files
+(`.md`/`.markdown`/`.txt` and the like) that colour structural tokens the markdown
+grammar otherwise leaves plain. These passes apply under **any** note theme; each token
+takes its colour from the active note theme's own scopes.
+
+| Pass | Colours | Example |
+|---|---|---|
+| Decorative dividers | Horizontal-rule / separator lines | `----`, `====//====//`, `* * *`, setext underlines, box-drawing rules |
+| Tags | Inline hashtags | `#tag` |
+| Strikethrough | Struck spans | `~~strikethrough~~` |
+| Task boxes | Checkbox markers | `[ ]`, `[x]` |
+| Table pipes | Cell separators | `\|` |
+
+The whole set is gated by the `editor.md_rich_coloring` master toggle, and each pass has
+its own switch — `editor.md_color_dividers`, `editor.md_color_tags`,
+`editor.md_color_strikethrough`, `editor.md_color_task_boxes`, `editor.md_color_table_pipes`
+(all default on; see [CONFIG.md](CONFIG.md)). Turn the master off to disable all five, or
+flip an individual key to tune a single pass while the master stays on.
 
 ## The compiled-in fallback: `wired-noir`
 
