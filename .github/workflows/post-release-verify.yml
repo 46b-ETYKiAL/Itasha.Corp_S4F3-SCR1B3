@@ -16,7 +16,16 @@ on:
   # token-created events to prevent recursion), so the tripwire would never fire
   # automatically. `workflow_run` fires after the Release workflow completes
   # regardless of how Release was triggered.
-  workflow_run:
+  #
+  # zizmor flags `workflow_run` as a dangerous trigger because it runs with the
+  # default branch's token and can be a privilege-escalation vector IF it checks
+  # out + executes code from the (untrusted) triggering run. This job does NOT:
+  # `permissions: contents: read` (read-only), it checks out its OWN default
+  # branch (never `github.event.workflow_run.head_*`) purely to read the embedded
+  # public key, and it only re-downloads the already-PUBLISHED release assets and
+  # verifies their minisign signatures. No untrusted code is executed, so the
+  # finding is a false positive for this verify-only tripwire.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["Release"]
     types: [completed]
   workflow_dispatch:
