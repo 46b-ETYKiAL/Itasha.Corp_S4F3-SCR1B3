@@ -10,6 +10,14 @@
 
 use super::*;
 
+/// ctx-data slot the editor right-click context menu stashes its chosen
+/// [`crate::app::commands::BuiltinCommand`] into, to be drained + dispatched a
+/// frame later where `self` is mutable (the menu closure runs while the
+/// highlighter borrows `self`).
+fn editor_ctx_cmd_id() -> egui::Id {
+    egui::Id::new("scr1b3_editor_ctx_menu_cmd")
+}
+
 impl ScribeApp {
     /// Apply the Wave-2 scroll knobs and drive middle-click autoscroll. Called
     /// at the very top of [`Self::frame_tick`], before any `ScrollArea` shows.
@@ -231,9 +239,15 @@ impl ScribeApp {
             return;
         }
 
-        if !self.visuals_applied {
+        // Rebuild the egui visuals whenever a visuals-affecting setting changes
+        // (tint colour / strength, opacity, translucency, background overrides,
+        // theme) — not just once at startup — so dragging the tint slider updates
+        // the main window live.
+        let vsig = self.visuals_signature();
+        if !self.visuals_applied || vsig != self.applied_visuals_sig {
             ctx.set_visuals(self.current_visuals());
             self.visuals_applied = true;
+            self.applied_visuals_sig = vsig;
         }
 
         // #24/#40 — the "doubled caption buttons" fix. ROOT CAUSE: winit keeps
@@ -2075,6 +2089,18 @@ impl ScribeApp {
                     if std::mem::take(&mut self.pending_dup_selection) {
                         self.duplicate_selection(ctx, editor_id, active);
                     }
+                    // A right-click context-menu command stashed in ctx-data on a
+                    // previous frame (it couldn't run inside the editor closure
+                    // while the highlighter borrowed `self`) — dispatch it now so
+                    // its pending_* flag is applied by the drains just below.
+                    if let Some(cmd) = ctx.data_mut(|d| {
+                        let id = editor_ctx_cmd_id();
+                        let v = d.get_temp::<crate::app::commands::BuiltinCommand>(id);
+                        d.remove::<crate::app::commands::BuiltinCommand>(id);
+                        v
+                    }) {
+                        self.execute_builtin(cmd);
+                    }
                     // Note-usability caret ops (palette + chord) — P0-1 / P0-4 /
                     // P1-4 / P2-1.
                     if std::mem::take(&mut self.pending_toggle_task) {
@@ -2180,6 +2206,43 @@ impl ScribeApp {
                             .interactive(!read_only)
                             .layouter(&mut layouter);
                         let out = editor.show(ui);
+                        // Right-click context menu — makes the note-usability actions
+                        // DISCOVERABLE without knowing the command palette / a chord:
+                        // the standard clipboard actions plus the markdown formatting
+                        // commands (bold/italic/code/strike, task toggle, table format,
+                        // case, date-time). Mutating actions are hidden in a read-only
+                        // buffer. Each routes through the same `execute_builtin` the
+                        // palette uses, so behaviour is identical.
+                        out.response.context_menu(|ui| {
+                            use crate::app::commands::BuiltinCommand as B;
+                            ui.set_min_width(200.0);
+                            // The command is stashed in ctx-data (not run here) —
+                            // `self` is borrowed immutably by the highlight layouter
+                            // in this ScrollArea closure, so the pick is drained +
+                            // dispatched below where `self` is mutable again.
+                            let pick = |ui: &mut egui::Ui, label: &str, cmd: B| {
+                                if ui.button(label).clicked() {
+                                    ui.ctx()
+                                        .data_mut(|d| d.insert_temp(editor_ctx_cmd_id(), cmd));
+                                    ui.close_menu();
+                                }
+                            };
+                            pick(ui, "Cut", B::Cut);
+                            pick(ui, "Copy", B::Copy);
+                            if !read_only {
+                                pick(ui, "Paste", B::Paste);
+                                ui.separator();
+                                pick(ui, "Bold", B::ToggleBold);
+                                pick(ui, "Italic", B::ToggleItalic);
+                                pick(ui, "Inline code", B::ToggleInlineCode);
+                                pick(ui, "Strikethrough", B::ToggleStrikethrough);
+                                ui.separator();
+                                pick(ui, "Toggle task  [ ] / [x]", B::ToggleTaskCheckbox);
+                                pick(ui, "Format table", B::FormatTable);
+                                pick(ui, "Title Case selection", B::TitlecaseSelection);
+                                pick(ui, "Insert date / time", B::InsertDateTime);
+                            }
+                        });
                         // Wave-3: the egui in-place edit happened inside show();
                         // `.changed()` is true exactly on the edited frame, so this
                         // is the ONLY hook for the default editor's text mutation.

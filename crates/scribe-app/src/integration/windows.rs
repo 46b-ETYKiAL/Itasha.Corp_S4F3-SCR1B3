@@ -7,7 +7,14 @@
 use super::windows_entries::{registry_entries, RegEntry};
 use super::RegisterReport;
 use scribe_core::config::ClaimType;
+use std::os::windows::process::CommandExt;
 use std::process::Command;
+
+/// `CREATE_NO_WINDOW` — run the child process with NO console window. Without
+/// this, every `reg.exe` / `cmd` spawn below flashes a black console window;
+/// registering several file types fires many `reg.exe` calls in a row, so the
+/// screen fills with windows "popping up and closing". This suppresses them.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn current_exe_string() -> Option<String> {
     std::env::current_exe()
@@ -20,6 +27,7 @@ fn current_exe_string() -> Option<String> {
 pub(crate) fn apply_entry(e: &RegEntry) -> Result<(), String> {
     let full_key = format!("HKCU\\{}", e.key);
     let mut cmd = Command::new("reg");
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.arg("add").arg(&full_key);
     if e.name.is_empty() {
         cmd.arg("/ve"); // the key's default value
@@ -87,6 +95,7 @@ pub fn register(types: &[ClaimType]) -> RegisterReport {
 /// can confirm the choice. Launched through the shell — no FFI.
 pub fn open_default_apps_ui() {
     let _ = Command::new("cmd")
+        .creation_flags(CREATE_NO_WINDOW)
         .args([
             "/c",
             "start",

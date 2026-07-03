@@ -888,6 +888,65 @@ fn panel_fill_opaque_when_master_off() {
 }
 
 #[test]
+fn tint_enable_toggle_gates_panel_fill_colour() {
+    let theme = Theme::wired_noir();
+    let base = panel_fill(&theme, &scribe_core::config::WindowConfig::default(), None);
+    // Strong tint but the enable toggle OFF => no colour shift (equals base).
+    let off = scribe_core::config::WindowConfig {
+        tint_enabled: false,
+        tint: "#ff0000".into(),
+        tint_strength: 0.8,
+        ..Default::default()
+    };
+    assert_eq!(
+        panel_fill(&theme, &off, None),
+        base,
+        "toggle off => no tint"
+    );
+    // Same tint with the toggle ON => the panel fill shifts toward red.
+    let on = scribe_core::config::WindowConfig {
+        tint_enabled: true,
+        ..off
+    };
+    assert_ne!(panel_fill(&theme, &on, None), base, "toggle on => tinted");
+}
+
+#[test]
+fn visuals_signature_tracks_the_tint_slider() {
+    // The tint slider must rebuild the visuals live: changing tint strength (or
+    // toggling the enable) changes the signature `frame_tick` compares, and the
+    // rebuilt `current_visuals` produces a different editor-well colour.
+    let mut app = ScribeApp::new_test(Config::default());
+    app.config.window.tint = "#ff0000".into();
+    app.config.window.tint_strength = 0.0;
+    let sig0 = app.visuals_signature();
+    let bg0 = app.current_visuals().extreme_bg_color;
+    app.config.window.tint_strength = 0.8;
+    let sig1 = app.visuals_signature();
+    let bg1 = app.current_visuals().extreme_bg_color;
+    assert_ne!(
+        sig0, sig1,
+        "raising tint strength must change the visuals signature"
+    );
+    assert_ne!(
+        bg0, bg1,
+        "raising tint strength must retint the editor well"
+    );
+    // Disabling the toggle reverts both.
+    app.config.window.tint_enabled = false;
+    assert_ne!(
+        sig1,
+        app.visuals_signature(),
+        "toggling enable changes the signature"
+    );
+    assert_eq!(
+        bg0,
+        app.current_visuals().extreme_bg_color,
+        "toggle off => untinted"
+    );
+}
+
+#[test]
 fn close_latch_hides_before_destroy() {
     // T19.1: requesting close must NOT close immediately; it hides first
     // (want_close -> closing) so a layered window leaves no DWM ghost.

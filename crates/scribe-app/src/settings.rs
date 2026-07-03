@@ -1629,6 +1629,17 @@ fn render_sections(
                 changed |= reset_to_default(ui, &mut config.window.opacity, &def.window.opacity);
                 ui.end_row();
             }
+            changed |= grid_bool(
+                ui,
+                q,
+                "window tint enable colour on off toggle",
+                "Enable window tint",
+                "Blend the tint colour into the app window background. Turn off to \
+                 remove the tint without losing your colour + strength. The tint \
+                 only shows once Tint strength is above 0.",
+                &mut config.window.tint_enabled,
+                &def.window.tint_enabled,
+            );
             if row_visible(q, "window tint colour hex") {
                 ui.label("Tint").on_hover_text(
                     "Colour tint applied over the translucent surface, as a hex code \

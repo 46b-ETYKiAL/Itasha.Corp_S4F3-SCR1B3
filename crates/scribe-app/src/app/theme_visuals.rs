@@ -4,6 +4,28 @@
 use super::*;
 
 impl ScribeApp {
+    /// A hash of every config input `current_visuals` reads, so `frame_tick` can
+    /// rebuild the egui visuals the instant one changes (the tint colour /
+    /// strength slider, opacity, translucency, background overrides, or theme) —
+    /// rather than only once at startup. This is what makes the tint slider
+    /// update the main window live.
+    pub(super) fn visuals_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.theme.name.hash(&mut h);
+        self.config.appearance.background_override.hash(&mut h);
+        self.config.appearance.note_background_override.hash(&mut h);
+        self.config.appearance.link_backgrounds.hash(&mut h);
+        let w = &self.config.window;
+        w.transparency_enabled.hash(&mut h);
+        w.tint_enabled.hash(&mut h);
+        w.tint.hash(&mut h);
+        // f32 has no Hash; hash its bit pattern.
+        w.tint_strength.to_bits().hash(&mut h);
+        w.opacity.to_bits().hash(&mut h);
+        h.finish()
+    }
+
     /// Build the egui visuals for the current theme, applying surface opacity
     /// when a translucent/glass window mode is active.
     pub(super) fn current_visuals(&self) -> egui::Visuals {

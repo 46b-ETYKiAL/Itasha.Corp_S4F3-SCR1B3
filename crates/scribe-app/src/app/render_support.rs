@@ -197,7 +197,7 @@ pub(crate) fn apply_window_tint(
     base: Color32,
     window: &scribe_core::config::WindowConfig,
 ) -> Color32 {
-    if window.tint_strength <= 0.0 {
+    if !window.tint_enabled || window.tint_strength <= 0.0 {
         return base;
     }
     match Rgba::parse_hex(&window.tint) {
