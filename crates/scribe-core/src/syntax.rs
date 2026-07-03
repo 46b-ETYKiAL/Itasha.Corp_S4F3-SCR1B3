@@ -34,6 +34,53 @@ pub struct HlSpan {
     pub italic: bool,
 }
 
+/// Which extra markdown/note token-colouring passes the editor applies on top of
+/// syntect's grammar highlighting. Each pass colours a token class the grammar
+/// leaves plain (or muted). All default ON — the user can disable the whole set
+/// or individual passes in Settings. See [`Highlighter::apply_markdown_overlays`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MdColorOpts {
+    /// `----`, `====//====//`, `* * *`, setext underlines, box-drawing rules.
+    pub dividers: bool,
+    /// `#tag` tokens (Obsidian-style; not scoped by the CommonMark grammar).
+    pub tags: bool,
+    /// `~~strikethrough~~` spans.
+    pub strikethrough: bool,
+    /// GFM task checkboxes `[ ]` / `[x]` at a list-item start.
+    pub task_boxes: bool,
+    /// Table cell separators `|` in table rows.
+    pub table_pipes: bool,
+}
+
+impl Default for MdColorOpts {
+    fn default() -> Self {
+        Self {
+            dividers: true,
+            tags: true,
+            strikethrough: true,
+            task_boxes: true,
+            table_pipes: true,
+        }
+    }
+}
+
+impl MdColorOpts {
+    /// All passes disabled (the master "rich markdown colouring" switch is off).
+    pub fn none() -> Self {
+        Self {
+            dividers: false,
+            tags: false,
+            strikethrough: false,
+            task_boxes: false,
+            table_pipes: false,
+        }
+    }
+
+    fn any(self) -> bool {
+        self.dividers || self.tags || self.strikethrough || self.task_boxes || self.table_pipes
+    }
+}
+
 /// Default editor foreground (base16-eighties text tone). Used for any byte not
 /// claimed by a more specific highlight capture.
 const DEFAULT_FG: [u8; 3] = [0xd3, 0xd0, 0xc8];
@@ -366,7 +413,7 @@ const DIVIDER_CHARS: &[char] = &[
 /// `-=-=-=`, or a box-drawing rule (`────`, `═══`). Deliberately conservative:
 /// the "no letters/digits" guard means real prose, code, list items, and table
 /// rows (which always contain alphanumerics) can never match. See
-/// [`Highlighter::apply_divider_overlay`].
+/// [`Highlighter::apply_markdown_overlays`].
 pub fn is_decorative_divider(trimmed: &str) -> bool {
     let non_space: Vec<char> = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
     // CommonMark thematic-break floor.
@@ -400,6 +447,152 @@ pub fn is_decorative_divider(trimmed: &str) -> bool {
     // is the real protection against prose/code; this is a secondary sanity bound.
     let total = trimmed.chars().count().max(1);
     non_space.len() * 100 >= total * 50
+}
+
+/// Recolour the byte range `[start, end)` of a line's spans to `color`, splitting
+/// any span that straddles the boundary so surrounding bytes keep their original
+/// grammar colour. `start`/`end` must be char boundaries within the line.
+fn override_range(
+    spans: &mut Vec<HlSpan>,
+    start: usize,
+    end: usize,
+    color: [u8; 3],
+    bold: bool,
+    italic: bool,
+) {
+    if start >= end {
+        return;
+    }
+    let mut out = Vec::with_capacity(spans.len() + 2);
+    for s in spans.drain(..) {
+        // Disjoint from the target range — keep as-is.
+        if s.range.end <= start || s.range.start >= end {
+            out.push(s);
+            continue;
+        }
+        // Left remainder before the range.
+        if s.range.start < start {
+            out.push(HlSpan {
+                range: s.range.start..start,
+                color: s.color,
+                bold: s.bold,
+                italic: s.italic,
+            });
+        }
+        // The overlapping slice — recoloured.
+        out.push(HlSpan {
+            range: s.range.start.max(start)..s.range.end.min(end),
+            color,
+            bold,
+            italic,
+        });
+        // Right remainder after the range.
+        if s.range.end > end {
+            out.push(HlSpan {
+                range: end..s.range.end,
+                color: s.color,
+                bold: s.bold,
+                italic: s.italic,
+            });
+        }
+    }
+    out.sort_by_key(|s| s.range.start);
+    *spans = out;
+}
+
+/// Colour Obsidian-style `#tag` tokens (the CommonMark grammar does not scope
+/// them). A tag is a `#` at start-of-line or after whitespace / an opening
+/// bracket, immediately followed by a letter/underscore (so an ATX `# heading`
+/// marker — `#` then space — is NOT a tag), then word chars / `-` / `/`.
+fn color_tags(spans: &mut Vec<HlSpan>, line: &str, color: [u8; 3]) {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let mut k = 0;
+    while k < chars.len() {
+        let (bi, c) = chars[k];
+        if c == '#' {
+            let prev_ok = k == 0 || {
+                let p = chars[k - 1].1;
+                p.is_whitespace() || "([{".contains(p)
+            };
+            let next_ok = chars
+                .get(k + 1)
+                .is_some_and(|(_, c)| c.is_alphabetic() || *c == '_');
+            if prev_ok && next_ok {
+                let mut m = k + 1;
+                while m < chars.len() {
+                    let cc = chars[m].1;
+                    if cc.is_alphanumeric() || cc == '_' || cc == '-' || cc == '/' {
+                        m += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let end = chars.get(m).map_or(line.len(), |(b, _)| *b);
+                override_range(spans, bi, end, color, false, false);
+                k = m;
+                continue;
+            }
+        }
+        k += 1;
+    }
+}
+
+/// Colour `~~strikethrough~~` spans (marks included). egui has no strike font
+/// style, so the run is tinted a muted colour instead.
+fn color_strikethrough(spans: &mut Vec<HlSpan>, line: &str, color: [u8; 3]) {
+    let mut search = 0;
+    while let Some(rel) = line[search..].find("~~") {
+        let open = search + rel;
+        let after = open + 2;
+        let Some(rel2) = line[after..].find("~~") else {
+            break;
+        };
+        let close = after + rel2;
+        if close > after {
+            override_range(spans, open, close + 2, color, false, false);
+        }
+        search = close + 2;
+    }
+}
+
+/// Colour a GFM task checkbox `[ ]` / `[x]` at a list-item start.
+fn color_task_box(spans: &mut Vec<HlSpan>, line: &str, color: [u8; 3]) {
+    let indent = line.len() - line.trim_start().len();
+    let rest = &line[indent..];
+    let Some(marker) = rest.chars().next() else {
+        return;
+    };
+    if !matches!(marker, '-' | '*' | '+') {
+        return;
+    }
+    let after_marker = indent + marker.len_utf8();
+    let Some(tail) = line.get(after_marker..) else {
+        return;
+    };
+    if !tail.starts_with(' ') {
+        return;
+    }
+    let box_start = after_marker + 1;
+    let boxs = &line[box_start..];
+    if boxs.starts_with("[ ]") || boxs.starts_with("[x]") || boxs.starts_with("[X]") {
+        override_range(spans, box_start, box_start + 3, color, false, false);
+    }
+}
+
+/// Colour the `|` cell separators of a markdown table row (a line with >= 2
+/// pipes). Prose rarely uses two bare pipes, and code lines are skipped upstream.
+fn color_table_pipes(spans: &mut Vec<HlSpan>, line: &str, color: [u8; 3]) {
+    if line.bytes().filter(|b| *b == b'|').count() < 2 {
+        return;
+    }
+    let pipes: Vec<usize> = line
+        .char_indices()
+        .filter(|(_, c)| *c == '|')
+        .map(|(b, _)| b)
+        .collect();
+    for b in pipes {
+        override_range(spans, b, b + 1, color, false, false);
+    }
 }
 
 /// Map a capture name to an RGB color by longest-meaningful prefix.
@@ -480,6 +673,8 @@ pub struct Highlighter {
     ts_rust: std::sync::OnceLock<Option<HighlightConfiguration>>,
     /// Color per `HL_NAMES` index, used to resolve `Highlight(idx)` events.
     ts_colors: Vec<[u8; 3]>,
+    /// Which extra markdown token-colouring passes to apply (user-configurable).
+    md_colors: MdColorOpts,
 }
 
 impl Default for Highlighter {
@@ -502,7 +697,14 @@ impl Highlighter {
             // grammar-compile path.
             ts_rust: std::sync::OnceLock::new(),
             ts_colors: HL_NAMES.iter().map(|n| color_for(n)).collect(),
+            md_colors: MdColorOpts::default(),
         }
+    }
+
+    /// Set which extra markdown token-colouring passes apply. Cheap; the passes
+    /// run per highlight call, so a change takes effect on the next re-highlight.
+    pub fn set_md_colors(&mut self, opts: MdColorOpts) {
+        self.md_colors = opts;
     }
 
     /// The lazily-built tree-sitter Rust config. Compiles the grammar+query on
@@ -916,7 +1118,7 @@ impl Highlighter {
             }
         }
         let mut spans = self.highlight_syntect(text, ext);
-        self.apply_divider_overlay(&mut spans, text, ext);
+        self.apply_markdown_overlays(&mut spans, text, ext);
         spans
     }
 
@@ -943,7 +1145,7 @@ impl Highlighter {
             }
         }
         let mut spans = self.highlight_syntect_incremental(text, ext, cache);
-        self.apply_divider_overlay(&mut spans, text, ext);
+        self.apply_markdown_overlays(&mut spans, text, ext);
         spans
     }
 
@@ -955,19 +1157,18 @@ impl Highlighter {
     /// A no-op for non-markdown files. Never touches lines inside a fenced code
     /// block. A pure `=`/`-` run directly under a paragraph line is a SETEXT
     /// underline → heading colour; every other divider → separator colour.
-    fn apply_divider_overlay(&self, per_line: &mut [Vec<HlSpan>], text: &str, ext: Option<&str>) {
-        if !is_markdown_ext(ext) {
+    fn apply_markdown_overlays(&self, per_line: &mut [Vec<HlSpan>], text: &str, ext: Option<&str>) {
+        let o = self.md_colors;
+        if !is_markdown_ext(ext) || !o.any() {
             return;
         }
         let Some(theme) = self.themes.themes.get(&self.theme_name) else {
             return;
         };
-        // Resolve a VISIBLE divider colour: many themes (the syntect base16 set)
-        // don't distinguish `meta.separator`, so it resolves to the plain
-        // foreground and a recolour would be a no-op. Walk progressively more
-        // prominent scopes and take the first whose colour actually differs from
-        // the theme's default foreground — this reproduces the Notepad++
-        // operator-colour look under every theme.
+        // Resolve VISIBLE token colours: many themes (the syntect base16 set)
+        // don't distinguish these scopes, so they resolve to the plain foreground
+        // and a recolour would be a no-op. Walk progressively more prominent
+        // scopes and take the first whose colour differs from the default fg.
         let theme_fg = theme
             .settings
             .foreground
@@ -991,6 +1192,17 @@ impl Highlighter {
             scope_color(theme, "markup.heading"),
         );
         let head = first_distinct(&["markup.heading", "entity.name.type"], sep);
+        let tag_c = first_distinct(
+            &[
+                "entity.name.tag",
+                "support.type",
+                "constant.other",
+                "keyword",
+            ],
+            sep,
+        );
+        let strike_c = first_distinct(&["markup.strikethrough", "markup.deleted", "comment"], sep);
+        let task_c = first_distinct(&["markup.list", "string", "keyword"], sep);
         let mut in_fence = false;
         // Whether the previous non-blank, non-fence line was ordinary paragraph
         // text (has letters/digits) — a following pure `=`/`-` line is its setext
@@ -1008,21 +1220,37 @@ impl Highlighter {
                 prev_is_text = false;
                 continue;
             }
-            if is_decorative_divider(trimmed) {
+            let Some(spans) = per_line.get_mut(i) else {
+                continue;
+            };
+            // The whole-line DIVIDER pass wins over the sub-range passes (a
+            // divider line carries no other tokens worth colouring).
+            if o.dividers && is_decorative_divider(trimmed) {
                 let pure = |ch: char| trimmed.chars().all(|x| x == ch || x.is_whitespace());
                 let is_setext = prev_is_text && (pure('=') || pure('-'));
-                let color = if is_setext { head } else { sep };
-                if let Some(spans) = per_line.get_mut(i) {
-                    *spans = vec![HlSpan {
-                        range: 0..line.len(),
-                        color,
-                        bold: false,
-                        italic: false,
-                    }];
-                }
+                *spans = vec![HlSpan {
+                    range: 0..line.len(),
+                    color: if is_setext { head } else { sep },
+                    bold: false,
+                    italic: false,
+                }];
                 prev_is_text = false;
-            } else {
-                prev_is_text = true;
+                continue;
+            }
+            prev_is_text = true;
+            // Sub-range passes recolour just their token bytes, splitting the
+            // existing spans so surrounding text keeps its grammar colour.
+            if o.task_boxes {
+                color_task_box(spans, line, task_c);
+            }
+            if o.tags {
+                color_tags(spans, line, tag_c);
+            }
+            if o.strikethrough {
+                color_strikethrough(spans, line, strike_c);
+            }
+            if o.table_pipes {
+                color_table_pipes(spans, line, sep);
             }
         }
     }
@@ -1459,6 +1687,91 @@ mod tests {
         let div = &lines[2];
         assert_eq!(div.len(), 1, "divider line should be one recoloured span");
         assert_ne!(div[0].color, DEFAULT_FG, "divider must not stay default fg");
+    }
+
+    #[test]
+    fn override_range_splits_and_recolours() {
+        let fg = [1, 1, 1];
+        let hi = [9, 9, 9];
+        let mut spans = vec![HlSpan {
+            range: 0..10,
+            color: fg,
+            bold: false,
+            italic: false,
+        }];
+        override_range(&mut spans, 3, 6, hi, false, false);
+        assert_eq!(spans.len(), 3);
+        assert_eq!((spans[0].range.clone(), spans[0].color), (0..3, fg));
+        assert_eq!((spans[1].range.clone(), spans[1].color), (3..6, hi));
+        assert_eq!((spans[2].range.clone(), spans[2].color), (6..10, fg));
+    }
+
+    fn one_span(line: &str) -> Vec<HlSpan> {
+        vec![HlSpan {
+            range: 0..line.len(),
+            color: [1, 1, 1],
+            bold: false,
+            italic: false,
+        }]
+    }
+
+    #[test]
+    fn tag_pass_colours_hashtags_not_atx_headings() {
+        let tag = [7, 7, 7];
+        let line = "see #note-1 and # heading and a#b";
+        let mut spans = one_span(line);
+        color_tags(&mut spans, line, tag);
+        let hit: Vec<&str> = spans
+            .iter()
+            .filter(|s| s.color == tag)
+            .map(|s| &line[s.range.clone()])
+            .collect();
+        // `#note-1` is a tag; `# heading` (space after #) and `a#b` (no
+        // boundary before #) are NOT.
+        assert_eq!(hit, vec!["#note-1"]);
+    }
+
+    #[test]
+    fn strikethrough_pass_colours_marked_run() {
+        let st = [7, 7, 7];
+        let line = "a ~~struck~~ b";
+        let mut spans = one_span(line);
+        color_strikethrough(&mut spans, line, st);
+        let hit: Vec<&str> = spans
+            .iter()
+            .filter(|s| s.color == st)
+            .map(|s| &line[s.range.clone()])
+            .collect();
+        assert_eq!(hit, vec!["~~struck~~"]);
+    }
+
+    #[test]
+    fn task_box_pass_colours_checkbox() {
+        for (line, want) in [("- [x] done", "[x]"), ("  * [ ] todo", "[ ]")] {
+            let tc = [7, 7, 7];
+            let mut spans = one_span(line);
+            color_task_box(&mut spans, line, tc);
+            let hit: Vec<&str> = spans
+                .iter()
+                .filter(|s| s.color == tc)
+                .map(|s| &line[s.range.clone()])
+                .collect();
+            assert_eq!(hit, vec![want], "line: {line:?}");
+        }
+    }
+
+    #[test]
+    fn md_overlays_respect_the_disable_switch() {
+        let mut hl = Highlighter::new();
+        let md = "a #tag and ~~x~~ here\n";
+        hl.set_md_colors(MdColorOpts::none());
+        let off = hl.highlight_document(md, Some("md"));
+        hl.set_md_colors(MdColorOpts::default());
+        let on = hl.highlight_document(md, Some("md"));
+        assert_ne!(
+            off[0], on[0],
+            "enabling markdown colouring must change the token line's spans"
+        );
     }
 
     #[test]
