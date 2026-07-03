@@ -46,6 +46,17 @@ fn default_app_status_id() -> egui::Id {
     egui::Id::new("scr1b3_default_app_status")
 }
 
+/// Shared slot a background default-app registration thread writes its result
+/// into. `Arc<Mutex<..>>` is `Clone + Send + Sync`, so it can live in egui
+/// ctx-data (the settings pane owns no state of its own) while the worker runs.
+type RegShared = std::sync::Arc<std::sync::Mutex<Option<crate::integration::RegisterReport>>>;
+
+/// ctx-data key for the in-flight registration handle (present ⇒ a registration
+/// is running; the section shows a spinner instead of freezing the UI).
+fn register_pending_id() -> egui::Id {
+    egui::Id::new("scr1b3_register_pending")
+}
+
 /// Parse a `#rrggbb` (or `rrggbb`) hex string into an opaque `Color32` (#88).
 /// Returns `None` on malformed input so the caller can fall back to a default.
 fn parse_hex_color(s: &str) -> Option<egui::Color32> {
@@ -2201,7 +2212,12 @@ fn render_sections(
         };
         ui.label(egui::RichText::new(os_note).weak().small());
 
-        let enabled = !selected.is_empty();
+        // A registration already running? (present handle ⇒ show a spinner, keep
+        // the button disabled so a second click can't spawn a duplicate worker.)
+        let pending: Option<RegShared> = ui
+            .ctx()
+            .data(|d| d.get_temp::<RegShared>(register_pending_id()));
+        let enabled = !selected.is_empty() && pending.is_none();
         let btn = ui.add_enabled(
             enabled,
             egui::Button::new(if cfg!(windows) {
@@ -2212,14 +2228,52 @@ fn render_sections(
         );
         if btn.clicked() {
             config.integration.register_file_types = true;
-            let report = crate::integration::register(&selected);
             config.integration.last_registration_unix = Some(crate::app::now_unix());
             changed = true;
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(default_app_status_id(), report.message.clone()));
+            // Run registration OFF the UI thread — it spawns several `reg.exe`
+            // processes and would otherwise FREEZE the window for a few seconds
+            // with no feedback ("nothing seems to be happening"). The worker
+            // writes its result into a shared slot and wakes the UI.
+            let shared: RegShared = std::sync::Arc::default();
+            let sink = shared.clone();
+            let types = selected.clone();
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let report = crate::integration::register(&types);
+                if let Ok(mut slot) = sink.lock() {
+                    *slot = Some(report);
+                }
+                ctx.request_repaint(); // wake the UI to pick up the result
+            });
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(register_pending_id(), shared);
+                d.remove::<String>(default_app_status_id()); // clear a stale status
+            });
         }
 
-        // Surface the most-recent attempt's status.
+        // Poll the in-flight registration: show a spinner while it runs, then
+        // stash its result message and drop the handle when it finishes.
+        if let Some(shared) = pending {
+            let done = shared.lock().ok().and_then(|mut slot| slot.take());
+            if let Some(report) = done {
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(default_app_status_id(), report.message.clone());
+                    d.remove::<RegShared>(register_pending_id());
+                });
+            } else {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(
+                        egui::RichText::new("Registering… opening the Windows Default Apps page")
+                            .small(),
+                    );
+                });
+                ui.ctx().request_repaint(); // keep polling until the worker finishes
+            }
+        }
+
+        // Surface the most-recent completed attempt's status.
         if let Some(msg) = ui
             .ctx()
             .data(|d| d.get_temp::<String>(default_app_status_id()))
