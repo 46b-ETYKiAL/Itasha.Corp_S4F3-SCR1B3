@@ -92,12 +92,13 @@ pub(crate) fn capture<R>(f: impl FnOnce() -> R) -> (R, Captured) {
     static GLOBAL_INIT: std::sync::Once = std::sync::Once::new();
     GLOBAL_INIT.call_once(|| {
         let _ = tracing::subscriber::set_global_default(
-            tracing_subscriber::registry()
-                .with(tracing_subscriber::filter::LevelFilter::TRACE),
+            tracing_subscriber::registry().with(tracing_subscriber::filter::LevelFilter::TRACE),
         );
     });
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let cap = Captured::default();
     let subscriber = tracing_subscriber::registry().with(CaptureLayer(cap.clone()));
     let r = tracing::subscriber::with_default(subscriber, f);
