@@ -57,7 +57,17 @@ jobs:
           # Determine which is higher with semver-aware sort.
           highest="$(printf '%s\n%s\n' "$src" "$latest" | sort -V | tail -1)"
           if [ "$highest" = "$src" ]; then
-            echo "::error::Cargo.toml is at v$src but the newest published release is v$latest. A release was never cut, so the in-app updater will report users as 'current' on the older build. Cut it: 'git tag v$src && git push origin v$src' (triggers release.yml)."
+            # A tag `v$src` means the release WAS cut — it may still be building /
+            # publishing (release.yml runs ~15 min AFTER the merge-push that fires
+            # this check, so on every release this job briefly sees the source
+            # ahead of the not-yet-published release). That is an in-flight
+            # release, not a bump-without-release drift; whether it publishes
+            # correctly is owned by release.yml + the post-release-verify tripwire.
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v$src" >/dev/null 2>&1; then
+              echo "::notice::Cargo.toml is at v$src and tag v$src exists — the release is cut (publishing or published). Not a bump-without-release drift."
+              exit 0
+            fi
+            echo "::error::Cargo.toml is at v$src but the newest published release is v$latest AND no tag v$src exists. A release was never cut, so the in-app updater will report users as 'current' on the older build. Cut it: 'git tag v$src && git push origin v$src' (triggers release.yml)."
             exit 1
           fi
           # Source is BEHIND the latest release (e.g. a hotfix released out of band) — not a drift we gate on.
