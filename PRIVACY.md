@@ -125,10 +125,14 @@ SCR1B3 stores state in standard per-OS directories (resolved via the
 |---|---|---|---|
 | Config (TOML) | `%APPDATA%\ItashaCorp\scr1b3\config\scr1b3.toml` | `~/Library/Application Support/com.ItashaCorp.scr1b3/scr1b3.toml` | `~/.config/scr1b3/scr1b3.toml` |
 | Themes | `%APPDATA%\ItashaCorp\scr1b3\config\themes\` | `~/Library/Application Support/com.ItashaCorp.scr1b3/themes/` | `~/.config/scr1b3/themes/` |
-| Plugin pinned keys (TOFU) | `%APPDATA%\ItashaCorp\scr1b3\config\plugin-keys\` | `~/Library/Application Support/com.ItashaCorp.scr1b3/plugin-keys/` | `~/.config/scr1b3/plugin-keys/` |
+| Plugin pinned keys (TOFU) | `%APPDATA%\ItashaCorp\scr1b3\config\plugins\pinned-keys.toml` | `~/Library/Application Support/com.ItashaCorp.scr1b3/plugins/pinned-keys.toml` | `~/.config/scr1b3/plugins/pinned-keys.toml` |
 | Crash/error report spool | `%APPDATA%\ItashaCorp\scr1b3\config\reports\` | `~/Library/Application Support/com.ItashaCorp.scr1b3/reports/` | `~/.config/scr1b3/reports/` |
-| Recent files / session | `%LOCALAPPDATA%\ItashaCorp\scr1b3\cache\session.toml` | `~/Library/Caches/com.ItashaCorp.scr1b3/session.toml` | `~/.cache/scr1b3/session.toml` |
-| Logs | `%LOCALAPPDATA%\ItashaCorp\scr1b3\cache\logs\` | `~/Library/Caches/com.ItashaCorp.scr1b3/logs/` | `~/.cache/scr1b3/logs/` |
+| Session manifest + unsaved-buffer backups | `%APPDATA%\ItashaCorp\scr1b3\config\session.json` (+ `…\config\backup\`) | `~/Library/Application Support/com.ItashaCorp.scr1b3/session.json` (+ `…/backup/`) | `~/.config/scr1b3/session.json` (+ `~/.config/scr1b3/backup/`) |
+
+The recent-files list is not a separate file — it is stored inside
+`scr1b3.toml` (`[editor] recent_files`). Structured logs are emitted to
+**stderr** (RUST_LOG-controlled; default `warn`) and are **not written to
+disk** — the app writes no cache directory.
 
 A spooled report stays in `reports/` until you consent to send it or you clear
 local state. No data is written outside these directories.
@@ -158,14 +162,13 @@ To erase everything SCR1B3 ever wrote on disk (including any spooled reports):
 
 ```bash
 # Windows (PowerShell)
-Remove-Item -Recurse "$env:APPDATA\ItashaCorp\scr1b3", "$env:LOCALAPPDATA\ItashaCorp\scr1b3"
+Remove-Item -Recurse "$env:APPDATA\ItashaCorp\scr1b3"
 
 # macOS
-rm -rf ~/Library/Application\ Support/com.ItashaCorp.scr1b3 \
-       ~/Library/Caches/com.ItashaCorp.scr1b3
+rm -rf ~/Library/Application\ Support/com.ItashaCorp.scr1b3
 
 # Linux
-rm -rf ~/.config/scr1b3 ~/.cache/scr1b3
+rm -rf ~/.config/scr1b3
 ```
 
 The editor will start fresh on next launch.

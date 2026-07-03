@@ -36,6 +36,15 @@ All settings are grouped into twelve tables: `[editor]`, `[appearance]`, `[fonts
 | `rulers` | array of integers | `[]` | Vertical guide rulers at these 1-based columns, e.g. `[80, 100]`. Empty = none. |
 | `auto_save` | boolean | `false` | Automatically save dirty buffers. |
 | `restore_session` | boolean | `true` | Reopen the previous session's tabs on launch. |
+| `note_theme` | string | `"base16-eighties.dark"` | Colour scheme for the note text / syntax highlighting, separate from the app chrome theme. One of the bundled note themes; an unknown value falls back to the default. See [THEMING.md](THEMING.md) § Note (editor text) colour themes. |
+| `syntax_from_theme` | boolean | `false` | Drive in-editor token colours from the active chrome theme's `[syntax]` map instead of `note_theme`. Off by default — `note_theme` stays authoritative unless you opt in. See [THEMING.md](THEMING.md). |
+| `detect_links` | boolean | `true` | Detect bare `http(s)://` URLs in the text and render them as a coloured, underlined, Ctrl/Cmd-click-to-open link (scheme allow-listed to http/https). |
+| `md_rich_coloring` | boolean | `true` | Master switch for the extra markdown token-colouring passes (dividers, `#tags`, `~~strikethrough~~`, task boxes, table pipes). Off disables all of them; the per-token keys below tune individual passes while the master is on. |
+| `md_color_dividers` | boolean | `true` | Colour decorative divider lines (`----`, `====//====//`, `* * *`, setext underlines, box-drawing rules). Only active when `md_rich_coloring` is on. |
+| `md_color_tags` | boolean | `true` | Colour `#tag` tokens. Only active when `md_rich_coloring` is on. |
+| `md_color_strikethrough` | boolean | `true` | Colour `~~strikethrough~~` spans. Only active when `md_rich_coloring` is on. |
+| `md_color_task_boxes` | boolean | `true` | Colour task checkboxes `[ ]`/`[x]`. Only active when `md_rich_coloring` is on. |
+| `md_color_table_pipes` | boolean | `true` | Colour table `\|` cell separators. Only active when `md_rich_coloring` is on. |
 
 ## `[appearance]` — theme and window
 
@@ -49,13 +58,14 @@ All settings are grouped into twelve tables: `[editor]`, `[appearance]`, `[fonts
 
 ## `[window]` — window translucency and chrome
 
-Translucency is **off by default** — a normal opaque window. When enabled, the mode and tint control the glass/blur look.
+Translucency is **off by default** — a normal opaque window. When `transparency_enabled` is on, the frameless surface reveals the desktop through the translucent panels; there is no OS glass/mica/vibrancy backdrop mode (the DWM materials re-added native caption buttons over the custom titlebar and were collapsed to a single toggle).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `transparency_enabled` | boolean | `false` | Master toggle for window translucency. |
-| `mode` | string | `"opaque"` | One of: `opaque`, `transparent`, `glass`, `mica`, `vibrancy`. |
-| `opacity` | float | `0.92` | Window opacity when translucent (0.0–1.0). |
+| `transparency_enabled` | boolean | `false` | Master toggle for window translucency — the single predicate every render path consults. |
+| `mode` | string | `"opaque"` | Legacy field retained for config back-compat only. It no longer selects a surface — `transparency_enabled` is the single predicate. Accepted values (`opaque`/`transparent`/`glass`/`mica`/`vibrancy`) parse but have no visual effect. |
+| `opacity` | float | `0.92` | Window opacity when translucent (0.05–1.0; the 0.05 floor keeps the window from going fully invisible). |
+| `tint_enabled` | boolean | `true` | Master on/off switch for the window colour tint. When off, no tint is applied regardless of `tint`/`tint_strength` (so you can toggle the effect without losing your chosen colour + strength). The tint only shows once `tint_strength` is above 0. |
 | `tint` | string | `"#08060d"` | Hex `#rrggbb` colour tint overlaid on the translucent window. |
 | `tint_strength` | float | `0.0` | Strength of the tint overlay (0.0 = none). |
 | `always_on_top` | boolean | `false` | Keep the window above other windows. |
@@ -171,7 +181,7 @@ Defaults **off** — SCR1B3 never registers as a file handler without an explici
 
 ## Full example `scr1b3.toml`
 
-This is the complete default configuration written out explicitly. Copy it as a starting point and trim it to only the keys you want to change.
+This is a representative default configuration — see each table above for the full key list. Copy it as a starting point and trim it to only the keys you want to change.
 
 ```toml
 [editor]
@@ -183,6 +193,15 @@ show_minimap = true
 word_wrap = true
 auto_save = false
 restore_session = true
+note_theme = "base16-eighties.dark"
+syntax_from_theme = false
+detect_links = true
+md_rich_coloring = true
+md_color_dividers = true
+md_color_tags = true
+md_color_strikethrough = true
+md_color_task_boxes = true
+md_color_table_pipes = true
 
 [appearance]
 theme = "itasha-corp"
@@ -193,6 +212,7 @@ frameless = true
 transparency_enabled = false
 mode = "opaque"
 opacity = 0.92
+tint_enabled = true
 tint = "#08060d"
 tint_strength = 0.0
 always_on_top = false

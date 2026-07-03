@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <strong>A fast, GPU-rendered, telemetry-free code &amp; text editor. Present day, present text.</strong>
+  <strong>A fast, GPU-rendered, telemetry-free code, text &amp; Markdown-notes editor. Present day, present text.</strong>
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@
 
 ## What is this?
 
-SCR1B3 (pronounced "scribe") is a code and text editor built in Rust for people who want a fast, native editor that respects them. It opens multi-gigabyte files without freezing, themes all the way down, and never phones home.
+SCR1B3 (pronounced "scribe") is a code, text, and Markdown-notes editor built in Rust for people who want a fast, native editor that respects them. It opens multi-gigabyte files without freezing, doubles as a Markdown note-taking workspace (templates, task boxes, live preview), themes all the way down, and never phones home.
 
 The text engine is a rope buffer, and memory-mapped read-only browsing means files far larger than RAM open instantly and stay smooth to scroll. Syntax highlighting runs on an engine-agnostic backend: a native tree-sitter grammar (Rust today) drives structure-aware coloring where one is wired, with syntect covering 100+ more languages with no per-language build step. Everything — appearance, fonts, behavior, themes — is driven by a single live-reloading TOML config. No webview, no account, no bloat.
 
@@ -98,11 +98,16 @@ Or launch SCR1B3 and open files from the editor. On first run it writes nothing 
 - **Large files without the freeze** — a rope buffer plus `mmap` read-only browse open multi-GB logs and files that defeat the 2 GB cap and 4×-RAM blowups of legacy editors, and stay responsive while you scroll.
 - **GPU-rendered** — smooth scrolling on a hardware-accelerated egui surface, with no system webview in the loop.
 - **100+ languages** — engine-agnostic highlighting: a native tree-sitter grammar (Rust today) gives structure-aware coloring where one is wired, with syntect covering 100+ more TextMate / Sublime syntaxes unchanged; broader tree-sitter coverage and folding are in progress.
-- **Power editing surfaces** — split view over a shared buffer, a document minimap with click-to-jump, brace-aware code folding, and an identifier completion popup (Ctrl/Cmd+Space) — all toggleable from the View menu.
+- **Power editing surfaces** — split view over a shared buffer, a document minimap with click-to-jump, brace-aware code folding, and an identifier completion popup (Ctrl/Cmd+Space) — all toggleable from the quick-access toolbar, the command palette (Ctrl+Shift+P), or Settings.
+- **Command palette** — press Ctrl+Shift+P (or the `⌘` / `>_` toolbar button) to fuzzy-search and run every built-in action and installed plugin command (~70 commands).
+- **Navigation & search** — project-wide find-in-files (Ctrl+Shift+F), a fuzzy file finder (Ctrl+P), go-to-line (Ctrl+G) and go-to-symbol (Ctrl+Shift+O), line bookmarks, and an F1 keyboard cheatsheet.
+- **Notes & Markdown** — a dedicated note colour theme (20 presets) plus toggleable Markdown accent passes for decorative dividers (`----`, `====//====//`), `#tags`, `~~strikethrough~~`, `[ ]`/`[x]` task boxes, and table pipes.
+- **Note authoring** — note templates (checklist / meeting / daily), task checkboxes, inline Markdown formatting chords (bold / italic / inline-code / strikethrough), table formatting, case conversion, and a Markdown live preview (Ctrl+Shift+V).
+- **Right-click editing** — a context menu with clipboard actions plus Markdown formatting (bold / italic / inline-code / strikethrough, toggle task box, format table, Title Case, insert date-time).
 - **Telemetry-free by default** — no account, no analytics, no usage beacons. Your file contents never leave your device.
 - **Deep theming** — live-reload Helix-style `[palette]` / `[ui]` / `[syntax]` TOML themes, including glass / transparency effects; ship your own without recompiling. Broken themes fall back to the compiled-in default, so the editor never blanks.
 - **LSP diagnostics** — language-server integration surfaces errors, warnings, and hints inline.
-- **Modern editing** — multi-tab, find / replace with full regex and capture-group replacement, memoized syntax-highlight layout, and encoding + EOL detection that round-trips files unmodified.
+- **Modern editing** — multi-tab, multi-cursor / column selection, find / replace with full regex and capture-group replacement, memoized syntax-highlight layout, and encoding + EOL detection that round-trips files unmodified.
 - **Plugins** — a capability-consent user plugin system scripted in [Rhai](https://rhai.rs) (pure-Rust, sandboxed by construction — no filesystem or network access, bounded by an operation count and a wall-clock deadline so a runaway script can't hang the editor), with minisign-signed tarballs verified against a TOFU-pinned key store.
 - **Offline spellcheck** — fully offline, code-aware (comments / strings), on by default.
 - **Default-app integration (opt-in)** — register SCR1B3 as the default handler for plain-text / Markdown / JSON / source-code files from **Settings → Default app**; per-OS (Windows ProgID / macOS UTI / Linux MIME). Off until you ask. `scr1b3 a.rs b.rs c.txt` also opens multiple files at once.
@@ -126,7 +131,7 @@ SCR1B3 reads a single live-reloading TOML file from your OS config directory. A 
 
 ## Theming
 
-Themes use a Helix-style three-namespace TOML schema (`[palette]` / `[ui]` / `[syntax]`) with palette-name references and `#RRGGBB` / `#RRGGBBAA` literals. SCR1B3 ships **32 built-in themes**. The calm canon is `itasha-corp` (default, house brand), `wired-noir` (brand canon), `phosphor-amber` (BBS heritage), `lain-mauve` (Wired violet), `ghost-paper` (light, WCAG AA), and `a11y-high-contrast` (WCAG AAA-target for low-vision users); the rest are the itasha-neon, heritage-alt, and Wave-4 families (see [THEMING.md](THEMING.md) for the full list). Pick one from **Settings → Appearance → Theme**, drop a user theme in `<config_dir>/themes/` to override, or click **Export to user theme** to fork the active theme to disk and edit it by hand (the live-reload watcher applies your changes immediately). Broken themes fall back to `wired-noir` so the editor never blanks. The optional motion settings (master switch, intensity, cursor blink) live in `[motion]` and are OFF by default. (A CRT / scanline post-process pass was scaffolded but not shipped — see THEMING.md.) Full guide: **[THEMING.md](THEMING.md)**.
+Themes use a Helix-style three-namespace TOML schema (`[palette]` / `[ui]` / `[syntax]`) with palette-name references and `#RRGGBB` / `#RRGGBBAA` literals. SCR1B3 ships **32 built-in themes**. The calm canon is `itasha-corp` (default, house brand), `wired-noir` (brand canon), `phosphor-amber` (BBS heritage), `lain-mauve` (Wired violet), `ghost-paper` (light, WCAG AA), and `a11y-high-contrast` (WCAG AAA-target for low-vision users); the rest are the itasha-neon, heritage-alt, and Wave-4 families (see [THEMING.md](THEMING.md) for the full list). Pick one from **Settings → Appearance → Theme**, drop a user theme in `<config_dir>/themes/` to override, or click **Export to user theme** to fork the active theme to disk and edit it by hand (the live-reload watcher applies your changes immediately). Broken themes fall back to `wired-noir` so the editor never blanks. A live window colour tint (Settings → Window: enable + colour + strength) blends over the app background in real time. The optional motion settings (master switch, intensity, cursor blink) live in `[motion]` and are OFF by default. (A CRT / scanline post-process pass was scaffolded but not shipped — see THEMING.md.) Full guide: **[THEMING.md](THEMING.md)**.
 
 ## Plugins
 

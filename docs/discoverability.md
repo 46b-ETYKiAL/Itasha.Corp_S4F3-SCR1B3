@@ -4,7 +4,7 @@ Levers to make SCR1B3 easy to find and evaluate on GitHub.
 
 ## Repository description (one line, SEO)
 
-> SCR1B3 — a fast, GPU-rendered, telemetry-free code & text editor for Windows, Linux, and macOS. A modern Notepad++ alternative in Rust: multi-GB large files, 100+ language syntax highlighting, deep TOML theming, no account, no telemetry.
+> SCR1B3 — a fast, GPU-rendered, telemetry-free code, text & Markdown-notes editor for Windows, Linux, and macOS. A modern Notepad++ alternative in Rust: multi-GB large files, 100+ language syntax highlighting, Markdown note-taking, deep TOML theming, no account, no telemetry.
 
 ## Topics / tags
 
@@ -14,6 +14,7 @@ Set these in the repo's "About" → Topics:
 text-editor code-editor rust egui wgpu cross-platform windows linux macos
 notepad-alternative syntax-highlighting ropey syntect telemetry-free privacy
 gpu-accelerated large-files themeable crt retro desktop-app lain
+notes note-taking markdown
 ```
 
 ## Social preview image
@@ -30,9 +31,9 @@ one-liners high above the fold.
 
 ## Release artifacts
 
-Tag-driven releases (`v*`) attach per-OS binaries + installers + `SHA256SUMS`
-so the "Releases" page and `packaging/install.sh` resolve the latest build
-automatically.
+Tag-driven releases (`v*`) attach per-OS binaries + installers, each with a
+per-file `<asset>.sha256` checksum alongside it, so the "Releases" page and
+`packaging/install.sh` resolve the latest build automatically.
 
 ## Recommended GitHub settings
 
