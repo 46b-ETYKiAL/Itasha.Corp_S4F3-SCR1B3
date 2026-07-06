@@ -1299,14 +1299,14 @@ dependencies = [
  "ecolor",
  "emath",
  "epaint_default_fonts",
- "font-types",
+ "font-types 0.11.3",
  "log",
  "nohash-hasher",
  "parking_lot",
  "profiling",
  "self_cell",
  "serde",
- "skrifa",
+ "skrifa 0.40.0",
  "smallvec",
  "vello_cpu",
 ]
@@ -1462,6 +1462,15 @@ checksum = "5b38ad915f6dadd993ced50848a8291a543bd41ca62bc10740d5e64e2ab4cfd7"
 dependencies = [
  "bytemuck",
  "serde",
+]
+
+[[package]]
+name = "font-types"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad67eced03f5504d9cbd3a879b5958b5c54d4e5fd794361c6eb21b05fb703411"
+dependencies = [
+ "bytemuck",
 ]
 
 [[package]]
@@ -3396,7 +3405,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b634fabf032fab15307ffd272149b622260f55974d9fad689292a5d33df02e5"
 dependencies = [
  "bytemuck",
- "font-types",
+ "font-types 0.11.3",
+]
+
+[[package]]
+name = "read-fonts"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "046a7d674daf459825b32f5062056d6882db0d2f5a479fbd76ccfc870ac18709"
+dependencies = [
+ "bytemuck",
+ "font-types 0.12.1",
+ "once_cell",
 ]
 
 [[package]]
@@ -3744,7 +3764,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
- "skrifa",
+ "skrifa 0.44.0",
  "tempfile",
  "toml",
  "tracing",
@@ -3978,7 +3998,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fbdfe3d2475fbd7ddd1f3e5cf8288a30eb3e5f95832829570cd88115a7434ac"
 dependencies = [
  "bytemuck",
- "read-fonts",
+ "read-fonts 0.37.0",
+]
+
+[[package]]
+name = "skrifa"
+version = "0.44.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "819ab7d62b1d3e72d9d9dea5650bac30424f9111364bb94928dbf5ecad1baa68"
+dependencies = [
+ "bytemuck",
+ "read-fonts 0.41.0",
 ]
 
 [[package]]
@@ -4689,7 +4719,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "log",
  "peniko",
- "skrifa",
+ "skrifa 0.40.0",
  "smallvec",
 ]
 
