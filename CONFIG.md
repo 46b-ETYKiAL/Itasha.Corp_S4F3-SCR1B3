@@ -64,7 +64,7 @@ Translucency is **off by default** — a normal opaque window. When `transparenc
 |---|---|---|---|
 | `transparency_enabled` | boolean | `false` | Master toggle for window translucency — the single predicate every render path consults. |
 | `mode` | string | `"opaque"` | Legacy field retained for config back-compat only. It no longer selects a surface — `transparency_enabled` is the single predicate. Accepted values (`opaque`/`transparent`/`glass`/`mica`/`vibrancy`) parse but have no visual effect. |
-| `opacity` | float | `0.92` | Window opacity when translucent (0.05–1.0; the 0.05 floor keeps the window from going fully invisible). |
+| `opacity` | float | `1.0` | Window opacity when translucent (0.0–1.0; the 0.0 floor lets the window go fully transparent). Fresh-configs-only: an existing config keeps whatever value it already stored — only a brand-new config picks up the `1.0` default. |
 | `tint_enabled` | boolean | `true` | Master on/off switch for the window colour tint. When off, no tint is applied regardless of `tint`/`tint_strength` (so you can toggle the effect without losing your chosen colour + strength). The tint only shows once `tint_strength` is above 0. |
 | `tint` | string | `"#08060d"` | Hex `#rrggbb` colour tint overlaid on the translucent window. |
 | `tint_strength` | float | `0.0` | Strength of the tint overlay (0.0 = none). |
@@ -211,7 +211,7 @@ frameless = true
 [window]
 transparency_enabled = false
 mode = "opaque"
-opacity = 0.92
+opacity = 1.0
 tint_enabled = true
 tint = "#08060d"
 tint_strength = 0.0

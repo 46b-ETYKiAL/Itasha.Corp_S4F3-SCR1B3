@@ -555,8 +555,15 @@ impl ScribeApp {
                                     // wordmark.
                                     let saved_spacing = ui.spacing().item_spacing.x;
                                     ui.spacing_mut().item_spacing.x = 0.0;
-                                    ui.label(RichText::new("S C R ").color(accent).strong());
-                                    ui.label(RichText::new("1 B 3").color(accent_alt).strong());
+                                    // Guarantee the split-tone wordmark keeps a
+                                    // legible luminance gap against the titlebar
+                                    // fill on ANY theme — SCR1B3's own teal voice
+                                    // is preserved (hue kept), only lifted/pushed
+                                    // if a theme's accent would wash out.
+                                    let wm_accent = ensure_readable_tone(accent, panel);
+                                    let wm_accent_alt = ensure_readable_tone(accent_alt, panel);
+                                    ui.label(RichText::new("S C R ").color(wm_accent).strong());
+                                    ui.label(RichText::new("1 B 3").color(wm_accent_alt).strong());
                                     ui.spacing_mut().item_spacing.x = saved_spacing;
                                     // Decorative separator + JP subtitle (写本 —
                                     // shahon) drop out FIRST when the titlebar is

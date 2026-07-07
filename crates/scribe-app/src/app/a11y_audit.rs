@@ -214,6 +214,60 @@ fn camp_themes_are_still_constructible_and_audited() {
     }
 }
 
+// ───────────────────── wordmark readable-tone guard ─────────────────────
+
+/// Local WCAG relative-luminance on an egui `Color32`, mirroring
+/// `render_support::relative_luminance` (which is private) so this test can
+/// assert the guard's luminance-gap contract directly.
+fn lum(c: egui::Color32) -> f32 {
+    let lin = |ch: u8| {
+        let cs = ch as f32 / 255.0;
+        if cs <= 0.040_45 {
+            cs / 12.92
+        } else {
+            ((cs + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+}
+
+#[test]
+fn ensure_readable_tone_lifts_low_contrast_tone_and_keeps_teal_hue() {
+    use egui::Color32;
+    // A near-black teal on a near-black titlebar has almost no luminance gap —
+    // the guard must lift it until it clears the ~0.34 MIN_GAP.
+    let dark_bg = Color32::from_rgb(0x0d, 0x0b, 0x14);
+    let faint_teal = Color32::from_rgb(0x0a, 0x2a, 0x28);
+    let gap_before = (lum(faint_teal) - lum(dark_bg)).abs();
+    assert!(gap_before < 0.34, "fixture must start below the gap");
+    let fixed = ensure_readable_tone(faint_teal, dark_bg);
+    let gap_after = (lum(fixed) - lum(dark_bg)).abs();
+    assert!(
+        gap_after >= 0.34 - 1e-3,
+        "guard must lift the tone to clear MIN_GAP, got {gap_after:.3}"
+    );
+    // Teal identity preserved: it lifted (brighter) and stays green/blue-led,
+    // never turning red-dominant.
+    assert!(fixed.g() >= faint_teal.g(), "tone should lift, not darken");
+    assert!(
+        fixed.g() >= fixed.r() && fixed.b() >= fixed.r(),
+        "teal hue must be preserved (not red-dominant): {fixed:?}"
+    );
+}
+
+#[test]
+fn ensure_readable_tone_leaves_already_legible_tone_untouched() {
+    use egui::Color32;
+    // Full SCR1B3 teal on the void titlebar already clears the gap → identity.
+    let dark_bg = Color32::from_rgb(0x0d, 0x0b, 0x14);
+    let teal = Color32::from_rgb(0x00, 0xff, 0xfe);
+    assert_eq!(
+        ensure_readable_tone(teal, dark_bg),
+        teal,
+        "a tone already past MIN_GAP must be returned unchanged"
+    );
+}
+
 // ───────────────────── AccessKit role + name + state ─────────────────────
 
 fn audit_app() -> ScribeApp {

@@ -228,14 +228,75 @@ pub(crate) fn panel_fill(
     // still composes on top.
     let base = apply_window_tint(base, window);
     if window.effective_translucent() {
-        // 0.02 floor matches the settings slider min + scribe_render::apply_window_opacity
+        // 0.0 floor matches the settings slider min + scribe_render::apply_window_opacity
         // so the full slider travel is live (the old 0.30 floor was a dead band;
-        // #24 dropped 0.05 → 0.02 for a more see-through lowest setting).
-        let a = (window.opacity.clamp(0.02, 1.0) * 255.0).round() as u8;
+        // it was later dropped to 0.0 so the lowest setting is genuinely fully
+        // transparent — see apply_window_opacity's doc for the shared invariant).
+        let a = (window.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         Color32::from_rgba_unmultiplied(base.r(), base.g(), base.b(), a)
     } else {
         base
     }
+}
+
+/// One sRGB 8-bit channel → linearised light value (WCAG sRGB EOTF). Feeds
+/// [`relative_luminance`].
+fn linearize_channel(c: u8) -> f32 {
+    let cs = c as f32 / 255.0;
+    if cs <= 0.040_45 {
+        cs / 12.92
+    } else {
+        ((cs + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// WCAG relative luminance (0.0 = black .. 1.0 = white) of an opaque sRGB
+/// colour. Alpha is ignored — the wordmark background is scored at its painted
+/// RGB.
+fn relative_luminance(c: Color32) -> f32 {
+    0.2126 * linearize_channel(c.r())
+        + 0.7152 * linearize_channel(c.g())
+        + 0.0722 * linearize_channel(c.b())
+}
+
+/// Blend `a` toward `b` by `t` (0.0..=1.0), preserving the RGB path (used to
+/// nudge a tone toward white/black while keeping its hue as intact as the step
+/// allows).
+fn lerp_rgb(a: Color32, b: Color32, t: f32) -> Color32 {
+    let mix = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(mix(a.r(), b.r()), mix(a.g(), b.g()), mix(a.b(), b.b()))
+}
+
+/// Guarantee a wordmark tone keeps a legible luminance gap against its
+/// background, mirroring C0PL4ND's `ensure_readable_tone` contrast floor while
+/// preserving SCR1B3's own teal accent voice. The hue is kept — a tone that
+/// already clears the gap is returned untouched; otherwise it is lifted toward
+/// white (on a dark titlebar) or pushed toward black (on a light one) by the
+/// minimum amount needed to reach `MIN_GAP`. This ports only the CONTRAST-floor
+/// mechanism, never C0PL4ND's palette.
+pub(crate) fn ensure_readable_tone(tone: Color32, bg: Color32) -> Color32 {
+    // 0.34 relative-luminance gap — the C0PL4ND `MIN_GAP` the port mirrors.
+    const MIN_GAP: f32 = 0.34;
+    let bg_l = relative_luminance(bg);
+    if (relative_luminance(tone) - bg_l).abs() >= MIN_GAP {
+        return tone;
+    }
+    // Push AWAY from the background: lighten on a dark titlebar, darken on a
+    // light one. Small fixed steps toward the endpoint, bounded so a
+    // pathological colour can never spin.
+    let target = if bg_l < 0.5 {
+        Color32::WHITE
+    } else {
+        Color32::BLACK
+    };
+    let mut out = tone;
+    for _ in 0..32 {
+        if (relative_luminance(out) - bg_l).abs() >= MIN_GAP {
+            break;
+        }
+        out = lerp_rgb(out, target, 0.08);
+    }
+    out
 }
 
 /// Paint a dot drag-grip and return its response. We paint the dots instead of
