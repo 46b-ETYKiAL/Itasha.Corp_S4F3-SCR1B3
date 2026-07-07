@@ -65,17 +65,40 @@ pub fn cleanup_after_update() {
     }
 }
 
-/// Build the PowerShell `Start-Process -Verb RunAs` script that launches the
-/// installer with a UAC elevation prompt. Pure (so it is unit-testable): the
-/// path is single-quoted for PowerShell with any embedded single quote escaped
-/// by doubling.
+/// Build the PowerShell `Start-Process -Verb RunAs` script that runs the
+/// FORGE-WIRE `setup.exe` UNATTENDED (no installer window, no "click Continue")
+/// and then relaunches SCR1B3. Pure (so it is unit-testable): every path is
+/// single-quoted for PowerShell with any embedded single quote escaped by
+/// doubling.
+///
+/// The installer's `--silent` mode (F0RG3-W1R3 `silent_install`) performs a
+/// headless install with NO UI; `--dir <install_dir>` targets the exact
+/// directory SCR1B3 currently runs from so the update lands in place (rather
+/// than the installer's own `C:\Program Files\…` default, which could split an
+/// install that lives elsewhere). `-Wait` blocks the unelevated helper until
+/// the elevated install finishes, and only THEN is the freshly-installed binary
+/// relaunched. The relaunch is UNCONDITIONAL (a `try/catch` swallows a UAC
+/// cancel or an install error) so the user is never left without SCR1B3 — on
+/// failure the prior binary already at `app_exe` simply comes back.
 #[cfg(windows)]
-fn powershell_runas_script(installer: &std::path::Path) -> String {
-    let p = installer.to_string_lossy().replace('\'', "''");
-    format!("Start-Process -FilePath '{p}' -Verb RunAs")
+fn powershell_runas_script(
+    installer: &std::path::Path,
+    install_dir: &std::path::Path,
+    app_exe: &std::path::Path,
+) -> String {
+    let q = |p: &std::path::Path| p.to_string_lossy().replace('\'', "''");
+    let inst = q(installer);
+    let dir = q(install_dir);
+    let app = q(app_exe);
+    format!(
+        "try {{ Start-Process -FilePath '{inst}' \
+         -ArgumentList '--silent','--dir','{dir}' -Verb RunAs -Wait }} catch {{ }}; \
+         Start-Process -FilePath '{app}'"
+    )
 }
 
-/// Launch the verified self-elevating installer WITH a UAC elevation prompt.
+/// Run the verified self-elevating installer SILENTLY (one UAC prompt, NO
+/// installer UI, NO click-through), then relaunch SCR1B3 in place.
 ///
 /// The `setup.exe` carries a `requireAdministrator` manifest. A plain
 /// `Command::spawn` (CreateProcess) CANNOT start such a binary — Windows returns
@@ -83,17 +106,27 @@ fn powershell_runas_script(installer: &std::path::Path) -> String {
 /// requires elevation". Elevation needs ShellExecute semantics, reached here
 /// WITHOUT any `unsafe` (the app is `#![forbid(unsafe_code)]`) via PowerShell's
 /// `Start-Process -Verb RunAs`, which raises the standard UAC prompt and runs
-/// the installer elevated. `CREATE_NO_WINDOW` keeps the helper PowerShell from
-/// flashing a console.
+/// the installer elevated. We pass the installer's `--silent`/`--dir` flags so
+/// it installs unattended into the running install's location — the single UAC
+/// prompt is unavoidable for a Program-Files write, but there is no interactive
+/// installer window and no "Continue" button. `CREATE_NO_WINDOW` keeps the
+/// helper PowerShell from flashing a console.
 #[cfg(windows)]
 fn launch_installer_elevated(installer: &std::path::Path) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let script = powershell_runas_script(installer);
+    // Resolve the running install's directory so the silent update overwrites
+    // the app exactly where it lives (in place) and so we relaunch THAT binary.
+    let app_exe = std::env::current_exe()?;
+    let install_dir = app_exe
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let script = powershell_runas_script(installer, &install_dir, &app_exe);
     // Hand our foreground right to the about-to-spawn process tree BEFORE the
-    // spawn (while we still own the foreground), so the elevated installer — a
-    // grandchild via PowerShell + UAC — can bring its window to the FRONT instead
-    // of flashing behind us. ASFW_ANY is required because the real installer's PID
+    // spawn (while we still own the foreground), so the relaunched SCR1B3 — a
+    // grandchild via PowerShell — can bring its window to the FRONT instead of
+    // opening behind us. ASFW_ANY is required because the relaunched app's PID
     // is not the PowerShell child's. See `allow_foreground_handoff`.
     scribe_win32_chrome::allow_foreground_handoff();
     std::process::Command::new("powershell")
@@ -149,7 +182,9 @@ pub(crate) enum ApplyStrategy {
     /// per-user (`%LOCALAPPDATA%\Programs\…`) install always takes.
     InPlaceSwap,
     /// Admin-owned dir (e.g. `C:\Program Files`) WITH a shipped self-elevating
-    /// installer → run the verified `setup.exe` (prompts for admin via UAC).
+    /// installer → run the verified `setup.exe` UNATTENDED (`--silent`): a
+    /// single UAC prompt, then a headless in-place install and auto-relaunch —
+    /// NO installer window and NO "click Continue".
     RunInstaller,
     /// Admin-owned dir WITHOUT an installer for this platform → an actionable
     /// failure ("download it from the releases page").
@@ -217,7 +252,8 @@ pub enum UpdateState {
     ReadyToApply { staged: PathBuf, version: String },
     /// The install dir is admin-owned (Program Files) so an in-place swap can't
     /// write it — a verified self-elevating installer has been staged instead;
-    /// running it updates in place (prompts for admin).
+    /// running it SILENTLY (`--silent`) updates in place (one UAC prompt, no
+    /// installer UI) and relaunches SCR1B3.
     ReadyToRunInstaller { installer: PathBuf, version: String },
     /// The verified binary was swapped in; restart to run it.
     Applied { version: String },
@@ -395,8 +431,12 @@ impl Updater {
         });
     }
 
-    /// Launch the staged, verified self-elevating installer and close the app so
-    /// it can replace the files in place (the installer requests UAC).
+    /// Launch the staged, verified self-elevating installer in SILENT mode and
+    /// close the app so it can replace the files in place. The helper (see
+    /// [`launch_installer_elevated`]) shows ONE UAC prompt, runs the installer
+    /// with no window and no click-through, waits for it, then relaunches
+    /// SCR1B3 — so from the user's view a machine-wide update is as seamless as
+    /// the per-user in-place swap, minus the one unavoidable elevation prompt.
     pub fn run_installer(&mut self, ctx: &egui::Context) {
         let UpdateState::ReadyToRunInstaller { installer, version } = &self.state else {
             return;
@@ -694,16 +734,72 @@ mod tests {
     #[test]
     fn powershell_runas_script_quotes_and_escapes_path() {
         use std::path::Path;
-        // A plain path is single-quoted into a Start-Process -Verb RunAs command.
+        // The fallback (Program-Files) install now runs the setup.exe SILENTLY:
+        // `--silent --dir <install_dir>` (no installer UI, no click-through),
+        // waits for the elevated install, then relaunches the app in place.
+        // Every path is single-quoted; the exact shape is pinned here.
         assert_eq!(
-            powershell_runas_script(Path::new(r"C:\tmp\scr1b3-setup.exe")),
-            r"Start-Process -FilePath 'C:\tmp\scr1b3-setup.exe' -Verb RunAs"
+            powershell_runas_script(
+                Path::new(r"C:\tmp\scr1b3-setup.exe"),
+                Path::new(r"C:\Program Files\Itasha.Corp\SCR1B3"),
+                Path::new(r"C:\Program Files\Itasha.Corp\SCR1B3\scr1b3.exe"),
+            ),
+            "try { Start-Process -FilePath 'C:\\tmp\\scr1b3-setup.exe' \
+             -ArgumentList '--silent','--dir','C:\\Program Files\\Itasha.Corp\\SCR1B3' \
+             -Verb RunAs -Wait } catch { }; \
+             Start-Process -FilePath 'C:\\Program Files\\Itasha.Corp\\SCR1B3\\scr1b3.exe'"
         );
-        // An embedded single quote is escaped by doubling (the PowerShell rule),
-        // so a crafted path can never break out of the quoted string.
+        // An embedded single quote in ANY path is escaped by doubling (the
+        // PowerShell rule), so a crafted path can never break out of the quoted
+        // string.
         assert_eq!(
-            powershell_runas_script(Path::new(r"C:\o'brien\scr1b3-setup.exe")),
-            r"Start-Process -FilePath 'C:\o''brien\scr1b3-setup.exe' -Verb RunAs"
+            powershell_runas_script(
+                Path::new(r"C:\o'brien\scr1b3-setup.exe"),
+                Path::new(r"C:\o'brien\app"),
+                Path::new(r"C:\o'brien\app\scr1b3.exe"),
+            ),
+            "try { Start-Process -FilePath 'C:\\o''brien\\scr1b3-setup.exe' \
+             -ArgumentList '--silent','--dir','C:\\o''brien\\app' \
+             -Verb RunAs -Wait } catch { }; \
+             Start-Process -FilePath 'C:\\o''brien\\app\\scr1b3.exe'"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_runas_script_is_silent_and_targets_running_install() {
+        use std::path::Path;
+        // The seamless-update contract for the Program-Files fallback: the
+        // installer is invoked UNATTENDED (carries `--silent`), targets the
+        // exact directory SCR1B3 runs from (so the update lands in place, not
+        // the installer's own default), WAITS for the elevated install, and
+        // then relaunches the app. A regression that drops any of these
+        // re-introduces the interactive "click Continue" window the silent
+        // invocation exists to remove.
+        let script = powershell_runas_script(
+            Path::new(r"C:\pf\scr1b3-setup.exe"),
+            Path::new(r"C:\pf\SCR1B3"),
+            Path::new(r"C:\pf\SCR1B3\scr1b3.exe"),
+        );
+        assert!(
+            script.contains("'--silent'"),
+            "must run unattended: {script}"
+        );
+        assert!(
+            script.contains(r"'--dir','C:\pf\SCR1B3'"),
+            "must target the running install dir in place: {script}"
+        );
+        assert!(
+            script.contains("-Verb RunAs"),
+            "must still elevate: {script}"
+        );
+        assert!(
+            script.contains("-Wait"),
+            "must wait for the elevated install before relaunch: {script}"
+        );
+        assert!(
+            script.contains(r"Start-Process -FilePath 'C:\pf\SCR1B3\scr1b3.exe'"),
+            "must relaunch the app after the install: {script}"
         );
     }
 
