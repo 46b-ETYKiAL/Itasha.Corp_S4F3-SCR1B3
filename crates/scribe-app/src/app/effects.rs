@@ -59,11 +59,15 @@ pub(super) fn paint_crt_scanlines(ctx: &egui::Context, darkness: f32, t: f64) {
 /// whose alpha wanders via layered sines of `t` (deterministic — no RNG, so the
 /// reduced-motion resting frame is stable). `strength` is capped at 0.20 for
 /// accessibility. `Order::Foreground` so it modulates the whole composited view.
-pub(super) fn paint_flicker(ctx: &egui::Context, strength: f32, t: f64) {
+/// `speed` is a cadence multiplier (clamped upstream); at `1.0` the flicker runs
+/// at the shipped rate and higher values flicker faster.
+pub(super) fn paint_flicker(ctx: &egui::Context, strength: f32, t: f64, speed: f32) {
     let s = strength.clamp(0.0, 0.20);
     if s <= 0.0 {
         return;
     }
+    // Per-effect speed: scale the time input so 1.0 reproduces the shipped cadence.
+    let t = t * speed as f64;
     let n = ((t * 17.0).sin() * 0.5 + (t * 53.0).sin() * 0.3 + (t * 97.0).sin() * 0.2).abs();
     let a = (s * n as f32 * 90.0).round() as u8;
     if a == 0 {
@@ -81,12 +85,16 @@ pub(super) fn paint_flicker(ctx: &egui::Context, strength: f32, t: f64) {
 }
 
 /// VHS-style tracking lines: faint bright horizontal bands sweeping down the
-/// window at two different speeds, like analogue tape tracking error.
-pub(super) fn paint_vhs_tracking(ctx: &egui::Context, t: f64) {
+/// window at two different speeds, like analogue tape tracking error. `speed` is
+/// a drift multiplier (clamped upstream); at `1.0` the bands sweep at the shipped
+/// rate and higher values sweep faster (both bands scale proportionally).
+pub(super) fn paint_vhs_tracking(ctx: &egui::Context, t: f64, speed: f32) {
     let rect = ctx.content_rect();
     if rect.height() < 1.0 {
         return;
     }
+    // Per-effect speed: scale the time input so 1.0 reproduces the shipped drift.
+    let t = t * speed as f64;
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::new("vhs-tracking"),
@@ -132,7 +140,9 @@ pub(super) fn wired_mesh_node_count(width: f32, height: f32, density: f32) -> us
 /// are the brightness-scaled alphas (M1) — at the default brightness `1.0` they
 /// are the shipped `16` / `40`. `Order::Background` so it sits BEHIND the editor
 /// like the tint overlay (SCR1B3 keeps Background, NOT C0PL4ND's Foreground).
-/// O(n²) over n ≤ 160 — bounded per frame.
+/// O(n²) over n ≤ 160 — bounded per frame. `drift_speed` is a node-drift
+/// multiplier (clamped upstream); at `1.0` the lattice drifts at the shipped rate
+/// and higher values let it breathe faster (only the drift, not the layout).
 pub(super) fn paint_wired_mesh(
     ctx: &egui::Context,
     density: f32,
@@ -140,6 +150,7 @@ pub(super) fn paint_wired_mesh(
     dot_alpha: u8,
     color: Color32,
     t: f64,
+    drift_speed: f32,
 ) {
     let rect = ctx.content_rect();
     if rect.width() < 1.0 || rect.height() < 1.0 {
@@ -150,13 +161,16 @@ pub(super) fn paint_wired_mesh(
         egui::Id::new("wired-mesh"),
     ));
     let n = wired_mesh_node_count(rect.width(), rect.height(), density);
+    // Per-effect speed: scale the drift-time input so 1.0 reproduces the shipped
+    // drift rate. The static node layout (bx/by) is left untouched.
+    let td = t * drift_speed as f64;
     let mut pts: Vec<egui::Pos2> = Vec::with_capacity(n);
     for i in 0..n {
         let fi = i as f64;
         let bx = (fi * 0.732).fract() as f32;
         let by = (fi * 0.387 + 0.13).fract() as f32;
-        let dx = ((t * 0.07 + fi * 1.3).sin() * 0.5 + 0.5) as f32;
-        let dy = ((t * 0.05 + fi * 0.7).cos() * 0.5 + 0.5) as f32;
+        let dx = ((td * 0.07 + fi * 1.3).sin() * 0.5 + 0.5) as f32;
+        let dy = ((td * 0.05 + fi * 0.7).cos() * 0.5 + 0.5) as f32;
         let x = rect.left() + (bx * 0.85 + dx * 0.1) * rect.width();
         let y = rect.top() + (by * 0.85 + dy * 0.1) * rect.height();
         pts.push(egui::pos2(x, y));

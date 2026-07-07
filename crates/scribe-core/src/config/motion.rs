@@ -111,10 +111,23 @@ pub struct MotionConfig {
     /// Flicker strength (0.0 = none .. capped at 0.20 for accessibility).
     #[serde(default = "default_flicker_strength")]
     pub flicker_strength: f32,
+    /// Flicker cadence multiplier (0.25 = quarter-speed .. 3.0 = triple-speed,
+    /// clamped). Scales the flicker's time input so the default `1.0` reproduces
+    /// the current shipped cadence EXACTLY and higher values flicker faster.
+    /// Independent of [`flicker_strength`], which tunes only the depth. Inert
+    /// until [`flicker`](Self::flicker) is enabled (default OFF).
+    #[serde(default = "default_flicker_speed")]
+    pub flicker_speed: f32,
     /// VHS-style horizontal tracking lines that drift down the window. Off by
     /// default.
     #[serde(default)]
     pub vhs_tracking: bool,
+    /// VHS tracking-line drift multiplier (0.25 .. 3.0, clamped). Scales BOTH
+    /// tracking-band drift speeds proportionally so the default `1.0` reproduces
+    /// the current shipped drift EXACTLY and higher values sweep faster. Inert
+    /// until [`vhs_tracking`](Self::vhs_tracking) is enabled (default OFF).
+    #[serde(default = "default_vhs_speed")]
+    pub vhs_speed: f32,
     /// Animated wired node-mesh ambient background (Lain-inspired). Off by
     /// default; drawn at Background order behind the editor.
     #[serde(default)]
@@ -129,6 +142,13 @@ pub struct MotionConfig {
     /// shipped look exactly (link alpha 16, dot alpha 40). (M1, C0PL4ND parity.)
     #[serde(default = "default_mesh_brightness")]
     pub mesh_brightness: f32,
+    /// Wired-mesh node-drift multiplier (0.25 .. 3.0, clamped). Scales the mesh
+    /// node drift rate so the default `1.0` reproduces the current shipped drift
+    /// EXACTLY and higher values let the lattice breathe faster. Independent of
+    /// [`mesh_density`]/[`mesh_brightness`], which tune the node count and alpha.
+    /// Inert until [`wired_ambient`](Self::wired_ambient) is enabled (default OFF).
+    #[serde(default = "default_mesh_drift_speed")]
+    pub mesh_drift_speed: f32,
     /// Caret ghost-trail: a fading echo follows the caret as it moves. Off by
     /// default.
     #[serde(default)]
@@ -171,6 +191,24 @@ fn default_mesh_brightness() -> f32 {
 /// until `caret_trail` is enabled, so this default never changes the resting look.
 fn default_caret_trail_intensity() -> f32 {
     0.6
+}
+
+/// Default flicker cadence multiplier — `1.0` reproduces the current shipped
+/// flicker rate exactly, so enabling the field changes nothing by default.
+fn default_flicker_speed() -> f32 {
+    1.0
+}
+
+/// Default VHS tracking-drift multiplier — `1.0` reproduces the current shipped
+/// drift speeds exactly, so enabling the field changes nothing by default.
+fn default_vhs_speed() -> f32 {
+    1.0
+}
+
+/// Default wired-mesh node-drift multiplier — `1.0` reproduces the current
+/// shipped drift rate exactly, so enabling the field changes nothing by default.
+fn default_mesh_drift_speed() -> f32 {
+    1.0
 }
 
 /// Base wired-mesh link-line alpha at brightness `1.0` (the current shipped look).
@@ -233,6 +271,24 @@ impl MotionConfig {
         self.caret_trail_intensity.clamp(0.0, 2.0)
     }
 
+    /// Flicker cadence multiplier clamped to its design band (0.25..=3.0). At the
+    /// default `1.0` the flicker runs at the current shipped cadence exactly.
+    pub fn clamped_flicker_speed(&self) -> f32 {
+        self.flicker_speed.clamp(0.25, 3.0)
+    }
+
+    /// VHS tracking-drift multiplier clamped to its design band (0.25..=3.0). At
+    /// the default `1.0` the tracking bands drift at the current shipped speeds.
+    pub fn clamped_vhs_speed(&self) -> f32 {
+        self.vhs_speed.clamp(0.25, 3.0)
+    }
+
+    /// Wired-mesh node-drift multiplier clamped to its design band (0.25..=3.0).
+    /// At the default `1.0` the lattice drifts at the current shipped rate.
+    pub fn clamped_mesh_drift_speed(&self) -> f32 {
+        self.mesh_drift_speed.clamp(0.25, 3.0)
+    }
+
     /// Lifetime (seconds) of a caret-trail echo at the configured intensity. (M2.)
     pub fn caret_trail_life(&self) -> f64 {
         caret_trail_life(self.caret_trail_intensity)
@@ -251,10 +307,13 @@ impl Default for MotionConfig {
             scanline_darkness: default_scanline_darkness(),
             flicker: false,
             flicker_strength: default_flicker_strength(),
+            flicker_speed: default_flicker_speed(),
             vhs_tracking: false,
+            vhs_speed: default_vhs_speed(),
             wired_ambient: false,
             mesh_density: default_mesh_density(),
             mesh_brightness: default_mesh_brightness(),
+            mesh_drift_speed: default_mesh_drift_speed(),
             caret_trail: false,
             caret_trail_intensity: default_caret_trail_intensity(),
             boot_glitch: false,
@@ -404,6 +463,64 @@ mod tests {
         let cfg = Config::from_toml_str("[motion]\nenabled = true\n").unwrap();
         assert!(!cfg.motion.caret_trail, "absent field keeps the trail off");
         assert_eq!(cfg.motion.caret_trail_intensity, 0.6);
+    }
+
+    #[test]
+    fn per_effect_speeds_default_to_one_and_clamp_to_their_band() {
+        // Per-effect speed multipliers default to 1.0 so the resting look is
+        // byte-for-byte unchanged (1.0 reproduces the current shipped cadence for
+        // flicker, VHS drift, and mesh drift). Each clamps to the 0.25..=3.0 band
+        // so a hand-edited TOML can't drive a seizure-fast or frozen animation.
+        let d = MotionConfig::default();
+        assert_eq!(d.flicker_speed, 1.0, "flicker_speed default is 1.0");
+        assert_eq!(d.vhs_speed, 1.0, "vhs_speed default is 1.0");
+        assert_eq!(d.mesh_drift_speed, 1.0, "mesh_drift_speed default is 1.0");
+        assert_eq!(d.clamped_flicker_speed(), 1.0);
+        assert_eq!(d.clamped_vhs_speed(), 1.0);
+        assert_eq!(d.clamped_mesh_drift_speed(), 1.0);
+        // Above-band values clamp to the 3.0 ceiling.
+        let hi = MotionConfig {
+            flicker_speed: 42.0,
+            vhs_speed: 9.0,
+            mesh_drift_speed: 5.0,
+            ..MotionConfig::default()
+        };
+        assert_eq!(hi.clamped_flicker_speed(), 3.0, "flicker ceiling 3.0");
+        assert_eq!(hi.clamped_vhs_speed(), 3.0, "vhs ceiling 3.0");
+        assert_eq!(hi.clamped_mesh_drift_speed(), 3.0, "mesh-drift ceiling 3.0");
+        // Below-band (incl. zero/negative) values clamp UP to the 0.25 floor so a
+        // frozen animation is impossible.
+        let lo = MotionConfig {
+            flicker_speed: 0.0,
+            vhs_speed: -3.0,
+            mesh_drift_speed: 0.1,
+            ..MotionConfig::default()
+        };
+        assert_eq!(lo.clamped_flicker_speed(), 0.25, "flicker floor 0.25");
+        assert_eq!(lo.clamped_vhs_speed(), 0.25, "vhs floor 0.25");
+        assert_eq!(lo.clamped_mesh_drift_speed(), 0.25, "mesh-drift floor 0.25");
+        // An in-band value passes through untouched.
+        let mid = MotionConfig {
+            flicker_speed: 1.5,
+            vhs_speed: 2.0,
+            mesh_drift_speed: 0.5,
+            ..MotionConfig::default()
+        };
+        assert_eq!(mid.clamped_flicker_speed(), 1.5);
+        assert_eq!(mid.clamped_vhs_speed(), 2.0);
+        assert_eq!(mid.clamped_mesh_drift_speed(), 0.5);
+        // Serde backfill: a config that predates these fields loads with the 1.0
+        // default (no visual change on upgrade).
+        let cfg = Config::from_toml_str("[motion]\nflicker = true\n").unwrap();
+        assert_eq!(
+            cfg.motion.flicker_speed, 1.0,
+            "absent field backfills to 1.0"
+        );
+        assert_eq!(cfg.motion.vhs_speed, 1.0, "absent field backfills to 1.0");
+        assert_eq!(
+            cfg.motion.mesh_drift_speed, 1.0,
+            "absent field backfills to 1.0"
+        );
     }
 
     // ---- MotionConfig clamps (previously uncovered) ----

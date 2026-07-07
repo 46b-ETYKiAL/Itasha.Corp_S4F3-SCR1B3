@@ -307,7 +307,7 @@ fn flicker_painter_is_noop_at_zero_strength() {
     // painter must early-return BEFORE allocating a layer, contributing nothing.
     let ctx = egui::Context::default();
     let _ = ctx.run(egui::RawInput::default(), |ctx| {
-        super::effects::paint_flicker(ctx, 0.0, 1.234);
+        super::effects::paint_flicker(ctx, 0.0, 1.234, 1.0);
     });
     // A no-op painter leaves no "crt-flicker" layer shapes. We can't read layer
     // internals, but a panic-free zero-strength call IS the contract; the
