@@ -1463,11 +1463,13 @@ fn render_sections(
                 &def.motion.enabled,
             );
             let on = config.motion.enabled;
-            if row_visible(q, "motion animation speed intensity") {
-                ui.label("Animation speed").on_hover_text(
-                    "Scale how long animations take. 0 makes every transition instant; 1 is \
-                     egui's full animation time and 2 is double that. Affects hover fades, \
-                     panel collapses, and value changes across the editor.",
+            if row_visible(q, "motion animation speed intensity ui transition") {
+                ui.label("UI transition speed").on_hover_text(
+                    "Scale how long the editor's CHROME transitions take — hover fades, panel \
+                     and collapsible expand/collapse, combobox/menu fades, and value-change \
+                     lerps. 0 makes every transition instant; 1 is egui's full transition time \
+                     and 2 is double that. This does NOT control the retro visual effects \
+                     (flicker / VHS / mesh) — those have their own per-effect speed sliders below.",
                 );
                 changed |= ui
                     .add_enabled(
@@ -1588,6 +1590,24 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+            if row_visible(q, "mesh drift speed motion") {
+                ui.label("Mesh drift speed").on_hover_text(
+                    "How fast the wired-mesh nodes drift. 1 is the standard rate; lower is a \
+                     slower, calmer breathe and higher makes the lattice shift faster.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.motion.wired_ambient,
+                        egui::Slider::new(&mut config.motion.mesh_drift_speed, 0.25..=3.0),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.mesh_drift_speed,
+                    &def.motion.mesh_drift_speed,
+                );
+                ui.end_row();
+            }
             if row_visible(q, "vhs tracking lines motion effect") {
                 ui.add_enabled_ui(on, |ui| {
                     changed |= ui
@@ -1603,6 +1623,21 @@ fn render_sections(
                     &mut config.motion.vhs_tracking,
                     &def.motion.vhs_tracking,
                 );
+                ui.end_row();
+            }
+            if row_visible(q, "vhs drift speed tracking motion") {
+                ui.label("VHS drift speed").on_hover_text(
+                    "How fast the VHS tracking bands sweep down the window. 1 is the standard \
+                     rate; lower drifts more slowly and higher sweeps faster.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.motion.vhs_tracking,
+                        egui::Slider::new(&mut config.motion.vhs_speed, 0.25..=3.0),
+                    )
+                    .changed();
+                changed |=
+                    reset_to_default(ui, &mut config.motion.vhs_speed, &def.motion.vhs_speed);
                 ui.end_row();
             }
             if row_visible(q, "screen flicker motion effect") {
@@ -1629,6 +1664,24 @@ fn render_sections(
                     ui,
                     &mut config.motion.flicker_strength,
                     &def.motion.flicker_strength,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "flicker speed cadence motion") {
+                ui.label("Flicker speed").on_hover_text(
+                    "How fast the screen flicker pulses. 1 is the standard cadence; lower is a \
+                     slower shimmer and higher flickers faster. Independent of the strength.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.motion.flicker,
+                        egui::Slider::new(&mut config.motion.flicker_speed, 0.25..=3.0),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.flicker_speed,
+                    &def.motion.flicker_speed,
                 );
                 ui.end_row();
             }
@@ -3209,6 +3262,9 @@ mod wiring_guard {
             "motion.mesh_brightness" => {
                 src.contains("mesh_link_alpha") || src.contains("mesh_dot_alpha")
             }
+            "motion.flicker_speed" => src.contains("clamped_flicker_speed"),
+            "motion.vhs_speed" => src.contains("clamped_vhs_speed"),
+            "motion.mesh_drift_speed" => src.contains("clamped_mesh_drift_speed"),
             "ui_scale" => src.contains("effective_ui_scale"),
             "editor.caret_width" => src.contains("clamped_caret_width"),
             _ => false,
@@ -3284,8 +3340,11 @@ mod wiring_guard {
         "motion.mesh_density",
         "motion.mesh_brightness",
         "motion.vhs_tracking",
+        "motion.vhs_speed",
         "motion.flicker",
         "motion.flicker_strength",
+        "motion.flicker_speed",
+        "motion.mesh_drift_speed",
         "motion.caret_trail",
         "motion.caret_trail_intensity",
         "motion.boot_glitch",

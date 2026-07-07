@@ -3148,15 +3148,21 @@ impl ScribeApp {
                     self.config.motion.mesh_dot_alpha(),
                     accent,
                     t,
+                    self.config.motion.clamped_mesh_drift_speed(),
                 );
                 animating = true;
             }
             if self.config.motion.vhs_tracking {
-                paint_vhs_tracking(ctx, t);
+                paint_vhs_tracking(ctx, t, self.config.motion.clamped_vhs_speed());
                 animating = true;
             }
             if self.config.motion.flicker {
-                paint_flicker(ctx, self.config.motion.clamped_flicker_strength(), t);
+                paint_flicker(
+                    ctx,
+                    self.config.motion.clamped_flicker_strength(),
+                    t,
+                    self.config.motion.clamped_flicker_speed(),
+                );
                 animating = true;
             }
             if self.config.motion.caret_trail {

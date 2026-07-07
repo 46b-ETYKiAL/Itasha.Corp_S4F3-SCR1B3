@@ -134,15 +134,18 @@ Subtle motion is **on by default**; the CRT/VHS effects are individually **off b
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | boolean | `true` | Master toggle for animations/motion. |
-| `intensity` | float | `0.6` | Overall motion intensity. |
+| `intensity` | float | `0.6` | UI transition speed — scales egui's chrome-transition time (hover fades, panel/collapsible expand-collapse, value-change lerps). Does NOT control the retro effects. Shown in Settings as **UI transition speed**. |
 | `cursor_blink` | boolean | `true` | Blink the text caret. |
 | `crt_scanlines` | boolean | `false` | CRT scanline overlay. |
 | `scanline_darkness` | float | _(tuned)_ | Strength of the scanline overlay. |
 | `flicker` | boolean | `false` | CRT flicker. |
 | `flicker_strength` | float | _(tuned)_ | Strength of the flicker. |
+| `flicker_speed` | float | `1.0` | Flicker cadence multiplier (0.25–3.0). `1.0` reproduces the shipped rate. |
 | `vhs_tracking` | boolean | `false` | VHS tracking-line artifact. |
+| `vhs_speed` | float | `1.0` | VHS tracking-band drift multiplier (0.25–3.0). `1.0` reproduces the shipped drift. |
 | `wired_ambient` | boolean | `false` | Ambient "wired" mesh background. |
 | `mesh_density` | float | _(tuned)_ | Density of the ambient mesh. |
+| `mesh_drift_speed` | float | `1.0` | Wired-mesh node-drift multiplier (0.25–3.0). `1.0` reproduces the shipped drift. |
 | `caret_trail` | boolean | `false` | Trailing afterglow on the caret. |
 | `boot_glitch` | boolean | `false` | One-shot glitch on launch. |
 
