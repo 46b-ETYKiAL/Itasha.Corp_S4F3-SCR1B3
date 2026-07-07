@@ -1393,6 +1393,32 @@ fn render_sections(
                 &mut config.editor.restore_cursor_position,
                 &def.editor.restore_cursor_position,
             );
+            if row_visible(q, "default save format markdown plain text extension") {
+                use scribe_core::config::DefaultSaveFormat;
+                ui.label("Default save format").on_hover_text(
+                    "The file type a brand-new note suggests in the Save dialog. Markdown \
+                     (.md) by default — you can still pick any name or extension when saving.",
+                );
+                egui::ComboBox::from_id_salt("default-save-format")
+                    .selected_text(config.integration.default_save_format.ui_label())
+                    .show_ui(ui, |ui| {
+                        for fmt in DefaultSaveFormat::ALL {
+                            changed |= ui
+                                .selectable_value(
+                                    &mut config.integration.default_save_format,
+                                    fmt,
+                                    fmt.ui_label(),
+                                )
+                                .changed();
+                        }
+                    });
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.integration.default_save_format,
+                    &def.integration.default_save_format,
+                );
+                ui.end_row();
+            }
         });
         space(ui);
     }

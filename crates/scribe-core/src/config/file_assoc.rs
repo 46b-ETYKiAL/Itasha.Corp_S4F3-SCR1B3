@@ -17,6 +17,84 @@
 //! unit-tested below.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// The document format SCR1B3 suggests when you save a not-yet-saved buffer via
+/// "Save As". This is ONLY a default for the save dialog — you can still type
+/// any name / extension you like in the dialog. Markdown is the default because
+/// SCR1B3 is a note-first editor.
+///
+/// Deliberately small but extensible: add a variant plus its arm in each `match`
+/// (and it is a member of [`ALL`](Self::ALL)) and the new format flows into both
+/// the Settings chooser and the Save-As dialog with no other wiring.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DefaultSaveFormat {
+    /// Markdown notes (`.md`). The default.
+    #[default]
+    Markdown,
+    /// Plain text (`.txt`).
+    PlainText,
+}
+
+impl DefaultSaveFormat {
+    /// Every format, in display order. Drives the Settings dropdown and the
+    /// secondary Save-As dialog filters.
+    pub const ALL: [DefaultSaveFormat; 2] =
+        [DefaultSaveFormat::Markdown, DefaultSaveFormat::PlainText];
+
+    /// File extension (NO leading dot) for this format — used as the primary
+    /// Save-As filter and appended to a chosen name that has no extension.
+    pub fn extension(self) -> &'static str {
+        match self {
+            DefaultSaveFormat::Markdown => "md",
+            DefaultSaveFormat::PlainText => "txt",
+        }
+    }
+
+    /// Short filter label shown in the Save-As dialog for this format.
+    pub fn filter_label(self) -> &'static str {
+        match self {
+            DefaultSaveFormat::Markdown => "Markdown",
+            DefaultSaveFormat::PlainText => "Plain Text",
+        }
+    }
+
+    /// Human label for the Settings dropdown (name + extension).
+    pub fn ui_label(self) -> &'static str {
+        match self {
+            DefaultSaveFormat::Markdown => "Markdown (.md)",
+            DefaultSaveFormat::PlainText => "Plain Text (.txt)",
+        }
+    }
+
+    /// The name SCR1B3 pre-fills in the Save-As dialog for a buffer: `<stem>.<ext>`,
+    /// defaulting the stem to `untitled` when the buffer has never been named.
+    /// A blank / whitespace-only stem also falls back to `untitled`.
+    pub fn suggested_file_name(self, stem: Option<&str>) -> String {
+        let stem = stem
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("untitled");
+        format!("{stem}.{}", self.extension())
+    }
+}
+
+/// Ensure a user-chosen Save-As path carries an extension: if the file name has
+/// NO extension at all, append `default_ext` (so `notes` → `notes.md`); if it
+/// already carries ANY extension — even a different one the user typed on
+/// purpose (`notes.txt`) — leave it exactly as given. Pure + testable so the
+/// Save-As codepath stays drivable without the rfd dialog.
+pub fn ensure_extension(path: &Path, default_ext: &str) -> PathBuf {
+    match path.extension() {
+        Some(_) => path.to_path_buf(),
+        None => {
+            let mut p = path.to_path_buf();
+            p.set_extension(default_ext);
+            p
+        }
+    }
+}
 
 /// A logical group of file types the user can ask SCR1B3 to become the default
 /// app for. Coarser than raw extensions so the Settings UI stays a short, legible
@@ -156,6 +234,13 @@ pub struct IntegrationConfig {
     /// Unix seconds of the last successful registration (for the Settings status
     /// line). `None` until the first successful register.
     pub last_registration_unix: Option<u64>,
+    /// The document format the "Save As" dialog defaults a not-yet-saved buffer
+    /// to (extension + primary filter). Defaults to Markdown — SCR1B3 is a
+    /// note-first editor, so new files suggest `untitled.md`. `#[serde(default)]`
+    /// means a config written before this field existed backfills to Markdown
+    /// automatically (serde-default IS the migration — no schema bump needed).
+    #[serde(default)]
+    pub default_save_format: DefaultSaveFormat,
 }
 
 impl IntegrationConfig {
@@ -233,6 +318,7 @@ mod tests {
             // out of order + an unknown key
             claimed_types: vec!["json".into(), "bogus".into(), "plain_text".into()],
             last_registration_unix: None,
+            default_save_format: DefaultSaveFormat::Markdown,
         };
         assert_eq!(
             c.claimed_types(),
@@ -247,9 +333,131 @@ mod tests {
             register_file_types: true,
             claimed_types: vec!["plain_text".into(), "markdown".into()],
             last_registration_unix: Some(1_700_000_000),
+            default_save_format: DefaultSaveFormat::PlainText,
         };
         let s = toml::to_string(&c).unwrap();
         let back: IntegrationConfig = toml::from_str(&s).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn default_save_format_defaults_to_markdown() {
+        // A fresh format value is Markdown, and Markdown's extension is `md`.
+        assert_eq!(DefaultSaveFormat::default(), DefaultSaveFormat::Markdown);
+        assert_eq!(DefaultSaveFormat::default().extension(), "md");
+        // And it is the default on a fresh IntegrationConfig too.
+        assert_eq!(
+            IntegrationConfig::default().default_save_format,
+            DefaultSaveFormat::Markdown
+        );
+    }
+
+    #[test]
+    fn existing_config_without_the_key_backfills_to_markdown() {
+        // A config (here, the IntegrationConfig section) written before this
+        // field existed omits `default_save_format` entirely. Serde-default is
+        // the migration: it backfills to Markdown with NO schema bump.
+        let older = "register_file_types = true\n";
+        let cfg: IntegrationConfig = toml::from_str(older).unwrap();
+        assert_eq!(cfg.default_save_format, DefaultSaveFormat::Markdown);
+        // Even a totally empty section backfills to Markdown.
+        let empty: IntegrationConfig = toml::from_str("").unwrap();
+        assert_eq!(empty.default_save_format, DefaultSaveFormat::Markdown);
+    }
+
+    #[test]
+    fn suggested_file_name_follows_the_configured_format() {
+        // Save-path contract, unit-tested at the pure-helper layer (the rfd
+        // dialog can't be driven headlessly): an untitled buffer suggests
+        // `untitled.<ext>`, and switching the format switches the extension.
+        assert_eq!(
+            DefaultSaveFormat::Markdown.suggested_file_name(None),
+            "untitled.md"
+        );
+        assert_eq!(
+            DefaultSaveFormat::PlainText.suggested_file_name(None),
+            "untitled.txt"
+        );
+        // A blank / whitespace stem also falls back to `untitled`.
+        assert_eq!(
+            DefaultSaveFormat::Markdown.suggested_file_name(Some("   ")),
+            "untitled.md"
+        );
+        // A named buffer keeps its stem, gaining the configured extension.
+        assert_eq!(
+            DefaultSaveFormat::Markdown.suggested_file_name(Some("notes")),
+            "notes.md"
+        );
+        assert_eq!(
+            DefaultSaveFormat::PlainText.suggested_file_name(Some("notes")),
+            "notes.txt"
+        );
+    }
+
+    #[test]
+    fn suggested_name_follows_config_field_end_to_end() {
+        // Drive the suggested name straight off a Config's integration field,
+        // proving the Settings choice reaches the save dialog's pre-fill.
+        use crate::config::Config;
+        let mut c = Config::default();
+        assert_eq!(
+            c.integration.default_save_format.suggested_file_name(None),
+            "untitled.md",
+            "the default config suggests a Markdown name"
+        );
+        c.integration.default_save_format = DefaultSaveFormat::PlainText;
+        assert_eq!(
+            c.integration.default_save_format.suggested_file_name(None),
+            "untitled.txt",
+            "switching the config to Plain Text switches the suggestion"
+        );
+        // And it survives a TOML round-trip (persisted like every other setting).
+        let back: Config = toml::from_str(&c.to_toml_string()).expect("config round-trip");
+        assert_eq!(
+            back.integration.default_save_format,
+            DefaultSaveFormat::PlainText
+        );
+    }
+
+    #[test]
+    fn ensure_extension_appends_only_when_missing() {
+        // No extension → the configured default is appended.
+        assert_eq!(
+            ensure_extension(Path::new("notes"), "md"),
+            PathBuf::from("notes.md")
+        );
+        assert_eq!(
+            ensure_extension(Path::new("notes"), "txt"),
+            PathBuf::from("notes.txt")
+        );
+        // An explicit DIFFERENT extension the user typed on purpose is respected.
+        assert_eq!(
+            ensure_extension(Path::new("notes.txt"), "md"),
+            PathBuf::from("notes.txt")
+        );
+        // A matching extension is likewise left untouched (idempotent).
+        assert_eq!(
+            ensure_extension(Path::new("notes.md"), "md"),
+            PathBuf::from("notes.md")
+        );
+        // A path with directories is preserved; only the leaf gains the ext.
+        assert_eq!(
+            ensure_extension(Path::new("/tmp/sub/report"), "md"),
+            PathBuf::from("/tmp/sub/report.md")
+        );
+    }
+
+    #[test]
+    fn format_labels_are_distinct_and_nonempty() {
+        for f in DefaultSaveFormat::ALL {
+            assert!(!f.extension().is_empty());
+            assert!(!f.filter_label().is_empty());
+            assert!(!f.ui_label().is_empty());
+        }
+        assert_ne!(
+            DefaultSaveFormat::Markdown.extension(),
+            DefaultSaveFormat::PlainText.extension()
+        );
+        assert_eq!(DefaultSaveFormat::ALL.len(), 2);
     }
 }
