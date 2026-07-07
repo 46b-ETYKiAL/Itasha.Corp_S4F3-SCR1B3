@@ -2818,8 +2818,9 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
                 .button("Install update (asks for admin)")
                 .on_hover_text(
                     "SCR1B3 is installed in a protected location, so the verified \
-                     installer runs to update it in place. Windows will prompt for \
-                     administrator rights; SCR1B3 will close and relaunch.",
+                     installer updates it in place silently — no installer window, \
+                     no extra clicks. Windows shows a single administrator prompt; \
+                     then SCR1B3 closes and relaunches on the new version.",
                 )
                 .clicked()
             {
