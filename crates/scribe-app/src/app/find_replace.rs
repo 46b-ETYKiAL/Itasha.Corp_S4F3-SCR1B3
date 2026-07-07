@@ -49,6 +49,9 @@ impl ScribeApp {
         // Wave-3: invalidate the gen-keyed minimap/spell caches.
         let i = self.active;
         self.tabs[i].edit_gen = self.tabs[i].edit_gen.wrapping_add(1);
+        // P2-C: a find/replace splice moves offsets out from under any
+        // multi-cursor set — drop the now-stale carets.
+        self.mc_clear_carets();
     }
 
     /// Wave-5 / 4-02: run the project-wide search over the open folder into the
