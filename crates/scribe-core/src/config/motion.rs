@@ -149,6 +149,14 @@ pub struct MotionConfig {
     /// Inert until [`wired_ambient`](Self::wired_ambient) is enabled (default OFF).
     #[serde(default = "default_mesh_drift_speed")]
     pub mesh_drift_speed: f32,
+    /// Custom wired-mesh colour override, as sRGB `[r, g, b]`. `None` (the
+    /// default) means the mesh FOLLOWS the active theme's accent colour. `Some`
+    /// pins the mesh to a chosen colour; the Settings picker then shows a
+    /// "Reset to theme" button that clears this back to `None`. Stored as a
+    /// fixed byte array (not a hex `String`) so `MotionConfig` stays `Copy`.
+    /// Inert until [`wired_ambient`](Self::wired_ambient) is enabled.
+    #[serde(default)]
+    pub mesh_color: Option<[u8; 3]>,
     /// Caret ghost-trail: a fading echo follows the caret as it moves. Off by
     /// default.
     #[serde(default)]
@@ -293,6 +301,14 @@ impl MotionConfig {
     pub fn caret_trail_life(&self) -> f64 {
         caret_trail_life(self.caret_trail_intensity)
     }
+
+    /// Resolve the wired-mesh colour as sRGB `[r, g, b]`: the user override when
+    /// one is pinned ([`mesh_color`](Self::mesh_color) is `Some`), else the
+    /// supplied theme accent (the default "follow the theme" behaviour). Pure so
+    /// the follow-theme-vs.-pinned choice is unit-testable without egui.
+    pub fn resolved_mesh_color(&self, theme_accent: [u8; 3]) -> [u8; 3] {
+        self.mesh_color.unwrap_or(theme_accent)
+    }
 }
 
 impl Default for MotionConfig {
@@ -314,6 +330,7 @@ impl Default for MotionConfig {
             mesh_density: default_mesh_density(),
             mesh_brightness: default_mesh_brightness(),
             mesh_drift_speed: default_mesh_drift_speed(),
+            mesh_color: None,
             caret_trail: false,
             caret_trail_intensity: default_caret_trail_intensity(),
             boot_glitch: false,
@@ -521,6 +538,44 @@ mod tests {
             cfg.motion.mesh_drift_speed, 1.0,
             "absent field backfills to 1.0"
         );
+    }
+
+    #[test]
+    fn mesh_color_defaults_to_follow_theme_and_round_trips() {
+        // The mesh colour override defaults to None => the mesh follows the theme
+        // accent. `resolved_mesh_color` returns the theme accent when unset and
+        // the pinned colour when set. A config predating the field backfills to
+        // None (no visual change on upgrade). The override round-trips through
+        // TOML.
+        let d = MotionConfig::default();
+        assert_eq!(d.mesh_color, None, "default follows the theme");
+        let accent = [0x00, 0xe5, 0xff];
+        assert_eq!(
+            d.resolved_mesh_color(accent),
+            accent,
+            "unset => follow the theme accent"
+        );
+        let pinned = MotionConfig {
+            mesh_color: Some([0x12, 0x34, 0x56]),
+            ..MotionConfig::default()
+        };
+        assert_eq!(
+            pinned.resolved_mesh_color(accent),
+            [0x12, 0x34, 0x56],
+            "set => the pinned colour wins over the theme accent"
+        );
+        // Serde backfill: absent field loads as None.
+        let cfg = Config::from_toml_str("[motion]\nwired_ambient = true\n").unwrap();
+        assert_eq!(
+            cfg.motion.mesh_color, None,
+            "absent field backfills to None"
+        );
+        // Round-trip a pinned colour through the config TOML.
+        let mut c2 = Config::default();
+        c2.motion.mesh_color = Some([10, 20, 30]);
+        let s = c2.to_toml_string();
+        let back: Config = toml::from_str(&s).expect("config TOML round-trip");
+        assert_eq!(back.motion.mesh_color, Some([10, 20, 30]));
     }
 
     // ---- MotionConfig clamps (previously uncovered) ----

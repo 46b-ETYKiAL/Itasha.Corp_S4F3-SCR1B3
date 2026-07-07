@@ -434,12 +434,19 @@ impl ScribeApp {
         let mut start_lsp = false;
 
         let accent = ui_color(&self.theme, "accent", Rgba::new(0, 255, 254, 255));
-        // Secondary brand colour for the split-tone wordmark (`1 B 3` half). Falls
-        // back to a complementary violet when a theme does not define `accent_alt`,
-        // so existing single-accent themes keep working; the 12 brand themes each
-        // set their own. Chrome stays one-accent everywhere ELSE (the split wordmark
-        // is the single deliberate two-tone mark, per the brand discipline).
-        let accent_alt = ui_color(&self.theme, "accent_alt", Rgba::new(0x9d, 0x7c, 0xff, 255));
+        // Secondary brand colour for the split-tone wordmark (`1 B 3` half). A
+        // theme MAY set `accent_alt` explicitly; when it doesn't, we derive the
+        // fallback from that theme's `keyword` syntax hue — a colour every theme
+        // defines and which is chosen to CONTRAST the accent. This makes BOTH
+        // halves of the wordmark recolour together on a theme change. (Previously
+        // this fell back to a FIXED violet, so only the accent-coloured "S C R "
+        // half followed the theme while "1 B 3" stayed violet on every theme —
+        // the "only half recolours" report.) Chrome stays one-accent everywhere
+        // ELSE; the split wordmark is the single deliberate two-tone mark.
+        let accent_alt_default = self
+            .theme
+            .syntax_color("keyword", Rgba::new(0x9d, 0x7c, 0xff, 255));
+        let accent_alt = ui_color(&self.theme, "accent_alt", accent_alt_default);
         let muted = ui_color(&self.theme, "line_number", Rgba::new(0x5a, 0x58, 0x69, 255));
         // Chrome panels (titlebar/toolbar/status/filetree/split/gutter/minimap) all
         // fill with this color. In a translucent window mode the fill MUST carry the
@@ -3141,12 +3148,18 @@ impl ScribeApp {
             let accent = ui_color(&self.theme, "accent", Rgba::new(0x4c, 0xc2, 0xff, 255));
             let mut animating = false;
             if self.config.motion.wired_ambient {
+                // Mesh colour follows the theme accent by default, or the user's
+                // pinned override (Settings → Motion → Mesh colour) when set.
+                let [mr, mg, mb] =
+                    self.config
+                        .motion
+                        .resolved_mesh_color([accent.r(), accent.g(), accent.b()]);
                 paint_wired_mesh(
                     ctx,
                     self.config.motion.clamped_mesh_density(),
                     self.config.motion.mesh_link_alpha(),
                     self.config.motion.mesh_dot_alpha(),
-                    accent,
+                    Color32::from_rgb(mr, mg, mb),
                     t,
                     self.config.motion.clamped_mesh_drift_speed(),
                 );

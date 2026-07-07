@@ -432,29 +432,75 @@ fn render_sections(
                     "Pick the active colour theme from the built-ins, or type a user theme \
                      name below. Changes apply live.",
                 );
-                let current = config.appearance.theme.clone();
-                egui::ComboBox::from_id_salt("theme-picker")
-                    .selected_text(&current)
-                    .show_ui(ui, |ui| {
-                        for name in scribe_core::theme::Theme::builtin_names() {
-                            if ui
-                                .selectable_value(
-                                    &mut config.appearance.theme,
-                                    (*name).to_string(),
-                                    *name,
-                                )
-                                .changed()
-                            {
-                                // #88/#106 — switching theme resets BOTH the app
-                                // and note background overrides to the new theme.
-                                config.appearance.background_override = None;
-                                config.appearance.note_background_override = None;
-                                changed = true;
+                ui.horizontal(|ui| {
+                    let names = scribe_core::theme::Theme::builtin_names();
+                    // Prev/next arrows that cycle the built-in themes IN PLACE
+                    // (no dropdown open). They are kept STATIONARY by pinning the
+                    // ComboBox between them to a FIXED width, so the arrows never
+                    // shift as the selected theme name changes length. Phosphor
+                    // carets render from the icon atlas (a raw "<"/">" glyph can
+                    // tofu in some UI fonts). `rem_euclid` wraps around the list;
+                    // a custom (non-built-in) theme name steps onto the first/last
+                    // built-in so the arrows always have a defined landing spot
+                    // (mirrors C0PL4ND's theme step arrows).
+                    let step = |config: &mut Config, delta: isize| {
+                        let n = names.len() as isize;
+                        let cur = names.iter().position(|t| *t == config.appearance.theme);
+                        let next = match cur {
+                            Some(i) => (i as isize + delta).rem_euclid(n),
+                            None if delta > 0 => 0,
+                            None => n - 1,
+                        };
+                        config.appearance.theme = names[next as usize].to_string();
+                        // #88/#106 — switching theme resets BOTH the app and note
+                        // background overrides to the new theme (parity with the
+                        // dropdown path below).
+                        config.appearance.background_override = None;
+                        config.appearance.note_background_override = None;
+                    };
+                    if ui
+                        .add(egui::Button::new(egui_phosphor::thin::CARET_LEFT))
+                        .on_hover_text("Previous theme")
+                        .clicked()
+                    {
+                        step(config, -1);
+                        changed = true;
+                    }
+                    egui::ComboBox::from_id_salt("theme-picker")
+                        // Fixed width => the flanking arrows are stationary and a
+                        // long theme name is clipped inside the box rather than
+                        // pushing the "next" arrow to the right.
+                        .width(168.0)
+                        .selected_text(config.appearance.theme.clone())
+                        .show_ui(ui, |ui| {
+                            for name in names {
+                                if ui
+                                    .selectable_value(
+                                        &mut config.appearance.theme,
+                                        (*name).to_string(),
+                                        *name,
+                                    )
+                                    .changed()
+                                {
+                                    config.appearance.background_override = None;
+                                    config.appearance.note_background_override = None;
+                                    changed = true;
+                                }
                             }
-                        }
-                    })
-                    .response
-                    .on_hover_text("Choose one of the built-in colour themes.");
+                        })
+                        .response
+                        .on_hover_text(
+                            "Choose a built-in colour theme, or use the arrows to cycle.",
+                        );
+                    if ui
+                        .add(egui::Button::new(egui_phosphor::thin::CARET_RIGHT))
+                        .on_hover_text("Next theme")
+                        .clicked()
+                    {
+                        step(config, 1);
+                        changed = true;
+                    }
+                });
                 changed |=
                     reset_to_default(ui, &mut config.appearance.theme, &def.appearance.theme);
                 ui.end_row();
@@ -1606,6 +1652,58 @@ fn render_sections(
                     &mut config.motion.mesh_drift_speed,
                     &def.motion.mesh_drift_speed,
                 );
+                ui.end_row();
+            }
+            if row_visible(q, "node mesh colour color theme motion") {
+                ui.label("Mesh colour").on_hover_text(
+                    "Colour of the wired-mesh nodes and links. By default it follows the \
+                     active theme's accent; pick a colour to pin it, then use 'Reset to \
+                     theme' to go back to following the theme.",
+                );
+                ui.add_enabled_ui(on && config.motion.wired_ambient, |ui| {
+                    ui.horizontal(|ui| {
+                        // Seed the picker with the active theme's accent so the
+                        // "follow theme" state shows the colour it will actually
+                        // paint. Resolving the built-in by name is best-effort — a
+                        // user TOML theme (not a built-in) falls back to the
+                        // shipped default accent seed.
+                        let theme_accent =
+                            scribe_core::theme::Theme::builtin(&config.appearance.theme)
+                                .map(|t| {
+                                    let [r, g, b, _] = t
+                                        .ui(
+                                            "accent",
+                                            scribe_core::theme::Rgba::new(0x00, 0xe5, 0xff, 255),
+                                        )
+                                        .to_array();
+                                    egui::Color32::from_rgb(r, g, b)
+                                })
+                                .unwrap_or(egui::Color32::from_rgb(0x00, 0xe5, 0xff));
+                        let mut col = config
+                            .motion
+                            .mesh_color
+                            .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b))
+                            .unwrap_or(theme_accent);
+                        if ui.color_edit_button_srgba(&mut col).changed() {
+                            config.motion.mesh_color = Some([col.r(), col.g(), col.b()]);
+                            changed = true;
+                        }
+                        // The reset appears only once the mesh colour has been
+                        // pinned away from the theme (mirrors the App-background
+                        // "Follow theme" affordance above).
+                        if config.motion.mesh_color.is_some()
+                            && ui
+                                .small_button("Reset to theme")
+                                .on_hover_text(
+                                    "Clear the custom colour; follow the theme's accent.",
+                                )
+                                .clicked()
+                        {
+                            config.motion.mesh_color = None;
+                            changed = true;
+                        }
+                    });
+                });
                 ui.end_row();
             }
             if row_visible(q, "vhs tracking lines motion effect") {
@@ -3266,6 +3364,7 @@ mod wiring_guard {
             "motion.flicker_speed" => src.contains("clamped_flicker_speed"),
             "motion.vhs_speed" => src.contains("clamped_vhs_speed"),
             "motion.mesh_drift_speed" => src.contains("clamped_mesh_drift_speed"),
+            "motion.mesh_color" => src.contains("resolved_mesh_color"),
             "ui_scale" => src.contains("effective_ui_scale"),
             "editor.caret_width" => src.contains("clamped_caret_width"),
             _ => false,
@@ -3346,6 +3445,7 @@ mod wiring_guard {
         "motion.flicker_strength",
         "motion.flicker_speed",
         "motion.mesh_drift_speed",
+        "motion.mesh_color",
         "motion.caret_trail",
         "motion.caret_trail_intensity",
         "motion.boot_glitch",

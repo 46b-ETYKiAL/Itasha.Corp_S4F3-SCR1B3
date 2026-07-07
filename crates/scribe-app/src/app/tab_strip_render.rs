@@ -274,6 +274,22 @@ impl ScribeApp {
                 add_tab = true;
             }
         });
+        // Subtle dividers between adjacent notes — a faint 1px hairline in each
+        // inter-chip gap so the rotated note tabs read as distinct without a heavy
+        // separator. The rotated column is always vertical, so each divider is a
+        // horizontal line at the gap midpoint spanning the chip width. Painted as
+        // a stroke (never a panel FILL) so it stays visible in transparency mode.
+        // Mirrors the divider block in `draw_tab_strip`.
+        if rects.len() > 1 {
+            let painter = ui.painter();
+            let hairline = egui::Stroke::new(1.0, muted.linear_multiply(0.30));
+            for pair in rects.windows(2) {
+                let (a, b) = (pair[0].1, pair[1].1);
+                let y = (a.bottom() + b.top()) * 0.5;
+                let x = egui::Rangef::new(a.left() + 3.0, a.right() - 3.0);
+                painter.hline(x, y, hairline);
+            }
+        }
         // #82 test hooks (cfg(test) only): record the full chip rects the indicator
         // consumes, and let a test force the in-flight drag pointer so the insertion
         // line paints deterministically for the regression + visual-QA checks.
