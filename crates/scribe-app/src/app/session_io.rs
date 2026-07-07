@@ -347,7 +347,31 @@ impl ScribeApp {
         if active >= self.tabs.len() {
             return;
         }
-        if let Some(path) = rfd::FileDialog::new().save_file() {
+        // Build the Save-As dialog from the configured default format so a new
+        // file suggests e.g. `untitled.md` (Markdown by default). The configured
+        // format is the PRIMARY filter; the other built-in formats follow as
+        // secondary filters, then an "All files" catch-all.
+        let fmt = self.config.integration.default_save_format;
+        let stem = self.tabs[active]
+            .doc
+            .path()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned());
+        let suggested = fmt.suggested_file_name(stem.as_deref());
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter(fmt.filter_label(), &[fmt.extension()])
+            .set_file_name(&suggested);
+        for other in scribe_core::config::DefaultSaveFormat::ALL {
+            if other != fmt {
+                dialog = dialog.add_filter(other.filter_label(), &[other.extension()]);
+            }
+        }
+        dialog = dialog.add_filter("All files", &["*"]);
+        if let Some(path) = dialog.save_file() {
+            // If the user typed a name with no extension, append the configured
+            // default (so `notes` → `notes.md`); a name that already carries an
+            // explicit extension is respected exactly as given.
+            let path = scribe_core::config::ensure_extension(&path, fmt.extension());
             let text = self.tabs[active].text.clone();
             self.tabs[active].doc.set_text(&text);
             match self.tabs[active].doc.save_as(&path) {
