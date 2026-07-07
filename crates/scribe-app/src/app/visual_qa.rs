@@ -296,6 +296,78 @@ fn scene_tabs() {
     render_scene("tabs", 1100.0, 720.0, app);
 }
 
+/// Top-bar button chrome parity (Fix 1). The LEFT toolbar buttons must now read
+/// as FRAMELESS — transparent when idle, matching the RIGHT window-caption
+/// buttons — with a persistent accent fill ONLY on a toggled-ON toggle. This
+/// scene turns the minimap + word-wrap toggles ON, so the PNG should show those
+/// two carrying a low-alpha accent background while `>_`, new/open/save/find/
+/// split/⋯ and the OFF toggles are all transparent (no filled button boxes).
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_toolbar_frameless() {
+    let mut cfg = qa_config();
+    // Two toggles ON so the accent on-fill is visible next to frameless buttons.
+    cfg.editor.show_minimap = true;
+    cfg.editor.word_wrap = true;
+    // Ensure a rich set of quick-access items is on the bar so the frameless
+    // treatment is visible across plain buttons AND toggles.
+    cfg.toolbar.items = [
+        "new",
+        "open",
+        "save",
+        "find",
+        "split",
+        "minimap",
+        "wrap",
+        "linenumbers",
+        "spellcheck",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    t.session_baseline = SAMPLE.to_string();
+    t.saved_baseline = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    render_scene("toolbar_frameless", 1100.0, 200.0, app);
+}
+
+/// Split-view divider (Fix 2). With `grid_enabled` and two open notes, the grid
+/// lays them side-by-side; the PNG should now show a thin theme-accent line down
+/// the boundary BETWEEN the two panes (instead of the old empty 4 px gap), and
+/// no line on the outer edges. Read the vertical seam at the window mid-line.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_split_divider() {
+    let mut cfg = qa_config();
+    cfg.editor.grid_enabled = true;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    for (i, (name, body)) in [
+        ("left.rs", "// left pane\n"),
+        ("right.rs", "// right pane\n"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mut t = EditorTab::scratch();
+        t.text = format!("{body}{SAMPLE}");
+        t.session_baseline = t.text.clone();
+        t.saved_baseline = t.text.clone();
+        // Distinct doc ids so the grid lays out two separate panes (sync would
+        // assign these anyway; setting them keeps the scene deterministic).
+        t.doc_id = crate::grid::DocId(i as u64 + 1);
+        let _ = name;
+        app.tabs.push(t);
+    }
+    app.active = 0;
+    render_scene("split_divider", 1100.0, 720.0, app);
+}
+
 /// Highlight-all-occurrences: a single-line buffer with the word `let`
 /// repeated; inject a selection of the FIRST `let` so the other two get the
 /// occurrence box. Selection is set on the egui TextEditState between frames.
