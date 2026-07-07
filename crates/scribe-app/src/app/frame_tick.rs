@@ -3148,12 +3148,18 @@ impl ScribeApp {
             let accent = ui_color(&self.theme, "accent", Rgba::new(0x4c, 0xc2, 0xff, 255));
             let mut animating = false;
             if self.config.motion.wired_ambient {
+                // Mesh colour follows the theme accent by default, or the user's
+                // pinned override (Settings → Motion → Mesh colour) when set.
+                let [mr, mg, mb] = self
+                    .config
+                    .motion
+                    .resolved_mesh_color([accent.r(), accent.g(), accent.b()]);
                 paint_wired_mesh(
                     ctx,
                     self.config.motion.clamped_mesh_density(),
                     self.config.motion.mesh_link_alpha(),
                     self.config.motion.mesh_dot_alpha(),
-                    accent,
+                    Color32::from_rgb(mr, mg, mb),
                     t,
                     self.config.motion.clamped_mesh_drift_speed(),
                 );

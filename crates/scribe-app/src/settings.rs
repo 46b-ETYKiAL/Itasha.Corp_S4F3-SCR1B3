@@ -1654,6 +1654,59 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+            if row_visible(q, "node mesh colour color theme motion") {
+                ui.label("Mesh colour").on_hover_text(
+                    "Colour of the wired-mesh nodes and links. By default it follows the \
+                     active theme's accent; pick a colour to pin it, then use 'Reset to \
+                     theme' to go back to following the theme.",
+                );
+                ui.add_enabled_ui(on && config.motion.wired_ambient, |ui| {
+                    ui.horizontal(|ui| {
+                        // Seed the picker with the active theme's accent so the
+                        // "follow theme" state shows the colour it will actually
+                        // paint. Resolving the built-in by name is best-effort — a
+                        // user TOML theme (not a built-in) falls back to the
+                        // shipped default accent seed.
+                        let theme_accent = scribe_core::theme::Theme::builtin(
+                            &config.appearance.theme,
+                        )
+                        .map(|t| {
+                            let [r, g, b, _] = t
+                                .ui(
+                                    "accent",
+                                    scribe_core::theme::Rgba::new(0x00, 0xe5, 0xff, 255),
+                                )
+                                .to_array();
+                            egui::Color32::from_rgb(r, g, b)
+                        })
+                        .unwrap_or(egui::Color32::from_rgb(0x00, 0xe5, 0xff));
+                        let mut col = config
+                            .motion
+                            .mesh_color
+                            .map(|[r, g, b]| egui::Color32::from_rgb(r, g, b))
+                            .unwrap_or(theme_accent);
+                        if ui.color_edit_button_srgba(&mut col).changed() {
+                            config.motion.mesh_color = Some([col.r(), col.g(), col.b()]);
+                            changed = true;
+                        }
+                        // The reset appears only once the mesh colour has been
+                        // pinned away from the theme (mirrors the App-background
+                        // "Follow theme" affordance above).
+                        if config.motion.mesh_color.is_some()
+                            && ui
+                                .small_button("Reset to theme")
+                                .on_hover_text(
+                                    "Clear the custom colour; follow the theme's accent.",
+                                )
+                                .clicked()
+                        {
+                            config.motion.mesh_color = None;
+                            changed = true;
+                        }
+                    });
+                });
+                ui.end_row();
+            }
             if row_visible(q, "vhs tracking lines motion effect") {
                 ui.add_enabled_ui(on, |ui| {
                     changed |= ui
@@ -3312,6 +3365,7 @@ mod wiring_guard {
             "motion.flicker_speed" => src.contains("clamped_flicker_speed"),
             "motion.vhs_speed" => src.contains("clamped_vhs_speed"),
             "motion.mesh_drift_speed" => src.contains("clamped_mesh_drift_speed"),
+            "motion.mesh_color" => src.contains("resolved_mesh_color"),
             "ui_scale" => src.contains("effective_ui_scale"),
             "editor.caret_width" => src.contains("clamped_caret_width"),
             _ => false,
@@ -3392,6 +3446,7 @@ mod wiring_guard {
         "motion.flicker_strength",
         "motion.flicker_speed",
         "motion.mesh_drift_speed",
+        "motion.mesh_color",
         "motion.caret_trail",
         "motion.caret_trail_intensity",
         "motion.boot_glitch",
