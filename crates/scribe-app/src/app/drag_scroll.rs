@@ -80,6 +80,23 @@ impl ScribeApp {
         if !primary_down || cmd || alt || !ctx.memory(|m| m.has_focus(editor_id)) {
             return;
         }
+        // A genuine drag-selection ALWAYS begins inside the editor viewport. A
+        // press that started anywhere else — a toolbar/titlebar button, the
+        // status bar, a side panel — is NOT an editor drag, even though the
+        // editor still owns keyboard focus for the one frame before the click
+        // surrenders it. Without this guard, clicking any top-bar button (the
+        // pointer sits far above the viewport top) makes `edge_autoscroll_step`
+        // read a full "past the top edge" depth and pan the note upward by a
+        // whole autoscroll step — the reported "clicking anything in the top bar
+        // scrolls the note up" bug. Gate on the press ORIGIN, not the live
+        // pointer, so dragging a real selection PAST the top/bottom edge (pointer
+        // beyond the viewport) still auto-pans as intended.
+        let press_in_editor = ctx
+            .input(|i| i.pointer.press_origin())
+            .is_some_and(|origin| viewport.contains(origin));
+        if !press_in_editor {
+            return;
+        }
         let mut delta = 0.0_f32;
         // P0-1: a positive `smooth_scroll_delta.y` means the content should move
         // DOWN (view toward the top), so the scroll OFFSET moves the opposite way.

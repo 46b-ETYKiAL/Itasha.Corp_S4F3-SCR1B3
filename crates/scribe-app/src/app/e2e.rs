@@ -3433,3 +3433,52 @@ fn mc_alt_pointer_drag_builds_column_and_inserts_per_line() {
 // the `scroll_step_*` unit tests in `drag_scroll.rs` (the clamp decision seam),
 // which avoid the fragility of reconstructing held-pointer + focus state outside
 // a real frame.
+
+/// Regression (the reported bug, general case): clicking ANY top-bar button
+/// must NOT move the editor viewport. We drive a REAL user click on the toolbar
+/// ">_" command-palette button. Its press lands in the toolbar — far ABOVE the
+/// editor viewport top — while the editor still owns keyboard focus for that one
+/// frame. The drag-select edge-autoscroll assist used to read that as "a drag
+/// held past the top edge" (`primary_down` + editor focus, pointer above the
+/// viewport) and pan the note UPWARD by a full edge-autoscroll step
+/// (`EDGE_MAX_SPEED * dt`). A note scrolled to the very bottom makes the upward
+/// jump maximally visible. Fixed by gating the autoscroll on the drag's press
+/// ORIGIN being inside the editor viewport — a genuine drag-selection always
+/// begins there; a top-bar click never does.
+#[test]
+fn topbar_click_does_not_scroll_the_note() {
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = true; // no welcome modal stealing focus
+    cfg.appearance.frameless = false;
+    let app = ScribeApp::new_test(cfg);
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::Vec2::new(1100.0, 720.0))
+        .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+    // A note far taller than the viewport so there is real scroll range.
+    h.state_mut().tabs[0].text = (0..400).map(|i| format!("line {i}\n")).collect();
+    h.run();
+    h.run(); // editor auto-focuses
+             // Scroll to the very bottom and settle (pending_scroll consumed, offset kept).
+    h.state_mut().pending_scroll = Some(1.0e6);
+    h.run();
+    h.state_mut().pending_scroll = None;
+    h.run();
+    h.run();
+    let before = h.state().scroll_metrics.0;
+    assert!(
+        before > 100.0,
+        "precondition: the note must be scrolled down so an upward jump is \
+         observable (offset {before:.1})"
+    );
+    // Click a real top-bar button the way a user does.
+    h.get_by_label(">_").click();
+    h.run();
+    h.run();
+    let after = h.state().scroll_metrics.0;
+    assert!(
+        (after - before).abs() < 1.0,
+        "clicking a top-bar button must not move the editor viewport \
+         (offset {before:.1} -> {after:.1}, delta {:.1})",
+        after - before
+    );
+}
