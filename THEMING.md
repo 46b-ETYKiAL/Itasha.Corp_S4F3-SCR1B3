@@ -15,7 +15,7 @@ The value is either a **built-in name** (see below) or the **file stem** of a th
 
 ## Built-in themes
 
-SCR1B3 ships **32 themes** (all compiled into the binary — no asset path needed). The catalogue is organised in four lines:
+SCR1B3 ships **34 themes** (all compiled into the binary — no asset path needed). The catalogue is organised in four lines:
 
 ### Calm-canon line (DECISION-2026-005 brand canon)
 | Name | Appearance | Voice | Notes |
@@ -26,6 +26,8 @@ SCR1B3 ships **32 themes** (all compiled into the binary — no asset path neede
 | `lain-mauve` | dark | mauve `#C89AE8` | Wired-era violet melancholy (pastel-leaning). |
 | `ghost-paper` | light | teal (darker) | Warm paper background, ink-grey text. WCAG AA. |
 | `a11y-high-contrast` | dark | teal `#00FFE0` | WCAG AAA-target. Pure white on black, saturated complements — for low-vision users. |
+| `wired-colorblind` | dark | teal `#00DDC4` | Deuteranopia/protanopia-safe (M5, ported from C0PL4ND). Red/green roles remapped onto a warm-vs-cool axis, luminance-separated so the palette survives loss of L/M-cone hue cues. WCAG body 17.51:1 (AAA). |
+| `itasha-void-high-contrast` | dark | teal `#34E0D0` | High-contrast a11y variant of the void flagship (M5, ported from C0PL4ND): same void-black hull + signal-teal cursor, every ANSI colour brightened for independent legibility. Low-vision. |
 
 ### Brand-signature line — **`itasha-neon` family** (DECISION-2026-009 brand-LINE)
 | Name | Appearance | Voice | Notes |
@@ -65,11 +67,11 @@ SCR1B3 ships **32 themes** (all compiled into the binary — no asset path neede
 | `yaksha-ink` | Ink-wash yaksha tones. |
 | `datamosh-haze` | Datamosh compression-artifact haze. |
 
-All 32 themes keep the **one-accent-equals-system-voice** principle: a single accent colour carries every interactive signal (cursor, hover, selection, active line-number, OK status). Akira-red is **alarm-only** across the family — never decorative — with the two documented exceptions above (`akira-redshift`, `atompunk-sodium`) cabined to opt-in-only themes.
+All 34 themes keep the **one-accent-equals-system-voice** principle: a single accent colour carries every interactive signal (cursor, hover, selection, active line-number, OK status). Akira-red is **alarm-only** across the family — never decorative — with the two documented exceptions above (`akira-redshift`, `atompunk-sodium`) cabined to opt-in-only themes.
 
 ## Note (editor text) colour themes
 
-The 32 themes above are the **chrome theme** (`[appearance].theme`) — they colour the app frame, gutter, panels, and titlebar. The colours of the **note text itself** (the syntax highlighting in the editing surface) come from a **separate note-colour theme**, `editor.note_theme` (see [CONFIG.md](CONFIG.md)). The two are independent: you can pair any chrome theme with any note theme.
+The 34 themes above are the **chrome theme** (`[appearance].theme`) — they colour the app frame, gutter, panels, and titlebar. The colours of the **note text itself** (the syntax highlighting in the editing surface) come from a **separate note-colour theme**, `editor.note_theme` (see [CONFIG.md](CONFIG.md)). The two are independent: you can pair any chrome theme with any note theme.
 
 Pick one live from **Settings → Appearance → Note colour theme** — the combo applies immediately to the note text, separate from the app theme. An unknown value falls back to the default (`base16-eighties.dark`).
 
