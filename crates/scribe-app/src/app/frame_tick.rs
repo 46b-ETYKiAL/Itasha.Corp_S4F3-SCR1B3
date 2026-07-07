@@ -167,6 +167,12 @@ impl ScribeApp {
         // the autoscroll injects into smooth_scroll_delta which the hovered
         // ScrollArea consumes when it renders later this tick).
         self.apply_scroll_settings(ctx);
+        // M6 accessibility UI zoom: apply the whole-app zoom factor once per frame.
+        // `effective_ui_scale` clamps to 0.5..=3.0 and maps any non-finite stored
+        // value to 1.0, so this can never blank the window; at the default 1.0 it
+        // is a no-op. Set every frame so a live settings change takes effect at
+        // once (egui only repaints when the factor actually changes).
+        ctx.set_zoom_factor(self.config.effective_ui_scale());
         // Drain a palette-requested clipboard/history action BEFORE any panel
         // renders, so the injected event reaches the central editor (shown
         // later this frame) and egui's TextEdit performs it natively.
@@ -3128,7 +3134,14 @@ impl ScribeApp {
             let accent = ui_color(&self.theme, "accent", Rgba::new(0x4c, 0xc2, 0xff, 255));
             let mut animating = false;
             if self.config.motion.wired_ambient {
-                paint_wired_mesh(ctx, self.config.motion.clamped_mesh_density(), accent, t);
+                paint_wired_mesh(
+                    ctx,
+                    self.config.motion.clamped_mesh_density(),
+                    self.config.motion.mesh_link_alpha(),
+                    self.config.motion.mesh_dot_alpha(),
+                    accent,
+                    t,
+                );
                 animating = true;
             }
             if self.config.motion.vhs_tracking {
@@ -3140,14 +3153,21 @@ impl ScribeApp {
                 animating = true;
             }
             if self.config.motion.caret_trail {
+                let life = self.config.motion.caret_trail_life();
                 while let Some(&(_, born)) = self.caret_trail.front() {
-                    if t - born > 0.45 {
+                    if t - born > life {
                         self.caret_trail.pop_front();
                     } else {
                         break;
                     }
                 }
-                paint_caret_trail(ctx, &self.caret_trail, accent, t);
+                paint_caret_trail(
+                    ctx,
+                    &self.caret_trail,
+                    accent,
+                    t,
+                    self.config.motion.caret_trail_intensity,
+                );
                 if !self.caret_trail.is_empty() {
                     animating = true;
                 }

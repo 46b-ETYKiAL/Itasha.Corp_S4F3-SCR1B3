@@ -454,6 +454,135 @@ impl Theme {
         }
     }
 
+    /// `wired-colorblind` — deuteranopia/protanopia-safe accessibility variant
+    /// ported from C0PL4ND (M5, ANSI→map schema translation). Red/green confusion
+    /// is the core risk, so the traditional red/green roles are remapped onto a
+    /// warm-vs-cool axis that survives the loss of L/M-cone hue discrimination:
+    /// the "red" role becomes warm orange, "green" becomes cool teal, and every
+    /// accent is separated by luminance so the palette stays distinguishable even
+    /// when hue cues are unavailable. WCAG body contrast 17.51:1 (AAA, > 7:1).
+    pub fn wired_colorblind() -> Theme {
+        let mut palette = BTreeMap::new();
+        palette.insert("void".into(), Rgba::new(0x08, 0x06, 0x0d, 255));
+        palette.insert("panel".into(), Rgba::new(0x16, 0x14, 0x1f, 255));
+        palette.insert("bezel".into(), Rgba::new(0x3a, 0x38, 0x45, 255)); // ANSI black
+        palette.insert("text".into(), Rgba::new(0xf0, 0xee, 0xf5, 255));
+        palette.insert("muted".into(), Rgba::new(0x6a, 0x68, 0x78, 255)); // ANSI bright-black
+        palette.insert("orange".into(), Rgba::new(0xff, 0x8c, 0x1a, 255)); // warm "red" role
+        palette.insert("teal".into(), Rgba::new(0x00, 0xdd, 0xc4, 255)); // cool "green" role
+        palette.insert("amber".into(), Rgba::new(0xff, 0xd2, 0x4d, 255)); // highest-luminance
+        palette.insert("blue".into(), Rgba::new(0x33, 0x99, 0xff, 255));
+        palette.insert("violet".into(), Rgba::new(0xb3, 0x66, 0xff, 255));
+        palette.insert("cyan".into(), Rgba::new(0x66, 0xe0, 0xff, 255));
+
+        let p = |k: &str| *palette.get(k).unwrap();
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), p("void"));
+        ui.insert("foreground".into(), p("text"));
+        ui.insert("panel".into(), p("panel"));
+        ui.insert("bezel".into(), p("bezel"));
+        ui.insert("gutter".into(), p("void"));
+        ui.insert("line_number".into(), p("muted"));
+        ui.insert("line_number_active".into(), p("teal"));
+        ui.insert("cursor".into(), p("amber")); // ANSI cursor #ffd24d
+        ui.insert("selection".into(), Rgba::new(0x24, 0x3a, 0x5a, 0x99));
+        ui.insert("accent".into(), p("teal"));
+        ui.insert("ok".into(), p("teal"));
+        ui.insert("error".into(), p("orange")); // warm, never green-like
+        ui.insert("warning".into(), p("amber"));
+
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), p("blue"));
+        syntax.insert("function".into(), p("teal"));
+        syntax.insert("string".into(), p("violet"));
+        syntax.insert("comment".into(), p("muted"));
+        syntax.insert("type".into(), p("cyan"));
+        syntax.insert("constant".into(), p("amber"));
+        syntax.insert("number".into(), p("orange"));
+        syntax.insert("variable".into(), p("text"));
+        syntax.insert("markup.heading".into(), p("cyan"));
+        syntax.insert("markup.bold".into(), p("blue"));
+        syntax.insert("markup.italic".into(), p("violet"));
+        syntax.insert("markup.quote".into(), p("muted"));
+        syntax.insert("markup.list".into(), p("teal"));
+        syntax.insert("markup.raw".into(), p("amber"));
+        syntax.insert("markup.link".into(), p("teal"));
+        syntax.insert("markup.separator".into(), p("muted"));
+        syntax.insert("url".into(), p("teal"));
+
+        Theme {
+            name: "wired-colorblind".into(),
+            appearance: Appearance::Dark,
+            palette,
+            ui,
+            syntax,
+        }
+    }
+
+    /// `itasha-void-high-contrast` — accessibility variant of the void flagship,
+    /// ported from C0PL4ND (M5, ANSI→map schema translation). Same void-black hull
+    /// and signal-teal cursor, but every ANSI colour is brightened toward its
+    /// bright variant so each is independently legible against the void background
+    /// and distinguishable from its neighbours. WCAG body contrast 17.51:1 (AAA).
+    pub fn itasha_void_high_contrast() -> Theme {
+        let mut palette = BTreeMap::new();
+        palette.insert("void".into(), Rgba::new(0x08, 0x06, 0x0d, 255));
+        palette.insert("panel".into(), Rgba::new(0x16, 0x13, 0x1f, 255));
+        palette.insert("bezel".into(), Rgba::new(0x4a, 0x48, 0x58, 255)); // ANSI black
+        palette.insert("text".into(), Rgba::new(0xf0, 0xee, 0xf5, 255));
+        palette.insert("muted".into(), Rgba::new(0x7a, 0x78, 0x88, 255)); // ANSI bright-black
+        palette.insert("teal".into(), Rgba::new(0x00, 0xe5, 0xff, 255)); // signal cursor/accent
+        palette.insert("red".into(), Rgba::new(0xff, 0x4d, 0x7d, 255)); // alarms
+        palette.insert("green".into(), Rgba::new(0x3d, 0xff, 0xc4, 255));
+        palette.insert("amber".into(), Rgba::new(0xff, 0xce, 0x5c, 255)); // warnings
+        palette.insert("blue".into(), Rgba::new(0x4d, 0x94, 0xff, 255));
+        palette.insert("magenta".into(), Rgba::new(0xec, 0x5c, 0xff, 255));
+        palette.insert("cyan".into(), Rgba::new(0x33, 0xec, 0xff, 255));
+
+        let p = |k: &str| *palette.get(k).unwrap();
+        let mut ui = BTreeMap::new();
+        ui.insert("background".into(), p("void"));
+        ui.insert("foreground".into(), p("text"));
+        ui.insert("panel".into(), p("panel"));
+        ui.insert("bezel".into(), p("bezel"));
+        ui.insert("gutter".into(), p("void"));
+        ui.insert("line_number".into(), p("muted"));
+        ui.insert("line_number_active".into(), p("teal"));
+        ui.insert("cursor".into(), p("teal")); // ANSI cursor #00e5ff
+        ui.insert("selection".into(), Rgba::new(0x55, 0x23, 0x80, 0x99));
+        ui.insert("accent".into(), p("teal"));
+        ui.insert("ok".into(), p("green"));
+        ui.insert("error".into(), p("red")); // alarm role
+        ui.insert("warning".into(), p("amber"));
+
+        let mut syntax = BTreeMap::new();
+        syntax.insert("keyword".into(), p("blue"));
+        syntax.insert("function".into(), p("teal"));
+        syntax.insert("string".into(), p("green"));
+        syntax.insert("comment".into(), p("muted"));
+        syntax.insert("type".into(), p("cyan"));
+        syntax.insert("constant".into(), p("amber"));
+        syntax.insert("number".into(), p("magenta"));
+        syntax.insert("variable".into(), p("text"));
+        syntax.insert("markup.heading".into(), p("cyan"));
+        syntax.insert("markup.bold".into(), p("blue"));
+        syntax.insert("markup.italic".into(), p("green"));
+        syntax.insert("markup.quote".into(), p("muted"));
+        syntax.insert("markup.list".into(), p("teal"));
+        syntax.insert("markup.raw".into(), p("amber"));
+        syntax.insert("markup.link".into(), p("teal"));
+        syntax.insert("markup.separator".into(), p("muted"));
+        syntax.insert("url".into(), p("teal"));
+
+        Theme {
+            name: "itasha-void-high-contrast".into(),
+            appearance: Appearance::Dark,
+            palette,
+            ui,
+            syntax,
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     //  DECISION-2026-009 brand-palette refresh (Phase 22 brand line)
     //
@@ -1505,6 +1634,9 @@ impl Theme {
             "lain-mauve",
             "ghost-paper",
             "a11y-high-contrast",
+            // C0PL4ND accessibility variants ported to SCR1B3's map schema (M5).
+            "wired-colorblind",
+            "itasha-void-high-contrast",
             // itasha-neon family (DECISION-2026-009).
             "itasha-neon",
             "itasha-neon-pastel",
@@ -1548,6 +1680,9 @@ impl Theme {
             "lain-mauve" => Some(Theme::lain_mauve()),
             "ghost-paper" => Some(Theme::ghost_paper()),
             "a11y-high-contrast" => Some(Theme::a11y_high_contrast()),
+            // C0PL4ND accessibility variants ported to SCR1B3's map schema (M5).
+            "wired-colorblind" => Some(Theme::wired_colorblind()),
+            "itasha-void-high-contrast" => Some(Theme::itasha_void_high_contrast()),
             // itasha-neon family.
             "itasha-neon" => Some(Theme::itasha_neon()),
             "itasha-neon-pastel" => Some(Theme::itasha_neon_pastel()),
@@ -1854,6 +1989,65 @@ mod tests {
                 assert!(t.ui.contains_key(key), "{name} missing ui.{key}");
             }
         }
+    }
+
+    #[test]
+    fn both_ported_themes_resolve_and_load() {
+        // M5: the two C0PL4ND accessibility variants ported to SCR1B3's map schema
+        // both resolve via `builtin`, carry non-empty palette/ui/syntax maps, and
+        // the high-contrast variant clears the WCAG AAA body-contrast floor (>=7:1)
+        // for foreground-on-background. `itasha-void` is deliberately NOT ported
+        // (SCR1B3 superseded the neon itasha-void with wired-noir).
+        for name in ["wired-colorblind", "itasha-void-high-contrast"] {
+            let t = Theme::builtin(name).unwrap_or_else(|| panic!("{name} must resolve"));
+            assert_eq!(t.name, name, "name round-trip");
+            assert!(!t.palette.is_empty(), "{name} palette non-empty");
+            assert!(!t.ui.is_empty(), "{name} ui non-empty");
+            assert!(!t.syntax.is_empty(), "{name} syntax non-empty");
+            for key in ["background", "foreground", "panel", "accent"] {
+                assert!(t.ui.contains_key(key), "{name} missing ui.{key}");
+            }
+        }
+        // The neon itasha-void was NOT ported (locked decision).
+        assert!(
+            Theme::builtin("itasha-void").is_none(),
+            "itasha-void must not be ported (superseded by wired-noir)"
+        );
+
+        // WCAG AAA contrast on the high-contrast variant: foreground vs background.
+        let hc = Theme::itasha_void_high_contrast();
+        let zero = Rgba::new(0, 0, 0, 0);
+        let ratio = contrast_ratio(hc.ui("foreground", zero), hc.ui("background", zero));
+        assert!(
+            ratio >= 7.0,
+            "itasha-void-high-contrast body contrast {ratio:.2}:1 is below the 7:1 AAA floor"
+        );
+        // The colourblind variant is also high-contrast on its void surface.
+        let cb = Theme::wired_colorblind();
+        let cb_ratio = contrast_ratio(cb.ui("foreground", zero), cb.ui("background", zero));
+        assert!(
+            cb_ratio >= 7.0,
+            "wired-colorblind contrast {cb_ratio:.2}:1 < 7:1"
+        );
+    }
+
+    /// WCAG 2.x relative-luminance contrast ratio between two opaque colours, for
+    /// the accessibility assertions above. `(L_lighter + 0.05) / (L_darker + 0.05)`.
+    fn contrast_ratio(a: Rgba, b: Rgba) -> f32 {
+        fn rel_lum(c: Rgba) -> f32 {
+            let chan = |v: u8| {
+                let s = v as f32 / 255.0;
+                if s <= 0.03928 {
+                    s / 12.92
+                } else {
+                    ((s + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b)
+        }
+        let (la, lb) = (rel_lum(a), rel_lum(b));
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
     }
 
     #[test]
