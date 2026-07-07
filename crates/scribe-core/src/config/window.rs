@@ -27,8 +27,9 @@ pub struct WindowConfig {
     /// Default OFF — translucency is opt-in.
     pub transparency_enabled: bool,
     pub mode: WindowMode,
-    /// Surface opacity for translucent modes (0.05..=1.0; the 0.05 floor keeps
-    /// the window from becoming fully invisible).
+    /// Surface opacity for translucent modes (0.0..=1.0; the 0.0 floor lets the
+    /// window go fully transparent — the editor text is painted opaque on top,
+    /// so it stays legible even at zero chrome alpha).
     pub opacity: f32,
     /// Master on/off switch for the window colour tint. When `false` no tint is
     /// applied regardless of `tint`/`tint_strength`, so the user can toggle the
@@ -65,7 +66,12 @@ impl Default for WindowConfig {
         Self {
             transparency_enabled: false,
             mode: WindowMode::Opaque,
-            opacity: 0.92,
+            // Fresh installs default to fully opaque. Inert unless the user
+            // enables transparency (`transparency_enabled` defaults false).
+            // Fresh-configs-only: an already-persisted config keeps whatever
+            // opacity it stored (serde deserializes it untouched) — this default
+            // only applies to a brand-new / never-set config.
+            opacity: 1.0,
             tint_enabled: true,
             tint: "#08060d".to_string(),
             tint_strength: 0.0,
