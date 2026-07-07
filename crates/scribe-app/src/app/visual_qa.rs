@@ -336,6 +336,38 @@ fn scene_toolbar_frameless() {
     render_scene("toolbar_frameless", 1100.0, 200.0, app);
 }
 
+/// Split-view divider (Fix 2). With `grid_enabled` and two open notes, the grid
+/// lays them side-by-side; the PNG should now show a thin theme-accent line down
+/// the boundary BETWEEN the two panes (instead of the old empty 4 px gap), and
+/// no line on the outer edges. Read the vertical seam at the window mid-line.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_split_divider() {
+    let mut cfg = qa_config();
+    cfg.editor.grid_enabled = true;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    for (i, (name, body)) in [
+        ("left.rs", "// left pane\n"),
+        ("right.rs", "// right pane\n"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mut t = EditorTab::scratch();
+        t.text = format!("{body}{SAMPLE}");
+        t.session_baseline = t.text.clone();
+        t.saved_baseline = t.text.clone();
+        // Distinct doc ids so the grid lays out two separate panes (sync would
+        // assign these anyway; setting them keeps the scene deterministic).
+        t.doc_id = crate::grid::DocId(i as u64 + 1);
+        let _ = name;
+        app.tabs.push(t);
+    }
+    app.active = 0;
+    render_scene("split_divider", 1100.0, 720.0, app);
+}
+
 /// Highlight-all-occurrences: a single-line buffer with the word `let`
 /// repeated; inject a selection of the FIRST `let` so the other two get the
 /// occurrence box. Selection is set on the egui TextEditState between frames.

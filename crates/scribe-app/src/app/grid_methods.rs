@@ -147,6 +147,9 @@ impl ScribeApp {
                 titles: &titles,
                 render_body: &mut render_body,
                 close_requests: &closes,
+                // Thin theme-accent divider between panes (muted). Recomputed
+                // from `accent` each frame so it follows a live theme change.
+                divider: crate::grid::divider_color(accent),
             };
             tree.ui(&mut behavior, ui);
         });

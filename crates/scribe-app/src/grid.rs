@@ -195,6 +195,22 @@ pub struct AppGridBehavior<'a> {
     /// need to touch it during one `tree.ui()` call. Drained by the host
     /// afterwards to drop the matching tabs.
     pub close_requests: &'a std::cell::RefCell<Vec<DocId>>,
+    /// Colour of the thin divider line egui_tiles paints in the gap BETWEEN
+    /// adjacent panes (see [`AppGridBehavior::resize_stroke`]). Driven from the
+    /// active theme accent (muted via [`divider_color`]) so split view has a
+    /// calm, theme-consistent boundary instead of an empty gap. Recomputed each
+    /// frame in `render_grid_central_panel`, so it tracks a live theme change.
+    pub divider: egui::Color32,
+}
+
+/// The colour of the split-view divider line: the theme **accent**, dropped to a
+/// low alpha so it reads as a calm separator rather than a harsh bright rule —
+/// consistent with the app's "calm, legible" surface. Pulled out as a pure
+/// function so the muting is unit-testable without driving a frame.
+pub fn divider_color(accent: egui::Color32) -> egui::Color32 {
+    // ~28% alpha: visible enough to divide the panes, quiet enough not to
+    // compete with the note text on either side.
+    accent.gamma_multiply(0.28)
 }
 
 impl<'a> egui_tiles::Behavior<Pane> for AppGridBehavior<'a> {
@@ -230,6 +246,30 @@ impl<'a> egui_tiles::Behavior<Pane> for AppGridBehavior<'a> {
 
     fn gap_width(&self, _style: &egui::Style) -> f32 {
         4.0
+    }
+
+    /// Paint a thin theme-accent line in the gap between adjacent panes.
+    ///
+    /// egui_tiles draws the inter-pane boundary (for horizontal, vertical AND
+    /// grid layouts) by stroking a line down the centre of each internal gap
+    /// with `resize_stroke(_, ResizeState::Idle)` — the default returns a
+    /// `gap_width`-wide stroke in the (near-invisible) `tab_bar_color`, which is
+    /// why split view read as just an empty 4 px gap with no visible boundary.
+    /// Overriding the IDLE state gives a crisp 1 px accent rule instead. The
+    /// line is centred in the gap and only drawn BETWEEN children (egui_tiles
+    /// iterates `tuple_windows` over adjacent panes), never on the container's
+    /// outer edge. The `Hovering`/`Dragging` states keep egui's default resize
+    /// highlight so the resize handle still lights up when the user grabs it.
+    fn resize_stroke(
+        &self,
+        style: &egui::Style,
+        resize_state: egui_tiles::ResizeState,
+    ) -> egui::Stroke {
+        match resize_state {
+            egui_tiles::ResizeState::Idle => egui::Stroke::new(1.0, self.divider),
+            egui_tiles::ResizeState::Hovering => style.visuals.widgets.hovered.fg_stroke,
+            egui_tiles::ResizeState::Dragging => style.visuals.widgets.active.fg_stroke,
+        }
     }
 
     fn retain_pane(&mut self, pane: &Pane) -> bool {
@@ -404,6 +444,9 @@ mod tests {
             titles,
             render_body: render,
             close_requests: closes,
+            // A fully-opaque teal stand-in so the divider assertions can check
+            // the muting/stroke without depending on a live theme.
+            divider: divider_color(egui::Color32::from_rgb(0, 255, 254)),
         }
     }
 
@@ -442,6 +485,63 @@ mod tests {
         assert_eq!(b.min_size(), 120.0, "min pane size pins the grid layout");
         // gap_width ignores the style argument; a default style is fine.
         assert_eq!(b.gap_width(&egui::Style::default()), 4.0);
+    }
+
+    #[test]
+    fn divider_color_mutes_the_accent_alpha() {
+        // The split-view divider is the theme accent dropped to a low alpha so
+        // it reads as a calm separator, not a harsh bright rule.
+        let accent = egui::Color32::from_rgb(0, 255, 254);
+        let d = divider_color(accent);
+        assert!(
+            d.a() < accent.a(),
+            "divider must be more transparent than the opaque accent"
+        );
+        assert!(d.a() > 0, "divider must still be visible (non-zero alpha)");
+        assert_ne!(
+            d,
+            egui::Color32::TRANSPARENT,
+            "divider must not be fully invisible"
+        );
+        // Color32 is premultiplied, so gamma_multiply scales every channel; the
+        // ACCENT HUE is what's preserved — recover it by un-premultiplying and
+        // confirm red stays absent while green/blue dominate (the teal accent),
+        // i.e. the divider is a muted accent, not a washed-out grey rule.
+        let [r, g, b, _a] = d.to_srgba_unmultiplied();
+        assert_eq!(r, 0, "accent hue preserved: no red in the teal divider");
+        assert!(
+            g > 200 && b > 200,
+            "accent hue preserved: green/blue dominate"
+        );
+    }
+
+    #[test]
+    fn resize_stroke_idle_paints_the_thin_accent_divider() {
+        // egui_tiles strokes the inter-pane gap with `resize_stroke(_, Idle)`.
+        // Our override returns a 1 px line in the (muted) divider colour, so the
+        // boundary between split panes is visible instead of an empty gap. The
+        // Hovering/Dragging states keep egui's default resize highlight.
+        use egui_tiles::ResizeState;
+        let titles: Vec<(DocId, String)> = Vec::new();
+        let mut render = |_: &mut egui::Ui, _: DocId| false;
+        let closes = std::cell::RefCell::new(Vec::new());
+        let b = behavior(&titles, &mut render, &closes);
+        let style = egui::Style::default();
+        let idle = b.resize_stroke(&style, ResizeState::Idle);
+        assert_eq!(idle.width, 1.0, "divider line is a thin 1 px rule");
+        assert_eq!(
+            idle.color, b.divider,
+            "idle stroke uses the muted accent divider"
+        );
+        // Interactive states are untouched — the resize handle still highlights.
+        assert_eq!(
+            b.resize_stroke(&style, ResizeState::Hovering),
+            style.visuals.widgets.hovered.fg_stroke
+        );
+        assert_eq!(
+            b.resize_stroke(&style, ResizeState::Dragging),
+            style.visuals.widgets.active.fg_stroke
+        );
     }
 
     #[test]
