@@ -566,7 +566,10 @@ mod tests {
         );
         // Serde backfill: absent field loads as None.
         let cfg = Config::from_toml_str("[motion]\nwired_ambient = true\n").unwrap();
-        assert_eq!(cfg.motion.mesh_color, None, "absent field backfills to None");
+        assert_eq!(
+            cfg.motion.mesh_color, None,
+            "absent field backfills to None"
+        );
         // Round-trip a pinned colour through the config TOML.
         let mut c2 = Config::default();
         c2.motion.mesh_color = Some([10, 20, 30]);

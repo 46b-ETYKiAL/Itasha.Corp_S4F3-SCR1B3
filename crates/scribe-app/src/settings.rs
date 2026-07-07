@@ -1667,19 +1667,18 @@ fn render_sections(
                         // paint. Resolving the built-in by name is best-effort — a
                         // user TOML theme (not a built-in) falls back to the
                         // shipped default accent seed.
-                        let theme_accent = scribe_core::theme::Theme::builtin(
-                            &config.appearance.theme,
-                        )
-                        .map(|t| {
-                            let [r, g, b, _] = t
-                                .ui(
-                                    "accent",
-                                    scribe_core::theme::Rgba::new(0x00, 0xe5, 0xff, 255),
-                                )
-                                .to_array();
-                            egui::Color32::from_rgb(r, g, b)
-                        })
-                        .unwrap_or(egui::Color32::from_rgb(0x00, 0xe5, 0xff));
+                        let theme_accent =
+                            scribe_core::theme::Theme::builtin(&config.appearance.theme)
+                                .map(|t| {
+                                    let [r, g, b, _] = t
+                                        .ui(
+                                            "accent",
+                                            scribe_core::theme::Rgba::new(0x00, 0xe5, 0xff, 255),
+                                        )
+                                        .to_array();
+                                    egui::Color32::from_rgb(r, g, b)
+                                })
+                                .unwrap_or(egui::Color32::from_rgb(0x00, 0xe5, 0xff));
                         let mut col = config
                             .motion
                             .mesh_color
