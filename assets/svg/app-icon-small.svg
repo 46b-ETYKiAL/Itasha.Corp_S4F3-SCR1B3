@@ -3,7 +3,6 @@
        legible survivors: void plate + single containment ring + 4 cardinal
        ticks + a FILLED pen-nib core (a stroked nib disappears at 16-32px).
        Same identity as the master, squint-test legible. Monochrome white. -->
-  <rect x="0" y="0" width="64" height="64" rx="12" ry="12" fill="#070A0C"/>
   <g transform="translate(32,32)">
     <g fill="none" stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round">
       <circle r="23" stroke-width="4.5"/>
