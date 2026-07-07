@@ -62,17 +62,22 @@ impl ScribeApp {
         }
         // A drag-selection is in progress when the primary button is held AND the
         // editor owns keyboard focus. `command` is held for Ctrl+wheel font zoom
-        // (handled in keyboard_input) — never hijack that as a drag-scroll.
-        let (primary_down, cmd, wheel_y, ptr, dt) = ctx.input(|i| {
+        // (handled in keyboard_input) — never hijack that as a drag-scroll. `alt`
+        // is held for an Alt+drag column (multi-cursor) selection (P3-F): its head
+        // is an absolute char offset built via a galley hit-test, so an autoscroll
+        // that remapped the pointer under a moving galley would fight the gesture
+        // — bail while Alt is down and let the column build own the drag.
+        let (primary_down, cmd, alt, wheel_y, ptr, dt) = ctx.input(|i| {
             (
                 i.pointer.primary_down(),
                 i.modifiers.command,
+                i.modifiers.alt,
                 i.smooth_scroll_delta.y,
                 i.pointer.interact_pos(),
                 i.stable_dt.clamp(1.0 / 240.0, 0.1),
             )
         });
-        if !primary_down || cmd || !ctx.memory(|m| m.has_focus(editor_id)) {
+        if !primary_down || cmd || alt || !ctx.memory(|m| m.has_focus(editor_id)) {
             return;
         }
         let mut delta = 0.0_f32;
@@ -85,8 +90,10 @@ impl ScribeApp {
         if let Some(p) = ptr {
             delta += edge_autoscroll_step(p.y, viewport, dt);
         }
-        if delta != 0.0 {
-            self.pending_scroll = Some((off_y + delta).clamp(0.0, max_off));
+        // P3-G: only pan (and self-pump a repaint) when the CLAMPED target
+        // actually differs from the current offset — see [`scroll_step_target`].
+        if let Some(target) = scroll_step_target(off_y, delta, max_off) {
+            self.pending_scroll = Some(target);
             // Reactive repaint pump: a still edge-pointer emits no input events,
             // so without this the pan would stall after a single tick.
             ctx.request_repaint();
@@ -135,6 +142,21 @@ impl ScribeApp {
             ctx.request_repaint();
         }
     }
+}
+
+/// The clamped scroll OFFSET to move to this frame, or `None` when the viewport
+/// cannot actually move (P3-G). Returns `Some(target)` only when `off_y + delta`,
+/// clamped to `[0, max_off]`, differs from `off_y`. At the document top/bottom the
+/// edge-autoscroll step stays non-zero while the pointer is held in the margin, so
+/// gating on `delta != 0.0` alone would re-request a repaint every frame — a
+/// continuous ~1-core busy-spin with nothing left to scroll. Clamping FIRST, then
+/// comparing, stops the pump exactly at the ends.
+fn scroll_step_target(off_y: f32, delta: f32, max_off: f32) -> Option<f32> {
+    if delta == 0.0 {
+        return None;
+    }
+    let target = (off_y + delta).clamp(0.0, max_off);
+    ((target - off_y).abs() > f32::EPSILON).then_some(target)
 }
 
 /// Per-frame vertical autoscroll velocity (points) when the drag pointer sits
@@ -216,6 +238,27 @@ mod tests {
     /// margin band when `inset < EDGE_MARGIN`).
     fn viewport_bottom_at(inset: f32) -> f32 {
         vp().bottom() - inset
+    }
+
+    #[test]
+    fn scroll_step_no_target_when_clamped_at_document_ends() {
+        // P3-G: at the very end (off_y == max_off) a toward-end delta yields NO
+        // target — nothing to scroll, so no repaint spin.
+        assert_eq!(scroll_step_target(500.0, 40.0, 500.0), None);
+        // Symmetrically at the start (off_y == 0) a toward-start delta yields None.
+        assert_eq!(scroll_step_target(0.0, -40.0, 500.0), None);
+        // A zero delta never scrolls.
+        assert_eq!(scroll_step_target(200.0, 0.0, 500.0), None);
+    }
+
+    #[test]
+    fn scroll_step_returns_clamped_target_when_movement_remains() {
+        // Mid-document: a real move returns the new offset.
+        assert_eq!(scroll_step_target(200.0, 40.0, 500.0), Some(240.0));
+        // A move overshooting the end clamps to max_off but STILL counts as motion.
+        assert_eq!(scroll_step_target(480.0, 40.0, 500.0), Some(500.0));
+        // A move overshooting the start clamps to 0 and still counts as motion.
+        assert_eq!(scroll_step_target(20.0, -40.0, 500.0), Some(0.0));
     }
 
     #[test]

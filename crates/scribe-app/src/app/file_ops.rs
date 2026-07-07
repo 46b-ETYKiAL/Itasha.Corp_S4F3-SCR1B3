@@ -50,6 +50,9 @@ impl ScribeApp {
                 self.tabs[active].set_text(new);
                 self.tabs[active].doc.mark_dirty();
                 self.status = status.to_string();
+                // P2-C: a whole-buffer transform rewrites offsets out from under
+                // any multi-cursor set — drop the now-stale carets.
+                self.mc_clear_carets();
             }
         }
     }

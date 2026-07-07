@@ -826,6 +826,9 @@ impl ScribeApp {
                         }
                         // Change-bar: reloaded content is the new clean baseline.
                         self.tabs[i].reset_change_baselines();
+                        // P2-C: the buffer was replaced wholesale — any
+                        // multi-cursor carets now point at stale offsets.
+                        self.mc_clear_carets();
                         self.status = format!("reloaded {} from disk", path.display());
                     }
                 }
@@ -2147,13 +2150,20 @@ impl ScribeApp {
                 // the TextEdit consumes this frame's events. Gesture geometry that
                 // needs the galley (Ctrl/Cmd+click add-caret, Alt+drag column
                 // select) is resolved after the closure lays it out.
+                // P1-A: bind the app-global multi-cursor state to the active tab.
+                // The editor is keyed PER TAB (doc_id-salted id) and switching tabs
+                // auto-focuses the new editor, so stale carets from the previous tab
+                // must be dropped BEFORE any edit interception or secondary-caret
+                // paint this frame — otherwise the next keystroke silently edits the
+                // WRONG document at clamped offsets.
+                self.mc_reconcile_owner(active);
                 // Esc collapses multi-cursor to a single caret. Focus-independent:
                 // being in multi-cursor mode is enough signal (egui can transiently
                 // drop editor focus between an intercepted edit and the next key),
-                // and it must run whether or not the editor currently holds focus.
-                if self.multi_cursor.is_active() {
-                    self.mc_collapse_on_escape(ctx);
-                }
+                // and it must run whether or not the editor currently holds focus —
+                // but it does NOT steal Escape while an overlay is open (P2-E), so
+                // an open find bar / palette / settings still receives it.
+                self.mc_collapse_on_escape(ctx, overlay_open);
                 let mc_focus = !read_only && !overlay_open && editor_focused;
                 if mc_focus {
                     self.handle_multi_cursor_keys(ctx, editor_id, active);
@@ -3048,6 +3058,10 @@ impl ScribeApp {
                         ctx.request_repaint();
                     }
                 }
+                // P1-A: attribute whatever multi-cursor state survived this frame's
+                // gestures (Ctrl+D / Ctrl+click / Alt+drag) to the active tab, so
+                // next frame's `mc_reconcile_owner` invalidates it on a tab switch.
+                self.mc_record_owner(active);
                 // F-034: apply a sticky-header click now that the hl borrow is
                 // released. Scrolls so the clicked definition sits at the top.
                 if let Some(line0) = sticky_jump {

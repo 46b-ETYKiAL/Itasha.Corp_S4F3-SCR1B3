@@ -3213,3 +3213,223 @@ fn mc_ctrl_click_pointer_adds_secondary_and_keeps_primary() {
         "the pre-click primary was restored (the click became the secondary)"
     );
 }
+
+// ---- adversarial-review remediation (P1-A / P2-C / P2-D / P2-E / P2-B) ----
+
+/// FIX-1 / P1-A — the app-global multi-cursor state MUST be scoped to the tab it
+/// was built on. Build carets on tab A, switch to tab B, then type: tab B must
+/// get a NORMAL single insertion (not tab A's replayed carets), tab A must be
+/// untouched, and the stale carets must be gone after the switch. This is the
+/// reachable silent wrong-buffer corruption the review flagged as ship-blocking.
+#[test]
+fn mc_carets_are_scoped_to_their_tab_no_cross_buffer_edit() {
+    let mut app = ScribeApp::new_test(Config::default());
+    app.tabs[0].text = "AAAAAAA".to_string(); // tab A
+    app.tabs.push(EditorTab::scratch());
+    app.tabs[1].text = "bbb".to_string(); // tab B (shorter, different buffer)
+    let d = Driver::new();
+    d.idle(&mut app); // sync_grid_state assigns distinct doc_ids; editor focuses
+    d.idle(&mut app);
+    assert_ne!(
+        app.tabs[0].doc_id, app.tabs[1].doc_id,
+        "the two tabs have distinct per-tab doc_ids"
+    );
+    assert_eq!(app.active, 0, "tab A is active to start");
+    let id_a = central_editor_id(&app);
+    // Build a multi-cursor set on tab A: secondary at char 3, primary at char 0.
+    app.multi_cursor
+        .add_caret(crate::multi_cursor::Caret::at(3));
+    set_selection(&d.ctx, id_a, 0, 0);
+    d.idle(&mut app); // end-of-frame records the owner = tab A's doc_id
+    assert!(
+        app.multi_cursor.is_active(),
+        "multi-cursor engaged on tab A"
+    );
+    // Switch to tab B — the real trigger (active-tab change + auto-focus).
+    app.active = 1;
+    d.idle(&mut app); // top-of-frame reconcile drops the stale carets
+    d.idle(&mut app); // let tab B's editor take focus
+    assert!(
+        !app.multi_cursor.is_active(),
+        "switching tabs cleared the stale carets"
+    );
+    assert!(
+        app.multi_cursor.secondaries().is_empty(),
+        "no secondary carets survive the tab switch"
+    );
+    assert_eq!(
+        app.mc_owner_doc, None,
+        "the caret owner was reset on the switch"
+    );
+    // Type into tab B: a NORMAL single insertion at its primary, tab A untouched.
+    let id_b = central_editor_id(&app);
+    set_selection(&d.ctx, id_b, 0, 0);
+    d.type_text(&mut app, "Z");
+    assert_eq!(
+        app.tabs[1].text, "Zbbb",
+        "tab B received exactly the normal single insertion"
+    );
+    assert_eq!(
+        app.tabs[0].text, "AAAAAAA",
+        "tab A's buffer is unchanged — no wrong-buffer edit"
+    );
+}
+
+/// FIX-2 / P2-C — an out-of-band buffer mutation (here a palette SORT transform,
+/// representative of reload / palette transforms / doc replace) rewrites offsets
+/// out from under the carets, so the stale multi-cursor set MUST be dropped.
+#[test]
+fn mc_out_of_band_transform_clears_stale_carets() {
+    let mut app = ScribeApp::new_test(Config::default());
+    app.tabs[0].text = "banana\napple\ncherry\n".to_string(); // unsorted
+    let d = Driver::new();
+    d.idle(&mut app);
+    d.idle(&mut app);
+    app.multi_cursor
+        .add_caret(crate::multi_cursor::Caret::at(3));
+    d.idle(&mut app); // record the owner
+    assert!(
+        app.multi_cursor.is_active(),
+        "carets engaged before the transform"
+    );
+    // A palette buffer transform (sort) mutates the whole buffer out-of-band.
+    app.execute_builtin(crate::app::commands::BuiltinCommand::SortLines);
+    assert_ne!(
+        app.tabs[0].text, "banana\napple\ncherry\n",
+        "the sort actually reordered the buffer"
+    );
+    assert!(
+        !app.multi_cursor.is_active(),
+        "the out-of-band transform cleared the now-stale carets"
+    );
+    assert_eq!(
+        app.mc_owner_doc, None,
+        "the caret owner was reset with the carets"
+    );
+}
+
+/// FIX-4 / P2-D — a multi-caret edit registers as ONE undoable whole-text step:
+/// Ctrl+Z after a two-caret insert restores the pre-edit text cleanly (no
+/// broken / half-undo state). Granularity is whole-buffer per batch (documented
+/// in the glue) — egui 0.34's undoer cannot express per-caret ranges.
+#[test]
+fn mc_multi_caret_edit_is_one_undo_step() {
+    let mut app = ScribeApp::new_test(Config::default());
+    app.tabs[0].text = "aaa\naaa".to_string();
+    let d = Driver::new();
+    d.idle(&mut app);
+    d.idle(&mut app);
+    let id = central_editor_id(&app);
+    app.multi_cursor
+        .add_caret(crate::multi_cursor::Caret::at(4));
+    set_selection(&d.ctx, id, 0, 0);
+    d.type_text(&mut app, "X");
+    assert_eq!(
+        app.tabs[0].text, "Xaaa\nXaaa",
+        "the two-caret insert edited both spots"
+    );
+    // Ctrl+Z reverts the WHOLE multi-caret edit as a single step.
+    d.key(&mut app, egui::Key::Z, egui::Modifiers::COMMAND);
+    assert_eq!(
+        app.tabs[0].text, "aaa\naaa",
+        "Ctrl+Z restored the pre-edit text in one clean step"
+    );
+}
+
+/// FIX-3 / P2-E — the focus-independent Esc collapse only STEALS Escape when
+/// multi-cursor is genuinely active AND no overlay is open, so a modal / find bar
+/// / palette that needs Escape is never starved. Pure predicate, no frame needed.
+#[test]
+fn mc_escape_consumed_only_when_active_and_no_overlay() {
+    let mut app = ScribeApp::new_test(Config::default());
+    // Inactive multi-cursor → Escape must fall through to other handlers.
+    assert!(
+        !app.mc_should_consume_escape(false),
+        "no multi-cursor active → do NOT consume Escape"
+    );
+    // Engage multi-cursor (a secondary caret).
+    app.multi_cursor
+        .add_caret(crate::multi_cursor::Caret::at(1));
+    assert!(
+        app.mc_should_consume_escape(false),
+        "active multi-cursor + no overlay → collapse on Escape"
+    );
+    assert!(
+        !app.mc_should_consume_escape(true),
+        "active multi-cursor but an overlay is open → let the overlay have Escape"
+    );
+}
+
+/// FIX-5 / P2-B — drive a REAL Alt+pointer press→drag→release through the actual
+/// gesture handler in `frame_tick` (galley hit-test → column build), NOT by
+/// calling `column_selection` directly. Proves the previously-untested
+/// production seam: the Alt-drag resolves to a multi-line column set and the
+/// per-line insert flows through the live edit interception. (What remains
+/// unproven headlessly is egui's OWN concurrent linear drag-highlight paint,
+/// which has no observable buffer effect — see the result file.)
+#[test]
+fn mc_alt_pointer_drag_builds_column_and_inserts_per_line() {
+    let mut app = ScribeApp::new_test(Config::default());
+    // A tall, uniform document so a vertical Alt-drag spans several lines, each
+    // long enough to share a column band.
+    app.tabs[0].text = (0..20).map(|_| "abcdefghij\n").collect::<String>();
+    let d = Driver::new();
+    d.idle(&mut app);
+    d.idle(&mut app); // editor auto-focuses
+    let alt = egui::Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+    let press = egui::pos2(140.0, 380.0);
+    let drag = egui::pos2(190.0, 470.0);
+    // Alt + primary PRESS latches the column anchor via the galley hit-test.
+    d.frame(
+        &mut app,
+        alt,
+        vec![
+            egui::Event::PointerMoved(press),
+            egui::Event::PointerButton {
+                pos: press,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: alt,
+            },
+        ],
+    );
+    // Alt + primary HELD (moved, not re-pressed) extends → the column build runs.
+    d.frame(&mut app, alt, vec![egui::Event::PointerMoved(drag)]);
+    assert!(
+        app.multi_cursor.is_active(),
+        "the real Alt+pointer-drag engaged multi-cursor"
+    );
+    let n_secondaries = app.multi_cursor.secondaries().len();
+    assert!(
+        n_secondaries >= 1,
+        "the drag spanned >=2 lines → >=1 secondary caret (got {n_secondaries})"
+    );
+    // Release ends the drag (column_anchor drops next frame).
+    d.frame(
+        &mut app,
+        alt,
+        vec![egui::Event::PointerButton {
+            pos: drag,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: alt,
+        }],
+    );
+    // Type through the REAL edit interception: exactly one char per caret.
+    let before = app.tabs[0].text.matches('X').count();
+    d.type_text(&mut app, "X");
+    let inserted = app.tabs[0].text.matches('X').count() - before;
+    assert_eq!(
+        inserted,
+        n_secondaries + 1,
+        "the column insert landed once per caret (primary + {n_secondaries} secondaries)"
+    );
+}
+
+// FIX-6 / P3-G (no-repaint-spin-at-document-end) is proven deterministically by
+// the `scroll_step_*` unit tests in `drag_scroll.rs` (the clamp decision seam),
+// which avoid the fragility of reconstructing held-pointer + focus state outside
+// a real frame.

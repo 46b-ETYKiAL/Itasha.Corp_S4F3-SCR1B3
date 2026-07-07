@@ -150,6 +150,8 @@ impl ScribeApp {
                         self.tabs[active].set_text(sorted);
                         self.tabs[active].doc.mark_dirty();
                         self.status = "sorted lines (A-Z)".to_string();
+                        // P2-C: reordering lines invalidates every caret offset.
+                        self.mc_clear_carets();
                     }
                 }
             }
