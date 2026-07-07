@@ -475,6 +475,20 @@ fn render_sections(
                 }
                 ui.end_row();
             }
+            if row_visible(q, "ui scale zoom accessibility a11y") {
+                // M6 — whole-app accessibility zoom, applied via ctx.set_zoom_factor
+                // once per frame. Clamped to 0.5..=3.0 with a NaN/inf guard by
+                // Config::effective_ui_scale so a wild value can't blank the window.
+                ui.label("UI scale").on_hover_text(
+                    "Zoom the entire interface — text, chrome, and controls — for readability. \
+                     1.0 is the standard size; the range is 0.5× to 3×.",
+                );
+                changed |= ui
+                    .add(egui::Slider::new(&mut config.ui_scale, 0.5..=3.0))
+                    .changed();
+                changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
+                ui.end_row();
+            }
             if row_visible(q, "background colour color app override") {
                 // #88 — app background colour, independent of the theme.
                 ui.label("App background").on_hover_text(
@@ -1452,13 +1466,13 @@ fn render_sections(
             if row_visible(q, "motion animation speed intensity") {
                 ui.label("Animation speed").on_hover_text(
                     "Scale how long animations take. 0 makes every transition instant; 1 is \
-                     egui's full animation time. Affects hover fades, panel collapses, and \
-                     value changes across the editor.",
+                     egui's full animation time and 2 is double that. Affects hover fades, \
+                     panel collapses, and value changes across the editor.",
                 );
                 changed |= ui
                     .add_enabled(
                         on,
-                        egui::Slider::new(&mut config.motion.intensity, 0.0..=1.0),
+                        egui::Slider::new(&mut config.motion.intensity, 0.0..=2.0),
                     )
                     .changed();
                 changed |=
@@ -1540,18 +1554,37 @@ fn render_sections(
             }
             if row_visible(q, "node mesh density motion") {
                 ui.label("Mesh density").on_hover_text(
-                    "How many nodes the wired-mesh background draws (sparse to dense).",
+                    "How many nodes the wired-mesh background draws (sparse to dense). \
+                     Higher values scale the node count with the window size.",
                 );
                 changed |= ui
                     .add_enabled(
                         on && config.motion.wired_ambient,
-                        egui::Slider::new(&mut config.motion.mesh_density, 0.0..=1.0),
+                        egui::Slider::new(&mut config.motion.mesh_density, 0.0..=2.0),
                     )
                     .changed();
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.mesh_density,
                     &def.motion.mesh_density,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "node mesh brightness motion") {
+                ui.label("Mesh brightness").on_hover_text(
+                    "How bright the wired-mesh lines and nodes are. 1 is the standard look; \
+                     lower dims the lattice toward invisible, higher makes it pop.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.motion.wired_ambient,
+                        egui::Slider::new(&mut config.motion.mesh_brightness, 0.0..=3.0),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.mesh_brightness,
+                    &def.motion.mesh_brightness,
                 );
                 ui.end_row();
             }
@@ -1609,6 +1642,24 @@ fn render_sections(
                 ui.label("");
                 changed |=
                     reset_to_default(ui, &mut config.motion.caret_trail, &def.motion.caret_trail);
+                ui.end_row();
+            }
+            if row_visible(q, "caret cursor trail intensity motion effect") {
+                ui.label("Caret-trail intensity").on_hover_text(
+                    "How far the caret ghost-trail reaches — from a faint short flick to a \
+                     bold, long comet tail.",
+                );
+                changed |= ui
+                    .add_enabled(
+                        on && config.motion.caret_trail,
+                        egui::Slider::new(&mut config.motion.caret_trail_intensity, 0.0..=2.0),
+                    )
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.caret_trail_intensity,
+                    &def.motion.caret_trail_intensity,
+                );
                 ui.end_row();
             }
             if row_visible(q, "boot glitch startup motion effect") {
@@ -3155,6 +3206,10 @@ mod wiring_guard {
             "motion.intensity" => src.contains("clamped_intensity"),
             "motion.flicker_strength" => src.contains("clamped_flicker_strength"),
             "motion.mesh_density" => src.contains("clamped_mesh_density"),
+            "motion.mesh_brightness" => {
+                src.contains("mesh_link_alpha") || src.contains("mesh_dot_alpha")
+            }
+            "ui_scale" => src.contains("effective_ui_scale"),
             "editor.caret_width" => src.contains("clamped_caret_width"),
             _ => false,
         }
@@ -3227,11 +3282,14 @@ mod wiring_guard {
         "motion.scanline_darkness",
         "motion.wired_ambient",
         "motion.mesh_density",
+        "motion.mesh_brightness",
         "motion.vhs_tracking",
         "motion.flicker",
         "motion.flicker_strength",
         "motion.caret_trail",
+        "motion.caret_trail_intensity",
         "motion.boot_glitch",
+        "ui_scale",
     ];
 
     /// Controls audited as DEAD (no runtime consumer yet). Shrinks as phases wire

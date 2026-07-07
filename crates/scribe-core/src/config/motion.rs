@@ -119,14 +119,27 @@ pub struct MotionConfig {
     /// default; drawn at Background order behind the editor.
     #[serde(default)]
     pub wired_ambient: bool,
-    /// Node-mesh density (0.0 = sparse .. 1.0 = dense, clamped). Drives the
-    /// node count of the wired-ambient background.
+    /// Node-mesh density (0.0 = sparse .. 2.0 = dense, clamped). Drives the
+    /// node count of the wired-ambient background. (M3: widened 0..1 -> 0..2 for
+    /// C0PL4ND parity, with area-aware node scaling in the painter.)
     #[serde(default = "default_mesh_density")]
     pub mesh_density: f32,
+    /// Wired-mesh brightness multiplier (0.0 = invisible .. 3.0 = bold, clamped).
+    /// Scales the mesh link/dot alphas; the default `1.0` reproduces the current
+    /// shipped look exactly (link alpha 16, dot alpha 40). (M1, C0PL4ND parity.)
+    #[serde(default = "default_mesh_brightness")]
+    pub mesh_brightness: f32,
     /// Caret ghost-trail: a fading echo follows the caret as it moves. Off by
     /// default.
     #[serde(default)]
     pub caret_trail: bool,
+    /// Caret-trail intensity (0.0 = faint short flick .. 2.0 = bold long comet
+    /// tail, clamped). Scales BOTH the echo lifetime (via [`caret_trail_life`])
+    /// and its peak opacity so the slider tunes the trail's reach. Inert until
+    /// [`caret_trail`](Self::caret_trail) is enabled (default OFF). (M2, C0PL4ND
+    /// parity.)
+    #[serde(default = "default_caret_trail_intensity")]
+    pub caret_trail_intensity: f32,
     /// One-shot boot "glitch" sweep on the first frames after launch. Off by
     /// default; self-terminates.
     #[serde(default)]
@@ -148,11 +161,40 @@ fn default_mesh_density() -> f32 {
     0.4
 }
 
+/// Default wired-mesh brightness — `1.0` reproduces the current shipped alphas
+/// (link 16, dot 40) exactly, so enabling the field changes nothing by default.
+fn default_mesh_brightness() -> f32 {
+    1.0
+}
+
+/// Default caret-trail intensity — matches C0PL4ND's `0.6` (a ~0.65s tail). Inert
+/// until `caret_trail` is enabled, so this default never changes the resting look.
+fn default_caret_trail_intensity() -> f32 {
+    0.6
+}
+
+/// Base wired-mesh link-line alpha at brightness `1.0` (the current shipped look).
+const MESH_LINK_BASE_ALPHA: f32 = 16.0;
+/// Base wired-mesh node-dot alpha at brightness `1.0` (the current shipped look).
+const MESH_DOT_BASE_ALPHA: f32 = 40.0;
+
+/// Lifetime (seconds) of a single caret-trail echo for a given `intensity`
+/// (0..=2). A higher intensity lets each echo linger longer, so the trail reads
+/// as a longer comet tail. Shared by the painter's fade math AND the caller's
+/// deque-prune so the two never disagree about when an echo is dead — pure and
+/// unit-testable. Ported verbatim from C0PL4ND's `cursor_trail_life`.
+///
+/// `0.35s` at zero intensity (a short flick) .. `1.35s` at max (a long tail); the
+/// default config intensity (`0.6`) lands at `~0.65s`.
+pub fn caret_trail_life(intensity: f32) -> f64 {
+    (0.35 + 0.5 * intensity.clamp(0.0, 2.0)) as f64
+}
+
 impl MotionConfig {
     /// Clamped intensity so a malformed user config can't drive an animation
-    /// outside its design band.
+    /// outside its design band. (M4: widened 0..1 -> 0..2 for C0PL4ND parity.)
     pub fn clamped_intensity(&self) -> f32 {
-        self.intensity.clamp(0.0, 1.0)
+        self.intensity.clamp(0.0, 2.0)
     }
 
     /// Flicker strength clamped to a calm, accessibility-safe ceiling.
@@ -160,9 +202,40 @@ impl MotionConfig {
         self.flicker_strength.clamp(0.0, 0.20)
     }
 
-    /// Node-mesh density clamped to its design band.
+    /// Node-mesh density clamped to its design band. (M3: widened 0..1 -> 0..2.)
     pub fn clamped_mesh_density(&self) -> f32 {
-        self.mesh_density.clamp(0.0, 1.0)
+        self.mesh_density.clamp(0.0, 2.0)
+    }
+
+    /// Wired-mesh brightness clamped to its design band (0..3). (M1.)
+    pub fn clamped_mesh_brightness(&self) -> f32 {
+        self.mesh_brightness.clamp(0.0, 3.0)
+    }
+
+    /// Wired-mesh link-line alpha, scaled by [`clamped_mesh_brightness`]. At the
+    /// default brightness `1.0` this returns `16` — the current shipped look. (M1.)
+    pub fn mesh_link_alpha(&self) -> u8 {
+        (MESH_LINK_BASE_ALPHA * self.clamped_mesh_brightness())
+            .round()
+            .clamp(0.0, 255.0) as u8
+    }
+
+    /// Wired-mesh node-dot alpha, scaled by [`clamped_mesh_brightness`]. At the
+    /// default brightness `1.0` this returns `40` — the current shipped look. (M1.)
+    pub fn mesh_dot_alpha(&self) -> u8 {
+        (MESH_DOT_BASE_ALPHA * self.clamped_mesh_brightness())
+            .round()
+            .clamp(0.0, 255.0) as u8
+    }
+
+    /// Caret-trail intensity clamped to its design band (0..2). (M2.)
+    pub fn clamped_caret_trail_intensity(&self) -> f32 {
+        self.caret_trail_intensity.clamp(0.0, 2.0)
+    }
+
+    /// Lifetime (seconds) of a caret-trail echo at the configured intensity. (M2.)
+    pub fn caret_trail_life(&self) -> f64 {
+        caret_trail_life(self.caret_trail_intensity)
     }
 }
 
@@ -181,7 +254,9 @@ impl Default for MotionConfig {
             vhs_tracking: false,
             wired_ambient: false,
             mesh_density: default_mesh_density(),
+            mesh_brightness: default_mesh_brightness(),
             caret_trail: false,
+            caret_trail_intensity: default_caret_trail_intensity(),
             boot_glitch: false,
         }
     }
@@ -228,7 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn motion_intensity_clamps_to_unit_band() {
+    fn motion_intensity_clamps_to_two_band() {
+        // M4: the animation-speed band widened 0..1 -> 0..2 for C0PL4ND parity.
+        // A value above the new ceiling clamps to 2.0 (not 1.0), an in-band 1.5
+        // passes through, and the default (0.6) is unchanged.
         let lo = MotionConfig {
             intensity: -5.0,
             ..MotionConfig::default()
@@ -237,9 +315,95 @@ mod tests {
             intensity: 42.0,
             ..MotionConfig::default()
         };
+        let mid = MotionConfig {
+            intensity: 1.5,
+            ..MotionConfig::default()
+        };
         assert_eq!(lo.clamped_intensity(), 0.0);
-        assert_eq!(hi.clamped_intensity(), 1.0);
+        assert_eq!(hi.clamped_intensity(), 2.0, "widened ceiling is 2.0");
+        assert_eq!(mid.clamped_intensity(), 1.5, "1.5 is now in-band");
         assert_eq!(MotionConfig::default().clamped_intensity(), 0.6);
+    }
+
+    #[test]
+    fn mesh_brightness_defaults_to_one_and_reproduces_current_alphas() {
+        // M1: the new brightness field defaults to 1.0 and, at that default,
+        // reproduces the CURRENT shipped mesh alphas exactly (link 16, dot 40) so
+        // enabling the field changes nothing by default.
+        let d = MotionConfig::default();
+        assert_eq!(d.mesh_brightness, 1.0, "default brightness is 1.0");
+        assert_eq!(d.mesh_link_alpha(), 16, "default reproduces link alpha 16");
+        assert_eq!(d.mesh_dot_alpha(), 40, "default reproduces dot alpha 40");
+        // Clamp band is [0, 3].
+        let hi = MotionConfig {
+            mesh_brightness: 9.0,
+            ..MotionConfig::default()
+        };
+        let lo = MotionConfig {
+            mesh_brightness: -1.0,
+            ..MotionConfig::default()
+        };
+        assert_eq!(hi.clamped_mesh_brightness(), 3.0, "brightness ceiling 3.0");
+        assert_eq!(lo.clamped_mesh_brightness(), 0.0, "brightness floor 0.0");
+        // Brightness scales the alphas linearly (and saturates at 255).
+        let bright = MotionConfig {
+            mesh_brightness: 2.0,
+            ..MotionConfig::default()
+        };
+        assert_eq!(bright.mesh_link_alpha(), 32, "2x brightness doubles link");
+        assert_eq!(bright.mesh_dot_alpha(), 80, "2x brightness doubles dot");
+        assert_eq!(lo.mesh_link_alpha(), 0, "zero brightness => invisible mesh");
+        assert_eq!(hi.mesh_dot_alpha(), 120, "3x brightness triples dot");
+        // Serde backfill: a config that predates the field loads with the 1.0
+        // default (no visual change on upgrade).
+        let cfg = Config::from_toml_str("[motion]\nwired_ambient = true\n").unwrap();
+        assert_eq!(
+            cfg.motion.mesh_brightness, 1.0,
+            "absent field backfills to 1.0"
+        );
+    }
+
+    #[test]
+    fn cursor_trail_life_matches_c0pl4nd_curve() {
+        // M2: the caret-trail life curve ported verbatim from C0PL4ND — a linear
+        // 0.35s..1.35s ramp over intensity 0..2, with the config default (0.6)
+        // landing at ~0.65s.
+        assert!((caret_trail_life(0.0) - 0.35).abs() < 1e-6, "0.0 -> 0.35s");
+        assert!((caret_trail_life(0.6) - 0.65).abs() < 1e-6, "0.6 -> 0.65s");
+        assert!((caret_trail_life(2.0) - 1.35).abs() < 1e-6, "2.0 -> 1.35s");
+        // Out-of-band intensity is clamped before the curve is applied.
+        assert!((caret_trail_life(9.0) - 1.35).abs() < 1e-6, "clamps at 2.0");
+        assert!(
+            (caret_trail_life(-1.0) - 0.35).abs() < 1e-6,
+            "clamps at 0.0"
+        );
+        // The method reads the configured intensity.
+        assert!((MotionConfig::default().caret_trail_life() - 0.65).abs() < 1e-6);
+    }
+
+    #[test]
+    fn caret_trail_default_off_so_intensity_is_inert() {
+        // M2: the caret-trail feature is OFF by default, so its intensity (0.6)
+        // never affects the resting surface — it only tunes the trail once the
+        // user opts in. This is the "default-off so inert until enabled" contract.
+        let d = MotionConfig::default();
+        assert!(!d.caret_trail, "caret-trail is OFF by default");
+        assert_eq!(d.caret_trail_intensity, 0.6, "intensity default is 0.6");
+        // Intensity clamps to its 0..2 band.
+        let hi = MotionConfig {
+            caret_trail_intensity: 42.0,
+            ..MotionConfig::default()
+        };
+        let lo = MotionConfig {
+            caret_trail_intensity: -5.0,
+            ..MotionConfig::default()
+        };
+        assert_eq!(hi.clamped_caret_trail_intensity(), 2.0);
+        assert_eq!(lo.clamped_caret_trail_intensity(), 0.0);
+        // Serde backfill leaves the trail off with the default intensity.
+        let cfg = Config::from_toml_str("[motion]\nenabled = true\n").unwrap();
+        assert!(!cfg.motion.caret_trail, "absent field keeps the trail off");
+        assert_eq!(cfg.motion.caret_trail_intensity, 0.6);
     }
 
     // ---- MotionConfig clamps (previously uncovered) ----
@@ -248,14 +412,19 @@ mod tests {
     fn motion_flicker_and_mesh_density_clamp_to_their_bands() {
         // A hand-edited TOML could drive these out of their design band; the
         // clamps keep flicker within the accessibility-safe 0.20 ceiling and the
-        // mesh density within [0, 1], regardless of the stored value.
+        // mesh density within [0, 2] (M3: widened from [0, 1]), regardless of the
+        // stored value.
         let wild = MotionConfig {
             flicker_strength: 5.0,
             mesh_density: 9.0,
             ..Default::default()
         };
         assert_eq!(wild.clamped_flicker_strength(), 0.20, "flicker ceiling");
-        assert_eq!(wild.clamped_mesh_density(), 1.0, "mesh density ceiling");
+        assert_eq!(
+            wild.clamped_mesh_density(),
+            2.0,
+            "mesh density ceiling (M3)"
+        );
         let neg = MotionConfig {
             flicker_strength: -1.0,
             mesh_density: -1.0,
@@ -263,14 +432,15 @@ mod tests {
         };
         assert_eq!(neg.clamped_flicker_strength(), 0.0, "flicker floor");
         assert_eq!(neg.clamped_mesh_density(), 0.0, "mesh density floor");
-        // An in-band value passes through untouched.
+        // An in-band value passes through untouched — including a value (1.5) that
+        // is only reachable AFTER the M3 widening.
         let ok = MotionConfig {
             flicker_strength: 0.1,
-            mesh_density: 0.5,
+            mesh_density: 1.5,
             ..Default::default()
         };
         assert_eq!(ok.clamped_flicker_strength(), 0.1);
-        assert_eq!(ok.clamped_mesh_density(), 0.5);
+        assert_eq!(ok.clamped_mesh_density(), 1.5, "1.5 is in-band after M3");
     }
 
     // ---- MUTANT-EQUIVALENT (config/motion.rs): documented, intentionally not tested ----

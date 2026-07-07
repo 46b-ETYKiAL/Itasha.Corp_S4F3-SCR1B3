@@ -9,6 +9,7 @@
 mod appearance;
 mod editor;
 mod file_assoc;
+mod keybindings;
 mod motion;
 mod reporting;
 mod system;
@@ -17,6 +18,7 @@ mod window;
 pub use appearance::*;
 pub use editor::*;
 pub use file_assoc::*;
+pub use keybindings::*;
 pub use motion::*;
 pub use reporting::*;
 pub use system::*;
@@ -33,6 +35,12 @@ use std::path::PathBuf;
 /// at the module root and is imported via `super::default_true`.
 pub(crate) fn default_true() -> bool {
     true
+}
+
+/// serde default for the accessibility UI zoom (M6): `1.0` (no zoom). A config
+/// that predates the field backfills to this, so upgrading changes nothing.
+fn default_ui_scale() -> f32 {
+    1.0
 }
 
 /// Current config schema version. Bumped whenever a one-time migration is
@@ -65,6 +73,19 @@ pub struct Config {
     /// [`migrate`]: Config::migrate
     #[serde(default)]
     pub schema_version: u32,
+    /// Accessibility UI zoom (M6). A whole-app zoom factor wired once per frame
+    /// via `ctx.set_zoom_factor`, clamped to `0.5..=3.0` by [`effective_ui_scale`]
+    /// (with a NaN/inf guard). Default `1.0`; a config that predates the field
+    /// backfills to `1.0` (no change on upgrade).
+    ///
+    /// [`effective_ui_scale`]: Config::effective_ui_scale
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
+    /// User-facing keymap schema (M7). The default set reproduces SCR1B3's
+    /// current hard-wired editor shortcuts EXACTLY (zero behaviour change);
+    /// [`Keybindings::validate`] surfaces duplicate / empty bindings.
+    #[serde(default)]
+    pub keybindings: Keybindings,
     pub editor: EditorConfig,
     pub appearance: AppearanceConfig,
     pub fonts: FontConfig,
@@ -99,6 +120,8 @@ impl Default for Config {
         // migrated. Every other field defers to its own `Default`.
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
+            ui_scale: default_ui_scale(),
+            keybindings: Keybindings::default(),
             editor: EditorConfig::default(),
             appearance: AppearanceConfig::default(),
             fonts: FontConfig::default(),
@@ -259,6 +282,17 @@ impl Config {
             changed = true;
         }
 
+        // M6 defensive sanitization (version-independent): a hand-edited config
+        // could store a non-finite `ui_scale` (NaN / ±inf), which would poison
+        // `ctx.set_zoom_factor` and blank the window. Reset any non-finite stored
+        // value to the `1.0` default here so the garbage never reaches the render
+        // path. Runs regardless of schema version (it guards a stored value, not a
+        // version-gated default flip) and reports a change only when it fixes one.
+        if !self.ui_scale.is_finite() {
+            self.ui_scale = default_ui_scale();
+            changed = true;
+        }
+
         // Migration invariants (debug-only): it must never LOWER the version,
         // and any config that started below the current schema must end exactly
         // at it. A FORWARD-version config (`original > CURRENT`, e.g. a file
@@ -271,6 +305,19 @@ impl Config {
             original >= CURRENT_SCHEMA_VERSION || self.schema_version == CURRENT_SCHEMA_VERSION
         );
         changed
+    }
+
+    /// The effective accessibility UI zoom (M6), clamped to a usable band and
+    /// guarded against garbage. A hand-edited config could store a wild, negative,
+    /// or non-finite value; this clamps to `0.5..=3.0` and maps any non-finite
+    /// (NaN / ±inf) value to `1.0`, so the value fed to `ctx.set_zoom_factor` is
+    /// always a sane, finite zoom that never blanks the window.
+    pub fn effective_ui_scale(&self) -> f32 {
+        if self.ui_scale.is_finite() {
+            self.ui_scale.clamp(0.5, 3.0)
+        } else {
+            default_ui_scale()
+        }
     }
 
     /// Load config from the OS config file, or defaults if absent/broken.
@@ -431,6 +478,61 @@ show_dropdown = false
             !c.editor.show_minimap,
             "migration must not override a v1 user choice"
         );
+    }
+
+    #[test]
+    fn effective_ui_scale_clamps_and_guards_against_garbage() {
+        // M6: the accessibility zoom is clamped to 0.5..=3.0, and any non-finite
+        // (NaN / ±inf) stored value maps to the safe 1.0 default so it can never
+        // poison ctx.set_zoom_factor and blank the window.
+        let scaled = |v: f32| {
+            Config {
+                ui_scale: v,
+                ..Default::default()
+            }
+            .effective_ui_scale()
+        };
+        assert_eq!(scaled(1.5), 1.5, "an in-band value passes through");
+        assert_eq!(scaled(0.1), 0.5, "below the floor clamps to 0.5");
+        assert_eq!(scaled(99.0), 3.0, "above the ceiling clamps to 3.0");
+        assert_eq!(scaled(f32::NAN), 1.0, "NaN maps to the 1.0 default");
+        assert_eq!(scaled(f32::INFINITY), 1.0, "inf maps to the 1.0 default");
+        assert_eq!(
+            scaled(f32::NEG_INFINITY),
+            1.0,
+            "-inf maps to the 1.0 default"
+        );
+        assert_eq!(
+            Config::default().effective_ui_scale(),
+            1.0,
+            "default is 1.0"
+        );
+    }
+
+    #[test]
+    fn ui_scale_backfills_to_one() {
+        // A config that predates the M6 field loads with the 1.0 default (no zoom
+        // change on upgrade). A migrate() over such a config leaves it finite.
+        let mut c = Config::from_toml_str("[editor]\ntab_width = 4\n").unwrap();
+        assert_eq!(c.ui_scale, 1.0, "absent ui_scale backfills to 1.0");
+        let _ = c.migrate();
+        assert!(c.ui_scale.is_finite());
+        assert_eq!(c.ui_scale, 1.0);
+    }
+
+    #[test]
+    fn migrate_sanitizes_a_non_finite_ui_scale() {
+        // A hand-edited config with a garbage ui_scale is repaired on load so the
+        // poison value never reaches the render path.
+        let mut nan = Config::from_toml_str("ui_scale = nan\n").unwrap();
+        assert!(
+            !nan.ui_scale.is_finite(),
+            "fixture stores a non-finite value"
+        );
+        assert!(nan.migrate(), "migrate must report the repair");
+        assert_eq!(nan.ui_scale, 1.0, "non-finite ui_scale reset to 1.0");
+        // Idempotent: a second pass over the repaired config is a no-op.
+        assert!(!nan.migrate());
     }
 
     #[test]
