@@ -612,6 +612,14 @@ pub struct ScribeApp {
     /// Wave-6 motion: fading caret-trail echoes as `(screen_rect, birth_time)`.
     /// Fed when the caret moves (default TextEdit path); aged out each frame.
     caret_trail: std::collections::VecDeque<(egui::Rect, f64)>,
+    /// P2 structural multi-selection over the central egui `TextEdit`: the
+    /// app-side secondary carets layered on egui's single primary caret
+    /// (Ctrl/Cmd+click, Ctrl+D select-next, Alt+drag column select). See
+    /// `crate::multi_cursor`.
+    multi_cursor: crate::multi_cursor::MultiCursor,
+    /// The latched anchor char offset of an in-progress Alt+drag column
+    /// selection (`None` when no column drag is active).
+    column_anchor: Option<usize>,
     /// Wave-6 motion: time the one-shot boot-glitch latched (first frame it ran).
     boot_glitch_started: Option<f64>,
     find_open: bool,
@@ -1126,6 +1134,8 @@ impl ScribeApp {
             md_preview_open: false,
             diff_view_open: false,
             caret_trail: std::collections::VecDeque::new(),
+            multi_cursor: crate::multi_cursor::MultiCursor::default(),
+            column_anchor: None,
             boot_glitch_started: None,
             find_open: false,
             find_query: String::new(),
@@ -1926,6 +1936,7 @@ mod grid_methods;
 mod grid_render;
 mod keyboard_input;
 mod modals;
+mod multi_cursor_glue;
 mod render_support;
 // Re-export the rendering & text-geometry leaf helpers so existing bare-name
 // call sites in mod.rs, the `use super::*` siblings (frame_tick, editor_overlays,

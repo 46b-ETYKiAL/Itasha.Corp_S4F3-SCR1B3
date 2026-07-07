@@ -27,6 +27,7 @@ mod issue_intake;
 #[cfg(test)]
 mod log_capture;
 mod md_preview;
+mod multi_cursor;
 mod plugin_manager;
 mod reporting;
 mod session_path_guard;

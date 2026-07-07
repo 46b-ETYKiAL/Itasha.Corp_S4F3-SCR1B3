@@ -2141,6 +2141,72 @@ impl ScribeApp {
                 // can read the editor's screen-space viewport once the `hl`
                 // borrow has dropped. Assigned unconditionally inside the block.
                 let editor_vp: egui::Rect;
+
+                // ---- P2 multi-cursor gestures + edit interception ----
+                // Replay edit keys at all carets (and handle Esc / Ctrl+D) BEFORE
+                // the TextEdit consumes this frame's events. Gesture geometry that
+                // needs the galley (Ctrl/Cmd+click add-caret, Alt+drag column
+                // select) is resolved after the closure lays it out.
+                // Esc collapses multi-cursor to a single caret. Focus-independent:
+                // being in multi-cursor mode is enough signal (egui can transiently
+                // drop editor focus between an intercepted edit and the next key),
+                // and it must run whether or not the editor currently holds focus.
+                if self.multi_cursor.is_active() {
+                    self.mc_collapse_on_escape(ctx);
+                }
+                let mc_focus = !read_only && !overlay_open && editor_focused;
+                if mc_focus {
+                    self.handle_multi_cursor_keys(ctx, editor_id, active);
+                }
+                let (mc_primary_pressed, mc_cmd, mc_alt, mc_primary_down, mc_ptr) =
+                    ctx.input(|i| {
+                        (
+                            i.pointer.primary_pressed(),
+                            i.modifiers.command,
+                            i.modifiers.alt,
+                            i.pointer.primary_down(),
+                            i.pointer.interact_pos(),
+                        )
+                    });
+                // A plain click (no Ctrl/Alt) collapses multi-cursor mode.
+                if mc_focus
+                    && mc_primary_pressed
+                    && !mc_cmd
+                    && !mc_alt
+                    && self.multi_cursor.is_active()
+                {
+                    self.multi_cursor.clear();
+                }
+                // Ctrl/Cmd+click adds (or toggles off) a caret at the clicked
+                // position, resolved via a galley hit-test in the closure. The
+                // pre-click primary head is remembered so it can be restored — the
+                // click becomes a NEW secondary and the existing primary stays.
+                let mc_ctrl_click =
+                    mc_focus && mc_primary_pressed && mc_cmd && !mc_alt && mc_ptr.is_some();
+                let mc_prev_primary: Option<usize> = if mc_ctrl_click {
+                    super::multi_cursor_glue::mc_load_primary_head(ctx, editor_id)
+                } else {
+                    None
+                };
+                // Alt+press starts a column-selection anchor; Alt+drag extends it.
+                let mc_alt_press = mc_focus && mc_alt && mc_primary_pressed && mc_ptr.is_some();
+                let mc_alt_drag = mc_focus
+                    && mc_alt
+                    && mc_primary_down
+                    && !mc_primary_pressed
+                    && self.column_anchor.is_some()
+                    && mc_ptr.is_some();
+                if mc_focus && !mc_primary_down {
+                    self.column_anchor = None;
+                }
+                // Snapshot the secondaries for painting inside the closure.
+                let mc_secondaries: Vec<crate::multi_cursor::Caret> =
+                    self.multi_cursor.secondaries().to_vec();
+                // Galley-resolved gesture outputs (need pos->char hit testing).
+                let mut mc_alt_anchor_idx: Option<usize> = None;
+                let mut mc_alt_head_idx: Option<usize> = None;
+                let mut mc_ctrl_click_idx: Option<usize> = None;
+
                 let anchor: Option<(egui::Pos2, usize)> = {
                     let hl = &self.hl;
                     let ext_ref = ext.as_deref();
@@ -2215,6 +2281,53 @@ impl ScribeApp {
                             .interactive(!read_only)
                             .layouter(&mut layouter);
                         let out = editor.show(ui);
+                        // ---- P2 multi-cursor — galley-resolved gestures + paint ----
+                        // Hit-test the pointer to a char index against the laid-out
+                        // galley (deterministic geometry) for the Ctrl/Cmd+click and
+                        // Alt+drag gestures captured before the closure.
+                        if let Some(p) = mc_ptr {
+                            let local = p - out.galley_pos;
+                            if mc_alt_press {
+                                mc_alt_anchor_idx = Some(out.galley.cursor_from_pos(local).index);
+                            } else if mc_alt_drag {
+                                mc_alt_head_idx = Some(out.galley.cursor_from_pos(local).index);
+                            } else if mc_ctrl_click {
+                                mc_ctrl_click_idx = Some(out.galley.cursor_from_pos(local).index);
+                            }
+                        }
+                        // Paint each secondary caret (and its single-row selection
+                        // band) so multi-cursor renders distinctly from egui's
+                        // primary caret.
+                        if !mc_secondaries.is_empty() {
+                            let painter = ui.painter();
+                            let gp = out.galley_pos;
+                            for c in &mc_secondaries {
+                                if !c.is_empty() {
+                                    let r = c.range();
+                                    let rs = out
+                                        .galley
+                                        .pos_from_cursor(egui::text::CCursor::new(r.start));
+                                    let re =
+                                        out.galley.pos_from_cursor(egui::text::CCursor::new(r.end));
+                                    if (rs.min.y - re.min.y).abs() < 0.5 {
+                                        let sel = egui::Rect::from_min_max(
+                                            gp + egui::vec2(rs.min.x, rs.min.y),
+                                            gp + egui::vec2(re.max.x, re.max.y),
+                                        );
+                                        painter.rect_filled(sel, 0.0, accent.linear_multiply(0.30));
+                                    }
+                                }
+                                let cr =
+                                    out.galley.pos_from_cursor(egui::text::CCursor::new(c.head));
+                                painter.line_segment(
+                                    [
+                                        gp + egui::vec2(cr.min.x, cr.min.y),
+                                        gp + egui::vec2(cr.min.x, cr.max.y),
+                                    ],
+                                    egui::Stroke::new(1.5, accent),
+                                );
+                            }
+                        }
                         // Right-click context menu — makes the note-usability actions
                         // DISCOVERABLE without knowing the command palette / a chord:
                         // the standard clipboard actions plus the markdown formatting
@@ -2878,6 +2991,63 @@ impl ScribeApp {
                     a
                 };
                 self.line_gutter = new_gutter;
+
+                // ---- P2 multi-cursor — resolve galley-dependent gestures ----
+                // Ctrl/Cmd+click: add (or toggle off) a secondary caret at the
+                // clicked char and restore the pre-click primary so it stays
+                // primary. Reconcile against `mc_prev_primary` (the pre-click
+                // head) — egui may have already moved its live primary onto the
+                // click point this frame, which would spuriously read as a hit.
+                if let Some(ix) = mc_ctrl_click_idx {
+                    let primary = mc_prev_primary
+                        .map(crate::multi_cursor::Caret::at)
+                        .unwrap_or_else(|| crate::multi_cursor::Caret::at(ix));
+                    self.multi_cursor
+                        .toggle_caret(crate::multi_cursor::Caret::at(ix), primary);
+                    if let Some(prev) = mc_prev_primary {
+                        super::multi_cursor_glue::mc_set_primary(ctx, editor_id, prev, prev);
+                    }
+                    ctx.request_repaint();
+                }
+                // Alt+press latches the column-selection anchor (and clears any
+                // prior multi-cursor); Alt+drag builds the per-line block.
+                if let Some(idx) = mc_alt_anchor_idx {
+                    self.column_anchor = Some(idx);
+                    self.multi_cursor.clear();
+                }
+                if let (Some(anchor_idx), Some(head_idx)) = (self.column_anchor, mc_alt_head_idx) {
+                    let chars: Vec<char> = self.tabs[active].text.chars().collect();
+                    let mut carets =
+                        crate::multi_cursor::column_selection(&chars, anchor_idx, head_idx);
+                    if carets.len() >= 2 {
+                        // Primary = the caret nearest the drag head; the rest are
+                        // secondaries painted + edited alongside it.
+                        let pix = carets
+                            .iter()
+                            .enumerate()
+                            .min_by_key(|(_, c)| {
+                                (c.head as isize - head_idx as isize).unsigned_abs()
+                            })
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
+                        let primary = carets.remove(pix);
+                        super::multi_cursor_glue::mc_set_primary(
+                            ctx,
+                            editor_id,
+                            primary.anchor,
+                            primary.head,
+                        );
+                        self.multi_cursor.set_secondaries(carets);
+                        ctx.request_repaint();
+                    } else if let Some(c) = carets.first() {
+                        // A single-line Alt+drag spans one line — make it a normal
+                        // ranged selection on that line instead of dropping the
+                        // gesture.
+                        super::multi_cursor_glue::mc_set_primary(ctx, editor_id, c.anchor, c.head);
+                        self.multi_cursor.clear();
+                        ctx.request_repaint();
+                    }
+                }
                 // F-034: apply a sticky-header click now that the hl borrow is
                 // released. Scrolls so the clicked definition sits at the top.
                 if let Some(line0) = sticky_jump {
