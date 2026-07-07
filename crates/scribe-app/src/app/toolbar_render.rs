@@ -23,6 +23,35 @@ impl ScribeApp {
         save_cfg: &mut bool,
         start_lsp: &mut bool,
     ) {
+        // Chrome parity with the window-caption buttons: the RIGHT-side caption
+        // buttons (`caption_btn` in `chrome.rs`) are FRAMELESS — transparent
+        // until hovered — but egui's default `Button`/`selectable_label` paint a
+        // filled `widgets.inactive.weak_bg_fill` frame, so the LEFT toolbar
+        // buttons (`>_`, new/open/save/find/split/…, the `⋯` more-actions) read
+        // as visually heavier than the caption buttons. Make every idle toolbar
+        // button transparent so the whole top bar looks uniform: clear the
+        // inactive fills + border for THIS `ui` scope only. egui still paints the
+        // `hovered`/`active` weak-fills on interaction, so hover feedback is
+        // preserved (the caption buttons paint their own hover fill; here egui
+        // does it for us). This applies in both text-label and icon
+        // (`appearance.toolbar_icons`) modes because it targets the widget
+        // visuals, not the label. A toggled-ON toolbar toggle (a
+        // `selectable_label`) still gets a PERSISTENT background so "on" stays
+        // obvious — we retint egui's default blue selection fill to the theme
+        // accent at low alpha (paired with the existing `sel(on)` accent LABEL in
+        // `toolbar_item`), so the on-state follows the active theme and OFF/idle
+        // toggles are transparent like every other button.
+        {
+            let accent = ui_color(&self.theme, "accent", Rgba::new(0, 255, 254, 255));
+            let v = ui.visuals_mut();
+            v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            v.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+            v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            // Low-alpha accent so the "on" fill reads as a calm highlight, not a
+            // solid block, and stays legible under the accent-tinted `sel(on)`
+            // label painted on top.
+            v.selection.bg_fill = accent.gamma_multiply(0.20);
+        }
         // NOTE: the settings "gear" used to lead this toolbar; it was RELOCATED
         // into the window caption row (left of Minimize) — see `caption_btn` in
         // `chrome.rs` + the titlebar caption block in `frame_tick.rs`. The

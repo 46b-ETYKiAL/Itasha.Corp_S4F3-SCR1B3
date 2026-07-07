@@ -296,6 +296,46 @@ fn scene_tabs() {
     render_scene("tabs", 1100.0, 720.0, app);
 }
 
+/// Top-bar button chrome parity (Fix 1). The LEFT toolbar buttons must now read
+/// as FRAMELESS — transparent when idle, matching the RIGHT window-caption
+/// buttons — with a persistent accent fill ONLY on a toggled-ON toggle. This
+/// scene turns the minimap + word-wrap toggles ON, so the PNG should show those
+/// two carrying a low-alpha accent background while `>_`, new/open/save/find/
+/// split/⋯ and the OFF toggles are all transparent (no filled button boxes).
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_toolbar_frameless() {
+    let mut cfg = qa_config();
+    // Two toggles ON so the accent on-fill is visible next to frameless buttons.
+    cfg.editor.show_minimap = true;
+    cfg.editor.word_wrap = true;
+    // Ensure a rich set of quick-access items is on the bar so the frameless
+    // treatment is visible across plain buttons AND toggles.
+    cfg.toolbar.items = [
+        "new",
+        "open",
+        "save",
+        "find",
+        "split",
+        "minimap",
+        "wrap",
+        "linenumbers",
+        "spellcheck",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    t.session_baseline = SAMPLE.to_string();
+    t.saved_baseline = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    render_scene("toolbar_frameless", 1100.0, 200.0, app);
+}
+
 /// Highlight-all-occurrences: a single-line buffer with the word `let`
 /// repeated; inject a selection of the FIRST `let` so the other two get the
 /// occurrence box. Selection is set on the egui TextEditState between frames.
