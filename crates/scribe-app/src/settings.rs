@@ -1175,6 +1175,45 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+            changed |= grid_bool(
+                ui,
+                q,
+                "drag select autoscroll wheel edge",
+                "Drag-select autoscroll",
+                "While selecting with the left button held, roll the wheel — or hold the \
+                 pointer near the top/bottom edge — to scroll and keep extending the \
+                 selection past the visible area.",
+                &mut config.scroll.drag_autoscroll,
+                &def.scroll.drag_autoscroll,
+            );
+            changed |= grid_bool(
+                ui,
+                q,
+                "scroll past end beyond last line",
+                "Scroll past end",
+                "Allow scrolling a little beyond the last line so it can sit at a \
+                 comfortable height instead of pinned to the bottom.",
+                &mut config.scroll.scroll_past_end,
+                &def.scroll.scroll_past_end,
+            );
+            if row_visible(q, "caret scroll off surrounding lines scrolloff") {
+                ui.label("Caret scroll-off").on_hover_text(
+                    "Keep the caret at least this many lines from the top/bottom edge when \
+                     navigating by keyboard (Vim scrolloff). 0 disables.",
+                );
+                changed |= ui
+                    .add(egui::Slider::new(
+                        &mut config.scroll.caret_scroll_off,
+                        0..=12,
+                    ))
+                    .changed();
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.scroll.caret_scroll_off,
+                    &def.scroll.caret_scroll_off,
+                );
+                ui.end_row();
+            }
         });
         ui.add_space(6.0);
 

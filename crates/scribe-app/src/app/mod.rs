@@ -1915,6 +1915,7 @@ mod build_plugins;
 mod builtins;
 mod chrome;
 mod deferred_actions;
+mod drag_scroll;
 mod editor_overlays;
 mod file_ops;
 mod find_nav;

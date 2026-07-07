@@ -1292,6 +1292,194 @@ fn input_ctrl_f_opens_and_escape_closes_find() {
     assert!(!app.find_open, "Escape closes the find bar");
 }
 
+/// A fresh, editor-focused app with a document far taller than the viewport, so
+/// there is real vertical scroll range for the drag-scroll conveniences. The
+/// welcome modal is suppressed (it would otherwise steal focus).
+fn tall_editor_app() -> ScribeApp {
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = true;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs[0].text = (0..400).map(|i| format!("line {i}\n")).collect();
+    app
+}
+
+/// P0-1 (the reported bug): holding the LEFT button to drag-select and rolling
+/// the wheel scrolls the editor viewport (via `pending_scroll`) so egui extends
+/// the selection past the visible region. Previously impossible — egui's
+/// `ScrollArea` gates the wheel behind "no widget is being dragged".
+#[test]
+fn input_drag_wheel_forces_viewport_scroll() {
+    let mut app = tall_editor_app();
+    let d = Driver::new();
+    d.idle(&mut app);
+    d.idle(&mut app); // editor auto-focuses
+    let pos = egui::pos2(300.0, 300.0);
+    // Press and HOLD the primary button over the editor (no release event), then
+    // MOVE while held so egui registers a real drag (sets `dragged_id`, which is
+    // what freezes its ScrollArea wheel handling — the condition being fixed).
+    d.frame(
+        &mut app,
+        egui::Modifiers::NONE,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    d.frame(
+        &mut app,
+        egui::Modifiers::NONE,
+        vec![egui::Event::PointerMoved(egui::pos2(324.0, 348.0))],
+    );
+    let wheel = || egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, -3.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    };
+    // Warm egui's wheel smoother one frame, then assert the forced scroll on the
+    // next held-drag wheel frame.
+    d.frame(&mut app, egui::Modifiers::NONE, vec![wheel()]);
+    app.pending_scroll = None;
+    d.frame(&mut app, egui::Modifiers::NONE, vec![wheel()]);
+    assert!(
+        app.pending_scroll.is_some(),
+        "wheel rolled during a held drag-selection must force a viewport scroll"
+    );
+}
+
+/// P0-2: holding a drag-selection pointer at the bottom viewport edge auto-pans
+/// (edge autoscroll), so a selection can be extended without touching the wheel.
+#[test]
+fn input_drag_edge_hold_autoscrolls() {
+    let mut app = tall_editor_app();
+    let d = Driver::new();
+    d.idle(&mut app);
+    d.idle(&mut app);
+    let start = egui::pos2(300.0, 300.0);
+    d.frame(
+        &mut app,
+        egui::Modifiers::NONE,
+        vec![
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    // Drag to the very bottom edge and hold (button still down).
+    let edge = egui::pos2(300.0, 712.0);
+    d.frame(
+        &mut app,
+        egui::Modifiers::NONE,
+        vec![egui::Event::PointerMoved(edge)],
+    );
+    app.pending_scroll = None;
+    d.frame(
+        &mut app,
+        egui::Modifiers::NONE,
+        vec![egui::Event::PointerMoved(edge)],
+    );
+    assert!(
+        app.pending_scroll.is_some(),
+        "holding a drag-selection at the bottom edge must auto-pan the viewport"
+    );
+}
+
+/// P0-1/P0-2 are opt-out: with `drag_autoscroll` off, a held-drag wheel does NOT
+/// force a scroll (egui's default freeze-while-dragging behaviour is restored).
+#[test]
+fn input_drag_wheel_respects_opt_out() {
+    let mut app = tall_editor_app();
+    app.config.scroll.drag_autoscroll = false;
+    let d = Driver::new();
+    d.idle(&mut app);
+    d.idle(&mut app);
+    let pos = egui::pos2(300.0, 300.0);
+    d.frame(
+        &mut app,
+        egui::Modifiers::NONE,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    d.frame(
+        &mut app,
+        egui::Modifiers::NONE,
+        vec![egui::Event::PointerMoved(egui::pos2(324.0, 348.0))],
+    );
+    let wheel = || egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, -3.0),
+        phase: egui::TouchPhase::Move,
+        modifiers: egui::Modifiers::NONE,
+    };
+    d.frame(&mut app, egui::Modifiers::NONE, vec![wheel()]);
+    app.pending_scroll = None;
+    d.frame(&mut app, egui::Modifiers::NONE, vec![wheel()]);
+    assert!(
+        app.pending_scroll.is_none(),
+        "drag_autoscroll=off must not force a scroll during a drag"
+    );
+}
+
+/// P1-3: scroll-past-end pads blank space below the last line, growing the
+/// scrollable content height so the last line can rest off the bottom edge.
+#[test]
+fn scroll_past_end_pads_content_below_last_line() {
+    let text: String = (0..6).map(|i| format!("line {i}\n")).collect();
+    let mut on = ScribeApp::new_test(Config::default());
+    on.tabs[0].text = text.clone();
+    run_frames(&mut on, 2);
+    let mut off = ScribeApp::new_test(Config::default());
+    off.config.scroll.scroll_past_end = false;
+    off.tabs[0].text = text;
+    run_frames(&mut off, 2);
+    assert!(
+        on.scroll_metrics.1 > off.scroll_metrics.1,
+        "scroll-past-end must grow content height (on={}, off={})",
+        on.scroll_metrics.1,
+        off.scroll_metrics.1
+    );
+}
+
+/// P1-4: a keyboard navigation press with the caret outside the keep-away band
+/// nudges the viewport (via `pending_scroll`) so the caret is re-framed. It must
+/// never fire while a button is held (that path belongs to drag autoscroll).
+#[test]
+fn caret_scroll_off_nudges_view_on_keyboard_nav() {
+    let mut cfg = Config::default(); // caret_scroll_off defaults to 3
+    cfg.editor.first_run_completed = true;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs[0].text = (0..200).map(|i| format!("line {i}\n")).collect();
+    let d = Driver::new();
+    d.idle(&mut app);
+    d.idle(&mut app); // caret at index 0, view at top, editor focused
+                      // Force the viewport far below the caret so the caret sits above the top
+                      // keep-away band.
+    app.pending_scroll = Some(600.0);
+    d.idle(&mut app); // editor applies the forced offset
+    app.pending_scroll = None;
+    d.key(&mut app, egui::Key::ArrowUp, egui::Modifiers::NONE);
+    assert!(
+        app.pending_scroll.is_some(),
+        "keyboard nav with the caret past the scroll-off margin must nudge the viewport"
+    );
+}
+
 /// F-005 helper: line:col math handles plain ASCII, end-of-buffer, and
 /// multi-byte UTF-8 codepoints.
 #[test]

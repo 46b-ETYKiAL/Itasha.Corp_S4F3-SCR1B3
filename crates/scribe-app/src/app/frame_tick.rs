@@ -2136,6 +2136,11 @@ impl ScribeApp {
                 // F-034: a clicked sticky header records its target line here;
                 // it is applied to `pending_scroll` after the hl borrow drops.
                 let mut sticky_jump: Option<usize> = None;
+                // Captured out of the editor closure so the post-render
+                // drag-scroll + caret-scroll-off assists (which need `&mut self`)
+                // can read the editor's screen-space viewport once the `hl`
+                // borrow has dropped. Assigned unconditionally inside the block.
+                let editor_vp: egui::Rect;
                 let anchor: Option<(egui::Pos2, usize)> = {
                     let hl = &self.hl;
                     let ext_ref = ext.as_deref();
@@ -2188,7 +2193,11 @@ impl ScribeApp {
                     let thin_scrollbar = self.config.editor.scrollbar_style
                         == scribe_core::config::ScrollbarStyle::Thin;
                     let mut a: Option<(egui::Pos2, usize)> = None;
+                    // Viewport height captured before the TextEdit consumes the
+                    // inner ui, for the P1-3 scroll-past-end trailing pad below.
+                    let scroll_past_end = self.config.scroll.scroll_past_end;
                     let sa_out = sa.show(ui, |ui| {
+                        let vp_h = ui.available_height();
                         if thin_scrollbar {
                             ui.style_mut().spacing.scroll.bar_width = 6.0;
                         }
@@ -2249,6 +2258,14 @@ impl ScribeApp {
                         // Bump the gen counter so the minimap + spell caches refresh.
                         if out.response.changed() {
                             self.tabs[active].edit_gen = self.tabs[active].edit_gen.wrapping_add(1);
+                        }
+                        // P1-3 scroll-past-end: pad blank space below the last
+                        // line so it can rest at a comfortable height instead of
+                        // being pinned to the viewport bottom (VS Code
+                        // `scrollBeyondLastLine`). Grows the ScrollArea content so
+                        // the extra offset is real scroll range, not a caret jump.
+                        if scroll_past_end {
+                            ui.add_space(vp_h * 0.6);
                         }
                         // #D — clickable-URL overlay pass. The persistent colour +
                         // underline is painted by the syntax layer (highlight_job);
@@ -2806,6 +2823,9 @@ impl ScribeApp {
                         sa_out.content_size.y.max(1.0),
                         sa_out.inner_rect.height().max(1.0),
                     );
+                    // Hand the viewport rect to the post-render drag-scroll +
+                    // caret-scroll-off assists (applied after the `hl` borrow).
+                    editor_vp = sa_out.inner_rect;
                     // F-034 sticky scroll: pin the enclosing definition headers
                     // at the top of the viewport once their own header line has
                     // scrolled above it. Drawn with an opaque chrome fill so the
@@ -2863,6 +2883,17 @@ impl ScribeApp {
                 if let Some(line0) = sticky_jump {
                     let lh_px = (font.size * line_height).max(1.0);
                     self.pending_scroll = Some((line0 as f32) * lh_px);
+                }
+                // P0-1/P0-2 drag-select autoscroll + P1-4 caret scroll-off. Both
+                // reuse `pending_scroll` (consumed next frame). The drag path only
+                // acts while the primary button is held and the editor is focused;
+                // the caret path only on a keyboard move with no button down, so
+                // the two never write in the same frame (and neither disturbs the
+                // sticky-header jump above, which fires on a click).
+                self.drag_scroll_assist(ctx, editor_id, editor_vp);
+                if let Some((caret_pos, _)) = anchor {
+                    let lh_px = (font.size * line_height).max(1.0);
+                    self.caret_scroll_off_assist(ctx, caret_pos.y, editor_vp, lh_px);
                 }
 
                 // Completion: open on Ctrl+Space, accept on Enter/Tab, render popup.

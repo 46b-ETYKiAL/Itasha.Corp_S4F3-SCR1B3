@@ -13,6 +13,16 @@ use serde::{Deserialize, Serialize};
 /// wheel-click → drift behaviour) is opt-out via `autoscroll`, with a
 /// distance→velocity `sensitivity` (points/sec per screen-pixel of offset) and a
 /// `dead_zone` radius so a still pointer doesn't drift.
+///
+/// `drag_autoscroll` (opt-out) drives the viewport while a LEFT-drag selection
+/// is in progress: rolling the wheel (or holding the pointer at the top/bottom
+/// viewport edge) scrolls the editor so egui's own TextEdit extends the
+/// selection past the visible region — the reported "can't select past the
+/// viewport" bug. `scroll_past_end` pads blank space below the last line so it
+/// can sit at a comfortable height (VS Code `scrollBeyondLastLine`).
+/// `caret_scroll_off` keeps the caret at least N lines from the top/bottom edge
+/// during keyboard navigation (Vim `scrolloff` / VS Code `cursorSurroundingLines`;
+/// `0` disables).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct ScrollConfig {
@@ -21,6 +31,9 @@ pub struct ScrollConfig {
     pub autoscroll: bool,
     pub autoscroll_sensitivity: f32,
     pub autoscroll_dead_zone: f32,
+    pub drag_autoscroll: bool,
+    pub scroll_past_end: bool,
+    pub caret_scroll_off: u8,
 }
 
 impl Default for ScrollConfig {
@@ -31,6 +44,9 @@ impl Default for ScrollConfig {
             autoscroll: true,
             autoscroll_sensitivity: 6.0,
             autoscroll_dead_zone: 12.0,
+            drag_autoscroll: true,
+            scroll_past_end: true,
+            caret_scroll_off: 3,
         }
     }
 }
@@ -48,6 +64,12 @@ impl ScrollConfig {
     /// Autoscroll dead-zone radius (screen px), clamped to the slider band.
     pub fn clamped_dead_zone(&self) -> f32 {
         self.autoscroll_dead_zone.clamp(4.0, 40.0)
+    }
+    /// Caret keep-away margin in lines, clamped so a malformed toml can't demand
+    /// a margin taller than a usable viewport. `0` disables (egui's just-in-view
+    /// default).
+    pub fn clamped_caret_scroll_off(&self) -> u8 {
+        self.caret_scroll_off.min(12)
     }
 }
 
@@ -175,16 +197,21 @@ mod tests {
         let s = ScrollConfig::default();
         assert_eq!(s.speed, 75.0);
         assert!(s.animate_jumps && s.autoscroll);
+        // Drag-select scroll conveniences default ON; caret keep-away = 3 lines.
+        assert!(s.drag_autoscroll && s.scroll_past_end);
+        assert_eq!(s.caret_scroll_off, 3);
         // Out-of-band values clamp to the slider range.
         let wild = ScrollConfig {
             speed: 9000.0,
             autoscroll_sensitivity: -3.0,
             autoscroll_dead_zone: 999.0,
+            caret_scroll_off: 200,
             ..ScrollConfig::default()
         };
         assert_eq!(wild.clamped_speed(), 200.0);
         assert_eq!(wild.clamped_sensitivity(), 2.0);
         assert_eq!(wild.clamped_dead_zone(), 40.0);
+        assert_eq!(wild.clamped_caret_scroll_off(), 12);
     }
 
     #[test]
