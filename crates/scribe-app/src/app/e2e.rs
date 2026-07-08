@@ -914,6 +914,58 @@ fn tint_enable_toggle_gates_panel_fill_colour() {
 }
 
 #[test]
+fn tint_colours_panel_in_transparent_mode() {
+    // Issue-1 regression guard: with transparency ON + tint_enabled ON +
+    // strength > 0, the tint must VISIBLY colour the (translucent) window — the
+    // panel fill carries the tinted RGB AND a reduced alpha. The tint is applied
+    // BEFORE the translucency alpha, so it never gets bypassed by the see-through
+    // path. (The UI bug was separate: the Tint colour/strength controls were
+    // gated on `transparency_enabled` instead of `tint_enabled`, greying them
+    // out — but the paint path here always tinted correctly.)
+    // Compare the UN-premultiplied red channel: `Color32` stores premultiplied
+    // bytes, so `.r()` scales with alpha and can't be compared across opacities.
+    let red = |c: egui::Color32| c.to_srgba_unmultiplied()[0];
+    let theme = Theme::wired_noir();
+    let plain_red = red(panel_fill(
+        &theme,
+        &scribe_core::config::WindowConfig::default(),
+        None,
+    ));
+    let w = scribe_core::config::WindowConfig {
+        transparency_enabled: true,
+        tint_enabled: true,
+        tint: "#ff0000".into(),
+        tint_strength: 0.8,
+        opacity: 0.5,
+        ..Default::default()
+    };
+    let tinted = panel_fill(&theme, &w, None);
+    // RGB shifted strongly toward red (the tint), not the plain theme panel.
+    assert!(
+        red(tinted) > plain_red,
+        "transparent-mode panel must be red-shifted by the tint (got r={}, plain r={plain_red})",
+        red(tinted)
+    );
+    // ...and translucent (alpha reflects the 0.5 opacity, not fully opaque).
+    assert!(
+        (76..255).contains(&tinted.a()),
+        "transparent-mode panel must carry the opacity alpha (got a={})",
+        tinted.a()
+    );
+    // Toggling tint OFF in the SAME transparent mode drops the colour shift.
+    let w_off = scribe_core::config::WindowConfig {
+        tint_enabled: false,
+        ..w
+    };
+    let untinted_translucent = panel_fill(&theme, &w_off, None);
+    assert_eq!(
+        red(untinted_translucent),
+        plain_red,
+        "tint OFF => no red shift even in transparent mode"
+    );
+}
+
+#[test]
 fn visuals_signature_tracks_the_tint_slider() {
     // The tint slider must rebuild the visuals live: changing tint strength (or
     // toggling the enable) changes the signature `frame_tick` compares, and the

@@ -1953,12 +1953,22 @@ fn render_sections(
                 &mut config.window.tint_enabled,
                 &def.window.tint_enabled,
             );
+            // The tint sub-controls are gated by the tint MASTER toggle
+            // (`tint_enabled`), NOT by transparency: the tint is colour-math on
+            // the panel/editor background fills and applies in BOTH opaque and
+            // translucent window modes (see `render_support::panel_fill`, which
+            // blends the tint BEFORE the translucency alpha). Gating them on
+            // `transparency_enabled` was the regression that left the Tint
+            // colour + strength greyed-out and "not functioning" whenever
+            // transparency was off — even though the tint would have worked.
+            let tint_on = config.window.tint_enabled;
             if row_visible(q, "window tint colour hex") {
                 ui.label("Tint").on_hover_text(
-                    "Colour tint applied over the translucent surface, as a hex code \
-                     (e.g. #1a1a2e).",
+                    "Colour tint blended into the app window background, as a hex \
+                     code (e.g. #1a1a2e). Works in both opaque and transparent \
+                     window modes.",
                 );
-                ui.add_enabled_ui(tos, |ui| {
+                ui.add_enabled_ui(tint_on, |ui| {
                     ui.horizontal(|ui| {
                         // Click the swatch → egui colour picker pop-out; the hex
                         // field stays for exact/paste entry. The two are kept in
@@ -1995,7 +2005,7 @@ fn render_sections(
                 );
                 changed |= ui
                     .add_enabled(
-                        tos,
+                        tint_on,
                         egui::Slider::new(&mut config.window.tint_strength, 0.0..=1.0),
                     )
                     .changed();
