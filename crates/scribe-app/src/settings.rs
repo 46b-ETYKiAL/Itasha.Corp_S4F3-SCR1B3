@@ -1360,6 +1360,41 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+            if row_visible(
+                q,
+                "wrap note title two lines side bar left right multi-line",
+            ) {
+                // Effective ONLY when the tab bar is on the Left/Right AND in
+                // HORIZONTAL orientation (rotated OFF): a title too long for one
+                // line then wraps to a 2nd line (max two; the 2nd truncates with
+                // an ellipsis if even two don't fit). Greyed otherwise so the
+                // double dependency (side bar + not rotated) is obvious.
+                let is_horizontal_side = config.editor.tab_bar_position.is_vertical()
+                    && !config.editor.side_tabs_rotated;
+                ui.add_enabled_ui(is_horizontal_side, |ui| {
+                    changed |= ui
+                        .checkbox(
+                            &mut config.editor.side_tabs_wrap_two_lines,
+                            "Wrap note titles to 2 lines (side bar)",
+                        )
+                        .on_hover_text(
+                            "When the tab bar is on the Left or Right with horizontal labels: \
+                             ON lets a title that doesn't fit on one line wrap onto a second \
+                             line (max two lines; the second is truncated with … if the title \
+                             is longer still). OFF keeps each side-bar title on a single line, \
+                             truncated with … when the bar is narrower than the title. No \
+                             effect for Top/Bottom or the rotated (vertical-text) side variant.",
+                        )
+                        .changed();
+                });
+                ui.label("");
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.editor.side_tabs_wrap_two_lines,
+                    &def.editor.side_tabs_wrap_two_lines,
+                );
+                ui.end_row();
+            }
             changed |= grid_bool(
                 ui,
                 q,
@@ -3405,6 +3440,7 @@ mod wiring_guard {
         "editor.scrollbar_style",
         "editor.tab_bar_position",
         "editor.side_tabs_rotated",
+        "editor.side_tabs_wrap_two_lines",
         "editor.restore_session",
         "editor.grid_enabled",
         "editor.experimental_rope_editor",

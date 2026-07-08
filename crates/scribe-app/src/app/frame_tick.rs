@@ -670,27 +670,43 @@ impl ScribeApp {
                 }
                 scribe_core::config::TabBarPosition::Left => {
                     let rotated = self.config.editor.side_tabs_rotated;
-                    // Fit-to-content width (#16): the bar hugs the widest tab
-                    // rather than a fixed 180px slab, so a short note name doesn't
-                    // leave a big empty bar. `exact_width` auto-tracks the content
-                    // every frame (no manual resize needed — it just fits).
                     let w = self.side_tab_bar_width(ctx, rotated);
-                    egui::SidePanel::left("tabs-left")
-                        .exact_width(w)
-                        .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
-                        .show(ctx, |ui| {
-                            self.draw_side_tab_strip(ui, accent, muted, rotated);
-                        });
+                    let sp = egui::SidePanel::left("tabs-left")
+                        .frame(egui::Frame::default().fill(panel).inner_margin(4.0));
+                    // Rotated: a narrow vertical-text strip that just hugs its
+                    // content (`exact_width`). Non-rotated (horizontal labels):
+                    // RESIZABLE so the user can drag the divider to widen OR — now
+                    // that titles truncate/ellipsise — SHRINK the bar below the
+                    // longest title (min ~64px). `default_width` opens it fit-to-
+                    // content; egui then remembers the user's dragged width (#16).
+                    let sp = if rotated {
+                        sp.exact_width(w)
+                    } else {
+                        sp.resizable(true)
+                            .default_width(w)
+                            .min_width(64.0)
+                            .max_width(400.0)
+                    };
+                    sp.show(ctx, |ui| {
+                        self.draw_side_tab_strip(ui, accent, muted, rotated);
+                    });
                 }
                 scribe_core::config::TabBarPosition::Right => {
                     let rotated = self.config.editor.side_tabs_rotated;
                     let w = self.side_tab_bar_width(ctx, rotated);
-                    egui::SidePanel::right("tabs-right")
-                        .exact_width(w)
-                        .frame(egui::Frame::default().fill(panel).inner_margin(4.0))
-                        .show(ctx, |ui| {
-                            self.draw_side_tab_strip(ui, accent, muted, rotated);
-                        });
+                    let sp = egui::SidePanel::right("tabs-right")
+                        .frame(egui::Frame::default().fill(panel).inner_margin(4.0));
+                    let sp = if rotated {
+                        sp.exact_width(w)
+                    } else {
+                        sp.resizable(true)
+                            .default_width(w)
+                            .min_width(64.0)
+                            .max_width(400.0)
+                    };
+                    sp.show(ctx, |ui| {
+                        self.draw_side_tab_strip(ui, accent, muted, rotated);
+                    });
                 }
             }
         }
