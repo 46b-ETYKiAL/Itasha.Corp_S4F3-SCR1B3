@@ -2119,3 +2119,6 @@ mod logging_tests;
 
 #[cfg(test)]
 mod error_message_tests;
+
+#[cfg(test)]
+mod tabbar_layout_tests;
