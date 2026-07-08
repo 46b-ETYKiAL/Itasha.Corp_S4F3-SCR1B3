@@ -78,22 +78,49 @@ pub fn syntax_color32(rgb: [u8; 3]) -> Color32 {
 
 /// Lower the alpha of the surface fills so a translucent/glass window reveals
 /// what is behind it. `opacity` is clamped to [0.0, 1.0]; at the 0.0 floor the
-/// chrome/background fills become fully transparent (maximum see-through). The
-/// window can never be truly "lost" even at 0.0 because the editor text itself
-/// is painted opaque on top, so it stays legible — only the chrome/background
-/// fills go translucent. (History: a previous 0.30 floor made the bottom of the
-/// slider a no-op; the floor was later dropped to 0.0 so the lowest setting is
-/// genuinely near-glass.)
+/// chrome/background fills become fully transparent (maximum see-through). This
+/// fades BOTH the panel/background fills AND the resting chrome-widget fills
+/// (toolbar buttons, tab chips, scrollbar trough) so the window gets genuinely
+/// see-through rather than leaving a solid chrome shell. The window can never be
+/// truly "lost" even at 0.0 because the editor text — and the hovered/active
+/// widget states — are painted opaque on top, so text stays legible and
+/// interaction feedback survives. (History: a previous 0.30 floor made the
+/// bottom of the slider a no-op; the floor was later dropped to 0.0 so the
+/// lowest setting is genuinely near-glass, and the resting widget fills were
+/// added to the fade so the chrome reveals the desktop too.)
 pub fn apply_window_opacity(v: &mut Visuals, opacity: f32) {
     // Floor at 0.0 so the window can be made FULLY transparent (max see-through).
     // The editor text itself is painted opaque on top, so it stays legible even
     // at zero chrome alpha — only the background/panel fills vanish.
     let a = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-    let with_a = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a);
-    // Only the PANEL surface goes translucent (it is what sits over the desktop).
+    // Reset the alpha to `a` from the UN-premultiplied channels. `Color32` stores
+    // premultiplied bytes, so reading `.r()/.g()/.b()` off a fill that already
+    // carries its own alpha (e.g. the scrollbar handle) and re-premultiplying
+    // would corrupt the colour — `to_srgba_unmultiplied` recovers the true RGB
+    // first so the re-alpha is exact regardless of the input's prior alpha.
+    let with_a = |c: Color32| {
+        let [r, g, b, _] = c.to_srgba_unmultiplied();
+        Color32::from_rgba_unmultiplied(r, g, b, a)
+    };
+    // The PANEL surfaces go translucent (they are what sit over the desktop).
     v.panel_fill = with_a(v.panel_fill);
     v.extreme_bg_color = with_a(v.extreme_bg_color);
     v.faint_bg_color = with_a(v.faint_bg_color);
+    // Also fade the RESTING chrome-widget fills so the window gets genuinely
+    // MORE see-through ("it doesn't get transparent enough"): the toolbar
+    // buttons / tab chips / side-panel controls paint their rest state from
+    // `widgets.noninteractive`/`widgets.inactive` `bg_fill` + `weak_bg_fill`
+    // (buttons specifically fill from `weak_bg_fill`). Left opaque, these kept a
+    // solid chrome shell over the desktop even at the lowest opacity; fading them
+    // lets the resting chrome reveal the desktop too. The HOVERED/ACTIVE widget
+    // states are DELIBERATELY left opaque, so pointing at / pressing a control
+    // still gives a solid visual response (interaction feedback survives max
+    // transparency). `inactive.bg_fill` — the SCROLLBAR HANDLE, which theme
+    // mapping already gives its own reduced alpha — is likewise left as-is so the
+    // grabbable bar stays visible.
+    v.widgets.noninteractive.bg_fill = with_a(v.widgets.noninteractive.bg_fill);
+    v.widgets.noninteractive.weak_bg_fill = with_a(v.widgets.noninteractive.weak_bg_fill);
+    v.widgets.inactive.weak_bg_fill = with_a(v.widgets.inactive.weak_bg_fill);
     // `window_fill` is DELIBERATELY left opaque. egui draws combo-box dropdowns,
     // context menus, and tooltips with `Frame::menu`/`Frame::popup`, both of which
     // take their fill from `window_fill` — lowering its alpha makes every dropdown
@@ -101,7 +128,7 @@ pub fn apply_window_opacity(v: &mut Visuals, opacity: f32) {
     // window darken toward black as opacity drops (it composites over the panels
     // behind it). Keeping it solid means popups/tooltips/the Settings window stay
     // legible and hold their colour regardless of the opacity slider; only the
-    // main panels reveal the desktop.
+    // main panels + resting chrome reveal the desktop.
 }
 
 #[cfg(test)]
@@ -143,16 +170,31 @@ mod tests {
         v.panel_fill = Color32::from_rgb(0x10, 0x10, 0x10);
         v.extreme_bg_color = Color32::from_rgb(0x05, 0x05, 0x05);
         v.faint_bg_color = Color32::from_rgb(0x15, 0x15, 0x15);
+        // Hovered/active widget states must stay OPAQUE (interaction feedback).
+        let hov = v.widgets.hovered.bg_fill;
+        let act = v.widgets.active.bg_fill;
 
         apply_window_opacity(&mut v, 0.5);
         assert_eq!(v.panel_fill.a(), 128, "panel must go ~half translucent");
         assert_eq!(v.extreme_bg_color.a(), 128);
         assert_eq!(v.faint_bg_color.a(), 128);
         assert_eq!(v.window_fill.a(), 255, "window_fill must stay OPAQUE");
+        // Resting chrome-widget fills also fade so the chrome reveals the desktop.
+        assert_eq!(v.widgets.noninteractive.bg_fill.a(), 128);
+        assert_eq!(v.widgets.noninteractive.weak_bg_fill.a(), 128);
+        assert_eq!(v.widgets.inactive.weak_bg_fill.a(), 128);
+        // Hovered/active states are untouched (stay opaque for feedback).
+        assert_eq!(v.widgets.hovered.bg_fill, hov, "hovered stays opaque");
+        assert_eq!(v.widgets.active.bg_fill, act, "active stays opaque");
 
-        // Fully transparent: panels vanish, window_fill still opaque.
+        // Fully transparent: panels + resting chrome vanish, window_fill still opaque.
         apply_window_opacity(&mut v, 0.0);
         assert_eq!(v.panel_fill.a(), 0);
+        assert_eq!(
+            v.widgets.inactive.weak_bg_fill.a(),
+            0,
+            "resting chrome fully vanishes"
+        );
         assert_eq!(v.window_fill.a(), 255);
     }
 

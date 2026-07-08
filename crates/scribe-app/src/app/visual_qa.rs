@@ -633,6 +633,53 @@ fn scene_tint_glass_settings_open() {
     render_scene("tint_glass_settings_open", 1100.0, 720.0, app);
 }
 
+/// ISSUE-1 verify — transparency ON + tint ON + strong red @ 0.8 opacity. The
+/// tint MUST visibly colour the translucent window chrome/editor-well (the
+/// panels carry the tinted RGB and the opacity alpha), while the body-text
+/// glyphs keep their untinted theme hue. Read the PNG next to `tint_off`: the
+/// (semi-transparent) chrome background is clearly red-shifted.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_transparent_tinted() {
+    let mut cfg = qa_config();
+    cfg.window.transparency_enabled = true;
+    cfg.window.tint_enabled = true;
+    cfg.window.tint = "#ff0000".to_string();
+    cfg.window.tint_strength = 0.8;
+    cfg.window.opacity = 0.8;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    t.session_baseline = SAMPLE.to_string();
+    t.saved_baseline = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    render_scene("transparent_tinted", 1100.0, 720.0, app);
+}
+
+/// ISSUE-2 verify — transparency ON at the LOWEST opacity (0.05, near the 0.0
+/// floor). Every background surface (chrome panels, editor well, and the
+/// resting/weak widget fills) must be near-fully see-through so the window is
+/// maximally transparent; only the editor glyphs + interactive controls stay
+/// legible. Read the PNG's alpha channel: the background is ~13/255 or lower.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_transparent_min_opacity() {
+    let mut cfg = qa_config();
+    cfg.window.transparency_enabled = true;
+    cfg.window.opacity = 0.05;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    t.session_baseline = SAMPLE.to_string();
+    t.saved_baseline = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    render_scene("transparent_min_opacity", 1100.0, 720.0, app);
+}
+
 /// #82 — rotate-ON side tabs MID-DRAG: the drop-insertion hairline must sit in
 /// the GAP between two stacked tab chips, never inside a chip's outline. Forces
 /// the drag pointer into the gap between chip 0 and chip 1 via the test hook,
