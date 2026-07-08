@@ -44,9 +44,10 @@ fn panel_width(h: &Harness<'_, ScribeApp>) -> f32 {
 /// Truncation-allows-shrink: the resizable side bar can be dragged NARROWER than
 /// the longest title, because the title truncates (…) instead of forcing the
 /// panel wide. Drives the actual panel-resize separator, then asserts the stored
-/// panel width dropped well below its fit-to-content start AND reached the ~64px
-/// floor — impossible before the fix, when the un-truncated label floored the
-/// panel at the full title width.
+/// panel width collapsed to hug the MINIMAL tab (grip + truncated title + close,
+/// ~96px) — far below the >280px the full title would otherwise demand. Before
+/// the fix, the un-truncated label floored the panel at the full title width, so
+/// this drag couldn't shrink it at all.
 #[test]
 fn side_bar_shrinks_below_longest_title_via_resize() {
     let (app, _dir) = left_bar_app(false);
@@ -58,17 +59,17 @@ fn side_bar_shrinks_below_longest_title_via_resize() {
 
     let start_w = panel_width(&h);
     // The separator sits at the panel's right edge (x == width). Press there,
-    // drag the pointer far left (to 40px — below the 64px floor, so it clamps),
-    // holding the button down across several frames for the resize to converge.
+    // drag the pointer hard left, holding the button down across several frames
+    // so the resize fully converges to the content-driven minimum.
     let sep_x = start_w;
     let mid_y = 300.0;
     h.drag_at(egui::pos2(sep_x, mid_y));
     h.run();
-    for _ in 0..4 {
-        h.hover_at(egui::pos2(40.0, mid_y));
+    for _ in 0..8 {
+        h.hover_at(egui::pos2(20.0, mid_y));
         h.run();
     }
-    h.drop_at(egui::pos2(40.0, mid_y));
+    h.drop_at(egui::pos2(20.0, mid_y));
     h.run();
     h.run();
 
@@ -78,10 +79,13 @@ fn side_bar_shrinks_below_longest_title_via_resize() {
         "the side bar must shrink well below its fit-to-content start once titles \
          truncate: start={start_w:.1} end={end_w:.1}"
     );
+    // The title's natural width is well over 280px; a truncating bar collapses to
+    // hug the minimal tab affordances (~96px). Assert it landed far below the
+    // title width — the behaviour that was impossible before truncation.
     assert!(
-        end_w <= 80.0,
-        "dragged to 40px, the bar should reach its ~64px min-width floor, not stay \
-         pinned at the title width: end={end_w:.1}"
+        end_w < 140.0,
+        "a truncating side bar must collapse below the full-title width (it can't \
+         before the fix): end={end_w:.1}"
     );
 }
 

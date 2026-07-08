@@ -755,7 +755,9 @@ fn plus_button_adds_a_tab() {
     let mut h = ui_harness(fresh_app());
     h.run();
     let before = h.state().tabs.len();
-    h.get_by_label("+").click();
+    // The add-tab control is now a frameless Phosphor PLUS glyph button (v0.4.58),
+    // not the old text "+" — match on its accessible glyph name.
+    h.get_by_label(egui_phosphor::thin::PLUS).click();
     h.run();
     assert_eq!(
         h.state().tabs.len(),

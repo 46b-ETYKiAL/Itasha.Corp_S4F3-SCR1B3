@@ -38,6 +38,7 @@ fn tab_hover_fill(accent: Color32) -> Color32 {
 ///     the un-truncated label width, so the divider couldn't drag narrower).
 ///   * `max_rows` is 1 (single-line, ellipsis on overflow) or 2 (opt-in wrap;
 ///     the 2nd row still elides with … when even two lines don't fit).
+///
 /// Pure + unit-tested so the "reserve + row-cap" rule can't silently regress.
 fn side_tab_label_wrap(avail_width: f32, selected: bool, two_line: bool) -> (f32, usize) {
     // Selected tabs show BOTH a pin toggle and a close ✕; other tabs show at
