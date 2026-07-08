@@ -453,9 +453,10 @@ fn pa06_top_tab_strip_keeps_all_tabs_addressable_at_scale() {
         "no tab may be dropped just because the TOP strip overflows the window \
          (PA-06 horizontal ScrollArea keeps them reachable)"
     );
-    // The strip's add-tab "+" affordance stays reachable at scale.
+    // The strip's add-tab affordance (now a frameless Phosphor PLUS glyph, v0.4.58)
+    // stays reachable at scale.
     assert!(
-        h.query_by_label("+").is_some(),
+        h.query_by_label(egui_phosphor::thin::PLUS).is_some(),
         "the top strip's add-tab control stays reachable when tabs overflow"
     );
     assert!(

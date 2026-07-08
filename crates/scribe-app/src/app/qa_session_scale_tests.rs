@@ -587,9 +587,10 @@ fn scenario7_restore_with_missing_file_is_graceful_no_panic() {
         h.state().tabs[0].text.contains("alpha bravo"),
         "the surviving tab holds its on-disk content"
     );
-    // The "+" add-tab affordance is always present on the strip (reachable UI).
+    // The add-tab affordance (now a frameless Phosphor PLUS glyph, v0.4.58) is
+    // always present on the strip (reachable UI).
     assert!(
-        h.query_by_label("+").is_some(),
+        h.query_by_label(egui_phosphor::thin::PLUS).is_some(),
         "the tab strip's add-tab control stays reachable after a partial restore"
     );
 }

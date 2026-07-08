@@ -28,6 +28,15 @@ pub struct EditorConfig {
     /// familiar look. No effect for the Top/Bottom positions.
     #[serde(default, alias = "side_tabs_vertical")]
     pub side_tabs_rotated: bool,
+    /// When the tab bar is on the Left or Right in HORIZONTAL orientation
+    /// (i.e. `side_tabs_rotated == false`), allow a note title that doesn't fit
+    /// on one line to wrap onto a SECOND line (max two lines; a title too long
+    /// for two lines is truncated with an ellipsis on the second). `false`
+    /// (default) keeps each side-bar title on a single line, truncated with an
+    /// ellipsis when the bar is narrower than the title. No effect for the
+    /// Top/Bottom positions or the rotated (vertical-text) side variant.
+    #[serde(default)]
+    pub side_tabs_wrap_two_lines: bool,
     /// Note (editor) syntax colour theme — the text colour scheme for the note
     /// body, independent of the app chrome theme (#104). One of the bundled
     /// syntect themes; an unknown value falls back to the default.
@@ -330,6 +339,7 @@ impl Default for EditorConfig {
             restore_session: true,
             tab_bar_position: TabBarPosition::Top,
             side_tabs_rotated: false,
+            side_tabs_wrap_two_lines: false,
             note_theme: default_note_theme(),
             grid_enabled: false,
             grid_layout: None,
@@ -393,6 +403,28 @@ mod tests {
         let legacy = "tab_width = 2\nside_tabs_vertical = true\n";
         let cfg3: EditorConfig = toml::from_str(legacy).unwrap();
         assert!(cfg3.side_tabs_rotated, "legacy alias maps to the new field");
+    }
+
+    #[test]
+    fn side_tabs_wrap_two_lines_round_trips_and_defaults_off() {
+        // Absent → default false (back-compat: older configs never wrote it).
+        let older = "tab_width = 2\n";
+        let cfg: EditorConfig = toml::from_str(older).unwrap();
+        assert!(
+            !cfg.side_tabs_wrap_two_lines,
+            "absent 2-line field defaults to false"
+        );
+        // Explicit ON round-trips.
+        let explicit = "tab_width = 2\nside_tabs_wrap_two_lines = true\n";
+        let cfg2: EditorConfig = toml::from_str(explicit).unwrap();
+        assert!(cfg2.side_tabs_wrap_two_lines);
+        // Serialize → deserialize preserves the flag.
+        let toml_str = toml::to_string(&cfg2).unwrap();
+        let cfg3: EditorConfig = toml::from_str(&toml_str).unwrap();
+        assert!(
+            cfg3.side_tabs_wrap_two_lines,
+            "flag survives a full round-trip"
+        );
     }
 
     /// F-012 helper: record_recent_file pushes to the front, dedups, caps.

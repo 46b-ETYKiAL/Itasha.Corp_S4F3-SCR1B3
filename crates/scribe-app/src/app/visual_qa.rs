@@ -697,3 +697,235 @@ fn scene_rotated_sidetab_drop_indicator() {
         eprintln!("[#82] rotated drop-indicator scene -> {}", p.display());
     }
 }
+
+// ---------------------------------------------------------------------------
+// v0.4.58 note-tab-bar wave — every dock position + both side variants, so the
+// four fixes can be verified in a PNG:
+//   Fix 1/2: the "+" button is frameless-until-hover + centred (like a top-bar
+//            button), NOT the old grey framed `small_button` slab.
+//   Fix 3:   a non-selected tab shows a faint hover fill (hover scenes).
+//   Fix 4:   a 1px theme-tinted divider separates adjacent tabs in EVERY
+//            position — including left/right (both non-rotated and rotated).
+//   Follow-up 1/2: horizontal side-bar titles ellipsise (shrink) / wrap to 2
+//            lines (opt-in).
+// ---------------------------------------------------------------------------
+
+/// Build a note-tab-bar QA scene app: native (non-frameless) chrome, the given
+/// dock position / rotation / 2-line option, and one real file tab per title
+/// (real files so `title()` shows distinct names). `pinned` marks tab indices
+/// pinned; `active` selects the accented tab.
+fn tabbar_scene_app(
+    position: scribe_core::config::TabBarPosition,
+    rotated: bool,
+    two_line: bool,
+    titles: &[&str],
+    active: usize,
+    pinned: &[usize],
+) -> ScribeApp {
+    let mut cfg = qa_config();
+    cfg.appearance.frameless = false;
+    cfg.editor.tab_bar_position = position;
+    cfg.editor.side_tabs_rotated = rotated;
+    cfg.editor.side_tabs_wrap_two_lines = two_line;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    for (i, name) in titles.iter().enumerate() {
+        let path = out_dir().join(name);
+        std::fs::write(&path, format!("// {name}\ncontent line\n")).expect("write scene file");
+        let mut t = EditorTab::from_path(path).expect("open scene file");
+        t.doc_id = crate::grid::DocId(i as u64 + 1);
+        if pinned.contains(&i) {
+            t.pinned = true;
+        }
+        app.tabs.push(t);
+    }
+    app.active = active.min(app.tabs.len().saturating_sub(1));
+    app
+}
+
+/// Like [`render_scene`] but injects a pointer hover at `hover` before the final
+/// capture, so a hover-only affordance (Fix 3's non-selected tab highlight)
+/// appears in the PNG.
+fn render_scene_hover(
+    name: &str,
+    w: f32,
+    h: f32,
+    app: ScribeApp,
+    hover: egui::Pos2,
+) -> Option<std::path::PathBuf> {
+    if !gpu_available() {
+        eprintln!("[visual-qa] no GPU adapter; skipping `{name}`");
+        return None;
+    }
+    let mut harness: Harness<'static, ScribeApp> = Harness::builder()
+        .with_size(egui::vec2(w, h))
+        .wgpu()
+        .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+    for _ in 0..5 {
+        harness.step();
+    }
+    harness.hover_at(hover);
+    for _ in 0..3 {
+        harness.step();
+    }
+    let img = harness.render().expect("kittest wgpu render must succeed");
+    let path = out_dir().join(format!("{name}.png"));
+    img.save(&path).expect("save visual-qa png");
+    eprintln!("[visual-qa] wrote {} (hover)", path.display());
+    Some(path)
+}
+
+const TABBAR_TITLES: &[&str] = &["main.rs", "lib.rs", "notes.md", "config.toml"];
+
+/// TOP dock — the four fixes' baseline: a horizontal strip with a frameless "+"
+/// at the row end and vertical dividers between chips. Read: the "+" has NO grey
+/// box at idle; thin lines sit between adjacent tabs.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tabbar_top() {
+    let app = tabbar_scene_app(
+        scribe_core::config::TabBarPosition::Top,
+        false,
+        false,
+        TABBAR_TITLES,
+        1,
+        &[0],
+    );
+    render_scene("tabbar_top", 1000.0, 240.0, app);
+}
+
+/// BOTTOM dock — same horizontal strip, docked above the status bar.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tabbar_bottom() {
+    let app = tabbar_scene_app(
+        scribe_core::config::TabBarPosition::Bottom,
+        false,
+        false,
+        TABBAR_TITLES,
+        1,
+        &[0],
+    );
+    render_scene("tabbar_bottom", 1000.0, 300.0, app);
+}
+
+/// LEFT dock, HORIZONTAL labels (non-rotated). Read: HORIZONTAL dividers between
+/// stacked tabs (the left/right-divider fix), the active tab accented, a pinned
+/// tab (dimmed grip), and the frameless centred "+" below the column.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tabbar_left_horizontal() {
+    let app = tabbar_scene_app(
+        scribe_core::config::TabBarPosition::Left,
+        false,
+        false,
+        TABBAR_TITLES,
+        1,
+        &[0],
+    );
+    render_scene("tabbar_left_horizontal", 900.0, 560.0, app);
+}
+
+/// RIGHT dock, HORIZONTAL labels — mirror of the left scene; confirms the
+/// dividers + frameless "+" also render on the right edge.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tabbar_right_horizontal() {
+    let app = tabbar_scene_app(
+        scribe_core::config::TabBarPosition::Right,
+        false,
+        false,
+        TABBAR_TITLES,
+        1,
+        &[0],
+    );
+    render_scene("tabbar_right_horizontal", 900.0, 560.0, app);
+}
+
+/// LEFT dock, ROTATED (vertical-text) variant. Read: HORIZONTAL dividers between
+/// the stacked rotated chips (Fix 4 for the rotated variant) and the frameless
+/// centred "+" at the column foot.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tabbar_left_rotated() {
+    let app = tabbar_scene_app(
+        scribe_core::config::TabBarPosition::Left,
+        true,
+        false,
+        TABBAR_TITLES,
+        1,
+        &[0],
+    );
+    render_scene("tabbar_left_rotated", 900.0, 560.0, app);
+}
+
+/// Fix 3 hover — LEFT horizontal bar with the pointer over the (non-selected)
+/// SECOND tab. Read: that tab carries a faint hover fill (lighter than the
+/// active tab's accent), painted BEHIND its label text. Hover coordinate targets
+/// the 2nd row of the left column.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tabbar_left_hover() {
+    let app = tabbar_scene_app(
+        scribe_core::config::TabBarPosition::Left,
+        false,
+        false,
+        TABBAR_TITLES,
+        0,
+        &[],
+    );
+    // The left column starts just below the top toolbar; the 2nd tab sits a bit
+    // lower. (Verified against the rendered PNG.)
+    render_scene_hover(
+        "tabbar_left_hover",
+        900.0,
+        560.0,
+        app,
+        egui::pos2(60.0, 92.0),
+    );
+}
+
+/// Follow-up 1 — a LONG title on a LEFT horizontal bar. The panel opens at its
+/// clamped fit width, but a title wider than that ELLIPSISES on one line
+/// ("a-very-long-…"). This proves the truncating galley renders; the shrink
+/// interaction is pinned by the `tabbar_resize_tests` interaction test.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tabbar_left_narrow_ellipsis() {
+    let titles = &[
+        "a-very-long-note-title-that-overflows-the-bar.md",
+        "short.md",
+        "another-fairly-long-filename-here.rs",
+    ];
+    let app = tabbar_scene_app(
+        scribe_core::config::TabBarPosition::Left,
+        false,
+        false,
+        titles,
+        1,
+        &[],
+    );
+    render_scene("tabbar_left_narrow_ellipsis", 900.0, 480.0, app);
+}
+
+/// Follow-up 2 — the SAME long titles with the "Wrap note titles to 2 lines"
+/// option ON. Read: a title too long for one line now WRAPS to a second line
+/// (chip grows taller); a title too long for even two lines elides the 2nd row.
+#[test]
+#[ignore = "GPU render; run with --ignored on a host with a wgpu adapter"]
+fn scene_tabbar_left_two_lines() {
+    let titles = &[
+        "a-very-long-note-title-that-overflows-the-bar.md",
+        "short.md",
+        "another-fairly-long-filename-here.rs",
+    ];
+    let app = tabbar_scene_app(
+        scribe_core::config::TabBarPosition::Left,
+        false,
+        true, // 2-line wrap ON
+        titles,
+        1,
+        &[],
+    );
+    render_scene("tabbar_left_two_lines", 900.0, 480.0, app);
+}

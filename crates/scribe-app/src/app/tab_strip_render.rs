@@ -16,6 +16,75 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// The faint hover-highlight fill for a NON-selected note tab (Fix 3). Lower
+/// alpha than the selected chip's `accent @ 0.20`, so a hovered inactive tab
+/// reads as a gentle affordance clearly distinct from — and lighter than — the
+/// active tab. Painted BEHIND the tab content (via `Frame::begin`/`end`) so it
+/// never washes over the label text. Shared by BOTH draw functions so the hover
+/// feel is identical in every dock position and side variant.
+fn tab_hover_fill(accent: Color32) -> Color32 {
+    accent.linear_multiply(0.09)
+}
+
+/// Wrap parameters for a horizontal LEFT/RIGHT side-bar tab title (Fixes for the
+/// two follow-up requirements). Given the content width available to the chip's
+/// row, whether the tab is selected (which carries a trailing pin+close vs just
+/// a close), and the opt-in 2-line setting, returns `(max_width, max_rows)` for
+/// the title galley:
+///   * `max_width` reserves room for the trailing pin/close affordances so the
+///     truncated/wrapped title never collides with them — AND, because the
+///     galley then reports only this BOUNDED width, it lets the resizable side
+///     panel shrink BELOW the widest title (egui otherwise floors the panel at
+///     the un-truncated label width, so the divider couldn't drag narrower).
+///   * `max_rows` is 1 (single-line, ellipsis on overflow) or 2 (opt-in wrap;
+///     the 2nd row still elides with … when even two lines don't fit).
+///
+/// Pure + unit-tested so the "reserve + row-cap" rule can't silently regress.
+fn side_tab_label_wrap(avail_width: f32, selected: bool, two_line: bool) -> (f32, usize) {
+    // Selected tabs show BOTH a pin toggle and a close ✕; other tabs show at
+    // most a close ✕. Reserve accordingly (glyph + inter-item spacing).
+    let reserve = if selected { 46.0 } else { 28.0 };
+    let max_width = (avail_width - reserve).max(24.0);
+    let max_rows = if two_line { 2 } else { 1 };
+    (max_width, max_rows)
+}
+
+/// Draw the note-tab-strip "+" (new-tab) button with the SAME frameless-until-
+/// hover chrome as the top-bar toolbar buttons: transparent idle fill + border,
+/// egui's default weak hover/active fill preserved (so it lights up ONLY on
+/// hover — matching a top-bar button, not the old grey `small_button` slab), and
+/// a fixed SQUARE min-size with the "+" glyph optically centred in both axes.
+/// Mirrors the visuals override in `toolbar_contents`, so a note-tab "+" is
+/// visually identical to a top-bar toolbar button. Used by BOTH `draw_tab_strip`
+/// (top/bottom + non-rotated side) and `draw_rotated_side_tabs` (rotated side),
+/// so every dock position and side variant gets the same button.
+fn tab_add_button(ui: &mut egui::Ui) -> egui::Response {
+    // A square sized to the standard interactive height so the button reads as a
+    // proper box (matching the top-bar buttons' footprint) in every position.
+    let side = ui.spacing().interact_size.y.max(22.0);
+    // A CENTER×CENTER child layout makes the Button's atom (the "+" glyph) sit
+    // dead-centre within the square min-size: egui aligns button content by the
+    // ui's horizontal_align × vertical_align, and `top_down(Align::Center)`
+    // yields Center on BOTH axes. The Phosphor PLUS glyph is centred in its own
+    // em-box (unlike the bare "+" text char, which sits optically high), so the
+    // mark lands pixel-centred regardless of dock position.
+    ui.allocate_ui_with_layout(
+        egui::vec2(side, side),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            let v = ui.visuals_mut();
+            v.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            v.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+            v.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            ui.add(
+                egui::Button::new(egui::RichText::new(egui_phosphor::thin::PLUS))
+                    .min_size(egui::vec2(side, side)),
+            )
+        },
+    )
+    .inner
+}
+
 impl ScribeApp {
     /// Render the tab strip inside a Left/Right side panel, honouring the
     /// `side_tabs_rotated` orientation option (#82). A side tab bar is always a
@@ -82,9 +151,13 @@ impl ScribeApp {
         }
         // grip(~12) + pin(~18) + close(~18) + inter-item spacing + chip inner
         // margin(16) + panel inner margin(8): the fixed affordances a tab row
-        // carries beside its label. Clamped: never narrower than a couple of
-        // buttons, never wider than a readable cap.
-        (max_label + 74.0).clamp(96.0, 280.0)
+        // carries beside its label, PLUS the label's own truncation reserve (up
+        // to 46px for a SELECTED tab; see `side_tab_label_wrap`). Budget enough
+        // that the fit-to-content width shows the widest title IN FULL — titles
+        // only elide once the user drags the (now resizable) bar narrower.
+        // Clamped: never narrower than a couple of buttons, never wider than a
+        // readable cap.
+        (max_label + 92.0).clamp(96.0, 280.0)
     }
 
     /// Render the side tab bar with each tab's label ROTATED 90° (vertical text,
@@ -143,7 +216,9 @@ impl ScribeApp {
                 } else {
                     Color32::TRANSPARENT
                 });
-            let chip_resp = chip.show(ui, |ui| {
+            let mut prepared = chip.begin(ui);
+            {
+                let ui = &mut prepared.content_ui;
                 ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     // #30 column order: grip · rotated-name · pin · close (top→bottom).
@@ -251,7 +326,16 @@ impl ScribeApp {
                         close = Some(i);
                     }
                 });
-            });
+            }
+            // Fix 3 — faint hover fill on a NON-selected rotated tab, written into
+            // the frame's RESERVED background slot (from `begin`) so it paints
+            // BEHIND the chip content and never washes over the rotated
+            // label/grip/close glyphs. Selected tabs keep their accent fill.
+            let chip_rect = prepared.frame.outer_rect(prepared.content_ui.min_rect());
+            if !selected && ui.rect_contains_pointer(chip_rect) {
+                prepared.frame.fill = tab_hover_fill(accent);
+            }
+            let chip_resp = prepared.end(ui);
             // #82 — record the FULL chip frame rect (grip · rotated label · pin ·
             // close · margins), NOT the inner rotated-label rect, so the
             // drop-insertion indicator and the nearest-chip drop resolution use the
@@ -259,15 +343,14 @@ impl ScribeApp {
             // "gap" midpoint land INSIDE a neighbouring chip's outline (over its
             // grip/close glyphs) — the drop line appeared inside the tab. Mirrors
             // the full-chip rect pushed by `draw_tab_strip`.
-            rects.push((i, chip_resp.response.rect));
+            rects.push((i, chip_resp.rect));
             ui.add_space(2.0);
         }
         // Centre the + add-tab button in the note-tab column (it used to hug the
         // left edge of the bar). `vertical_centered` centres the single button
         // horizontally in the column.
         ui.vertical_centered(|ui| {
-            if ui
-                .small_button("+")
+            if tab_add_button(ui)
                 .on_hover_text("New tab (Ctrl+N)")
                 .clicked()
             {
@@ -282,7 +365,11 @@ impl ScribeApp {
         // Mirrors the divider block in `draw_tab_strip`.
         if rects.len() > 1 {
             let painter = ui.painter();
-            let hairline = egui::Stroke::new(1.0, muted.linear_multiply(0.30));
+            // Fix 4 — the rotated column is ALWAYS vertical, so every divider is a
+            // horizontal hairline at the inter-chip gap midpoint. Bumped from the
+            // old 0.30 alpha (near-invisible on the narrow side bar against the
+            // dark panel fill) to a clearly legible theme-tinted 1px line.
+            let hairline = egui::Stroke::new(1.0, muted.linear_multiply(0.55));
             for pair in rects.windows(2) {
                 let (a, b) = (pair[0].1, pair[1].1);
                 let y = (a.bottom() + b.top()) * 0.5;
@@ -408,6 +495,22 @@ impl ScribeApp {
     ///   Closes F-001 / F-043 from `docs/audits/overlooked-surfaces-2026-05-29.md`.
     pub(super) fn draw_tab_strip(&mut self, ui: &mut egui::Ui, accent: Color32, muted: Color32) {
         let active = self.active;
+        // Strip orientation is KNOWN from the parent layout, not inferred from
+        // the tab rects: top/bottom wrap this strip in `ui.horizontal(...)`
+        // (main_dir horizontal); a non-rotated SIDE bar wraps it in
+        // `ui.vertical(...)` (main_dir top-down). The old center-delta inference
+        // (Δx vs Δy of the first two chips) MISFIRED on a side bar whenever two
+        // stacked tabs had very different widths — |Δx| could exceed the one-row
+        // |Δy|, so the code drew VERTICAL dividers/insertion lines for a VERTICAL
+        // bar (i.e. inside a tab, invisible as a separator). That was the "no
+        // divider on left/right" bug. Deriving it from the layout is exact.
+        let horizontal = ui.layout().main_dir().is_horizontal();
+        // A LEFT/RIGHT bar in HORIZONTAL orientation (this fn's side variant):
+        // titles truncate (or, opt-in, wrap to 2 lines) so the resizable panel
+        // can shrink below the widest title. Top/bottom scroll instead.
+        let side_bar = !horizontal;
+        let two_line = side_bar && self.config.editor.side_tabs_wrap_two_lines;
+        let label_font = egui::TextStyle::Body.resolve(ui.style());
         let mut switch_to = None;
         let mut close = None;
         let mut close_others = None;
@@ -455,7 +558,9 @@ impl ScribeApp {
                 } else {
                     Color32::TRANSPARENT
                 });
-            let chip_resp = chip.show(ui, |ui| {
+            let mut prepared = chip.begin(ui);
+            {
+                let ui = &mut prepared.content_ui;
                 // Force a single horizontal ROW for the chip contents (grip ·
                 // name · pin · close). Top/bottom strips are already in a
                 // horizontal parent so this is a no-op there; a SIDE strip's
@@ -492,13 +597,52 @@ impl ScribeApp {
                             }
                         }
                     }
-                    let label =
-                        RichText::new(shown.clone()).color(if selected { accent } else { muted });
-                    let resp = ui.add(
-                        egui::Label::new(label)
-                            .selectable(false)
-                            .sense(egui::Sense::click_and_drag()),
-                    );
+                    let label_color = if selected { accent } else { muted };
+                    let resp = if side_bar {
+                        // Requirement 1/2 — LEFT/RIGHT horizontal side bar: the
+                        // title truncates with … (single line), or wraps to at
+                        // most 2 lines (opt-in) with the 2nd row elided when even
+                        // two won't fit. A pre-layouted galley reports only its
+                        // BOUNDED width, so the resizable side panel can shrink
+                        // BELOW the longest title (egui would otherwise floor the
+                        // panel width at the widest un-truncated label). Reserve
+                        // room for the trailing pin/close so the title never
+                        // collides with them as the bar narrows.
+                        let (max_width, max_rows) =
+                            side_tab_label_wrap(ui.available_width(), selected, two_line);
+                        let mut job = egui::text::LayoutJob::single_section(
+                            shown.clone(),
+                            egui::text::TextFormat {
+                                font_id: label_font.clone(),
+                                color: label_color,
+                                ..Default::default()
+                            },
+                        );
+                        job.wrap = egui::text::TextWrapping {
+                            max_width,
+                            max_rows,
+                            // Single line: break anywhere for a clean mid-word
+                            // elision. Two lines: prefer word breaks; the 2nd row
+                            // still elides with … via `max_rows`.
+                            break_anywhere: !two_line,
+                            overflow_character: Some('…'),
+                        };
+                        let galley = ui.fonts_mut(|f| f.layout_job(job));
+                        ui.add(
+                            egui::Label::new(galley)
+                                .selectable(false)
+                                .sense(egui::Sense::click_and_drag()),
+                        )
+                    } else {
+                        // Top/bottom (and any non-side use): keep the full title on
+                        // one line — the strip scrolls horizontally instead.
+                        let label = RichText::new(shown.clone()).color(label_color);
+                        ui.add(
+                            egui::Label::new(label)
+                                .selectable(false)
+                                .sense(egui::Sense::click_and_drag()),
+                        )
+                    };
                     if resp.clicked() {
                         switch_to = Some(i);
                     }
@@ -574,16 +718,26 @@ impl ScribeApp {
                         close = Some(i);
                     }
                 });
-            });
+            }
+            // Fix 3 — faint hover fill on a NON-selected tab, written into the
+            // frame's RESERVED background slot (from `begin`) so it paints BEHIND
+            // the chip content and never washes over the label text. Selected
+            // tabs keep their accent fill; this only lights up an inactive tab
+            // the pointer is over.
+            let chip_rect = prepared.frame.outer_rect(prepared.content_ui.min_rect());
+            if !selected && ui.rect_contains_pointer(chip_rect) {
+                prepared.frame.fill = tab_hover_fill(accent);
+            }
+            let chip_resp = prepared.end(ui);
             // Hit-test the FULL chip rect (label + pin + close + margins), not the
             // bare name-label — that was why a drop in the gap, or over the
             // pin/close area, or past the last tab silently did nothing.
-            rects.push((i, chip_resp.response.rect));
+            rects.push((i, chip_resp.rect));
         }
 
-        // "+" — add a new tab at the end of the strip (same as Ctrl+N).
-        if ui
-            .small_button("+")
+        // "+" — add a new tab at the end of the strip (same as Ctrl+N). Frameless-
+        // until-hover + centred glyph, identical to a top-bar toolbar button.
+        if tab_add_button(ui)
             .on_hover_text("New tab (Ctrl+N)")
             .clicked()
         {
@@ -596,13 +750,8 @@ impl ScribeApp {
         // Both are painted on the foreground (paint-only, never interactable —
         // a `layer_painter`, not an `Area`, so it cannot swallow clicks).
         if let Some((src, ref label, pointer)) = dragging {
-            // Infer strip orientation from the first two tab rects: when tabs
-            // advance mostly in X the strip is horizontal (top/bottom); mostly
-            // in Y means a vertical side strip.
-            let horizontal = rects.len() < 2
-                || (rects[1].1.center().x - rects[0].1.center().x).abs()
-                    >= (rects[1].1.center().y - rects[0].1.center().y).abs();
-
+            // Orientation is the KNOWN strip orientation (from the parent layout),
+            // not a rect-delta guess — see the note at the top of the fn.
             // Insertion gap: the boundary nearest the pointer along the main
             // axis. We draw the line on the leading edge of the first tab whose
             // center is past the pointer (or the trailing edge of the last).
@@ -674,9 +823,8 @@ impl ScribeApp {
         // over the pin/close area, or past either end still reorders (the old
         // name-label-`contains` test silently no-op'd in all those cases).
         if let (Some(src), Some(pos)) = (drag_src, drop_pos) {
-            let horizontal = rects.len() < 2
-                || (rects[1].1.center().x - rects[0].1.center().x).abs()
-                    >= (rects[1].1.center().y - rects[0].1.center().y).abs();
+            // Same KNOWN orientation as the divider/indicator (from the parent
+            // layout) — no fragile rect-delta guess.
             let mut target: Option<usize> = rects
                 .iter()
                 .find(|(_, rect)| rect.contains(pos))
@@ -704,12 +852,16 @@ impl ScribeApp {
 
         // Subtle dividers between tabs — a faint hairline in each inter-chip gap
         // so the tabs read as distinct without heavy separators. Painted after
-        // the strip is laid out, using the same horizontal/vertical inference.
+        // the strip is laid out, using the KNOWN strip orientation (see the note
+        // at the top of the fn): a horizontal strip → vertical dividers between
+        // columns; a vertical SIDE bar → horizontal dividers between rows. This
+        // is the actual left/right-divider fix — the old center-delta guess drew
+        // vertical lines inside a side bar's tabs, so no separator was visible.
         if rects.len() > 1 {
-            let horizontal = (rects[1].1.center().x - rects[0].1.center().x).abs()
-                >= (rects[1].1.center().y - rects[0].1.center().y).abs();
             let painter = ui.painter();
-            let hairline = egui::Stroke::new(1.0, muted.linear_multiply(0.30));
+            // Bumped from the old 0.30 alpha (near-invisible on the narrow side
+            // bar against the dark panel) to a clearly legible theme-tinted line.
+            let hairline = egui::Stroke::new(1.0, muted.linear_multiply(0.55));
             for pair in rects.windows(2) {
                 let (a, b) = (pair[0].1, pair[1].1);
                 if horizontal {
@@ -758,5 +910,53 @@ impl ScribeApp {
         if add_tab {
             self.new_tab();
         }
+    }
+}
+
+#[cfg(test)]
+mod side_tab_label_wrap_tests {
+    use super::side_tab_label_wrap;
+
+    #[test]
+    fn single_line_by_default_and_reserves_room_for_trailing_controls() {
+        // OFF → exactly one row (truncate with ellipsis), never a wrap.
+        let (w, rows) = side_tab_label_wrap(200.0, false, false);
+        assert_eq!(rows, 1, "2-line OFF ⇒ single-line truncation");
+        // The label max-width is BELOW the available width (room reserved for the
+        // trailing close ✕) — this is what lets the panel shrink below the title.
+        assert!(
+            w < 200.0,
+            "must reserve trailing space so the bar can shrink"
+        );
+        assert!((w - (200.0 - 28.0)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn selected_reserves_more_for_pin_plus_close() {
+        // A selected tab carries pin + close, so it reserves MORE than a plain tab.
+        let (sel, _) = side_tab_label_wrap(200.0, true, false);
+        let (plain, _) = side_tab_label_wrap(200.0, false, false);
+        assert!(
+            sel < plain,
+            "selected reserves for pin + close, not just close"
+        );
+    }
+
+    #[test]
+    fn two_line_option_wires_through_to_max_rows() {
+        // The config toggle is honoured: ON ⇒ up to TWO rows.
+        let (_, rows_on) = side_tab_label_wrap(200.0, false, true);
+        assert_eq!(rows_on, 2, "2-line ON ⇒ max two rows");
+        let (_, rows_off) = side_tab_label_wrap(200.0, false, false);
+        assert_eq!(rows_off, 1, "2-line OFF ⇒ one row");
+    }
+
+    #[test]
+    fn width_floors_at_a_small_positive_on_a_very_narrow_bar() {
+        // Dragged narrower than the reserve → the galley width never goes to
+        // zero/negative (which would panic or vanish); it floors at 24px so a
+        // sliver of the elided title still shows.
+        let (w, _) = side_tab_label_wrap(10.0, true, false);
+        assert!(w >= 24.0, "max-width floors at 24px on an ultra-narrow bar");
     }
 }
