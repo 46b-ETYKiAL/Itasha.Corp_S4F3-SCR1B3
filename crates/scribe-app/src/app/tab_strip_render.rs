@@ -151,9 +151,13 @@ impl ScribeApp {
         }
         // grip(~12) + pin(~18) + close(~18) + inter-item spacing + chip inner
         // margin(16) + panel inner margin(8): the fixed affordances a tab row
-        // carries beside its label. Clamped: never narrower than a couple of
-        // buttons, never wider than a readable cap.
-        (max_label + 74.0).clamp(96.0, 280.0)
+        // carries beside its label, PLUS the label's own truncation reserve (up
+        // to 46px for a SELECTED tab; see `side_tab_label_wrap`). Budget enough
+        // that the fit-to-content width shows the widest title IN FULL — titles
+        // only elide once the user drags the (now resizable) bar narrower.
+        // Clamped: never narrower than a couple of buttons, never wider than a
+        // readable cap.
+        (max_label + 92.0).clamp(96.0, 280.0)
     }
 
     /// Render the side tab bar with each tab's label ROTATED 90° (vertical text,

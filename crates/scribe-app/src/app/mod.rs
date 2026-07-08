@@ -1058,7 +1058,14 @@ impl ScribeApp {
                 restored_active = active_idx;
             }
         }
-        if tabs.is_empty() && config.editor.restore_session {
+        if watch_config && tabs.is_empty() && config.editor.restore_session {
+            // Gated on `watch_config` for the SAME reason as the manifest restore
+            // above: under `new_test` (watch_config = false) a test must NOT
+            // inherit the host's real on-disk legacy session — that pollutes
+            // `tabs.len()` assertions (e.g. `cli_with_no_files_opens_a_single_
+            // scratch_tab` saw the dev machine's live session and restored 2 tabs
+            // instead of the expected scratch). Production launches pass
+            // watch_config = true, so real restore is unchanged.
             // R6 / S-04 — the legacy paths-only session file is also a
             // user-writable on-disk artifact. Apply the same restore guard:
             // reject UNC / nonexistent / root-escaping paths, self-rooting the
