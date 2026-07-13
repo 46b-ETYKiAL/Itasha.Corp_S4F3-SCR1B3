@@ -163,7 +163,7 @@ version = "1.25.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.bytemuck_derive]]
-version = "1.10.2"
+version = "1.11.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.byteorder-lite]]
@@ -789,7 +789,7 @@ version = "0.8.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.naga]]
-version = "29.0.3"
+version = "29.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.ndk]]
@@ -1072,6 +1072,10 @@ criteria = "safe-to-deploy"
 version = "0.39.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.quote]]
+version = "1.0.46"
+criteria = "safe-to-deploy"
+
 [[exemptions.r-efi]]
 version = "5.3.0"
 criteria = "safe-to-deploy"
@@ -1189,7 +1193,7 @@ version = "0.23.40"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-pki-types]]
-version = "1.14.1"
+version = "1.15.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustls-webpki]]
@@ -2001,9 +2005,9 @@ version = "5.12.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zvariant_derive]]
-version = "5.12.0"
+version = "5.13.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zvariant_utils]]
-version = "3.4.0"
+version = "3.5.0"
 criteria = "safe-to-deploy"
