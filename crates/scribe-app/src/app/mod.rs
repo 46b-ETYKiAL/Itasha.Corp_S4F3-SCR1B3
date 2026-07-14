@@ -2086,6 +2086,9 @@ mod session_io_tests;
 mod deferred_actions_tests;
 
 #[cfg(test)]
+mod keyboard_input_tests;
+
+#[cfg(test)]
 mod execute_builtin_tests;
 
 #[cfg(test)]

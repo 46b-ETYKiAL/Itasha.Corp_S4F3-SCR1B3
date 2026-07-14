@@ -1242,18 +1242,39 @@ fn completion_popup_renders_in_frame() {
 // produces) against ONE persistent `Context` so focus + widget state carry
 // across frames, then assert what the app did.
 
-struct Driver {
+/// Drives the real `frame_tick` render loop with synthetic input.
+///
+/// `pub(super)` so sibling test modules (`keyboard_input_tests`) reuse it rather
+/// than each cloning a RawInput builder that then drifts.
+pub(super) struct Driver {
     ctx: egui::Context,
 }
 
 impl Driver {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             ctx: egui::Context::default(),
         }
     }
 
-    fn frame(&self, app: &mut ScribeApp, modifiers: egui::Modifiers, events: Vec<egui::Event>) {
+    pub(super) fn frame(
+        &self,
+        app: &mut ScribeApp,
+        modifiers: egui::Modifiers,
+        events: Vec<egui::Event>,
+    ) {
+        self.frame_with(app, modifiers, events, Vec::new());
+    }
+
+    /// `frame`, plus `dropped_files` — the one RawInput field the drag-drop
+    /// handler reads, which no `Event` can carry.
+    pub(super) fn frame_with(
+        &self,
+        app: &mut ScribeApp,
+        modifiers: egui::Modifiers,
+        events: Vec<egui::Event>,
+        dropped_files: Vec<egui::DroppedFile>,
+    ) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -1261,13 +1282,60 @@ impl Driver {
             )),
             modifiers,
             events,
+            dropped_files,
             ..Default::default()
         };
         let _ = self.ctx.run(input, |ctx| app.frame_tick(ctx));
     }
 
-    fn idle(&self, app: &mut ScribeApp) {
+    /// Simulate dropping `paths` onto the window (F-011).
+    pub(super) fn drop_files(&self, app: &mut ScribeApp, paths: &[PathBuf]) {
+        let dropped = paths
+            .iter()
+            .map(|p| egui::DroppedFile {
+                path: Some(p.clone()),
+                ..Default::default()
+            })
+            .collect();
+        self.frame_with(app, egui::Modifiers::NONE, vec![], dropped);
+    }
+
+    pub(super) fn idle(&self, app: &mut ScribeApp) {
         self.frame(app, egui::Modifiers::NONE, vec![]);
+    }
+
+    /// Press `key` and return what the shortcut layer collected, by driving
+    /// `handle_keyboard_shortcuts` alone.
+    ///
+    /// `find_nav` is an out-param that `frame_tick` consumes and turns into a
+    /// find-bar scroll, so a full frame gives no way to observe it directly.
+    pub(super) fn shortcuts(
+        &self,
+        app: &mut ScribeApp,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) -> (Pending, Option<bool>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1100.0, 720.0),
+            )),
+            modifiers,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let mut act = Pending::default();
+        let mut find_nav = None;
+        let _ = self.ctx.run(input, |ctx| {
+            app.handle_keyboard_shortcuts(ctx, &mut act, &mut find_nav);
+        });
+        (act, find_nav)
     }
 
     fn click(&self, app: &mut ScribeApp, pos: egui::Pos2) {
@@ -1293,7 +1361,7 @@ impl Driver {
         );
     }
 
-    fn key(&self, app: &mut ScribeApp, key: egui::Key, modifiers: egui::Modifiers) {
+    pub(super) fn key(&self, app: &mut ScribeApp, key: egui::Key, modifiers: egui::Modifiers) {
         self.frame(
             app,
             modifiers,
