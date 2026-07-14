@@ -82,8 +82,18 @@ fn e03_save_failed_is_plain_and_leak_free() {
 #[test]
 fn e15_no_language_detected_is_plain_with_recovery() {
     let mut a = app();
-    // Fresh scratch tab: no language hint, no path.
+    // A SAVED file with no extension — the only way to reach "no language
+    // detected". A fresh scratch tab (which this used to use) has no path at
+    // all, and its problem is that it was never saved, not the extension; it
+    // gets the distinct message pinned by `e15b` below.
+    let dir = std::env::temp_dir().join(format!("scr1b3-e15-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("no-extension");
+    std::fs::write(&p, "x").unwrap();
+    a.open_path(p);
+
     a.start_lsp_for_active();
+
     let t = a.toast.clone().expect("must surface a toast");
     assert!(
         t.starts_with("Couldn't detect this file's language"),
@@ -93,6 +103,20 @@ fn e15_no_language_detected_is_plain_with_recovery() {
         t.contains("extension"),
         "should tell the user how to enable it"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn e15b_unsaved_buffer_is_told_to_save_not_to_add_an_extension() {
+    // The unsaved case is a DIFFERENT problem and gets its own message. It used
+    // to be told "Couldn't detect this file's language ... save it with a file
+    // extension", because the match tested the language hint before the path —
+    // and the hint IS the extension, so the path-missing arm was dead code.
+    let mut a = app();
+    a.start_lsp_for_active();
+    let t = a.toast.clone().expect("must surface a toast");
+    assert_eq!(t, "Save the file first, then start the language server.");
+    assert_no_raw_leak(&t);
 }
 
 #[test]

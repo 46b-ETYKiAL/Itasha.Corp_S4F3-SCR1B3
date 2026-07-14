@@ -2890,9 +2890,15 @@ fn toolbar_fold_and_linenumbers_buttons_flip_their_flags() {
 
 /// Clicking the LSP toolbar button on a plain scratch tab surfaces a toast
 /// explaining why no server starts — the observable outcome of the button
-/// wiring. A scratch tab has no detectable language, so the toast is the
-/// "no language detected" notice (the path-missing branch fires only once a
-/// language is known).
+/// wiring. A scratch tab has never been saved, so the toast is the
+/// "save the file first" notice.
+///
+/// This previously asserted the "no language detected" copy, and its comment
+/// explained that "the path-missing branch fires only once a language is
+/// known". That was the bug, rationalised: `language_hint()` IS the path's
+/// extension, so a language can never be known without a path and the
+/// path-missing branch was unreachable. The scratch tab — whose actual problem
+/// is that it has no path — was told to add a file extension instead.
 #[test]
 fn toolbar_lsp_button_on_scratch_tab_sets_toast() {
     let mut app = toolbar_app();
@@ -2904,10 +2910,7 @@ fn toolbar_lsp_button_on_scratch_tab_sets_toast() {
     h.run();
     assert_eq!(
         h.state().toast.as_deref(),
-        Some(
-            "Couldn't detect this file's language. Save it with a file extension \
-             (like .rs or .py) to enable language features."
-        ),
+        Some("Save the file first, then start the language server."),
         "the LSP button on a scratch tab must explain why it can't start"
     );
 }
