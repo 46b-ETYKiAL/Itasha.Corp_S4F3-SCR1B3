@@ -2080,6 +2080,9 @@ mod text_ops_tests;
 mod text_ops_selection_tests;
 
 #[cfg(test)]
+mod session_io_tests;
+
+#[cfg(test)]
 mod execute_builtin_tests;
 
 #[cfg(test)]
