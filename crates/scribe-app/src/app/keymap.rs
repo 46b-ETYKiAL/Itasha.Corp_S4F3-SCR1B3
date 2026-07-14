@@ -120,6 +120,35 @@ fn key_from_token(token: &str) -> Option<egui::Key> {
     })
 }
 
+/// How a key reads on a keyboard, for display in the cheatsheet / palette.
+///
+/// [`egui::Key::name`] is already right for letters (`"N"`), digits (`"0"`),
+/// arrows (`"Up"`), `"Tab"` and `"F11"`; only punctuation needs overriding,
+/// because a user looks for `Ctrl+\`, not `Ctrl+Backslash`.
+fn key_display(key: egui::Key) -> &'static str {
+    match key {
+        egui::Key::Backslash => "\\",
+        egui::Key::Slash => "/",
+        egui::Key::OpenBracket => "[",
+        egui::Key::CloseBracket => "]",
+        egui::Key::Period => ".",
+        egui::Key::Comma => ",",
+        egui::Key::Equals => "=",
+        egui::Key::Minus => "-",
+        egui::Key::Plus => "+",
+        egui::Key::Semicolon => ";",
+        egui::Key::Quote => "'",
+        egui::Key::Backtick => "`",
+        egui::Key::Colon => ":",
+        egui::Key::Pipe => "|",
+        egui::Key::Questionmark => "?",
+        egui::Key::Exclamationmark => "!",
+        egui::Key::OpenCurlyBracket => "{",
+        egui::Key::CloseCurlyBracket => "}",
+        other => other.name(),
+    }
+}
+
 /// A chord resolved all the way to an [`egui::Key`] plus its required modifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ResolvedChord {
@@ -127,6 +156,36 @@ pub(super) struct ResolvedChord {
     shift: bool,
     alt: bool,
     key: egui::Key,
+}
+
+impl ResolvedChord {
+    /// Render as a user-facing chord, e.g. `"Ctrl+Shift+F"`.
+    ///
+    /// `mod` prints per platform — **Cmd** on macOS, **Ctrl** elsewhere — which
+    /// also fixes the old hard-coded tables, whose literal `"Ctrl+…"` strings were
+    /// wrong for every macOS user regardless of rebinding.
+    fn display(self) -> String {
+        let mut out = String::new();
+        if self.cmd {
+            out.push_str(if cfg!(target_os = "macos") {
+                "Cmd+"
+            } else {
+                "Ctrl+"
+            });
+        }
+        if self.alt {
+            out.push_str(if cfg!(target_os = "macos") {
+                "Option+"
+            } else {
+                "Alt+"
+            });
+        }
+        if self.shift {
+            out.push_str("Shift+");
+        }
+        out.push_str(key_display(self.key));
+        out
+    }
 }
 
 /// The user's keymap, resolved once per `[keybindings]` change.
@@ -196,6 +255,31 @@ impl Keymap {
                 format!("'{action}' is bound to '{combo}', which is not a key on your keyboard — it cannot be triggered")
             })
             .collect()
+    }
+
+    /// How the chords for `actions` currently read, for help surfaces.
+    ///
+    /// Returns `None` when `actions` is empty — the caller's hard-coded string is
+    /// then correct, because the shortcut is not rebindable (Esc, F1, Ctrl+C …).
+    /// Several actions render joined by `" / "`, which is how the font-zoom row
+    /// shows in/out/reset as one line.
+    ///
+    /// An action that resolves to nothing renders as `"unbound"` rather than being
+    /// skipped: the whole point of reading this off the live keymap is that the
+    /// help never claims a key that would not work. If EVERY action is unbound the
+    /// row says so honestly.
+    pub(super) fn display_for(&self, actions: &[&str]) -> Option<String> {
+        if actions.is_empty() {
+            return None;
+        }
+        let shown: Vec<String> = actions
+            .iter()
+            .map(|a| {
+                self.chord(a)
+                    .map_or_else(|| "unbound".to_string(), ResolvedChord::display)
+            })
+            .collect();
+        Some(shown.join(" / "))
     }
 
     /// Did the user press the chord bound to `action` this frame?

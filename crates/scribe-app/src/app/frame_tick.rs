@@ -1096,7 +1096,13 @@ impl ScribeApp {
             // plugins.
             for cmd in BUILTIN_COMMANDS {
                 let label = cmd.label;
-                let shortcut = cmd.shortcut;
+                // Same rule as the cheatsheet: show the chord the user actually
+                // has, not the one this command shipped with. Searching matches
+                // the DISPLAYED text, so typing "ctrl+e" finds a rebound command.
+                let shortcut = self
+                    .keymap
+                    .display_for(cmd.bindings)
+                    .unwrap_or_else(|| cmd.shortcut.to_string());
                 if q.is_empty()
                     || label.to_lowercase().contains(&q)
                     || shortcut.to_lowercase().contains(&q)
@@ -1268,7 +1274,17 @@ impl ScribeApp {
                             .striped(true)
                             .show(ui, |ui| {
                                 for entry in KEYBOARD_SHORTCUTS {
-                                    ui.label(RichText::new(entry.chord).color(accent).monospace());
+                                    // Rebindable rows render the user's CURRENT
+                                    // chord; a hard-wired row (`bindings: &[]`)
+                                    // keeps its static text. Reading the live
+                                    // keymap is what stops the cheatsheet from
+                                    // teaching the default chord to someone who
+                                    // rebound it.
+                                    let chord = self
+                                        .keymap
+                                        .display_for(entry.bindings)
+                                        .unwrap_or_else(|| entry.chord.to_string());
+                                    ui.label(RichText::new(chord).color(accent).monospace());
                                     ui.label(RichText::new(entry.action).color(muted).small());
                                     ui.end_row();
                                 }
