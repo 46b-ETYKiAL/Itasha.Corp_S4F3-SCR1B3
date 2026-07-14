@@ -50,6 +50,15 @@ fn cheatsheet_app(edit: impl FnOnce(&mut Config)) -> ScribeApp {
     app
 }
 
+/// How `mod` reads on THIS platform. The editor renders Cmd on macOS and Ctrl
+/// elsewhere, so a test that hard-codes "Ctrl" only tests two of the three OSes
+/// CI builds — as the macOS runner duly proved.
+const MOD: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
+
 /// The F1 cheatsheet shows the chord the user ACTUALLY has.
 ///
 /// The table hard-coded "Ctrl+N". That was accurate only while chords were
@@ -61,12 +70,12 @@ fn cheatsheet_renders_the_rebound_chord_not_the_default() {
     let mut h = harness(cheatsheet_app(|c| c.keybindings.new_file = "mod+e".into()));
     h.run();
     assert!(
-        h.query_by_label("Ctrl+E").is_some(),
-        "the cheatsheet must show the rebound Ctrl+E for New file"
+        h.query_by_label(&format!("{MOD}+E")).is_some(),
+        "the cheatsheet must show the rebound {MOD}+E for New file"
     );
     assert!(
-        h.query_by_label("Ctrl+N").is_none(),
-        "the cheatsheet must NOT still advertise the displaced Ctrl+N"
+        h.query_by_label(&format!("{MOD}+N")).is_none(),
+        "the cheatsheet must NOT still advertise the displaced {MOD}+N"
     );
 }
 
@@ -81,14 +90,19 @@ fn cheatsheet_marks_an_unbound_action() {
     );
 }
 
-/// A hard-wired row keeps its static text (the fallback path still works).
+/// A hard-wired row keeps its static text (the fallback path still works), with
+/// the platform's own modifier name.
+///
+/// Copy is `Key::C + Modifiers::COMMAND`, which IS Cmd+C on macOS — so the whole
+/// table reads in one voice rather than half "Cmd+E", half "Ctrl+C".
 #[test]
 fn cheatsheet_keeps_static_text_for_non_rebindable_rows() {
     let mut h = harness(cheatsheet_app(|_| {}));
     h.run();
     assert!(
-        h.query_by_label("Ctrl+C").is_some(),
-        "Copy is not rebindable, so its row must still render its static chord"
+        h.query_by_label(&format!("{MOD}+C")).is_some(),
+        "Copy is not rebindable, so its row must still render its static chord — \
+         localized to this platform's modifier"
     );
 }
 

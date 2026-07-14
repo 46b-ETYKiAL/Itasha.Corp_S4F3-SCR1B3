@@ -149,6 +149,25 @@ fn key_display(key: egui::Key) -> &'static str {
     }
 }
 
+/// Localize a HARD-CODED chord string (the `chord` / `shortcut` fallback text of
+/// a non-rebindable shortcut) for the current platform.
+///
+/// Those strings are written `"Ctrl+C"`, but the handlers behind them key off
+/// `egui::Modifiers::COMMAND` (e.g. Undo is `Key::Z + COMMAND`) and `ALT` — which
+/// are Cmd and Option on macOS. So the literal text was already wrong for every
+/// macOS user, before any of this was rebindable. Rebindable rows render through
+/// [`ResolvedChord::display`], which is already platform-correct; without the same
+/// treatment here the cheatsheet would read half "Cmd+E", half "Ctrl+C" on macOS.
+///
+/// A no-op everywhere else.
+pub(super) fn platform_chord_text(text: &str) -> String {
+    if cfg!(target_os = "macos") {
+        text.replace("Ctrl+", "Cmd+").replace("Alt+", "Option+")
+    } else {
+        text.to_string()
+    }
+}
+
 /// A chord resolved all the way to an [`egui::Key`] plus its required modifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ResolvedChord {
@@ -433,6 +452,53 @@ mod tests {
                 "default binding '{name}' resolved to the wrong chord"
             );
         }
+    }
+
+    #[test]
+    fn chords_render_with_this_platforms_modifier_names() {
+        // Both render paths — resolved chords and hard-coded fallback text — must
+        // agree on what `mod` is called here, or the cheatsheet reads half
+        // "Cmd+E" and half "Ctrl+C" on macOS.
+        let km = Keymap::resolve(&Keybindings::default());
+        let save = km.display_for(&[action::SAVE]).expect("save is bound");
+        let zoom = km
+            .display_for(&[
+                action::INCREASE_FONT,
+                action::DECREASE_FONT,
+                action::RESET_FONT,
+            ])
+            .expect("font zoom is bound");
+        if cfg!(target_os = "macos") {
+            assert_eq!(save, "Cmd+S");
+            assert_eq!(zoom, "Cmd+= / Cmd+- / Cmd+0");
+            assert_eq!(platform_chord_text("Ctrl+C"), "Cmd+C");
+            assert_eq!(platform_chord_text("Ctrl+Alt+X"), "Cmd+Option+X");
+            assert_eq!(
+                km.display_for(&[action::MOVE_LINE_UP]).unwrap(),
+                "Option+Up"
+            );
+        } else {
+            assert_eq!(save, "Ctrl+S");
+            assert_eq!(zoom, "Ctrl+= / Ctrl+- / Ctrl+0");
+            assert_eq!(platform_chord_text("Ctrl+C"), "Ctrl+C", "no-op off macOS");
+            assert_eq!(platform_chord_text("Ctrl+Alt+X"), "Ctrl+Alt+X");
+            assert_eq!(km.display_for(&[action::MOVE_LINE_UP]).unwrap(), "Alt+Up");
+        }
+        // Punctuation reads as the key on the keyboard, not egui's variant name.
+        assert!(
+            km.display_for(&[action::TOGGLE_GRID])
+                .unwrap()
+                .ends_with('\\'),
+            "toggle_grid must render as the backslash key"
+        );
+        // An unbound action says so rather than naming a key that does nothing.
+        let km = Keymap::resolve(&Keybindings {
+            save: String::new(),
+            ..Default::default()
+        });
+        assert_eq!(km.display_for(&[action::SAVE]).as_deref(), Some("unbound"));
+        // No actions => the caller's static text is correct.
+        assert_eq!(km.display_for(&[]), None);
     }
 
     #[test]

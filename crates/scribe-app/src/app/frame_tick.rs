@@ -1102,7 +1102,7 @@ impl ScribeApp {
                 let shortcut = self
                     .keymap
                     .display_for(cmd.bindings)
-                    .unwrap_or_else(|| cmd.shortcut.to_string());
+                    .unwrap_or_else(|| keymap::platform_chord_text(cmd.shortcut));
                 if q.is_empty()
                     || label.to_lowercase().contains(&q)
                     || shortcut.to_lowercase().contains(&q)
@@ -1280,10 +1280,10 @@ impl ScribeApp {
                                     // keymap is what stops the cheatsheet from
                                     // teaching the default chord to someone who
                                     // rebound it.
-                                    let chord = self
-                                        .keymap
-                                        .display_for(entry.bindings)
-                                        .unwrap_or_else(|| entry.chord.to_string());
+                                    let chord =
+                                        self.keymap.display_for(entry.bindings).unwrap_or_else(
+                                            || keymap::platform_chord_text(entry.chord),
+                                        );
                                     ui.label(RichText::new(chord).color(accent).monospace());
                                     ui.label(RichText::new(entry.action).color(muted).small());
                                     ui.end_row();
