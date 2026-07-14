@@ -553,10 +553,13 @@ fn new_note_from_template_opens_a_seeded_tab_per_kind() {
         cfg.editor.first_run_completed = true;
         ScribeApp::new_test(cfg)
     };
-    for (kind, needle) in [
-        (NoteTemplate::Checklist, "# Checklist"),
-        (NoteTemplate::Meeting, "# Meeting notes"),
-        (NoteTemplate::Daily, "- [ ] "),
+    // The `label` column is what the status line reports back to the user. It
+    // was unasserted until mutation testing showed `label()` could return "" or
+    // "xyzzy" with every test still green.
+    for (kind, needle, label) in [
+        (NoteTemplate::Checklist, "# Checklist", "checklist"),
+        (NoteTemplate::Meeting, "# Meeting notes", "meeting"),
+        (NoteTemplate::Daily, "- [ ] ", "daily"),
     ] {
         let before = app.tabs.len();
         app.new_note_from_template(kind);
@@ -565,6 +568,11 @@ fn new_note_from_template_opens_a_seeded_tab_per_kind() {
         assert!(
             text.contains(needle),
             "{kind:?} must seed its body (looking for {needle:?}), got: {text:?}"
+        );
+        assert_eq!(
+            app.status,
+            format!("new note: {label}"),
+            "{kind:?} must NAME itself in the status line"
         );
     }
 }
@@ -896,4 +904,115 @@ fn auto_pair_ignores_an_ordinary_character() {
 
     assert_eq!(app.tabs[active].text, "");
     assert!(survived, "egui inserts ordinary characters, not us");
+}
+
+// ---- gaps found by mutation testing (cargo-mutants) ----
+//
+// Each test below kills a mutant that survived the first pass — i.e. the code
+// could be broken in this exact way and every prior test stayed green.
+
+#[test]
+fn auto_indent_newline_continues_a_list_mid_buffer() {
+    // Every earlier list test put the caret on the LAST line, so
+    // `text[bcur..].find('\n')` returned None and the `.map(|i| bcur + i)`
+    // end-of-line arm never executed — `bcur + i` could become `bcur - i` and
+    // nothing noticed. This is also the common real case: pressing Enter on a
+    // list item that has more lines below it.
+    let (mut app, ctx) = app_with("mid.md", "- one\n- two\n- three");
+    let active = app.active;
+    select(&ctx, 11, 11); // end of "- two", with "- three" still below
+
+    assert!(app.auto_indent_newline(&ctx, edit_id(), active));
+
+    assert_eq!(
+        app.tabs[active].text, "- one\n- two\n- \n- three",
+        "the new marker is inserted at the END of the caret's line, not spliced \
+         into it or appended past the following lines"
+    );
+    assert_eq!(
+        selection(&ctx),
+        (14, 14),
+        "caret lands after the new marker"
+    );
+}
+
+#[test]
+fn auto_indent_newline_exits_a_list_from_the_middle_of_a_buffer() {
+    // Same blind spot on the exit path: an empty item with lines below it.
+    let (mut app, ctx) = app_with("mid.md", "- one\n- \n- three");
+    let active = app.active;
+    select(&ctx, 8, 8); // end of the dangling "- "
+
+    assert!(app.auto_indent_newline(&ctx, edit_id(), active));
+
+    assert_eq!(
+        app.tabs[active].text, "- one\n\n- three",
+        "the dangling marker is dropped WITHOUT eating the following line"
+    );
+}
+
+#[test]
+fn jump_matching_bracket_is_skipped_just_over_the_size_guard() {
+    // The guard is `text.len() > 500_000`. Mutating `>` to `==` leaves it firing
+    // ONLY at exactly 500_000 — so a big buffer would do the O(n) scan on every
+    // press, which is the stall the guard exists to prevent. Every other test
+    // uses a tiny buffer, so none of them could tell.
+    let mut body = String::from("{}");
+    body.push_str(&"x".repeat(500_001 - body.len()));
+    assert_eq!(body.len(), 500_001, "fixture is one byte OVER the guard");
+
+    let (mut app, ctx) = app_with("big.rs", &body);
+    let active = app.active;
+    select(&ctx, 0, 0); // on the '{'
+
+    app.jump_matching_bracket(&ctx, edit_id(), active);
+
+    assert_eq!(
+        selection(&ctx),
+        (0, 0),
+        "over the size guard the caret must NOT move — the scan is skipped"
+    );
+}
+
+#[test]
+fn jump_matching_bracket_still_runs_exactly_at_the_size_guard() {
+    // The other side of the boundary: `>` must not be `>=`. At exactly 500_000
+    // the guard does NOT fire and the jump still works, so the limit is an
+    // inclusive ceiling rather than silently one byte short.
+    let mut body = String::from("{}");
+    body.push_str(&"x".repeat(500_000 - body.len()));
+    assert_eq!(body.len(), 500_000, "fixture is exactly AT the guard");
+
+    let (mut app, ctx) = app_with("big.rs", &body);
+    let active = app.active;
+    select(&ctx, 0, 0); // on the '{'
+
+    app.jump_matching_bracket(&ctx, edit_id(), active);
+
+    assert_eq!(
+        selection(&ctx),
+        (1, 1),
+        "exactly at the limit the jump must still happen (the guard is `>`, \
+         not `>=`)"
+    );
+}
+
+#[test]
+fn auto_indent_newline_mid_line_defers_to_egui_with_lines_below() {
+    // `auto_indent_newline_mid_line_defers_to_egui` used a SINGLE-line fixture,
+    // so `text[bcur..].find('\n')` returned None and the end-of-line closure
+    // never ran at all. With a line below, the closure runs with i > 0 — which
+    // is the only input that distinguishes `bcur + i` from `bcur - i`.
+    //
+    // Behaviourally this is just "Enter in the middle of a list item that has
+    // more items below it": egui splits the line, we stay out of it.
+    let (mut app, ctx) = app_with("mid.md", "- one\n- two");
+    let active = app.active;
+    select(&ctx, 2, 2); // inside "one", with "- two" below
+
+    assert!(
+        !app.auto_indent_newline(&ctx, edit_id(), active),
+        "a mid-line Enter must be left to egui"
+    );
+    assert_eq!(app.tabs[active].text, "- one\n- two", "and must not edit");
 }
