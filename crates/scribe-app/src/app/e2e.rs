@@ -1325,6 +1325,107 @@ impl Driver {
     }
 }
 
+/// A REBOUND action fires on its new chord and no longer fires on the old one.
+///
+/// This is the discriminating test for the `[keybindings]` wiring: it fails
+/// against a build where the config section is parsed but ignored (the shortcut
+/// stays hard-wired to Ctrl+N), which is exactly what shipped before. The
+/// `default_keymap_matches_current_hardwired_shortcuts` parity test in
+/// `scribe-core` cannot catch that — it only compares the default STRINGS, which
+/// are identical whether or not anything reads them.
+#[test]
+fn input_rebound_keybinding_replaces_the_default_chord() {
+    let mut cfg = Config::default();
+    cfg.keybindings.new_file = "mod+e".into();
+    let mut app = ScribeApp::new_test(cfg);
+    let d = Driver::new();
+    d.idle(&mut app);
+
+    let before = app.tabs.len();
+    d.key(&mut app, egui::Key::E, egui::Modifiers::COMMAND);
+    assert_eq!(
+        app.tabs.len(),
+        before + 1,
+        "the rebound chord (Ctrl+E) must open a new tab — if this fails, \
+         [keybindings] is not wired to the input layer"
+    );
+
+    // The displaced default must go quiet, otherwise the action is bound twice.
+    d.key(&mut app, egui::Key::N, egui::Modifiers::COMMAND);
+    assert_eq!(
+        app.tabs.len(),
+        before + 1,
+        "the old default (Ctrl+N) must NOT still fire after rebinding"
+    );
+}
+
+/// Modifiers match exactly: a `mod+…` binding does not fire when Shift is held.
+///
+/// The hard-wired handler tested `cmd && key_pressed(S)`, so Ctrl+Shift+S also
+/// triggered a plain Save. Exact matching is what lets `mod+o` (open) and
+/// `mod+shift+o` (go to symbol) coexist without hand-written shift guards.
+#[test]
+fn input_modifiers_must_match_the_binding_exactly() {
+    let mut app = ScribeApp::new_test(Config::default());
+    let d = Driver::new();
+    d.idle(&mut app);
+
+    let before = app.tabs.len();
+    d.key(
+        &mut app,
+        egui::Key::N,
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+    );
+    assert_eq!(
+        app.tabs.len(),
+        before,
+        "Ctrl+Shift+N must not fire the `mod+n` new-file binding"
+    );
+
+    // The exact chord still works.
+    d.key(&mut app, egui::Key::N, egui::Modifiers::COMMAND);
+    assert_eq!(app.tabs.len(), before + 1, "Ctrl+N still opens a new tab");
+}
+
+/// An unparseable binding disables its action rather than falling back to the
+/// old hard-wired chord — the keymap is the single source of truth.
+#[test]
+fn input_unparseable_binding_disables_the_action() {
+    let mut cfg = Config::default();
+    cfg.keybindings.new_file = "mod+nosuchkey".into();
+    let mut app = ScribeApp::new_test(cfg);
+    let d = Driver::new();
+    d.idle(&mut app);
+
+    let before = app.tabs.len();
+    d.key(&mut app, egui::Key::N, egui::Modifiers::COMMAND);
+    assert_eq!(
+        app.tabs.len(),
+        before,
+        "a binding that names an unknown key must leave the action unbound, \
+         not silently revert to Ctrl+N"
+    );
+}
+
+/// Editing `[keybindings]` at runtime (config live-reload) re-resolves the
+/// keymap — the cache must not pin the chords from launch.
+#[test]
+fn input_keymap_follows_a_live_config_reload() {
+    let mut app = ScribeApp::new_test(Config::default());
+    let d = Driver::new();
+    d.idle(&mut app);
+
+    // Rebind after the app is already running, as a live config reload would.
+    app.config.keybindings.new_file = "mod+e".into();
+    let before = app.tabs.len();
+    d.key(&mut app, egui::Key::E, egui::Modifiers::COMMAND);
+    assert_eq!(
+        app.tabs.len(),
+        before + 1,
+        "a keymap change after launch must take effect without a restart"
+    );
+}
+
 #[test]
 fn input_ctrl_n_adds_a_tab() {
     let mut app = ScribeApp::new_test(Config::default());

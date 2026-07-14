@@ -520,6 +520,15 @@ type CountCache = Option<(u64, crate::grid::DocId, DocCounts)>;
 
 pub struct ScribeApp {
     config: Config,
+    /// The user's `[keybindings]`, resolved into matchable egui chords.
+    ///
+    /// Cached rather than re-parsed per frame: config live-reloads, so
+    /// `handle_keyboard_shortcuts` rebuilds this whenever `keymap_src` no longer
+    /// equals `config.keybindings`, and otherwise reuses it.
+    keymap: keymap::Keymap,
+    /// The `[keybindings]` value `keymap` was built from — the live-reload
+    /// invalidation key.
+    keymap_src: scribe_core::config::Keybindings,
     /// Resolved config/runtime directory (where `scr1b3.toml`, the session
     /// manifest, and the unsaved-buffer backups live). Resolved ONCE at build
     /// from `Config::config_dir()`. `new_test` overrides it to a per-instance
@@ -1116,9 +1125,13 @@ impl ScribeApp {
 
         // Built from `config` before the struct literal moves `config` in.
         let spell = build_spell_engine(&config);
+        let keymap_src = config.keybindings.clone();
+        let keymap = keymap::Keymap::resolve(&keymap_src);
 
         let app = Self {
             config,
+            keymap,
+            keymap_src,
             issue_intake: crate::issue_intake::IssueIntakeState::default(),
             config_dir: Config::config_dir(),
             theme,
@@ -1952,6 +1965,7 @@ mod frame_tick;
 mod grid_methods;
 mod grid_render;
 mod keyboard_input;
+mod keymap;
 mod modals;
 mod multi_cursor_glue;
 mod render_support;

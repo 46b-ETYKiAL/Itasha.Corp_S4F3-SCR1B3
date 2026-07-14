@@ -6,12 +6,100 @@
 //! change. `mod` is the platform command modifier (Ctrl on Windows/Linux, Cmd on
 //! macOS) — the same `i.modifiers.command` the hard-wired handler keys off.
 //!
-//! [`Keybindings::validate`] surfaces the two silent failure modes a user-editable
-//! keymap can drift into — a blank binding (an unreachable action) and two actions
-//! bound to the same combo (a collision) — so the settings UI can warn instead of
-//! the user wondering why a shortcut "does nothing".
+//! [`Keybindings::validate`] surfaces the silent failure modes a user-editable
+//! keymap can drift into — a blank binding (an unreachable action), an
+//! unparseable combo, and two actions bound to the same combo (a collision) — so
+//! the settings UI can warn instead of the user wondering why a shortcut "does
+//! nothing".
+//!
+//! [`Chord`] is the parsed form the editor's input layer matches against. It is
+//! deliberately engine-neutral: it carries the modifier flags plus a canonical
+//! key TOKEN (`"n"`, `"f11"`, `"arrowup"`), and the app crate maps that token to
+//! its windowing library's key type. That keeps `scribe-core` free of any UI
+//! dependency while still owning the single definition of "what does this combo
+//! string mean".
 
 use serde::{Deserialize, Serialize};
+
+/// A parsed key combo: the modifier flags plus the canonical non-modifier key
+/// token (lowercased, e.g. `"n"` / `"f11"` / `"arrowup"`).
+///
+/// `mod` is the platform command modifier (Ctrl on Windows/Linux, Cmd on macOS);
+/// `ctrl` / `cmd` / `command` are accepted as aliases for it, and `option` as an
+/// alias for `alt`, so a config written with either muscle-memory still parses.
+///
+/// Matching is EXACT on modifiers: a chord parsed from `"mod+o"` has
+/// `shift == false` and must NOT fire when Shift is also held (that is what
+/// keeps `mod+o` and `mod+shift+o` distinct actions).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chord {
+    /// The platform command modifier (Ctrl / Cmd) is required.
+    pub cmd: bool,
+    /// Shift is required.
+    pub shift: bool,
+    /// Alt / Option is required.
+    pub alt: bool,
+    /// Canonical lowercase key token — the one non-modifier token in the combo.
+    pub key: String,
+}
+
+impl Chord {
+    /// Parse a combo string such as `"mod+shift+f"`.
+    ///
+    /// Returns `None` when the combo is unusable: no non-modifier key
+    /// (`""`, `"mod"`), or more than one non-modifier key (`"a+b"`). Tokens are
+    /// trimmed and lowercased, so `"Mod + Shift + F"` parses like `"mod+shift+f"`.
+    pub fn parse(combo: &str) -> Option<Self> {
+        let mut chord = Self {
+            cmd: false,
+            shift: false,
+            alt: false,
+            key: String::new(),
+        };
+        let mut key_seen = false;
+        for raw in combo.split('+') {
+            let token = raw.trim().to_ascii_lowercase();
+            if token.is_empty() {
+                continue;
+            }
+            match token.as_str() {
+                "mod" | "ctrl" | "control" | "cmd" | "command" => chord.cmd = true,
+                "shift" => chord.shift = true,
+                "alt" | "option" => chord.alt = true,
+                _ => {
+                    // A second non-modifier key is not a chord this editor can
+                    // express (egui has no multi-key chord layer) — reject it
+                    // rather than silently honouring only the last one.
+                    if key_seen {
+                        return None;
+                    }
+                    key_seen = true;
+                    chord.key = token;
+                }
+            }
+        }
+        key_seen.then_some(chord)
+    }
+
+    /// The canonical rendering of this chord (`"mod+alt+shift+key"`, modifiers in
+    /// a fixed order). Two combo strings that mean the same thing — `"shift+mod+c"`,
+    /// `"ctrl+shift+c"`, `"mod+shift+c"` — share one canonical form, which is what
+    /// makes [`Keybindings::validate`] conflict detection alias-aware.
+    pub fn canonical(&self) -> String {
+        let mut out = String::new();
+        if self.cmd {
+            out.push_str("mod+");
+        }
+        if self.alt {
+            out.push_str("alt+");
+        }
+        if self.shift {
+            out.push_str("shift+");
+        }
+        out.push_str(&self.key);
+        out
+    }
+}
 
 /// User-rebindable key bindings (action name -> key-combo string). Every field's
 /// default is the combo SCR1B3 currently hard-wires for that action, so the
@@ -146,6 +234,10 @@ impl Default for Keybindings {
 pub enum KeybindingIssue {
     /// `action` has an empty / whitespace-only combo — it can never trigger.
     Empty { action: &'static str },
+    /// `action`'s combo cannot be parsed into a chord (no key, or more than one
+    /// key — e.g. `"mod"` alone or `"a+b"`), so the action is unreachable. Without
+    /// this the binding would look plausible in the file and simply never fire.
+    Invalid { action: &'static str, combo: String },
     /// `actions` (>= 2) are all bound to the same normalized `combo` — they
     /// collide; at most one can win.
     Conflict {
@@ -160,6 +252,9 @@ impl KeybindingIssue {
         match self {
             KeybindingIssue::Empty { action } => {
                 format!("'{action}' has no key bound — it cannot be triggered")
+            }
+            KeybindingIssue::Invalid { action, combo } => {
+                format!("'{action}' has an unreadable key combo '{combo}' — it cannot be triggered")
             }
             KeybindingIssue::Conflict { combo, actions } => {
                 format!(
@@ -215,46 +310,43 @@ impl Keybindings {
         ]
     }
 
-    /// Canonical form of a combo for conflict comparison: lowercased, trimmed,
-    /// split on `+`, empties dropped, tokens sorted — so `"shift+mod+c"` and
-    /// `"mod+shift+c"` compare equal. An all-empty combo normalizes to `""`.
-    fn normalize_combo(combo: &str) -> String {
-        let mut parts: Vec<String> = combo
-            .split('+')
-            .map(|p| p.trim().to_ascii_lowercase())
-            .filter(|p| !p.is_empty())
-            .collect();
-        parts.sort();
-        parts.join("+")
-    }
-
-    /// Detect keybinding issues: blank bindings (unreachable actions) and combos
-    /// bound to more than one action (collisions). Returns an empty Vec when the
-    /// set is clean — the default set is clean by construction. Pure + order-
-    /// deterministic (empties first in declaration order, then conflicts sorted by
-    /// combo) so the settings surfacing is stable frame-to-frame.
+    /// Detect keybinding issues: blank bindings, unparseable combos (both make an
+    /// action unreachable), and combos bound to more than one action (collisions).
+    /// Returns an empty Vec when the set is clean — the default set is clean by
+    /// construction. Pure + order-deterministic (empties then invalids in
+    /// declaration order, then conflicts sorted by combo) so the settings
+    /// surfacing is stable frame-to-frame.
+    ///
+    /// Conflict detection keys off [`Chord::canonical`], the SAME parse the input
+    /// layer matches with — so aliases collide the way they actually do at
+    /// runtime (`"ctrl+s"` and `"mod+s"` are one combo, not two).
     pub fn validate(&self) -> Vec<KeybindingIssue> {
         let entries = self.entries();
         let mut issues = Vec::new();
 
-        // Blank bindings: an action with no resolvable combo can never fire.
+        // Unreachable actions: a blank combo, or one that cannot parse into a
+        // chord. Both would otherwise fail silently.
         for (name, combo) in entries.iter() {
-            if Self::normalize_combo(combo).is_empty() {
+            if combo.trim().is_empty() {
                 issues.push(KeybindingIssue::Empty { action: name });
+            } else if Chord::parse(combo).is_none() {
+                issues.push(KeybindingIssue::Invalid {
+                    action: name,
+                    combo: (*combo).to_string(),
+                });
             }
         }
 
-        // Collisions: group non-empty bindings by their normalized combo.
+        // Collisions: group parseable bindings by their canonical chord.
         let mut groups: Vec<(String, Vec<&'static str>)> = Vec::new();
         for (name, combo) in entries.iter() {
-            let norm = Self::normalize_combo(combo);
-            if norm.is_empty() {
+            let Some(canon) = Chord::parse(combo).map(|c| c.canonical()) else {
                 continue;
-            }
-            if let Some(slot) = groups.iter_mut().find(|(c, _)| *c == norm) {
+            };
+            if let Some(slot) = groups.iter_mut().find(|(c, _)| *c == canon) {
                 slot.1.push(name);
             } else {
-                groups.push((norm, vec![name]));
+                groups.push((canon, vec![name]));
             }
         }
         groups.sort_by(|a, b| a.0.cmp(&b.0));
@@ -287,7 +379,8 @@ mod tests {
     #[test]
     fn validate_detects_a_duplicate_combo_collision() {
         // Two actions bound to the same combo (even written in a different token
-        // order) must be flagged as a Conflict listing both action names.
+        // order) must be flagged as a Conflict listing both action names. The
+        // reported combo is the canonical chord rendering (`mod+k`).
         let kb = Keybindings {
             save: "mod+k".into(),
             find: "k+mod".into(), // same combo, different token order
@@ -295,12 +388,102 @@ mod tests {
         };
         let issues = kb.validate();
         let conflict = issues.iter().find_map(|i| match i {
-            KeybindingIssue::Conflict { combo, actions } if combo == "k+mod" => Some(actions),
+            KeybindingIssue::Conflict { combo, actions } if combo == "mod+k" => Some(actions),
             _ => None,
         });
-        let actions = conflict.expect("a k+mod conflict must be reported");
+        let actions = conflict.expect("a mod+k conflict must be reported");
         assert!(actions.contains(&"save"));
         assert!(actions.contains(&"find"));
+    }
+
+    #[test]
+    fn validate_detects_a_collision_written_with_modifier_aliases() {
+        // `ctrl+k` and `mod+k` are the SAME chord at runtime (both mean the
+        // command modifier), so binding two actions to them collides. The old
+        // sort-the-raw-tokens normalization compared them as different strings
+        // and missed this; canonicalizing through `Chord::parse` catches it.
+        let kb = Keybindings {
+            save: "mod+k".into(),
+            find: "ctrl+k".into(),
+            ..Default::default()
+        };
+        let conflict = kb.validate().into_iter().find_map(|i| match i {
+            KeybindingIssue::Conflict { combo, actions } if combo == "mod+k" => Some(actions),
+            _ => None,
+        });
+        let actions = conflict.expect("mod+k and ctrl+k are one chord and must collide");
+        assert!(actions.contains(&"save"));
+        assert!(actions.contains(&"find"));
+    }
+
+    #[test]
+    fn validate_flags_an_unparseable_combo_as_invalid() {
+        // A combo with no key (`"mod"`) or two keys (`"a+b"`) cannot fire. Before
+        // `Invalid` existed these passed validation and then silently did nothing.
+        let kb = Keybindings {
+            save: "mod".into(),
+            find: "a+b".into(),
+            ..Default::default()
+        };
+        let issues = kb.validate();
+        for action in ["save", "find"] {
+            assert!(
+                issues.iter().any(
+                    |i| matches!(i, KeybindingIssue::Invalid { action: a, .. } if *a == action)
+                ),
+                "an unparseable combo for '{action}' must be flagged: {issues:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chord_parses_modifiers_aliases_and_canonicalizes() {
+        let c = Chord::parse("Mod + Shift + F").expect("a well-formed combo parses");
+        assert_eq!(
+            c,
+            Chord {
+                cmd: true,
+                shift: true,
+                alt: false,
+                key: "f".into()
+            }
+        );
+        assert_eq!(c.canonical(), "mod+shift+f");
+        // Aliases fold onto the same canonical chord.
+        for alias in [
+            "ctrl+shift+f",
+            "cmd+shift+f",
+            "command+shift+f",
+            "shift+mod+f",
+        ] {
+            assert_eq!(
+                Chord::parse(alias).expect("alias parses").canonical(),
+                "mod+shift+f",
+                "'{alias}' must canonicalize like 'mod+shift+f'"
+            );
+        }
+        assert_eq!(
+            Chord::parse("option+arrowup")
+                .expect("option aliases alt")
+                .canonical(),
+            "alt+arrowup"
+        );
+        // Unusable combos.
+        assert!(Chord::parse("").is_none(), "empty combo");
+        assert!(Chord::parse("mod+shift").is_none(), "modifiers with no key");
+        assert!(Chord::parse("a+b").is_none(), "two non-modifier keys");
+    }
+
+    #[test]
+    fn every_default_binding_parses_into_a_chord() {
+        // The keymap is only authoritative if every shipped default actually
+        // resolves — an unparseable default would be a dead action out of the box.
+        for (action, combo) in Keybindings::default().entries() {
+            assert!(
+                Chord::parse(combo).is_some(),
+                "default binding '{action}' = '{combo}' must parse into a chord"
+            );
+        }
     }
 
     #[test]

@@ -1,62 +1,78 @@
 //! Keyboard-shortcut handling for `frame_tick`, extracted from `mod.rs` (A-01 wave 3).
 //!
-//! Behavior-neutral split: the single large `ctx.input(|i| { ... })` closure
-//! that collected per-frame keyboard shortcuts into a `Pending` action set (and
-//! the find-bar F3 navigation direction) is moved verbatim out of `frame_tick`.
-//! The closure body is unchanged except that the two writebacks now target the
-//! `&mut` parameters (`act` already auto-derefs; `find_nav` becomes `*find_nav`).
+//! Every chord here resolves from the user's `[keybindings]` config via
+//! [`Keymap`](super::keymap::Keymap) — the config section is authoritative, not
+//! decorative. The shipped defaults reproduce the chords this handler used to
+//! hard-wire, so a user who never touches `[keybindings]` sees the same editor.
+//!
+//! Two deliberate differences from the old hard-wired form:
+//! - **Modifiers match exactly.** The hard-wired tests were `cmd && key_pressed(K)`,
+//!   which let Ctrl+Shift+S also fire plain Save and forced hand-written
+//!   `!i.modifiers.shift` guards wherever a `mod+shift+…` action would otherwise
+//!   collide. Exact matching makes those guards unnecessary and makes each
+//!   binding mean one chord.
+//! - **Only mapped actions are rebindable.** F1 (cheatsheet), Esc (close overlay),
+//!   F3 (find-next) and Ctrl+scroll zoom stay hard-wired: they are not actions in
+//!   the `[keybindings]` schema.
 #![allow(clippy::wildcard_imports)]
 
+use super::keymap::{action, Keymap};
 use super::*;
 
 impl ScribeApp {
     /// Collect this frame's keyboard shortcuts into `act` (a `Pending` action
     /// set) and record the find-bar F3 navigation direction in `find_nav`.
     ///
-    /// Moved verbatim from the inline `ctx.input` closure in `frame_tick`; every
-    /// chord, modal-open, and toggle is identical. Splitting it out lets
-    /// `frame_tick` read as a short sequence of named steps.
+    /// Chords come from the user's keymap; the surrounding app-state logic (what
+    /// an action does, which overlay it focuses) is unchanged.
     pub(super) fn handle_keyboard_shortcuts(
         &mut self,
         ctx: &egui::Context,
         act: &mut Pending,
         find_nav: &mut Option<bool>,
     ) {
+        // Config live-reloads, so re-resolve when (and only when) the user's
+        // bindings actually changed. `Keymap` owns its data, which keeps
+        // `self` free to be mutated inside the `ctx.input` closure below.
+        if self.keymap_src != self.config.keybindings {
+            self.keymap_src = self.config.keybindings.clone();
+            self.keymap = Keymap::resolve(&self.keymap_src);
+        }
+        let km = &self.keymap;
+
         ctx.input(|i| {
             let cmd = i.modifiers.command;
-            act.new = cmd && i.key_pressed(egui::Key::N);
-            // Exclude shift so Ctrl+Shift+O (go-to-symbol, below) does not ALSO
-            // fire the open-file dialog. Mirrors the Ctrl+F / Ctrl+P guards.
-            act.open = cmd && !i.modifiers.shift && i.key_pressed(egui::Key::O);
-            act.save = cmd && i.key_pressed(egui::Key::S);
-            if cmd && !i.modifiers.shift && i.key_pressed(egui::Key::F) {
+            act.new = km.pressed(i, action::NEW_FILE);
+            act.open = km.pressed(i, action::OPEN_FILE);
+            act.save = km.pressed(i, action::SAVE);
+            if km.pressed(i, action::FIND) {
                 if !self.find_open {
                     self.focus_find = true;
                 }
                 self.find_open = true;
             }
-            // Wave-5: Ctrl/Cmd+Shift+F opens project-wide find (find in files).
-            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::F) {
+            // Wave-5: project-wide find (find in files).
+            if km.pressed(i, action::FIND_IN_FILES) {
                 if !self.find_in_files_open {
                     self.focus_find_in_files = true;
                 }
                 self.find_in_files_open = true;
             }
-            // Wave-5 P1: Ctrl+. toggles zen / distraction-free mode. Entering zen
-            // also closes the find bars so nothing but the editor remains.
-            if cmd && !i.modifiers.shift && i.key_pressed(egui::Key::Period) {
+            // Wave-5 P1: zen / distraction-free mode. Entering zen also closes the
+            // find bars so nothing but the editor remains.
+            if km.pressed(i, action::TOGGLE_ZEN) {
                 self.zen_mode = !self.zen_mode;
                 if self.zen_mode {
                     self.find_open = false;
                     self.find_in_files_open = false;
                 }
             }
-            // Wave-5 P1: Ctrl+Shift+V toggles the markdown live-preview panel.
-            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::V) {
+            // Wave-5 P1: toggle the markdown live-preview panel.
+            if km.pressed(i, action::TOGGLE_MD_PREVIEW) {
                 self.md_preview_open = !self.md_preview_open;
             }
-            // Ctrl/Cmd+Shift+P opens the command palette (plugin + builtin cmds).
-            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::P) {
+            // The command palette (plugin + builtin cmds).
+            if km.pressed(i, action::COMMAND_PALETTE) {
                 if !self.palette_open {
                     self.focus_palette = true;
                 }
@@ -67,61 +83,56 @@ impl ScribeApp {
                 self.palette_selected = 0;
             }
             // F-006 fix from docs/audits/overlooked-surfaces-2026-05-29.md —
-            // wave 1 keyboard shortcuts:
-            // - Ctrl+W: close the active tab.
-            // - Ctrl+\: toggle the multi-note grid (F-003 entry-point fix).
-            // - Ctrl+Tab / Ctrl+Shift+Tab: cycle tabs (next / prev).
-            if cmd && i.key_pressed(egui::Key::W) {
+            // wave 1 keyboard shortcuts: close the active tab, toggle the
+            // multi-note grid (F-003 entry-point fix), cycle tabs.
+            if km.pressed(i, action::CLOSE_TAB) {
                 act.close_active_tab = true;
             }
-            if cmd && i.key_pressed(egui::Key::Backslash) {
+            if km.pressed(i, action::TOGGLE_GRID) {
                 act.toggle_grid = true;
             }
             // Wave-2 keyboard fill-in (docs/audits/overlooked-surfaces-2026-05-29.md).
-            if cmd && i.key_pressed(egui::Key::H) {
+            if km.pressed(i, action::REPLACE) {
                 act.open_replace = true;
             }
-            if cmd && i.key_pressed(egui::Key::Slash) {
+            if km.pressed(i, action::TOGGLE_COMMENT) {
                 act.toggle_comment = true;
             }
-            // Jump to the matching bracket. !shift so it never collides with a
-            // potential Ctrl+Shift+M binding.
-            if cmd && !i.modifiers.shift && i.key_pressed(egui::Key::M) {
+            // Jump to the matching bracket.
+            if km.pressed(i, action::JUMP_BRACKET) {
                 act.jump_bracket = true;
             }
-            if i.key_pressed(egui::Key::F11) {
+            if km.pressed(i, action::TOGGLE_FULLSCREEN) {
                 act.toggle_fullscreen = true;
             }
-            // F-018 — Ctrl+K Ctrl+T (cycle theme) approximated as
-            // Ctrl+Shift+T (single-key chord) since egui has no native
-            // multi-key chord layer. F-031 — Ctrl+Shift+M toggles the
-            // minimap. Both persist via save_config.
-            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::T) {
+            // F-018 — Ctrl+K Ctrl+T (cycle theme) approximated as a single-key
+            // chord since egui has no native multi-key chord layer. F-031 —
+            // toggle the minimap. Both persist via save_config.
+            if km.pressed(i, action::CYCLE_THEME) {
                 act.cycle_theme = true;
             }
-            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::M) {
+            if km.pressed(i, action::TOGGLE_MINIMAP) {
                 act.toggle_minimap = true;
             }
-            // F-032 — Ctrl+Shift+[ folds every region in the active buffer,
-            // Ctrl+Shift+] expands every region. Switches the editor into
-            // fold-view mode so the user sees the change immediately
-            // (otherwise the fold set is updated but the normal central
-            // panel doesn't honor it).
-            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::OpenBracket) {
+            // F-032 — fold every region in the active buffer / expand every
+            // region. Switches the editor into fold-view mode so the user sees
+            // the change immediately (otherwise the fold set is updated but the
+            // normal central panel doesn't honor it).
+            if km.pressed(i, action::FOLD_ALL) {
                 act.fold_all = true;
             }
-            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::CloseBracket) {
+            if km.pressed(i, action::EXPAND_ALL) {
                 act.expand_all = true;
             }
-            // Font zoom: Ctrl+= / Ctrl++ in, Ctrl+- out, Ctrl+0 reset, and
+            // Font zoom: bound chords in / out / reset, plus hard-wired
             // Ctrl+scroll. Universal editor convenience.
-            if cmd && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)) {
+            if km.pressed(i, action::INCREASE_FONT) {
                 act.font_zoom = Some(1);
             }
-            if cmd && i.key_pressed(egui::Key::Minus) {
+            if km.pressed(i, action::DECREASE_FONT) {
                 act.font_zoom = Some(-1);
             }
-            if cmd && i.key_pressed(egui::Key::Num0) {
+            if km.pressed(i, action::RESET_FONT) {
                 act.font_zoom = Some(0);
             }
             if cmd {
@@ -132,23 +143,22 @@ impl ScribeApp {
                     act.font_zoom = Some(-1);
                 }
             }
-            // Reopen the most recently closed tab (Ctrl+Shift+R — Ctrl+Shift+T
-            // is already the theme-cycle chord in this editor).
-            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::R) {
+            // Reopen the most recently closed tab (the default is Ctrl+Shift+R —
+            // Ctrl+Shift+T is already the theme-cycle chord in this editor).
+            if km.pressed(i, action::REOPEN_TAB) {
                 act.reopen_tab = true;
             }
-            // F-017 — Alt+Up/Down move the cursor line; Ctrl+Shift+D
-            // duplicates; Ctrl+J joins next.
-            if i.modifiers.alt && i.key_pressed(egui::Key::ArrowUp) {
+            // F-017 — move the cursor line up/down, duplicate it, join the next.
+            if km.pressed(i, action::MOVE_LINE_UP) {
                 act.move_line_up = true;
             }
-            if i.modifiers.alt && i.key_pressed(egui::Key::ArrowDown) {
+            if km.pressed(i, action::MOVE_LINE_DOWN) {
                 act.move_line_down = true;
             }
-            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::D) {
+            if km.pressed(i, action::DUPLICATE_LINE) {
                 act.duplicate_line = true;
             }
-            if cmd && i.key_pressed(egui::Key::J) {
+            if km.pressed(i, action::JOIN_LINES) {
                 act.join_lines = true;
             }
             // F-011 — drag-drop file open. egui collects DroppedFile entries
@@ -159,34 +169,28 @@ impl ScribeApp {
                     act.files_to_open.push(p);
                 }
             }
-            if cmd
-                && i.key_pressed(egui::Key::Tab)
-                && !i.modifiers.shift
-                && self.completion.is_none()
-            {
+            // Tab cycling is suppressed while the completion popup is open — it
+            // consumes Tab to accept a candidate.
+            if km.pressed(i, action::NEXT_TAB) && self.completion.is_none() {
                 act.cycle_tab_next = true;
             }
-            if cmd
-                && i.key_pressed(egui::Key::Tab)
-                && i.modifiers.shift
-                && self.completion.is_none()
-            {
+            if km.pressed(i, action::PREV_TAB) && self.completion.is_none() {
                 act.cycle_tab_prev = true;
             }
             // F-014: F1 toggles the keyboard cheatsheet — universal "help"
-            // convention. The Esc handler below closes it like any overlay.
+            // convention, deliberately not rebindable. The Esc handler below
+            // closes it like any overlay.
             if i.key_pressed(egui::Key::F1) {
                 self.cheatsheet_open = !self.cheatsheet_open;
             }
-            // F-015 — Ctrl+G opens the go-to-line modal.
-            if cmd && i.key_pressed(egui::Key::G) {
+            // F-015 — the go-to-line modal.
+            if km.pressed(i, action::GOTO_LINE) {
                 self.goto_open = true;
                 self.focus_goto = true;
                 self.goto_query.clear();
             }
-            // Ctrl+Shift+O opens the go-to-symbol modal (jump to a definition
-            // in the active buffer).
-            if cmd && i.modifiers.shift && i.key_pressed(egui::Key::O) {
+            // The go-to-symbol modal (jump to a definition in the active buffer).
+            if km.pressed(i, action::GOTO_SYMBOL) {
                 if !self.goto_symbol_open {
                     self.focus_goto_symbol = true;
                 }
@@ -194,32 +198,31 @@ impl ScribeApp {
                 self.goto_symbol_query.clear();
                 self.goto_symbol_selected = 0;
             }
-            // F-012 — Ctrl+R opens the recent-files modal. Exclude shift so
-            // Ctrl+Shift+R (reopen-closed-tab, above) does not ALSO open it.
-            if cmd && !i.modifiers.shift && i.key_pressed(egui::Key::R) {
+            // F-012 — the recent-files modal.
+            if km.pressed(i, action::RECENT_FILES) {
                 self.recent_open = true;
                 self.recent_selected = 0;
             }
-            // Line bookmarks: Ctrl+F2 toggles on the cursor line; F2 jumps to
-            // the next bookmark; Shift+F2 jumps to the previous one. Ctrl takes
-            // priority so Ctrl+F2 never doubles as a plain-F2 navigate.
-            if i.key_pressed(egui::Key::F2) {
-                if cmd {
-                    act.toggle_bookmark = true;
-                } else if i.modifiers.shift {
-                    act.prev_bookmark = true;
-                } else {
-                    act.next_bookmark = true;
-                }
+            // Line bookmarks: toggle on the cursor line, jump to the next, jump
+            // to the previous. Exact modifier matching keeps the three F2 chords
+            // (Ctrl+F2 / F2 / Shift+F2 by default) from shadowing each other.
+            if km.pressed(i, action::TOGGLE_BOOKMARK) {
+                act.toggle_bookmark = true;
+            }
+            if km.pressed(i, action::NEXT_BOOKMARK) {
+                act.next_bookmark = true;
+            }
+            if km.pressed(i, action::PREV_BOOKMARK) {
+                act.prev_bookmark = true;
             }
             // #R6 — F3 / Shift+F3 cycle find matches while the find bar is open.
+            // Not rebindable: it is find-bar navigation, not a global action.
             if self.find_open && i.key_pressed(egui::Key::F3) {
                 *find_nav = Some(!i.modifiers.shift);
             }
-            // F-010 — Ctrl+P opens the fuzzy file finder (rebuilds the
-            // file index on first open so cold-start cost lands here,
-            // not on launch).
-            if cmd && i.key_pressed(egui::Key::P) && !i.modifiers.shift {
+            // F-010 — the fuzzy file finder (rebuilds the file index on first
+            // open so cold-start cost lands here, not on launch).
+            if km.pressed(i, action::FUZZY_FINDER) {
                 act.open_fuzzy = true;
             }
             if i.key_pressed(egui::Key::Escape) {
