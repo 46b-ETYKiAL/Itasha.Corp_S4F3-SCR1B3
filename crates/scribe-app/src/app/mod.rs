@@ -2077,6 +2077,9 @@ mod indent_tests;
 mod text_ops_tests;
 
 #[cfg(test)]
+mod text_ops_selection_tests;
+
+#[cfg(test)]
 mod execute_builtin_tests;
 
 #[cfg(test)]
