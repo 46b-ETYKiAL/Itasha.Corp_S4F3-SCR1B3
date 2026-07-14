@@ -1323,20 +1323,26 @@ impl ScribeApp {
     /// Graceful: missing/unconfigured servers just surface a notice.
     fn start_lsp_for_active(&mut self) {
         let active = self.active.min(self.tabs.len().saturating_sub(1));
+        // Match on the PATH first. `language_hint()` is derived from the path
+        // (it is the file's extension), so `Some(lang)` cannot occur without a
+        // path — matching on the hint first made the `(_, None)` arm dead code,
+        // and an UNSAVED buffer fell into the no-language arm and was told
+        // "couldn't detect this file's language" when the real problem is that
+        // it has never been saved. Each case now gets the message written for it.
         let (lang, path, text) = match self.tabs.get(active) {
-            Some(t) => match (t.doc.language_hint(), t.doc.path()) {
-                (Some(lang), Some(path)) => (lang, path.to_path_buf(), t.text.clone()),
+            Some(t) => match (t.doc.path(), t.doc.language_hint()) {
+                (Some(path), Some(lang)) => (lang, path.to_path_buf(), t.text.clone()),
                 (None, _) => {
+                    self.toast =
+                        Some("Save the file first, then start the language server.".into());
+                    return;
+                }
+                (Some(_), None) => {
                     self.toast = Some(
                         "Couldn't detect this file's language. Save it with a file extension \
                          (like .rs or .py) to enable language features."
                             .into(),
                     );
-                    return;
-                }
-                (_, None) => {
-                    self.toast =
-                        Some("Save the file first, then start the language server.".into());
                     return;
                 }
             },
@@ -2087,6 +2093,9 @@ mod deferred_actions_tests;
 
 #[cfg(test)]
 mod keyboard_input_tests;
+
+#[cfg(test)]
+mod mod_logic_tests;
 
 #[cfg(test)]
 mod execute_builtin_tests;
