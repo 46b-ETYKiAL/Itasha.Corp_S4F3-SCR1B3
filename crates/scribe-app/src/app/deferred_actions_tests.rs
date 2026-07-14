@@ -1,0 +1,670 @@
+//! Coverage for `deferred_actions.rs` — the dispatcher that applies everything
+//! a frame decided to do once the UI borrows are released.
+//!
+//! This is where nearly every keyboard shortcut and palette command actually
+//! lands, so an unhandled or mis-wired branch here means a shortcut that quietly
+//! does nothing. Each handler is small, but there are ~30 of them and the whole
+//! set was reachable only through a live frame — hence 52% coverage on a file
+//! with no logic that needs a renderer.
+//!
+//! Two branches are deliberately never exercised: `act.open` and
+//! `act.open_folder` call `rfd::FileDialog` and block on a human. Per ADR-0007
+//! they are an exclusion, not something to fake.
+#![allow(clippy::wildcard_imports)]
+use super::deferred_actions::DeferredFlags;
+use super::*;
+
+fn app() -> (ScribeApp, egui::Context) {
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = true;
+    (ScribeApp::new_test(cfg), egui::Context::default())
+}
+
+/// All flags off — the neutral baseline each test turns exactly one thing on in.
+fn flags() -> DeferredFlags {
+    DeferredFlags {
+        run_cmd: None,
+        run_builtin: None,
+        save_cfg: false,
+        open_from_tree: None,
+        close_tree: false,
+        start_lsp: false,
+        want_open_cfg: false,
+        want_restore_cfg: false,
+        want_dismiss_cfg: false,
+    }
+}
+
+/// Apply `act` with no frame-local flags set.
+fn apply(app: &mut ScribeApp, ctx: &egui::Context, act: &mut Pending) {
+    app.apply_deferred_actions(ctx, act, flags());
+}
+
+/// Apply only frame-local `flags` with an empty action set.
+fn apply_flags(app: &mut ScribeApp, ctx: &egui::Context, flags: DeferredFlags) {
+    app.apply_deferred_actions(ctx, &mut Pending::default(), flags);
+}
+
+// ---- the empty case ----
+
+#[test]
+fn an_empty_action_set_changes_nothing() {
+    // The overwhelmingly common frame: nothing was requested, so nothing must
+    // happen — no tab churn, no config write, no status text.
+    let (mut app, ctx) = app();
+    let before_tabs = app.tabs.len();
+    let before_active = app.active;
+    let before_status = app.status.clone();
+    let before_cfg = app.config.clone();
+
+    apply(&mut app, &ctx, &mut Pending::default());
+
+    assert_eq!(app.tabs.len(), before_tabs);
+    assert_eq!(app.active, before_active);
+    assert_eq!(app.status, before_status);
+    assert_eq!(
+        app.config, before_cfg,
+        "an idle frame must not touch config"
+    );
+}
+
+// ---- tabs ----
+
+#[test]
+fn new_opens_a_tab_and_close_active_closes_one() {
+    let (mut app, ctx) = app();
+    let before = app.tabs.len();
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            new: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(app.tabs.len(), before + 1, "Ctrl+N adds a tab");
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            close_active_tab: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(app.tabs.len(), before, "Ctrl+W closes the active tab");
+}
+
+#[test]
+fn cycle_tab_next_and_prev_wrap_in_both_directions() {
+    let (mut app, ctx) = app();
+    // Three tabs total (the starting scratch tab + two).
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            new: true,
+            ..Default::default()
+        },
+    );
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            new: true,
+            ..Default::default()
+        },
+    );
+    let n = app.tabs.len();
+    assert!(n >= 3);
+    app.active = n - 1;
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            cycle_tab_next: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        app.active, 0,
+        "Ctrl+Tab wraps past the last tab to the first"
+    );
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            cycle_tab_prev: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        app.active,
+        n - 1,
+        "Ctrl+Shift+Tab wraps back past the first to the last"
+    );
+}
+
+#[test]
+fn cycle_tab_with_no_tabs_does_not_panic() {
+    // The `!self.tabs.is_empty()` guard: cycling with everything closed must be
+    // inert rather than dividing by zero.
+    let (mut app, ctx) = app();
+    app.tabs.clear();
+    app.active = 0;
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            cycle_tab_next: true,
+            cycle_tab_prev: true,
+            ..Default::default()
+        },
+    );
+    assert!(app.tabs.is_empty());
+}
+
+#[test]
+fn files_to_open_are_all_opened_and_the_queue_is_drained() {
+    let (mut app, ctx) = app();
+    let dir = std::env::temp_dir().join(format!("scr1b3-deferred-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = dir.join("a.md");
+    let b = dir.join("b.md");
+    std::fs::write(&a, "aaa").unwrap();
+    std::fs::write(&b, "bbb").unwrap();
+    let before = app.tabs.len();
+
+    let mut act = Pending {
+        files_to_open: vec![a, b],
+        ..Default::default()
+    };
+    apply(&mut app, &ctx, &mut act);
+
+    assert_eq!(app.tabs.len(), before + 2, "both queued files open");
+    assert!(
+        act.files_to_open.is_empty(),
+        "the queue MUST be drained, or every later frame reopens the same files"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn open_from_tree_opens_the_clicked_file() {
+    let (mut app, ctx) = app();
+    let dir = std::env::temp_dir().join(format!("scr1b3-deferred-tree-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("tree.md");
+    std::fs::write(&f, "from the tree").unwrap();
+
+    apply_flags(
+        &mut app,
+        &ctx,
+        DeferredFlags {
+            open_from_tree: Some(f),
+            ..flags()
+        },
+    );
+
+    assert_eq!(app.tabs[app.active].text, "from the tree");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn close_tree_clears_the_file_tree_root() {
+    let (mut app, ctx) = app();
+    app.file_tree_root = Some(PathBuf::from("."));
+    apply_flags(
+        &mut app,
+        &ctx,
+        DeferredFlags {
+            close_tree: true,
+            ..flags()
+        },
+    );
+    assert!(app.file_tree_root.is_none());
+}
+
+// ---- toggles that persist ----
+
+#[test]
+fn toggle_grid_flips_the_setting_and_persists_it() {
+    let (mut app, ctx) = app();
+    let before = app.config.editor.grid_enabled;
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            toggle_grid: true,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(app.config.editor.grid_enabled, !before, "the toggle flips");
+    assert!(app.status.contains("multi-note grid"), "and is reported");
+    // A toggle the user has to redo on every launch is a bug: it must be saved.
+    let saved = app.config_dir.as_ref().unwrap().join("scr1b3.toml");
+    assert!(saved.exists(), "the flipped setting must be persisted");
+}
+
+#[test]
+fn toggle_minimap_flips_the_setting_and_persists_it() {
+    let (mut app, ctx) = app();
+    let before = app.config.editor.show_minimap;
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            toggle_minimap: true,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(app.config.editor.show_minimap, !before);
+    assert!(app.status.contains("minimap"));
+    assert!(app
+        .config_dir
+        .as_ref()
+        .unwrap()
+        .join("scr1b3.toml")
+        .exists());
+}
+
+#[test]
+fn cycle_theme_advances_to_the_next_builtin_and_persists_it() {
+    let (mut app, ctx) = app();
+    let names = scribe_core::theme::Theme::builtin_names();
+    let before = app.config.appearance.theme.clone();
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            cycle_theme: true,
+            ..Default::default()
+        },
+    );
+
+    assert_ne!(app.config.appearance.theme, before, "the theme advances");
+    assert!(
+        names.contains(&app.config.appearance.theme.as_str()),
+        "and lands on a real builtin, got {:?}",
+        app.config.appearance.theme
+    );
+    assert!(app.status.contains("theme:"));
+}
+
+#[test]
+fn cycle_theme_wraps_from_the_last_builtin_back_to_the_first() {
+    let (mut app, ctx) = app();
+    let names = scribe_core::theme::Theme::builtin_names();
+    app.config.appearance.theme = (*names.last().unwrap()).to_string();
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            cycle_theme: true,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        app.config.appearance.theme, names[0],
+        "cycling past the last theme wraps to the first"
+    );
+}
+
+#[test]
+fn cycle_theme_from_an_unknown_theme_starts_at_the_second() {
+    // An unknown theme name (hand-edited config) resolves to index 0, so the
+    // next is index 1 — it must not panic or stall on the unknown value.
+    let (mut app, ctx) = app();
+    let names = scribe_core::theme::Theme::builtin_names();
+    app.config.appearance.theme = "not-a-real-theme".into();
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            cycle_theme: true,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(app.config.appearance.theme, names[1 % names.len()]);
+}
+
+// ---- font zoom ----
+
+#[test]
+fn font_zoom_steps_up_and_down_and_zero_resets_to_the_default() {
+    let (mut app, ctx) = app();
+    let def = Config::default().fonts.editor_size;
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            font_zoom: Some(2),
+            ..Default::default()
+        },
+    );
+    assert_eq!(app.config.fonts.editor_size, def + 2.0, "Ctrl+= grows");
+    assert!(app.status.contains("font size:"));
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            font_zoom: Some(-1),
+            ..Default::default()
+        },
+    );
+    assert_eq!(app.config.fonts.editor_size, def + 1.0, "Ctrl+- shrinks");
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            font_zoom: Some(0),
+            ..Default::default()
+        },
+    );
+    assert_eq!(app.config.fonts.editor_size, def, "Ctrl+0 resets");
+}
+
+#[test]
+fn font_zoom_clamps_to_a_legible_range() {
+    // Unclamped this reaches 0/negative font sizes — an unreadable, unrecoverable
+    // window (you cannot see the menu to fix it).
+    let (mut app, ctx) = app();
+
+    for _ in 0..50 {
+        apply(
+            &mut app,
+            &ctx,
+            &mut Pending {
+                font_zoom: Some(-5),
+                ..Default::default()
+            },
+        );
+    }
+    assert_eq!(app.config.fonts.editor_size, 8.0, "clamped at the floor");
+
+    for _ in 0..50 {
+        apply(
+            &mut app,
+            &ctx,
+            &mut Pending {
+                font_zoom: Some(5),
+                ..Default::default()
+            },
+        );
+    }
+    assert_eq!(app.config.fonts.editor_size, 32.0, "clamped at the ceiling");
+}
+
+// ---- find / replace ----
+
+#[test]
+fn open_replace_opens_the_find_bar_focused_on_replace() {
+    let (mut app, ctx) = app();
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            open_replace: true,
+            ..Default::default()
+        },
+    );
+    assert!(app.find_open, "Ctrl+H reuses the find bar");
+    assert!(app.focus_replace, "with focus in the replace field");
+}
+
+// ---- folding ----
+
+/// Open `name` holding `text` so the tab carries a real language hint (which is
+/// what the fold-region choice keys off).
+fn app_with_file(name: &str, text: &str) -> (ScribeApp, egui::Context) {
+    let (mut app, ctx) = app();
+    let dir = std::env::temp_dir().join(format!(
+        "scr1b3-deferred-fold-{}-{name}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, text).unwrap();
+    app.open_path(path);
+    (app, ctx)
+}
+
+#[test]
+fn fold_all_folds_code_by_braces_and_switches_to_fold_view() {
+    let (mut app, ctx) = app_with_file("f.rs", "fn a() {\n    body\n}\n");
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            fold_all: true,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(app.folds.len(), 1, "the one brace region folds");
+    assert!(app.fold_view, "and fold view switches on so it is visible");
+    assert!(app.status.contains("folded 1 region"));
+}
+
+#[test]
+fn fold_all_folds_a_note_by_heading_not_by_braces() {
+    // P2-4 regression: this handler used the brace-only `fold_regions`, so
+    // Ctrl+Shift+[ in a markdown note found ZERO regions — it switched the user
+    // into fold view with nothing folded and reported "folded 0 region(s)" —
+    // while the palette's Fold All folded the same buffer by heading.
+    let (mut app, ctx) = app_with_file("f.md", "# One\ntext\n# Two\nmore\n");
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            fold_all: true,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        app.folds.len(),
+        2,
+        "a note folds by heading SECTION (2 headings => 2 regions), got {:?}",
+        app.folds
+    );
+    assert!(app.fold_view);
+    assert!(app.status.contains("folded 2 region"));
+}
+
+#[test]
+fn fold_all_shortcut_and_palette_command_agree() {
+    // The same feature behind two doors: the Ctrl+Shift+[ shortcut (this
+    // dispatcher) and the palette's BuiltinCommand::FoldAll. They must fold the
+    // same buffer identically — they disagreed on notes until the fix above.
+    for (name, body) in [
+        ("p.md", "# One\ntext\n# Two\nmore\n"),
+        ("p.rs", "fn a() {\n    body\n}\n"),
+    ] {
+        let (mut via_key, ctx) = app_with_file(name, body);
+        apply(
+            &mut via_key,
+            &ctx,
+            &mut Pending {
+                fold_all: true,
+                ..Default::default()
+            },
+        );
+
+        let (mut via_palette, _) = app_with_file(name, body);
+        via_palette.execute_builtin(BuiltinCommand::FoldAll);
+
+        assert_eq!(
+            via_key.folds, via_palette.folds,
+            "{name}: the shortcut and the palette must fold identically"
+        );
+        assert_eq!(via_key.status, via_palette.status, "{name}: same report");
+    }
+}
+
+#[test]
+fn expand_all_clears_every_fold() {
+    let (mut app, ctx) = app();
+    app.folds.insert(0);
+    app.folds.insert(2);
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            expand_all: true,
+            ..Default::default()
+        },
+    );
+
+    assert!(app.folds.is_empty());
+    assert_eq!(app.status, "expanded all");
+}
+
+#[test]
+fn fold_all_with_no_tabs_does_not_panic() {
+    // The `self.active < self.tabs.len()` guard.
+    let (mut app, ctx) = app();
+    app.tabs.clear();
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            fold_all: true,
+            ..Default::default()
+        },
+    );
+    assert!(app.folds.is_empty());
+}
+
+// ---- fuzzy finder ----
+
+#[test]
+fn open_fuzzy_builds_the_index_once_and_resets_the_query() {
+    let (mut app, ctx) = app();
+    let dir = std::env::temp_dir().join(format!("scr1b3-deferred-fuzzy-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("indexed.md"), "x").unwrap();
+    app.file_tree_root = Some(dir.clone());
+    app.fuzzy_query = "stale query".into();
+    app.fuzzy_selected = 7;
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            open_fuzzy: true,
+            ..Default::default()
+        },
+    );
+
+    assert!(app.fuzzy_open);
+    assert!(app.focus_fuzzy);
+    assert!(
+        app.fuzzy_query.is_empty(),
+        "reopening must not inherit the last query"
+    );
+    assert_eq!(app.fuzzy_selected, 0, "nor the last selection");
+    assert!(
+        !app.fuzzy_index.is_empty(),
+        "the index is lazily built on first open"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- config banner (F-038) ----
+
+#[test]
+fn restore_cfg_resets_to_defaults_persists_and_clears_the_banner() {
+    let (mut app, ctx) = app();
+    app.config.editor.show_minimap = !Config::default().editor.show_minimap;
+    app.config_error_banner = Some("bad config".into());
+
+    apply_flags(
+        &mut app,
+        &ctx,
+        DeferredFlags {
+            want_restore_cfg: true,
+            ..flags()
+        },
+    );
+
+    assert_eq!(app.config, Config::default(), "everything back to defaults");
+    assert!(
+        app.config_error_banner.is_none(),
+        "the banner that offered the fix must clear once it is applied"
+    );
+    assert_eq!(app.status, "config restored to defaults");
+    assert!(
+        app.config_dir
+            .as_ref()
+            .unwrap()
+            .join("scr1b3.toml")
+            .exists(),
+        "the restored config must be written, not just held in memory"
+    );
+}
+
+#[test]
+fn dismiss_cfg_clears_the_banner_without_touching_the_config() {
+    let (mut app, ctx) = app();
+    app.config.editor.show_minimap = !Config::default().editor.show_minimap;
+    let keep = app.config.clone();
+    app.config_error_banner = Some("bad config".into());
+
+    apply_flags(
+        &mut app,
+        &ctx,
+        DeferredFlags {
+            want_dismiss_cfg: true,
+            ..flags()
+        },
+    );
+
+    assert!(app.config_error_banner.is_none());
+    assert_eq!(
+        app.config, keep,
+        "dismiss only hides the banner — it must not reset the user's settings"
+    );
+}
+
+// ---- save_cfg ----
+
+#[test]
+fn save_cfg_writes_the_current_config() {
+    let (mut app, ctx) = app();
+    app.config.editor.show_minimap = !Config::default().editor.show_minimap;
+
+    apply_flags(
+        &mut app,
+        &ctx,
+        DeferredFlags {
+            save_cfg: true,
+            ..flags()
+        },
+    );
+
+    let path = app.config_dir.as_ref().unwrap().join("scr1b3.toml");
+    let written = std::fs::read_to_string(&path).expect("config written");
+    assert!(
+        written.contains("show_minimap"),
+        "the live config is what gets written"
+    );
+}

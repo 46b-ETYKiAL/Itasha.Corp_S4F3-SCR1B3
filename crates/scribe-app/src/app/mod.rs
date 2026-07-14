@@ -2083,6 +2083,9 @@ mod text_ops_selection_tests;
 mod session_io_tests;
 
 #[cfg(test)]
+mod deferred_actions_tests;
+
+#[cfg(test)]
 mod execute_builtin_tests;
 
 #[cfg(test)]
