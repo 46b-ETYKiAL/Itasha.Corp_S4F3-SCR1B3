@@ -1,0 +1,31 @@
+# gitleaks configuration — see .github/workflows/secret-scan.yml.
+#
+# The default ruleset is the baseline and stays fully in force; this file only
+# adds a narrow allowlist. `useDefault = true` is load-bearing: a gitleaks config
+# WITHOUT it REPLACES the built-in rules instead of extending them, which would
+# silently turn the secret scan into a no-op — the exact failure this file must
+# not cause.
+[extend]
+useDefault = true
+
+# A key BINDING is not an API key.
+#
+# `generic-api-key` fires on `<identifier containing "key"> = "<string>"`, so
+# every `keybindings.<action> = "mod+e"` assignment in the [keybindings] tests
+# reads as a credential to it. The identifier is "key/bindings"; the value is a
+# keyboard chord.
+#
+# Scoped as tightly as the false positive: it matches ONLY an assignment whose
+# left side is a `keybindings.<field>` path and whose value is a chord — modifier
+# and key tokens, `+`, and spaces. A credential cannot hide in that character
+# class (no `/`, `=`, `.`, `-`, `_`, or case variation), so this narrows the rule
+# without weakening credential detection. Verified by planting a real
+# AWS-shaped key and confirming the scan still fails.
+[[rules]]
+id = "generic-api-key"
+[rules.allowlist]
+description = "keyboard chords assigned to keybindings.<action> are not secrets"
+regexTarget = "line"
+regexes = [
+  '''keybindings\.[a-z_]+\s*=\s*"[a-z0-9+ ]*"''',
+]
