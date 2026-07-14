@@ -568,3 +568,332 @@ fn new_note_from_template_opens_a_seeded_tab_per_kind() {
         );
     }
 }
+
+// ---- indent_with_spaces (Tab with insert_spaces on) ----
+
+#[test]
+fn indent_with_spaces_inserts_tab_width_spaces_at_the_caret() {
+    let (mut app, ctx) = app_with("i.md", "ab");
+    let active = app.active;
+    app.config.editor.tab_width = 4;
+    select(&ctx, 1, 1);
+
+    app.indent_with_spaces(&ctx, edit_id(), active);
+
+    assert_eq!(
+        app.tabs[active].text, "a    b",
+        "4 spaces land at the caret"
+    );
+    assert_eq!(selection(&ctx), (5, 5), "the caret advances past them");
+}
+
+#[test]
+fn indent_with_spaces_honours_the_configured_tab_width() {
+    let (mut app, ctx) = app_with("i.md", "x");
+    let active = app.active;
+    app.config.editor.tab_width = 2;
+    select(&ctx, 0, 0);
+
+    app.indent_with_spaces(&ctx, edit_id(), active);
+
+    assert_eq!(app.tabs[active].text, "  x", "tab_width=2 => 2 spaces");
+}
+
+#[test]
+fn indent_with_spaces_without_stored_state_is_a_noop() {
+    let (mut app, ctx) = app_with("i.md", "untouched");
+    let active = app.active;
+    app.indent_with_spaces(&ctx, edit_id(), active);
+    assert_eq!(app.tabs[active].text, "untouched");
+}
+
+// ---- insert_datetime_at_caret ----
+
+#[test]
+fn insert_datetime_replaces_the_selection_with_a_timestamp() {
+    let (mut app, ctx) = app_with("d.md", "at REPLACE_ME end");
+    let active = app.active;
+    select(&ctx, 3, 13); // "REPLACE_ME"
+
+    app.insert_datetime_at_caret(&ctx, edit_id(), active);
+
+    let text = &app.tabs[active].text;
+    assert!(
+        !text.contains("REPLACE_ME"),
+        "the selection must be replaced, got: {text}"
+    );
+    assert!(text.starts_with("at ") && text.ends_with(" end"), "{text}");
+    // Don't pin the clock — assert the SHAPE the caller depends on.
+    assert!(
+        text.contains('T') && text.contains('Z'),
+        "an ISO-8601 UTC stamp was inserted, got: {text}"
+    );
+    assert!(app.status.contains("inserted"), "and is reported");
+}
+
+#[test]
+fn insert_datetime_leaves_the_caret_after_the_stamp() {
+    let (mut app, ctx) = app_with("d.md", "");
+    let active = app.active;
+    select(&ctx, 0, 0);
+
+    app.insert_datetime_at_caret(&ctx, edit_id(), active);
+
+    let len = app.tabs[active].text.chars().count();
+    assert_eq!(
+        selection(&ctx),
+        (len, len),
+        "the caret must sit after the stamp, ready to keep typing"
+    );
+}
+
+// ---- duplicate_selection (Ctrl+D) ----
+
+#[test]
+fn duplicate_selection_copies_the_selection_after_itself() {
+    let (mut app, ctx) = app_with("dup.md", "abcdef");
+    let active = app.active;
+    select(&ctx, 1, 3); // "bc"
+
+    app.duplicate_selection(&ctx, edit_id(), active);
+
+    assert_eq!(
+        app.tabs[active].text, "abcbcdef",
+        "the copy follows the original"
+    );
+    assert_eq!(
+        selection(&ctx),
+        (5, 5),
+        "the caret ends after the inserted copy"
+    );
+}
+
+#[test]
+fn duplicate_selection_with_a_collapsed_caret_duplicates_the_line() {
+    // Ctrl+D with no selection is "duplicate line" — the common use.
+    let (mut app, ctx) = app_with("dup.md", "first\nsecond\nthird");
+    let active = app.active;
+    select(&ctx, 8, 8); // inside "second", column 2
+
+    app.duplicate_selection(&ctx, edit_id(), active);
+
+    assert_eq!(
+        app.tabs[active].text, "first\nsecond\nsecond\nthird",
+        "the whole line is copied below"
+    );
+    assert_eq!(
+        selection(&ctx),
+        (15, 15),
+        "the caret keeps its COLUMN on the new copy (line 3, col 2)"
+    );
+}
+
+#[test]
+fn duplicate_selection_duplicates_the_last_line_without_a_trailing_newline() {
+    // The `find('\n').map_or(text.len(), ..)` end-of-buffer branch.
+    let (mut app, ctx) = app_with("dup.md", "only line");
+    let active = app.active;
+    select(&ctx, 0, 0);
+
+    app.duplicate_selection(&ctx, edit_id(), active);
+
+    assert_eq!(app.tabs[active].text, "only line\nonly line");
+}
+
+#[test]
+fn duplicate_selection_is_char_indexed() {
+    // A byte-indexed slice would split "é" and panic.
+    let (mut app, ctx) = app_with("dup.md", "éxé");
+    let active = app.active;
+    select(&ctx, 0, 2); // "éx"
+
+    app.duplicate_selection(&ctx, edit_id(), active);
+
+    assert_eq!(app.tabs[active].text, "éxéxé");
+}
+
+// ---- toggle_comment_active ----
+
+#[test]
+fn toggle_comment_comments_then_uncomments_every_non_blank_line() {
+    let (mut app, _) = app_with("c.rs", "let a = 1;\n\nlet b = 2;\n");
+    let active = app.active;
+
+    app.toggle_comment_active();
+    assert_eq!(
+        app.tabs[active].text, "// let a = 1;\n\n// let b = 2;\n",
+        "blank lines stay blank — a commented blank line is just noise"
+    );
+
+    // Every non-blank line is now commented => the toggle reverses exactly.
+    app.toggle_comment_active();
+    assert_eq!(
+        app.tabs[active].text, "let a = 1;\n\nlet b = 2;\n",
+        "toggling twice must round-trip to the original"
+    );
+}
+
+#[test]
+fn toggle_comment_preserves_indentation() {
+    // The prefix goes after the leading whitespace, not before it — otherwise
+    // toggling a comment reformats the user's code.
+    let (mut app, _) = app_with("c.rs", "fn f() {\n    let a = 1;\n}\n");
+    let active = app.active;
+
+    app.toggle_comment_active();
+
+    assert_eq!(
+        app.tabs[active].text, "// fn f() {\n    // let a = 1;\n// }\n",
+        "the indent is kept and the prefix sits after it"
+    );
+}
+
+#[test]
+fn toggle_comment_uncomments_a_prefix_written_without_a_space() {
+    // Hand-written `//x` must uncomment to `x`, not `/x`.
+    let (mut app, _) = app_with("c.rs", "//x\n");
+    let active = app.active;
+
+    app.toggle_comment_active();
+
+    assert_eq!(app.tabs[active].text, "x\n");
+}
+
+#[test]
+fn toggle_comment_on_a_blank_buffer_does_nothing() {
+    let (mut app, _) = app_with("c.rs", "\n\n");
+    let active = app.active;
+    app.toggle_comment_active();
+    assert_eq!(
+        app.tabs[active].text, "\n\n",
+        "nothing to comment => the buffer is untouched"
+    );
+}
+
+#[test]
+fn toggle_comment_keeps_a_missing_trailing_newline_missing() {
+    let (mut app, _) = app_with("c.rs", "let a = 1;");
+    let active = app.active;
+    app.toggle_comment_active();
+    assert_eq!(
+        app.tabs[active].text, "// let a = 1;",
+        "a buffer with no trailing newline must not gain one"
+    );
+}
+
+// ---- handle_auto_pair ----
+//
+// Unlike the ops above, this one reads the frame's `Event::Text` from the
+// context (it decides based on the character being typed) and consumes that
+// event so egui's TextEdit does not ALSO insert the char. So it needs a real
+// frame, not just stored state.
+
+/// Type `c` for one frame and run `handle_auto_pair`, returning whether the
+/// Text event survived — `false` means auto-pair consumed it and egui will not
+/// double-insert the character.
+fn type_char(app: &mut ScribeApp, ctx: &egui::Context, active: usize, c: char) -> bool {
+    let input = egui::RawInput {
+        events: vec![egui::Event::Text(c.to_string())],
+        ..Default::default()
+    };
+    let mut survived = false;
+    let _ = ctx.run(input, |ctx| {
+        app.handle_auto_pair(ctx, edit_id(), active);
+        survived = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Text(s) if s.chars().eq([c])))
+        });
+    });
+    survived
+}
+
+#[test]
+fn auto_pair_wraps_a_selection_in_the_typed_pair() {
+    let (mut app, ctx) = app_with("ap.md", "wrap me");
+    let active = app.active;
+    app.config.editor.auto_pair = true;
+    select(&ctx, 0, 4); // "wrap"
+
+    let survived = type_char(&mut app, &ctx, active, '(');
+
+    assert_eq!(
+        app.tabs[active].text, "(wrap) me",
+        "the selection is wrapped"
+    );
+    assert!(
+        !survived,
+        "the '(' MUST be consumed, or egui inserts it again and the text \
+         becomes '((wrap) me'"
+    );
+}
+
+#[test]
+fn auto_pair_inserts_the_pair_and_leaves_the_caret_between() {
+    let (mut app, ctx) = app_with("ap.md", "");
+    let active = app.active;
+    app.config.editor.auto_pair = true;
+    select(&ctx, 0, 0);
+
+    type_char(&mut app, &ctx, active, '(');
+
+    assert_eq!(app.tabs[active].text, "()");
+    assert_eq!(
+        selection(&ctx),
+        (1, 1),
+        "the caret sits BETWEEN the pair, ready to type inside"
+    );
+}
+
+#[test]
+fn auto_pair_types_over_an_existing_closing_char() {
+    // Typing ')' when ')' is already right of the caret must step over it
+    // rather than inserting a second one.
+    let (mut app, ctx) = app_with("ap.md", "()");
+    let active = app.active;
+    app.config.editor.auto_pair = true;
+    select(&ctx, 1, 1); // between the pair
+
+    let survived = type_char(&mut app, &ctx, active, ')');
+
+    assert_eq!(app.tabs[active].text, "()", "no second ')' is inserted");
+    assert_eq!(
+        selection(&ctx),
+        (2, 2),
+        "the caret steps over the existing one"
+    );
+    assert!(!survived, "the typed ')' is consumed");
+}
+
+#[test]
+fn auto_pair_off_leaves_typing_entirely_to_egui() {
+    let (mut app, ctx) = app_with("ap.md", "");
+    let active = app.active;
+    app.config.editor.auto_pair = false;
+    select(&ctx, 0, 0);
+
+    let survived = type_char(&mut app, &ctx, active, '(');
+
+    assert_eq!(
+        app.tabs[active].text, "",
+        "the setting is honoured: no pairing"
+    );
+    assert!(
+        survived,
+        "the event must pass through so egui still inserts the '('"
+    );
+}
+
+#[test]
+fn auto_pair_ignores_an_ordinary_character() {
+    // A non-pair char must fall through untouched (the Passthrough branch).
+    let (mut app, ctx) = app_with("ap.md", "");
+    let active = app.active;
+    app.config.editor.auto_pair = true;
+    select(&ctx, 0, 0);
+
+    let survived = type_char(&mut app, &ctx, active, 'x');
+
+    assert_eq!(app.tabs[active].text, "");
+    assert!(survived, "egui inserts ordinary characters, not us");
+}
