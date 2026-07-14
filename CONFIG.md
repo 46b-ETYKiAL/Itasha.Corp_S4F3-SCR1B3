@@ -17,7 +17,78 @@ SCR1B3 is configured by a single, live-reloading **TOML** file. Great defaults o
 - **A missing file is fine.** Absent config silently uses defaults.
 - **Live reload.** Saving the file applies changes without a restart.
 
-All settings are grouped into twelve tables: `[editor]`, `[appearance]`, `[fonts]`, `[window]`, `[updates]`, `[spellcheck]`, `[plugins]`, `[toolbar]`, `[motion]`, `[scroll]`, `[reporting]`, `[integration]`.
+Most settings are grouped into twelve tables: `[editor]`, `[appearance]`, `[fonts]`, `[window]`, `[updates]`, `[spellcheck]`, `[plugins]`, `[toolbar]`, `[motion]`, `[scroll]`, `[reporting]`, `[integration]`. Three keys live at the top level, before any table — see below.
+
+---
+
+## Top-level keys
+
+These sit at the top of the file, above the first `[table]` header.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `schema_version` | integer | `4` | Config-format version, used for one-time migrations. Written automatically; you never need to set it by hand. A file written before versioning existed reads as `0` and is migrated forward exactly once on load. **Do not hand-edit this downward** — it does not downgrade your file, it just re-runs migrations. Current value: `CURRENT_SCHEMA_VERSION = 4`. |
+| `ui_scale` | float | `1.0` | Whole-app accessibility zoom, applied to every panel and the chrome (distinct from `fonts.editor_size`, which scales only the editor text). Clamped to `0.5`–`3.0`; a nonsensical value falls back to `1.0` rather than blanking the window. |
+
+### `[keybindings]` — rebindable shortcuts
+
+Every action below can be rebound to any key combo. Only the keys you list are overridden; the rest keep their defaults.
+
+A combo is `+`-separated modifiers followed by one key, e.g. `mod+shift+f`:
+
+- `mod` — the platform command modifier: **Ctrl** on Windows/Linux, **Cmd** on macOS. (`ctrl`, `control`, `cmd`, and `command` are accepted as aliases.)
+- `shift`, `alt` (`option` is an alias for `alt`).
+- The key: a letter (`f`), a digit (`num0`), a function key (`f11`), an arrow (`arrowup`), or a named key (`tab`, `period`, `slash`, `backslash`, `openbracket`, `closebracket`, `equals`, `minus`). Case does not matter.
+
+Modifiers must match **exactly**: `mod+o` (open file) does not fire when Shift is held, which is what keeps it distinct from `mod+shift+o` (go to symbol).
+
+Two combos that mean the same chord — `mod+shift+f` and `ctrl+shift+f` — collide, and a combo that names no key (`mod`) or two keys (`a+b`) can never fire. Settings surfaces both as warnings rather than letting the shortcut silently do nothing.
+
+`F1` (cheatsheet), `Esc` (close overlay), `F3` / `Shift+F3` (find next/previous) and `Ctrl+scroll` (font zoom) are fixed and not rebindable.
+
+| Action | Default | Description |
+|---|---|---|
+| `new_file` | `mod+n` | New file / tab. |
+| `open_file` | `mod+o` | Open a file. |
+| `save` | `mod+s` | Save the active file. |
+| `find` | `mod+f` | Open the in-buffer find bar. |
+| `find_in_files` | `mod+shift+f` | Open project-wide find. |
+| `replace` | `mod+h` | Open find-and-replace. |
+| `command_palette` | `mod+shift+p` | Open the command palette. |
+| `fuzzy_finder` | `mod+p` | Open the fuzzy file finder. |
+| `goto_line` | `mod+g` | Go to line. |
+| `goto_symbol` | `mod+shift+o` | Go to symbol in the active buffer. |
+| `recent_files` | `mod+r` | Open the recent-files list. |
+| `close_tab` | `mod+w` | Close the active tab. |
+| `next_tab` | `mod+tab` | Cycle to the next tab. |
+| `prev_tab` | `mod+shift+tab` | Cycle to the previous tab. |
+| `reopen_tab` | `mod+shift+r` | Reopen the most recently closed tab. |
+| `toggle_grid` | `mod+backslash` | Toggle the multi-note grid. |
+| `toggle_comment` | `mod+slash` | Toggle line comments on the selection. |
+| `jump_bracket` | `mod+m` | Jump to the matching bracket. |
+| `toggle_fullscreen` | `f11` | Toggle OS fullscreen. |
+| `toggle_zen` | `mod+period` | Toggle zen / distraction-free mode. |
+| `cycle_theme` | `mod+shift+t` | Cycle to the next theme. |
+| `toggle_minimap` | `mod+shift+m` | Toggle the minimap. |
+| `toggle_md_preview` | `mod+shift+v` | Toggle the markdown live-preview panel. |
+| `fold_all` | `mod+shift+openbracket` | Fold every region in the active buffer. |
+| `expand_all` | `mod+shift+closebracket` | Expand every folded region. |
+| `increase_font` | `mod+equals` | Increase the editor font size. Also fires on `mod++`. |
+| `decrease_font` | `mod+minus` | Decrease the editor font size. |
+| `reset_font` | `mod+num0` | Reset the editor font size. |
+| `move_line_up` | `alt+arrowup` | Move the current line up. |
+| `move_line_down` | `alt+arrowdown` | Move the current line down. |
+| `duplicate_line` | `mod+shift+d` | Duplicate the current line. |
+| `join_lines` | `mod+j` | Join the next line onto the current one. |
+| `toggle_bookmark` | `mod+f2` | Toggle a bookmark on the cursor line. |
+| `next_bookmark` | `f2` | Jump to the next bookmark. |
+| `prev_bookmark` | `shift+f2` | Jump to the previous bookmark. |
+
+```toml
+[keybindings]
+save = "mod+e"          # rebind Save to Ctrl+E
+toggle_zen = "f10"      # zen mode on F10
+```
 
 ---
 

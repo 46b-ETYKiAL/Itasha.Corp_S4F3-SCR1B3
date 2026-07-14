@@ -3527,6 +3527,101 @@ mod wiring_guard {
             );
         }
     }
+
+    /// Runtime source EXCLUDING the config module (and the settings UI), for the
+    /// section-level guard below.
+    ///
+    /// `runtime_source` deliberately keeps `scribe-core/src/config/**` in scope —
+    /// the dotted `section.field` probes it uses never appear in the struct
+    /// definitions, so their presence still proves a real consumer. A SECTION
+    /// probe (`.keybindings`) is not so lucky: it matches the field declaration
+    /// in `config/mod.rs`, which would make an entirely unread section look
+    /// consumed. Dropping the config module is what makes the guard honest.
+    fn runtime_source_outside_config() -> String {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let mut out = String::new();
+        for dir in [
+            format!("{manifest}/src"),
+            format!("{manifest}/../scribe-core/src"),
+        ] {
+            collect_outside_config(Path::new(&dir), &mut out);
+        }
+        out
+    }
+
+    fn collect_outside_config(dir: &Path, out: &mut String) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                // The config module DEFINES the sections; it cannot be evidence
+                // that anything CONSUMES them.
+                if p.file_name().is_some_and(|n| n == "config") {
+                    continue;
+                }
+                collect_outside_config(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                if name == "settings.rs" || name == "config.rs" {
+                    continue;
+                }
+                if let Ok(c) = fs::read_to_string(&p) {
+                    out.push_str(&c);
+                }
+            }
+        }
+    }
+
+    /// Every top-level key a user can write in `scr1b3.toml`, each of which MUST
+    /// be read by runtime code outside the config module.
+    ///
+    /// `schema_version` is deliberately absent: it is migration metadata, and its
+    /// only legitimate consumer (`Config::migrate`) lives inside the config module
+    /// by design.
+    const WIRED_SECTIONS: &[&str] = &[
+        "editor",
+        "appearance",
+        "fonts",
+        "window",
+        "updates",
+        "spellcheck",
+        "plugins",
+        "toolbar",
+        "motion",
+        "scroll",
+        "reporting",
+        "integration",
+        "keybindings",
+        "ui_scale",
+    ];
+
+    /// The section-level companion to `every_wired_setting_has_a_runtime_consumer`.
+    ///
+    /// That guard only audits controls exposed in the Settings WINDOW, so a config
+    /// surface with no Settings UI is invisible to it. `[keybindings]` shipped that
+    /// way: 35 rebindable actions that parsed, validated, and were read by nothing,
+    /// while every Settings-exposed control was correctly wired and the guard stayed
+    /// green. This checks the other axis — a whole section that nothing consumes.
+    #[test]
+    fn every_config_section_has_a_runtime_consumer() {
+        let src = runtime_source_outside_config();
+        for &section in WIRED_SECTIONS {
+            // A section is consumed if its field access appears, or — for one read
+            // only through a config METHOD — if that method does. `ui_scale` is
+            // reached via `Config::effective_ui_scale` (the clamp/NaN guard), so
+            // the literal `.ui_scale` never appears at the call site.
+            let consumed = src.contains(&format!(".{section}"))
+                || match section {
+                    "ui_scale" => src.contains("effective_ui_scale"),
+                    _ => false,
+                };
+            assert!(
+                consumed,
+                "DEAD CONFIG SECTION: `[{section}]` can be written in scr1b3.toml but no \
+                 runtime code outside the config module reads it — it is a false promise",
+            );
+        }
+    }
 }
 
 /// Visual-QA for the update-status pane. We cannot "see" the rendered UI, so we
