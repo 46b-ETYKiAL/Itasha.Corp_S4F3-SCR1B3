@@ -1030,11 +1030,42 @@ impl ScribeApp {
         if let Some(e) = config_err.as_ref() {
             tracing::warn!("settings file failed to load, using defaults: {e}");
         }
-        let config_error_banner: Option<String> = config_err.as_ref().map(|_| {
-            "Your settings file couldn't be read, so the app is using default settings. \
-             Open it to check for typos, or restore the defaults."
-                .to_string()
-        });
+        // A keymap problem is not a parse error — the file loaded fine — but it
+        // has the same consequence for the user: a shortcut that does nothing.
+        // Now that `[keybindings]` actually drives input, an unreachable or
+        // colliding binding MUST be surfaced, or the user is back to guessing why
+        // their key "doesn't work". A parse error wins the banner: defaults are in
+        // force, so any keymap complaint would be about bindings that aren't live.
+        // Grammar problems (blank / unparseable / colliding) come from core;
+        // unknown-key problems can only be known once the chord is resolved
+        // against the UI layer's key table, so `keymap` contributes those.
+        let keybinding_issues: Vec<String> = config
+            .keybindings
+            .validate()
+            .iter()
+            .map(|i| i.message())
+            .chain(keymap::Keymap::unknown_key_messages(&config.keybindings))
+            .collect();
+        for issue in &keybinding_issues {
+            tracing::warn!("keybinding problem: {issue}");
+        }
+        let config_error_banner: Option<String> = config_err
+            .as_ref()
+            .map(|_| {
+                "Your settings file couldn't be read, so the app is using default settings. \
+                 Open it to check for typos, or restore the defaults."
+                    .to_string()
+            })
+            .or_else(|| {
+                keybinding_issues.first().map(|first| {
+                    let rest = match keybinding_issues.len() - 1 {
+                        0 => String::new(),
+                        1 => " (and 1 more keybinding problem)".to_string(),
+                        n => format!(" (and {n} more keybinding problems)"),
+                    };
+                    format!("Keyboard shortcut problem: {first}.{rest}")
+                })
+            });
         let mut toast = config_err.map(|_| {
             "Your settings file couldn't be read — using default settings for now.".to_string()
         });

@@ -1325,6 +1325,42 @@ impl Driver {
     }
 }
 
+/// A keymap problem is surfaced to the user, not swallowed.
+///
+/// `Keybindings::validate` existed to catch exactly this, but nothing called it —
+/// so a typo'd combo produced silence and no explanation. Now that the keymap
+/// actually drives input, an unreachable binding has to say so.
+#[test]
+fn keybinding_issues_surface_in_the_config_banner() {
+    let mut cfg = Config::default();
+    cfg.keybindings.save = "mod+nosuchkey".into(); // parses, but names no real key
+    cfg.keybindings.find = String::new(); // unreachable
+    let app = ScribeApp::new_test(cfg);
+    let banner = app
+        .config_error_banner
+        .as_ref()
+        .expect("a broken keymap must raise the config banner");
+    assert!(
+        banner.contains("Keyboard shortcut problem"),
+        "the banner must name the problem class, got: {banner}"
+    );
+    assert!(
+        banner.contains("more keybinding problem"),
+        "the banner must account for the additional issue, got: {banner}"
+    );
+}
+
+/// A clean keymap raises no banner (the guard above must not cry wolf).
+#[test]
+fn a_valid_keymap_raises_no_config_banner() {
+    let app = ScribeApp::new_test(Config::default());
+    assert!(
+        app.config_error_banner.is_none(),
+        "the default keymap is clean and must not raise a banner: {:?}",
+        app.config_error_banner
+    );
+}
+
 /// A REBOUND action fires on its new chord and no longer fires on the old one.
 ///
 /// This is the discriminating test for the `[keybindings]` wiring: it fails

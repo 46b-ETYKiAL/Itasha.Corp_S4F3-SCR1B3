@@ -135,7 +135,11 @@ pub(super) struct ResolvedChord {
 /// action whose combo is blank / unparseable / names an unknown key resolves to
 /// `None` and simply never fires — `Keybindings::validate` is what surfaces that
 /// to the user.
-#[derive(Debug, Clone, Default)]
+/// Deliberately NOT `Default`: an empty keymap answers "no" to every action, so a
+/// defaulted one would silently disable every shortcut in the editor. Build it
+/// with [`Keymap::resolve`] from a real [`Keybindings`] — for the stock chords,
+/// `Keymap::resolve(&Keybindings::default())`.
+#[derive(Debug, Clone)]
 pub(super) struct Keymap {
     chords: Vec<(&'static str, Option<ResolvedChord>)>,
 }
@@ -166,6 +170,32 @@ impl Keymap {
             .iter()
             .find(|(name, _)| *name == action)
             .and_then(|(_, chord)| *chord)
+    }
+
+    /// Actions whose combo is a well-formed chord but names a key that does not
+    /// exist (`mod+nosuchkey`), reported as ready-made user-facing messages.
+    ///
+    /// [`Keybindings::validate`] cannot catch this and should not try: it lives in
+    /// `scribe-core` and owns the combo GRAMMAR, while the key TABLE belongs to the
+    /// UI layer — to a grammar check, `nosuchkey` is a perfectly good key token.
+    /// Only resolution knows better. Reporting it here is what stops an unknown
+    /// key name from becoming exactly the silent dead shortcut the validation
+    /// exists to prevent.
+    ///
+    /// Blank and unparseable combos are NOT reported here — `validate` already
+    /// covers those, and double-reporting one binding would be noise.
+    pub(super) fn unknown_key_messages(kb: &Keybindings) -> Vec<String> {
+        kb.entries()
+            .iter()
+            .filter(|(_, combo)| {
+                // Only combos that parse (so not Empty/Invalid) but whose key is
+                // unresolvable.
+                Chord::parse(combo).is_some_and(|c| key_from_token(&c.key).is_none())
+            })
+            .map(|(action, combo)| {
+                format!("'{action}' is bound to '{combo}', which is not a key on your keyboard — it cannot be triggered")
+            })
+            .collect()
     }
 
     /// Did the user press the chord bound to `action` this frame?

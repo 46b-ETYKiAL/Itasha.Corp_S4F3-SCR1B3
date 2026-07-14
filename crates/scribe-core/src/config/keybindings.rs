@@ -1,10 +1,11 @@
 //! User-facing keymap schema + validation ([`Keybindings`] + [`KeybindingIssue`]).
 //!
 //! Ported from C0PL4ND's keybindings framework (M7), re-authored for the EDITOR
-//! domain: the default set reproduces SCR1B3's CURRENT hard-wired shortcuts
-//! EXACTLY (see `app::keyboard_input`), so shipping the schema is a zero-behaviour
-//! change. `mod` is the platform command modifier (Ctrl on Windows/Linux, Cmd on
-//! macOS) — the same `i.modifiers.command` the hard-wired handler keys off.
+//! domain. `app::keyboard_input` resolves every chord through this schema, so it
+//! is what the editor actually keys off; the defaults reproduce the shortcuts
+//! that handler used to hard-wire, which keeps a user who never touches
+//! `[keybindings]` on the same editor. `mod` is the platform command modifier
+//! (Ctrl on Windows/Linux, Cmd on macOS) — the `i.modifiers.command` egui reports.
 //!
 //! [`Keybindings::validate`] surfaces the silent failure modes a user-editable
 //! keymap can drift into — a blank binding (an unreachable action), an
@@ -437,6 +438,42 @@ mod tests {
     }
 
     #[test]
+    fn issue_messages_name_the_action_and_the_problem() {
+        // `message` is what the user actually reads in the config banner, so its
+        // CONTENT is a contract, not decoration. Without asserting it, the whole
+        // body could be replaced by an empty string and every other test here
+        // would still pass (cargo-mutants confirmed exactly that).
+        let empty = KeybindingIssue::Empty { action: "save" }.message();
+        assert!(empty.contains("save"), "must name the action: {empty}");
+        assert!(
+            empty.contains("no key bound"),
+            "must state the problem: {empty}"
+        );
+
+        let invalid = KeybindingIssue::Invalid {
+            action: "find",
+            combo: "a+b".into(),
+        }
+        .message();
+        assert!(invalid.contains("find"), "must name the action: {invalid}");
+        assert!(invalid.contains("a+b"), "must quote the combo: {invalid}");
+
+        let conflict = KeybindingIssue::Conflict {
+            combo: "mod+k".into(),
+            actions: vec!["save", "find"],
+        }
+        .message();
+        assert!(
+            conflict.contains("mod+k"),
+            "must name the combo: {conflict}"
+        );
+        assert!(
+            conflict.contains("save") && conflict.contains("find"),
+            "must list every colliding action: {conflict}"
+        );
+    }
+
+    #[test]
     fn chord_parses_modifiers_aliases_and_canonicalizes() {
         let c = Chord::parse("Mod + Shift + F").expect("a well-formed combo parses");
         assert_eq!(
@@ -505,11 +542,15 @@ mod tests {
 
     #[test]
     fn default_keymap_matches_current_hardwired_shortcuts() {
-        // M7 (locked decision): the default action set MUST reproduce SCR1B3's
-        // CURRENT hard-wired editor shortcuts EXACTLY — `mod` is the command
-        // modifier the hard-wired handler keys off (`i.modifiers.command`). This
-        // pins the parity so a future default edit that drifts from the wired
-        // behaviour is caught.
+        // M7 (locked decision): the shipped defaults reproduce the chords SCR1B3
+        // hard-wired before `[keybindings]` drove input, so upgrading changes
+        // nothing for a user who never edits the section. Pinning them here means
+        // a default edit is a deliberate, reviewed change to muscle memory.
+        //
+        // NOTE this test compares STRINGS only — it passed for as long as the
+        // section was unwired entirely. `app::keymap` pins what each default
+        // RESOLVES to, and `app::e2e::input_rebound_keybinding_replaces_the_
+        // default_chord` proves the config is actually read.
         let kb = Keybindings::default();
         // File / edit.
         assert_eq!(kb.new_file, "mod+n"); // Ctrl+N
