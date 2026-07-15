@@ -1000,6 +1000,40 @@ impl ScribeApp {
         app
     }
 
+    /// R6 / S-04 — filter and open the legacy paths-only session list. A path
+    /// that reaches off this machine is never auto-opened.
+    ///
+    /// Split out of `build` so it is REACHABLE. Its only caller is gated on
+    /// `watch_config`, which is false under `new_test` (a test must not inherit
+    /// the host's real on-disk session), so this loop could never run in a
+    /// test — and the in-diff mutation gate proved what that cost: deleting the
+    /// `!` on the guard, which inverts it into "open exactly the unsafe paths
+    /// and skip the safe ones", left the whole suite green. Taking the list as
+    /// an ARGUMENT is what makes the logic testable at all; an ambient input
+    /// is an untestable one.
+    ///
+    /// (This site used to build a "self-rooted" allowed set from the listed
+    /// paths' own parents — a fence that could not fail. See
+    /// `session_path_guard` for why it was removed rather than repaired.)
+    #[allow(clippy::needless_pass_by_value)]
+    fn restore_legacy_tabs(listed: Vec<PathBuf>) -> Vec<EditorTab> {
+        let mut out = Vec::new();
+        for path in listed {
+            if !crate::session_path_guard::is_safe_restore_path(&path) {
+                tracing::debug!(
+                    "session restore (legacy): skipping {} (resolves off this machine, \
+                     or is gone) — not auto-opening",
+                    path.display()
+                );
+                continue;
+            }
+            if let Ok(t) = EditorTab::from_path(path) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
     /// A per-call temp directory for hermetic test config I/O, guaranteed EMPTY.
     ///
     /// `{pid}-{seq}` is unique among *live* processes, but it is NOT unique over
@@ -1140,25 +1174,7 @@ impl ScribeApp {
             // scratch_tab` saw the dev machine's live session and restored 2 tabs
             // instead of the expected scratch). Production launches pass
             // watch_config = true, so real restore is unchanged.
-            // R6 / S-04 — the legacy paths-only session file auto-opens too,
-            // so it gets the same guard: a path that reaches off this machine
-            // is never opened. (This call site used to build a "self-rooted"
-            // allowed set from the listed paths' own parents — a fence that
-            // could not fail. See `session_path_guard` for why it was removed
-            // rather than repaired.)
-            for path in load_session() {
-                if !crate::session_path_guard::is_safe_restore_path(&path) {
-                    tracing::debug!(
-                        "session restore (legacy): skipping {} (resolves off this machine, \
-                         or is gone) — not auto-opening",
-                        path.display()
-                    );
-                    continue;
-                }
-                if let Ok(t) = EditorTab::from_path(path) {
-                    tabs.push(t);
-                }
-            }
+            tabs.extend(Self::restore_legacy_tabs(load_session()));
         }
         if tabs.is_empty() {
             tabs.push(EditorTab::scratch());
@@ -2118,6 +2134,9 @@ mod text_ops_selection_tests;
 
 #[cfg(test)]
 mod session_io_tests;
+
+#[cfg(test)]
+mod file_ops_tests;
 
 #[cfg(test)]
 mod deferred_actions_tests;

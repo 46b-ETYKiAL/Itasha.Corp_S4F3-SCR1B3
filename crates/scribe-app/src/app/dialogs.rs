@@ -20,14 +20,27 @@
 //! A test build returning `None` reads as "the user pressed Cancel", which every
 //! call site already handles — that is the whole point of the `if let Some(path)`
 //! shape they all use.
+//!
+//! But cancel-by-default is not enough on its own, and getting that wrong cost
+//! a round trip: a seam that ONLY ever cancels makes every dialog-driven
+//! function a no-op under `cfg(test)`, so its body can be deleted with the
+//! suite still green. The in-diff mutation gate caught exactly that on
+//! `open_dialog`, `convert_to_markdown_active` and `export_html_active` after
+//! this seam landed — the seam that closed one hole opened three more. So each
+//! entry point here has an injector in [`test_hooks`]: a test supplies the
+//! answer the OS would have given, and the real code around the dialog still
+//! runs.
 
 use std::path::PathBuf;
 
 /// Ask the user to pick one existing file. `None` = cancelled.
+///
+/// In a test build this returns whatever [`test_hooks::set_next_pick_file`]
+/// injected, or `None` (cancelled) if nothing was injected.
 pub(crate) fn pick_file() -> Option<PathBuf> {
     #[cfg(test)]
     {
-        None
+        test_hooks::take_next_pick_file()
     }
     #[cfg(not(test))]
     {
@@ -36,10 +49,13 @@ pub(crate) fn pick_file() -> Option<PathBuf> {
 }
 
 /// Ask the user to pick a folder. `None` = cancelled.
+///
+/// In a test build this returns whatever [`test_hooks::set_next_pick_folder`]
+/// injected, or `None` (cancelled) if nothing was injected.
 pub(crate) fn pick_folder() -> Option<PathBuf> {
     #[cfg(test)]
     {
-        None
+        test_hooks::take_next_pick_folder()
     }
     #[cfg(not(test))]
     {
@@ -88,6 +104,8 @@ pub(crate) mod test_hooks {
 
     thread_local! {
         static NEXT_SAVE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        static NEXT_PICK_FILE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+        static NEXT_PICK_FOLDER: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     }
 
     /// The next [`super::save_file`] returns `path`, as if the user picked it.
@@ -98,5 +116,23 @@ pub(crate) mod test_hooks {
 
     pub(super) fn take_next_save_path() -> Option<PathBuf> {
         NEXT_SAVE_PATH.with(|c| c.borrow_mut().take())
+    }
+
+    /// The next [`super::pick_file`] returns `path`. Consumed once.
+    pub(crate) fn set_next_pick_file(path: PathBuf) {
+        NEXT_PICK_FILE.with(|c| *c.borrow_mut() = Some(path));
+    }
+
+    pub(super) fn take_next_pick_file() -> Option<PathBuf> {
+        NEXT_PICK_FILE.with(|c| c.borrow_mut().take())
+    }
+
+    /// The next [`super::pick_folder`] returns `path`. Consumed once.
+    pub(crate) fn set_next_pick_folder(path: PathBuf) {
+        NEXT_PICK_FOLDER.with(|c| *c.borrow_mut() = Some(path));
+    }
+
+    pub(super) fn take_next_pick_folder() -> Option<PathBuf> {
+        NEXT_PICK_FOLDER.with(|c| c.borrow_mut().take())
     }
 }

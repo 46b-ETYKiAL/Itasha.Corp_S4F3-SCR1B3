@@ -431,3 +431,84 @@ fn wiping_a_dir_that_was_never_created_is_fine() {
         "NotFound must be ignored"
     );
 }
+
+/// The legacy paths-only restore must open ordinary files and refuse ones that
+/// reach off this machine.
+///
+/// The in-diff mutation gate found `delete !` surviving on this guard — i.e.
+/// inverting it into "skip the safe paths, open the unsafe ones" broke nothing,
+/// because the only caller is gated on `watch_config` and could never run in a
+/// test. `restore_legacy_tabs` takes the list as an argument for exactly this
+/// reason.
+///
+/// The "safe file DOES open" half is what kills the inverted-guard mutant, and
+/// it does so on every platform — unlike the reject half, which needs a
+/// reachable UNC-classified path to discriminate (see `session_path_guard`).
+#[test]
+fn the_legacy_restore_opens_ordinary_files() {
+    let dir = std::env::temp_dir().join(format!("scr1b3-legacy-ok-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let a = dir.join("a.md");
+    let b = dir.join("b.md");
+    std::fs::write(&a, "first").unwrap();
+    std::fs::write(&b, "second").unwrap();
+
+    let tabs = ScribeApp::restore_legacy_tabs(vec![a, b]);
+
+    assert_eq!(tabs.len(), 2, "both ordinary files must restore");
+    assert_eq!(tabs[0].text, "first");
+    assert_eq!(tabs[1].text, "second");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_legacy_restore_skips_a_vanished_file_without_losing_the_others() {
+    let dir = std::env::temp_dir().join(format!("scr1b3-legacy-gone-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let real = dir.join("real.md");
+    std::fs::write(&real, "here").unwrap();
+    let ghost = dir.join("ghost.md");
+
+    let tabs = ScribeApp::restore_legacy_tabs(vec![ghost, real]);
+
+    assert_eq!(
+        tabs.len(),
+        1,
+        "the vanished entry is skipped, the real one still restores"
+    );
+    assert_eq!(tabs[0].text, "here");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The reject half. Unix-only for the same reason as the guard's own ordering
+/// test: `//tmp/x` is UNC-classified AND reachable, so it is the only fixture
+/// that can tell a working guard from a deleted one. An unreachable
+/// `\attacker\share\x` would fail to open anyway and prove nothing.
+#[cfg(unix)]
+#[test]
+fn the_legacy_restore_refuses_a_path_that_reaches_off_this_machine() {
+    let dir = std::env::temp_dir().join(format!("scr1b3-legacy-remote-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let real = dir.join("notes.md");
+    std::fs::write(&real, "openable").unwrap();
+    let remote = std::path::PathBuf::from(format!("/{}", real.display()));
+    assert!(
+        crate::session_path_guard::is_unc_path(&remote),
+        "fixture must be UNC-classified, else it proves nothing"
+    );
+    assert!(
+        std::fs::read_to_string(&remote).is_ok(),
+        "fixture must be READABLE, else the skip could come from the open failing"
+    );
+
+    let tabs = ScribeApp::restore_legacy_tabs(vec![remote]);
+
+    assert!(
+        tabs.is_empty(),
+        "a path that reaches off this machine must not be auto-opened"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
