@@ -127,6 +127,39 @@ jobs:
       - name: Audit forge-wire-manifest.toml
         run: python3 scripts/verify_forge_wire_manifest.py
 
+  bench-smoke:
+    # The four criterion benches (file_load, rope_edits, search,
+    # syntax_highlight) had NO gate: `clippy --all-targets` compile-checks them,
+    # but nothing ever RAN them, so a bench could panic or drift away from the
+    # API it measures and stay green indefinitely.
+    #
+    # `cargo bench -- --test` is criterion's run-once test mode: each benchmark
+    # body executes a single iteration and asserts nothing about timing. That
+    # catches bit-rot deterministically, which is the part CI can actually judge
+    # — wall-clock numbers on a shared runner are noise and are NOT gated here.
+    name: benchmarks smoke (no timing)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Run every benchmark once (bit-rot guard, timing ignored)
+        # `--benches` also picks up the lib's implicit bench target, so this runs
+        # the scribe-core unit tests in RELEASE as well. That is a bonus, not the
+        # point (release-only behaviour differs — overflow checks are off), and
+        # it is why this job takes longer than the bench bodies alone. Keep
+        # `--benches` rather than listing each bench: a newly added bench must be
+        # gated automatically, not silently left out.
+        run: cargo bench -p scribe-core --benches --locked -- --test
+
   fuzz-build:
     # Compile-only check that the cargo-fuzz targets stay buildable (they need
     # nightly + libFuzzer, so they live outside the main workspace). No fuzzing
