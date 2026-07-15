@@ -60,12 +60,28 @@ fn scale_harness(app: ScribeApp) -> egui_kittest::Harness<'static, ScribeApp> {
 /// test. At ~1500 files this is the load-bearing settle loop. `run_ok` (not
 /// `run`) because the focused query field's blinking caret keeps requesting
 /// repaints, which would trip `run`'s max-steps panic. Returns the number of
-/// poll iterations consumed (a finished search returns < cap; a wedged one hits
-/// the cap and the caller's `find_in_files_running` assert fails honestly).
+/// poll iterations consumed, for the callers' assert messages.
+///
+/// Bounded by WALL-CLOCK, not iteration count. An iteration cap (this was 400 ×
+/// 5ms) reads as generous and starves silently: what the loop is waiting for is
+/// a WORKER THREAD, and under CPU contention that worker gets less CPU while
+/// each `run_ok` also gets slower — so the loop burns minutes of real time and
+/// still gives up with the search unfinished. It failed twice that way on a
+/// contended host (146s, then 26s) while passing in 20s on a quiet one, and one
+/// of those took a whole 30-mutant sweep down with it via BaselineFailed. The
+/// failure surfaces as "the search settles to a clean idle state" being false,
+/// which reads exactly like a real bug — a false-RED generator, and CI runners
+/// are small and share hosts.
+///
+/// A deadline is the right shape because it waits LONGER on a slower machine,
+/// which is what a starved worker needs. It is deliberately far above any real
+/// search (a quiet run settles in a few seconds), so it only ever bounds a
+/// genuinely wedged worker.
 fn run_until_search_done(h: &mut egui_kittest::Harness<'static, ScribeApp>) -> usize {
-    const CAP: usize = 400;
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(300);
+    let start = std::time::Instant::now();
     let mut iters = 0;
-    for _ in 0..CAP {
+    while start.elapsed() < DEADLINE {
         iters += 1;
         h.run_ok();
         if !h.state().find_in_files_running {
