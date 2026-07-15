@@ -143,23 +143,13 @@ impl ScribeApp {
         let bdir = session::backup_dir(&dir);
         let mut tabs: Vec<EditorTab> = Vec::new();
 
-        // R6 / S-04 — the manifest is a user-writable on-disk artifact; a
-        // tampered `session.json` can point at a `\\attacker\share\…` UNC path
-        // (→ SMB/NTLM credential leak) or a symlink escaping the prior working
-        // set. Derive the ALLOWED ROOTS for this restore from the parent
-        // directories of the manifest's OWN declared paths (the prior session
-        // roots). Only paths that canonicalize to stay under one of these roots
-        // — and are not UNC, and exist — are auto-opened. See
-        // `session_path_guard::is_safe_restore_path` for the fail-closed rules.
-        let root_candidates: Vec<PathBuf> = manifest
-            .tabs
-            .iter()
-            .filter_map(|s| s.path.as_ref().map(PathBuf::from))
-            .filter(|p| !crate::session_path_guard::is_unc_path(p))
-            .filter_map(|p| p.parent().map(|par| par.to_path_buf()))
-            .collect();
-        let allowed_roots =
-            crate::session_path_guard::allowed_roots(root_candidates.iter().map(|p| p.as_path()));
+        // R6 / S-04 — a tampered `session.json` can point at a
+        // `\\attacker\share\…` UNC path, and restore AUTO-opens it with no
+        // user interaction, which makes Windows authenticate to the attacker's
+        // SMB host and hand over a NetNTLMv2 response. That — a path that
+        // reaches off this machine — is the one thing the guard blocks. See
+        // `session_path_guard` for why it does not also try to fence the
+        // restore inside a "prior working set".
         // Enforce the one-tab-per-file invariant on restore: a file must NEVER be
         // reopened into two tabs. The manifest can legitimately carry two entries
         // for the same path — a stale unsaved-backup entry coexisting with a
@@ -179,18 +169,19 @@ impl ScribeApp {
         for (si, snap) in manifest.tabs.iter().enumerate() {
             let raw_path = snap.path.as_ref().map(PathBuf::from);
             // R6 / S-04 — classify this entry's declared path. A path that
-            // FAILS the restore guard (UNC, nonexistent, or escaping the
-            // allowed roots) is NEVER auto-opened from disk and NEVER carried
-            // as the tab's save target. `path` below is the SAFE path used for
-            // disk re-open / save-target; an unsafe path is dropped to `None`.
+            // FAILS the restore guard (reaches a remote host, or has vanished)
+            // is NEVER auto-opened from disk and NEVER carried as the tab's
+            // save target. `path` below is the SAFE path used for disk
+            // re-open / save-target; an unsafe path is dropped to `None`.
             let path: Option<PathBuf> = match &raw_path {
-                Some(p) if crate::session_path_guard::is_safe_restore_path(p, &allowed_roots) => {
-                    Some(p.clone())
-                }
+                Some(p) if crate::session_path_guard::is_safe_restore_path(p) => Some(p.clone()),
                 Some(p) => {
-                    tracing::warn!(
-                        "session restore: skipping untrusted path {} (UNC / nonexistent / \
-                         escapes the prior session roots) — not auto-opening",
+                    // debug!, not warn!: the path itself is untrusted content,
+                    // and `session.rs` keeps it out of higher log levels for
+                    // that reason. A skipped restore is not an alarm.
+                    tracing::debug!(
+                        "session restore: skipping {} (resolves off this machine, or is gone) \
+                         — not auto-opening",
                         p.display()
                     );
                     None

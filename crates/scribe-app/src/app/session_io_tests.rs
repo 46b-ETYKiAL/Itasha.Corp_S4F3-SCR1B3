@@ -810,85 +810,82 @@ fn an_unreadable_backup_does_not_reopen_from_disk_when_restore_session_is_off() 
     );
 }
 
-/// Point `link` at `target`, or fail with the reason.
+// The symlink fixture that used to live here is gone with the escape-fence it
+// tested. The guard no longer cares where a path resolves to, only whether it
+// reaches off this machine — so the discriminating fixture is now a reachable
+// UNC-classified path (see `reachable_unc_classified` below), not a symlink.
+// Symlink resolution itself is unit-tested in `session_path_guard`, including
+// on Windows.
+
+/// A path that the guard classifies as UNC but that is genuinely REACHABLE,
+/// so `Document::open` would succeed on it if the guard were removed.
 ///
-/// Windows needs Developer Mode (or an elevated shell) for `symlink_file`. This
-/// refuses to skip on failure: the symlink is the only fixture that exercises
-/// the S-04 restore guard at all (see below), and a security test that silently
-/// skips is indistinguishable from one that passes.
-fn symlink_file_or_explain(target: &Path, link: &Path) {
-    #[cfg(windows)]
-    let r = std::os::windows::fs::symlink_file(target, link);
-    #[cfg(unix)]
-    let r = std::os::unix::fs::symlink(target, link);
-    if let Err(e) = r {
-        panic!(
-            "could not create the symlink fixture {} -> {}: {e}\n\
-             On Windows this needs Developer Mode (Settings ▸ System ▸ For \
-             developers) or an elevated shell.",
-            link.display(),
-            target.display()
-        );
-    }
+/// This is what makes the two tests below discriminating. The obvious fixture
+/// — `\\attacker\share\evil.md` — proves nothing: it does not exist, so
+/// `EditorTab::from_path` fails whether or not the guard runs, and the test
+/// passes with the guard DELETED. cargo-mutants proved exactly that about the
+/// old suite: forcing `is_safe_restore_path` to `true` left all nine restore
+/// tests green.
+///
+/// On Linux `//tmp/x` names the same file as `/tmp/x`, which gives us a path
+/// that is UNC-by-classification and openable-in-fact. Windows has no such
+/// path (a real `\\host\share` needs a real SMB server), so these run on unix
+/// only; the Windows-relevant ordering is covered by the unit tests in
+/// `session_path_guard`.
+#[cfg(unix)]
+fn reachable_unc_classified(real: &Path) -> PathBuf {
+    let doubled = PathBuf::from(format!("/{}", real.display()));
+    assert!(
+        crate::session_path_guard::is_unc_path(&doubled),
+        "fixture must be UNC-classified, else it proves nothing"
+    );
+    assert!(
+        std::fs::read_to_string(&doubled).is_ok(),
+        "fixture must be READABLE, else the restore could fail for the wrong \
+         reason and the guard would go untested"
+    );
+    doubled
 }
 
+#[cfg(unix)]
 #[test]
-fn restore_refuses_a_symlink_whose_target_escapes_the_prior_session_roots() {
-    // The wiring test that `restore_skips_a_clean_tab_whose_path_is_untrusted`
-    // only LOOKS like it is. That one declares `\\attacker\share\evil.md`, which
-    // does not exist — so `EditorTab::from_path` fails to open it whether or not
-    // the guard runs, and it passes with the guard REMOVED. cargo-mutants proved
-    // that: forcing the `is_safe_restore_path` guard to `true` left all nine
-    // restore tests green, and `allowed_roots` merely became an unused variable.
-    //
-    // A symlink is the discriminating fixture, because `Document::open` FOLLOWS
-    // it and succeeds. The guard is then the only thing between a tampered
-    // `session.json` and the file it aims at.
-    let dir = temp_dir("restore-symlink-escape");
-    let inside = dir.join("inside");
-    std::fs::create_dir_all(&inside).unwrap();
-    let outside = temp_dir("restore-symlink-escape-outside");
-    let secret = outside.join("secret.md");
-    std::fs::write(&secret, "top secret").unwrap();
-
-    // The manifest declares ONLY the link, so the sole allowed root is
-    // `inside/` — and the link's canonical target lands in `outside/`.
-    let link = inside.join("notes.md");
-    symlink_file_or_explain(&secret, &link);
+fn restore_refuses_a_path_that_reaches_off_this_machine() {
+    let dir = temp_dir("restore-remote-path");
+    let real = dir.join("notes.md");
+    std::fs::write(&real, "openable").unwrap();
+    // Openable in fact, remote by classification: the guard is the ONLY thing
+    // that can stop this from being auto-opened.
+    let remote = reachable_unc_classified(&real);
 
     let got = restore_from(
         &dir,
-        vec![snap(Some(link.display().to_string()), false, None)],
+        vec![snap(Some(remote.display().to_string()), false, None)],
         true,
     );
     assert!(
         got.is_none(),
-        "a symlink whose canonical target escapes the prior session roots must \
-         never be auto-opened"
+        "a path that resolves off this machine must never be auto-opened — \
+         opening it is what hands the user's NetNTLMv2 hash to the host"
     );
 }
 
+#[cfg(unix)]
 #[test]
-fn restore_never_makes_an_escaping_symlink_a_save_target() {
-    // The same escape, but with unsaved work to recover: the content must
-    // survive (we never lose the user's work) while the attacker-chosen path is
-    // stripped — otherwise a later Ctrl+S writes straight through the link into
-    // the outside file.
+fn restore_never_makes_a_remote_path_a_save_target() {
+    // The same reject, but with unsaved work to recover: the content must
+    // survive (we never lose the user's work) while the untrusted path is
+    // stripped — otherwise a later Ctrl+S writes straight back out to it.
     use scribe_core::session;
-    let dir = temp_dir("restore-symlink-target");
-    let inside = dir.join("inside");
-    std::fs::create_dir_all(&inside).unwrap();
-    let outside = temp_dir("restore-symlink-target-outside");
-    let secret = outside.join("secret.md");
-    std::fs::write(&secret, "top secret").unwrap();
-    let link = inside.join("notes.md");
-    symlink_file_or_explain(&secret, &link);
+    let dir = temp_dir("restore-remote-target");
+    let real = dir.join("notes.md");
+    std::fs::write(&real, "on disk").unwrap();
+    let remote = reachable_unc_classified(&real);
 
     session::write_backup(&session::backup_dir(&dir), "u0.bak", "my work").unwrap();
     let (tabs, _) = restore_from(
         &dir,
         vec![snap(
-            Some(link.display().to_string()),
+            Some(remote.display().to_string()),
             true,
             Some("u0.bak".into()),
         )],
@@ -899,13 +896,13 @@ fn restore_never_makes_an_escaping_symlink_a_save_target() {
     assert_eq!(tabs[0].text, "my work", "unsaved work is never lost");
     assert!(
         tabs[0].doc.path().is_none(),
-        "the escaping path MUST be stripped: saving through it would write to \
-         the symlink's target outside every allowed root"
+        "the untrusted path MUST be stripped: saving through it would write \
+         back out to the remote host"
     );
     assert_eq!(
-        std::fs::read_to_string(&secret).unwrap(),
-        "top secret",
-        "the outside file must be untouched by the restore"
+        std::fs::read_to_string(&real).unwrap(),
+        "on disk",
+        "the target file must be untouched by the restore"
     );
 }
 

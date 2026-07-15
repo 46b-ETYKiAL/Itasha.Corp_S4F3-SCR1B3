@@ -20,8 +20,8 @@
 //!   * `EditorTab` (module-private) — built via the same funnel the fixtures use.
 //!   * `scribe_core::session` — the on-disk manifest API, driven through the
 //!     app's test-isolated `config_dir` for a true save→restore round-trip.
-//!   * `crate::session_path_guard::{is_safe_restore_path, allowed_roots}` — the
-//!     R6 / S-04 hardened restore path validation (missing-file + escape).
+//!   * `crate::session_path_guard::is_safe_restore_path` — the R6 / S-04
+//!     restore path validation (remote-path reject + missing-file skip).
 
 #![allow(clippy::wildcard_imports)]
 use super::*;
@@ -355,18 +355,13 @@ fn scenario4_session_save_restore_round_trip_preserves_set_active_and_flags() {
         "dirty state must survive the full save→restore round-trip"
     );
 
-    // R6 / S-04 — every restored path stays within the prior session's roots (no
-    // escape, no UNC). This is the hardened-restore regression guard.
-    let root_candidates: Vec<std::path::PathBuf> = files
-        .iter()
-        .filter_map(|p| p.parent().map(|par| par.to_path_buf()))
-        .collect();
-    let roots =
-        crate::session_path_guard::allowed_roots(root_candidates.iter().map(|p| p.as_path()));
+    // R6 / S-04 — every restored path is an ordinary local file, so none of
+    // them is refused by the restore guard. At scale this is the regression
+    // that matters: the guard must not start rejecting the user's own work.
     for f in &files {
         assert!(
-            crate::session_path_guard::is_safe_restore_path(f, &roots),
-            "an in-bounds project file must pass the restore path-guard: {}",
+            crate::session_path_guard::is_safe_restore_path(f),
+            "an ordinary project file must pass the restore path-guard: {}",
             f.display()
         );
     }
@@ -532,13 +527,12 @@ fn scenario7_restore_with_missing_file_is_graceful_no_panic() {
 
     // R6 path-guard: the present file is restorable; the vanished one is SKIPPED
     // (fail-closed on nonexistence) — never auto-created, never a panic.
-    let roots = crate::session_path_guard::allowed_roots(std::iter::once(project.path()));
     assert!(
-        crate::session_path_guard::is_safe_restore_path(&present, &roots),
+        crate::session_path_guard::is_safe_restore_path(&present),
         "the surviving file must restore"
     );
     assert!(
-        !crate::session_path_guard::is_safe_restore_path(&vanished, &roots),
+        !crate::session_path_guard::is_safe_restore_path(&vanished),
         "a vanished file must be skipped, not auto-opened (graceful, no panic)"
     );
 
@@ -549,7 +543,7 @@ fn scenario7_restore_with_missing_file_is_graceful_no_panic() {
     let mut restored: Vec<EditorTab> = Vec::new();
     for snap in &reloaded.tabs {
         let p = std::path::PathBuf::from(snap.path.as_ref().unwrap());
-        if crate::session_path_guard::is_safe_restore_path(&p, &roots) {
+        if crate::session_path_guard::is_safe_restore_path(&p) {
             if let Ok(tab) = EditorTab::from_path(p) {
                 restored.push(tab);
             }

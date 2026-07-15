@@ -1140,22 +1140,17 @@ impl ScribeApp {
             // scratch_tab` saw the dev machine's live session and restored 2 tabs
             // instead of the expected scratch). Production launches pass
             // watch_config = true, so real restore is unchanged.
-            // R6 / S-04 — the legacy paths-only session file is also a
-            // user-writable on-disk artifact. Apply the same restore guard:
-            // reject UNC / nonexistent / root-escaping paths, self-rooting the
-            // allowed set on the listed paths' own parent directories.
-            let listed = load_session();
-            let legacy_roots = crate::session_path_guard::allowed_roots(
-                listed
-                    .iter()
-                    .filter(|p| !crate::session_path_guard::is_unc_path(p))
-                    .filter_map(|p| p.parent())
-                    .collect::<Vec<_>>(),
-            );
-            for path in listed {
-                if !crate::session_path_guard::is_safe_restore_path(&path, &legacy_roots) {
-                    tracing::warn!(
-                        "session restore (legacy): skipping untrusted path {} — not auto-opening",
+            // R6 / S-04 — the legacy paths-only session file auto-opens too,
+            // so it gets the same guard: a path that reaches off this machine
+            // is never opened. (This call site used to build a "self-rooted"
+            // allowed set from the listed paths' own parents — a fence that
+            // could not fail. See `session_path_guard` for why it was removed
+            // rather than repaired.)
+            for path in load_session() {
+                if !crate::session_path_guard::is_safe_restore_path(&path) {
+                    tracing::debug!(
+                        "session restore (legacy): skipping {} (resolves off this machine, \
+                         or is gone) — not auto-opening",
                         path.display()
                     );
                     continue;
