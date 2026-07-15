@@ -266,3 +266,107 @@ fn tab_cycling_yields_to_the_completion_popup() {
         "with the popup closed, Ctrl+Tab cycles again"
     );
 }
+
+// ---- the KEYBOARD half of the toggles/latches ----
+//
+// `execute_builtin_tests.rs` asserts zen, md-preview and focus-find through the
+// command PALETTE. That is a different code path from the shortcut handler, and
+// mutation testing proved the split matters: four `!` deletions in
+// `keyboard_input.rs` survived the whole suite because the palette tests kept
+// passing. It is the same shape as the fold-all bug this PR fixes — palette
+// worked, shortcut was broken, nothing noticed. So: press the KEYS here.
+
+#[test]
+fn ctrl_f_on_a_closed_find_bar_focuses_the_field() {
+    // If the latch does not fire, the bar opens but the caret stays in the
+    // document — the user's next keystrokes are typed into their file instead of
+    // the search box. `find_open` is true either way, so asserting only that is
+    // blind to it.
+    let (mut app, d) = driven();
+    assert!(!app.find_open, "fixture starts closed");
+
+    d.shortcuts(&mut app, egui::Key::F, CMD);
+
+    assert!(app.find_open, "Ctrl+F opens the find bar");
+    assert!(
+        app.focus_find,
+        "and focuses the field — opening it without focus sends typing to the document"
+    );
+}
+
+#[test]
+fn ctrl_f_on_an_already_open_find_bar_does_not_re_grab_focus() {
+    // The other side of the same latch: focus is requested only on the OPEN
+    // transition, so a second press cannot yank the caret back out of wherever
+    // the user has put it.
+    let (mut app, d) = driven();
+    app.find_open = true;
+    app.focus_find = false;
+
+    d.shortcuts(&mut app, egui::Key::F, CMD);
+
+    assert!(app.find_open, "still open");
+    assert!(
+        !app.focus_find,
+        "focus is a first-open latch, not a re-grab on every press"
+    );
+}
+
+#[test]
+fn ctrl_shift_f_on_a_closed_find_in_files_bar_focuses_the_field() {
+    let (mut app, d) = driven();
+    assert!(!app.find_in_files_open, "fixture starts closed");
+
+    d.shortcuts(&mut app, egui::Key::F, CMD | egui::Modifiers::SHIFT);
+
+    assert!(app.find_in_files_open, "Ctrl+Shift+F opens find-in-files");
+    assert!(app.focus_find_in_files, "and focuses its query field");
+}
+
+#[test]
+fn ctrl_shift_f_on_an_already_open_find_in_files_bar_does_not_re_grab_focus() {
+    let (mut app, d) = driven();
+    app.find_in_files_open = true;
+    app.focus_find_in_files = false;
+
+    d.shortcuts(&mut app, egui::Key::F, CMD | egui::Modifiers::SHIFT);
+
+    assert!(app.find_in_files_open, "still open");
+    assert!(
+        !app.focus_find_in_files,
+        "focus is a first-open latch, not a re-grab on every press"
+    );
+}
+
+#[test]
+fn the_zen_shortcut_toggles_both_ways_and_closes_the_find_bars() {
+    // Covered through the palette, never through the key. A dropped `!` here
+    // makes Ctrl+. a dead key while the palette command keeps working.
+    let (mut app, d) = driven();
+    app.find_open = true;
+    app.find_in_files_open = true;
+    assert!(!app.zen_mode, "fixture starts out of zen");
+
+    d.shortcuts(&mut app, egui::Key::Period, CMD);
+    assert!(app.zen_mode, "Ctrl+. enters zen mode");
+    assert!(!app.find_open, "entering zen closes the find bar");
+    assert!(
+        !app.find_in_files_open,
+        "entering zen closes find-in-files too — nothing but the editor remains"
+    );
+
+    d.shortcuts(&mut app, egui::Key::Period, CMD);
+    assert!(app.zen_mode.eq(&false), "and the same key leaves zen mode");
+}
+
+#[test]
+fn the_markdown_preview_shortcut_toggles_both_ways() {
+    let (mut app, d) = driven();
+    assert!(!app.md_preview_open, "fixture starts with the pane closed");
+
+    d.shortcuts(&mut app, egui::Key::V, CMD | egui::Modifiers::SHIFT);
+    assert!(app.md_preview_open, "Ctrl+Shift+V opens the preview pane");
+
+    d.shortcuts(&mut app, egui::Key::V, CMD | egui::Modifiers::SHIFT);
+    assert!(!app.md_preview_open, "and the same key closes it again");
+}
