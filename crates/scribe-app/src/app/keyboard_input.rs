@@ -19,6 +19,13 @@
 use super::keymap::{action, Keymap};
 use super::*;
 
+/// Zoom-gesture deadzone, as a `zoom_delta()` multiplier.
+///
+/// Keeps the feel of the +/-0.5-point scroll deadzone this replaced: at egui's
+/// default `scroll_zoom_speed` (1/200) a 0.5-point wheel step is
+/// `exp(0.5/200) ~= 1.0025`. Below it, trackpad jitter must not resize the font.
+const ZOOM_DEADZONE: f32 = 1.0025;
+
 impl ScribeApp {
     /// Collect this frame's keyboard shortcuts into `act` (a `Pending` action
     /// set) and record the find-bar F3 navigation direction in `find_nav`.
@@ -41,7 +48,6 @@ impl ScribeApp {
         let km = &self.keymap;
 
         ctx.input(|i| {
-            let cmd = i.modifiers.command;
             act.new = km.pressed(i, action::NEW_FILE);
             act.open = km.pressed(i, action::OPEN_FILE);
             act.save = km.pressed(i, action::SAVE);
@@ -135,13 +141,20 @@ impl ScribeApp {
             if km.pressed(i, action::RESET_FONT) {
                 act.font_zoom = Some(0);
             }
-            if cmd {
-                let dy = i.smooth_scroll_delta.y;
-                if dy > 0.5 {
-                    act.font_zoom = Some(1);
-                } else if dy < -0.5 {
-                    act.font_zoom = Some(-1);
-                }
+            // Ctrl+scroll never reached this handler. egui's `zoom_modifier`
+            // defaults to COMMAND, so when a wheel event carries Ctrl (which
+            // egui-winit always attaches) egui folds it into `zoom_factor_delta`
+            // and leaves `smooth_scroll_delta` at ZERO. Reading the scroll delta
+            // under `if cmd` was therefore dead: `dy` was always 0.0.
+            //
+            // `zoom_delta()` is the signal egui actually publishes for "the user
+            // wants to zoom" — and it reports trackpad pinch too, so that now
+            // zooms the font as well. It is a multiplier: 1.0 means no gesture.
+            let zoom = i.zoom_delta();
+            if zoom > ZOOM_DEADZONE {
+                act.font_zoom = Some(1);
+            } else if zoom < 1.0 / ZOOM_DEADZONE {
+                act.font_zoom = Some(-1);
             }
             // Reopen the most recently closed tab (the default is Ctrl+Shift+R —
             // Ctrl+Shift+T is already the theme-cycle chord in this editor).

@@ -370,3 +370,152 @@ fn the_markdown_preview_shortcut_toggles_both_ways() {
     d.shortcuts(&mut app, egui::Key::V, CMD | egui::Modifiers::SHIFT);
     assert!(!app.md_preview_open, "and the same key closes it again");
 }
+
+// ---- font zoom ----
+//
+// The Ctrl+scroll half of this shipped DEAD and no test noticed, because every
+// test drove the keys. egui's `zoom_modifier` defaults to COMMAND, so a wheel
+// event carrying Ctrl — which is exactly the gesture, and egui-winit always
+// attaches the live modifiers — is folded into egui's own zoom accumulator and
+// `smooth_scroll_delta` is left at ZERO. The old handler read that delta under
+// `if cmd`, so `dy` was always 0.0 and the branch could not fire. Nothing in
+// egui or eframe consumes `zoom_factor_delta` either, so the gesture did
+// nothing at all.
+
+/// One frame carrying a wheel gesture. `ctrl` is attached to the wheel event
+/// itself, which is what egui-winit does and what makes egui treat it as a zoom.
+fn wheel(app: &mut ScribeApp, dy: f32, ctrl: bool) -> Option<i8> {
+    let ctx = egui::Context::default();
+    let mods = if ctrl {
+        egui::Modifiers::COMMAND
+    } else {
+        egui::Modifiers::NONE
+    };
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1200.0, 800.0),
+        )),
+        modifiers: mods,
+        events: vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, dy),
+            modifiers: mods,
+            phase: egui::TouchPhase::Move,
+        }],
+        ..Default::default()
+    };
+    let mut act = Pending::default();
+    let mut nav = None;
+    let _ = ctx.run(input, |ctx| {
+        app.handle_keyboard_shortcuts(ctx, &mut act, &mut nav);
+    });
+    act.font_zoom
+}
+
+#[test]
+fn ctrl_scroll_up_zooms_the_font_in() {
+    let mut app = app();
+    assert_eq!(
+        wheel(&mut app, 4.0, true),
+        Some(1),
+        "Ctrl+scroll up must zoom in — this is the gesture that shipped dead"
+    );
+}
+
+#[test]
+fn ctrl_scroll_down_zooms_the_font_out() {
+    let mut app = app();
+    assert_eq!(
+        wheel(&mut app, -4.0, true),
+        Some(-1),
+        "Ctrl+scroll down zooms out"
+    );
+}
+
+#[test]
+fn scrolling_without_ctrl_does_not_resize_the_font() {
+    // Plain scrolling is scrolling. egui only reports a zoom gesture when the
+    // wheel carries the zoom modifier, so this must stay silent in both
+    // directions or every scroll would rescale the document.
+    let mut app = app();
+    assert_eq!(
+        wheel(&mut app, 4.0, false),
+        None,
+        "plain scroll up is not a zoom"
+    );
+    assert_eq!(
+        wheel(&mut app, -4.0, false),
+        None,
+        "plain scroll down is not a zoom"
+    );
+}
+
+#[test]
+fn a_zoom_gesture_inside_the_deadzone_is_ignored() {
+    // Pins BOTH sides of ZOOM_DEADZONE. A threshold whose fixtures all sit far
+    // out on one side reads as "covered" while nothing distinguishes `>` from
+    // `>=` — so straddle it: at egui's default scroll_zoom_speed (1/200),
+    // exp(0.4/200) = 1.0020 is inside and exp(0.6/200) = 1.0030 is outside.
+    let mut app = app();
+    assert_eq!(
+        wheel(&mut app, 0.4, true),
+        None,
+        "jitter must not resize the font"
+    );
+    assert_eq!(wheel(&mut app, -0.4, true), None, "…in either direction");
+    assert_eq!(
+        wheel(&mut app, 0.6, true),
+        Some(1),
+        "but a real nudge just past the deadzone does zoom"
+    );
+    assert_eq!(
+        wheel(&mut app, -0.6, true),
+        Some(-1),
+        "…in either direction"
+    );
+}
+
+#[test]
+fn the_font_zoom_chords_step_in_the_direction_they_name() {
+    // `Some(-1)` vs `Some(1)` is one character, and the difference is Ctrl+Minus
+    // making the text BIGGER. Assert the sign, not just that something happened.
+    let (mut app, d) = driven();
+    let (act, _) = d.shortcuts(&mut app, egui::Key::Equals, CMD);
+    assert_eq!(act.font_zoom, Some(1), "Ctrl+= zooms IN");
+
+    let (act, _) = d.shortcuts(&mut app, egui::Key::Minus, CMD);
+    assert_eq!(act.font_zoom, Some(-1), "Ctrl+- zooms OUT");
+
+    let (act, _) = d.shortcuts(&mut app, egui::Key::Num0, CMD);
+    assert_eq!(act.font_zoom, Some(0), "Ctrl+0 resets to the default size");
+}
+
+#[test]
+fn ctrl_shift_p_on_a_closed_palette_focuses_it() {
+    let (mut app, d) = driven();
+    assert!(!app.palette_open, "fixture starts closed");
+
+    d.shortcuts(&mut app, egui::Key::P, CMD | egui::Modifiers::SHIFT);
+
+    assert!(app.palette_open, "Ctrl+Shift+P opens the palette");
+    assert!(
+        app.focus_palette,
+        "and focuses the query field — otherwise the user types into their document"
+    );
+}
+
+#[test]
+fn ctrl_shift_p_on_an_open_palette_does_not_re_grab_focus() {
+    let (mut app, d) = driven();
+    app.palette_open = true;
+    app.focus_palette = false;
+
+    d.shortcuts(&mut app, egui::Key::P, CMD | egui::Modifiers::SHIFT);
+
+    assert!(app.palette_open, "still open");
+    assert!(
+        !app.focus_palette,
+        "focus is a first-open latch, not a re-grab on every press"
+    );
+}
