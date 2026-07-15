@@ -732,3 +732,59 @@ fn cycle_tab_next_steps_forward_one_from_a_middle_tab() {
 
     assert_eq!(app.active, 1, "Ctrl+Tab from tab 0 must step FORWARD one");
 }
+
+// ---- toggle_fullscreen ----
+//
+// The rest of the codebase treats ViewportCommands as "not headless-assertable"
+// (see the caption-button tests in e2e_overlays.rs, which only assert no-panic).
+// That is truer of Maximize/Minimize, which carry no argument to check — but
+// Fullscreen carries the TARGET STATE, and `ctx.run` hands back every command
+// it emitted in `FullOutput::viewport_output`. So the toggle IS assertable, and
+// it needs to be: mutation testing showed the `!` could be deleted — making
+// "toggle fullscreen" re-assert the state it is already in, i.e. do nothing —
+// with the whole suite still green.
+
+/// Run one frame that applies `act`, returning the viewport commands emitted.
+fn viewport_cmds(app: &mut ScribeApp, act: &mut Pending) -> Vec<egui::ViewportCommand> {
+    let ctx = egui::Context::default();
+    let out = ctx.run(egui::RawInput::default(), |ctx| {
+        app.apply_deferred_actions(ctx, act, flags());
+    });
+    out.viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .map(|v| v.commands.clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn toggle_fullscreen_asks_for_the_opposite_of_the_current_state() {
+    // Starting windowed (the headless default), the toggle must request TRUE.
+    // Without the `!` it would request `false` — the state it is already in —
+    // and F11 would silently do nothing.
+    let (mut app, _) = app();
+    let cmds = viewport_cmds(
+        &mut app,
+        &mut Pending {
+            toggle_fullscreen: true,
+            ..Default::default()
+        },
+    );
+    assert!(
+        cmds.contains(&egui::ViewportCommand::Fullscreen(true)),
+        "windowed => the toggle must ask to ENTER fullscreen, got: {cmds:?}"
+    );
+}
+
+#[test]
+fn no_fullscreen_request_when_the_action_was_not_asked_for() {
+    // The negative control: without the flag, no Fullscreen command at all. If
+    // this fired regardless, the test above would pass for the wrong reason.
+    let (mut app, _) = app();
+    let cmds = viewport_cmds(&mut app, &mut Pending::default());
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, egui::ViewportCommand::Fullscreen(_))),
+        "an idle frame must not touch fullscreen, got: {cmds:?}"
+    );
+}
