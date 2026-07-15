@@ -957,3 +957,101 @@ fn open_cfg_seeds_defaults_on_a_cold_install() {
         "the seed must have content"
     );
 }
+
+// ---- move line up / down ----
+//
+// `move_cursor_line` had been called with dir=1 by every test that touched it
+// (a workflow test and a perf test that only watched edit_gen), so NOTHING
+// asserted that "move line up" moves UP. Deleting the `-` from the dispatch's
+// `move_cursor_line(-1)` — making Alt+Up push the line DOWN — survived the
+// whole suite. Assert the direction, and assert it from the DISPATCH, since
+// that is where the sign lives.
+
+/// A three-line buffer with the caret parked on `line0` (0-based).
+fn app_with_lines(line0: usize) -> (ScribeApp, egui::Context) {
+    let (mut app, ctx) = app();
+    let i = app.active;
+    app.tabs[i].text = "alpha\nbravo\ncharlie".to_string();
+    set_caret_line0(&mut app, line0);
+    (app, ctx)
+}
+
+#[test]
+fn move_line_up_moves_the_caret_line_above_its_predecessor() {
+    let (mut app, ctx) = app_with_lines(1); // on "bravo"
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            move_line_up: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        app.tabs[app.active].text, "bravo\nalpha\ncharlie",
+        "Alt+Up swaps the caret line with the one ABOVE it"
+    );
+    assert_eq!(
+        app.last_cursor_line_col.map(|(l, _)| l),
+        Some(1),
+        "and the caret follows the line it moved (now line 1)"
+    );
+}
+
+#[test]
+fn move_line_down_moves_the_caret_line_below_its_successor() {
+    let (mut app, ctx) = app_with_lines(1); // on "bravo"
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            move_line_down: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        app.tabs[app.active].text, "alpha\ncharlie\nbravo",
+        "Alt+Down swaps the caret line with the one BELOW it"
+    );
+    assert_eq!(
+        app.last_cursor_line_col.map(|(l, _)| l),
+        Some(3),
+        "and the caret follows the line it moved (now line 3)"
+    );
+}
+
+#[test]
+fn move_line_up_from_the_first_line_is_a_no_op() {
+    // The top edge: there is nothing above line 0, so the buffer must be left
+    // exactly as it was rather than wrapping or panicking.
+    let (mut app, ctx) = app_with_lines(0);
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            move_line_up: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        app.tabs[app.active].text, "alpha\nbravo\ncharlie",
+        "nothing is above the first line"
+    );
+}
+
+#[test]
+fn move_line_down_from_the_last_line_is_a_no_op() {
+    let (mut app, ctx) = app_with_lines(2);
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            move_line_down: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        app.tabs[app.active].text, "alpha\nbravo\ncharlie",
+        "nothing is below the last line"
+    );
+}
