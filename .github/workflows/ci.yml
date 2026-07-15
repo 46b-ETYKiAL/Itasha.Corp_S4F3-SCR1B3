@@ -153,6 +153,20 @@ jobs:
             libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+      - name: fuzz/Cargo.lock is current
+        working-directory: fuzz
+        # Every other cargo call in this repo runs `--locked`; `cargo fuzz build`
+        # cannot (cargo-fuzz exposes no such flag and rejects it), so it silently
+        # REGENERATES fuzz/Cargo.lock in the runner and passes. Lockfile drift
+        # was therefore unfailable — and had already happened unnoticed: the
+        # committed lock pinned scribe-core 0.4.57 while the workspace was on
+        # 0.4.59, i.e. the fuzz targets linked a version we no longer ship.
+        #
+        # `cargo metadata --locked` re-resolves against the committed lock and
+        # exits non-zero if it is stale, which restores the guarantee without the
+        # nightly/sanitizer toolchain. Verified BOTH ways: exit 0 against the
+        # current lock, exit 101 against a deliberately staled one.
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Build fuzz targets (compile-only)
         working-directory: fuzz
         run: cargo +nightly fuzz build
