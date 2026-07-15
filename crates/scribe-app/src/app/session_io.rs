@@ -426,11 +426,15 @@ impl ScribeApp {
         }
     }
 
-    /// ADR-0007 exclusion: blocks on a native dialog. Keep this body a thin seam
-    /// between [`Self::save_as_prompt`] and [`Self::commit_save_as`] — anything
-    /// decidable belongs in one of those, where tests can reach it. Under
-    /// `cfg(test)` the dialog is headless and returns `None` (see
-    /// [`super::dialogs`]), i.e. the same as the user cancelling.
+    /// Save-As, end to end: decide → ask → commit. Keep this body a thin seam;
+    /// anything decidable belongs in [`Self::save_as_prompt`] or
+    /// [`Self::commit_save_as`].
+    ///
+    /// No longer an ADR-0007 exclusion. The dialog still cannot be driven by a
+    /// test, but it is now the ONLY part that cannot: `super::dialogs` is
+    /// headless under `cfg(test)` and a test injects the path the user "picked"
+    /// via `dialogs::test_hooks::set_next_save_path`, so this whole flow is
+    /// exercised for real. Nothing injected = the user cancelled.
     pub(super) fn save_as_active(&mut self) {
         let Some(prompt) = self.save_as_prompt() else {
             return;

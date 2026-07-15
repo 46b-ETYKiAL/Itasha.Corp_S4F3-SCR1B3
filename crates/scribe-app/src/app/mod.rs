@@ -1000,13 +1000,47 @@ impl ScribeApp {
         app
     }
 
-    /// A process-unique, per-call temp directory for hermetic test config I/O.
+    /// A per-call temp directory for hermetic test config I/O, guaranteed EMPTY.
+    ///
+    /// `{pid}-{seq}` is unique among *live* processes, but it is NOT unique over
+    /// time: the OS recycles PIDs and these dirs are never cleaned up, so a fresh
+    /// process can be handed a path a long-dead one already populated. Wiping the
+    /// dir is what makes the name a hermetic dir rather than just a unique one.
+    ///
+    /// This is not hypothetical. It failed `approve_plugin_allows_first_contact_
+    /// signed_key` in a full-suite run: a stale dir already pinned `goodplug` to
+    /// an older random key, so `pin_or_match` reported Rotated instead of first
+    /// contact and approval was (correctly) refused. The danger is the SILENT
+    /// case — inheriting state doesn't make a test fail, it makes it test
+    /// something else. That test quietly stopped covering first contact and
+    /// started re-covering key rotation, and nothing said so.
     #[cfg(test)]
     fn unique_test_config_dir() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("scr1b3-test-{}-{n}", std::process::id()))
+        Self::wiped(std::env::temp_dir().join(format!("scr1b3-test-{}-{n}", std::process::id())))
+    }
+
+    /// Guarantee `dir` holds no state from a previous process, then hand it back.
+    ///
+    /// Split out from [`Self::unique_test_config_dir`] purely so it is reachable:
+    /// the caller's path depends on a live PID and an atomic counter, so a test
+    /// cannot arrange for it to be stale. Here the path is an argument, so the
+    /// stale case is directly constructible — see `a_stale_config_dir_is_wiped_
+    /// before_a_test_gets_it`.
+    #[cfg(test)]
+    fn wiped(dir: PathBuf) -> PathBuf {
+        // Ignore NotFound (the normal case); anything else would resurface as a
+        // confusing failure in whichever test happens to land on this path.
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            assert!(
+                e.kind() == std::io::ErrorKind::NotFound,
+                "could not clear stale test config dir {}: {e}",
+                dir.display()
+            );
+        }
+        dir
     }
 
     fn build(

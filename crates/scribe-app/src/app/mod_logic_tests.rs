@@ -378,3 +378,56 @@ fn an_unknown_plugin_command_leaves_the_buffer_untouched_and_says_so() {
         "the toast must reassure that nothing was lost, got: {toast}"
     );
 }
+
+/// A test must never inherit a previous process's state.
+///
+/// `unique_test_config_dir` names dirs `scr1b3-test-{pid}-{seq}`, which is unique
+/// among LIVE processes but not over time: PIDs recycle and these dirs are never
+/// cleaned. A full-suite run really did fail this way — a stale dir already
+/// pinned `goodplug`, so `approve_plugin_allows_first_contact_signed_key` was
+/// handed a rotated key instead of first contact.
+///
+/// The loud failure was the lucky outcome. Inherited state does not reliably
+/// fail a test; it makes the test cover something other than its name.
+#[test]
+fn a_stale_config_dir_is_wiped_before_a_test_gets_it() {
+    let dir = std::env::temp_dir().join(format!("scr1b3-stale-probe-{}", std::process::id()));
+    // Stand in for the dead process: leave a pinned key exactly where a real
+    // stale dir carries one.
+    let plugins = dir.join("plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::fs::write(plugins.join("pinned-keys.toml"), "goodplug = 'stale-key'").unwrap();
+    assert!(
+        plugins.join("pinned-keys.toml").exists(),
+        "probe not staged"
+    );
+
+    let handed_back = ScribeApp::wiped(dir.clone());
+
+    assert_eq!(
+        handed_back, dir,
+        "the dir handed back must be the one asked for"
+    );
+    assert!(
+        !plugins.join("pinned-keys.toml").exists(),
+        "a test would have inherited a pinned key from a dead process"
+    );
+    assert!(
+        !dir.exists(),
+        "the whole stale dir must be gone, not just emptied"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The common path: nothing to wipe is not an error.
+#[test]
+fn wiping_a_dir_that_was_never_created_is_fine() {
+    let dir = std::env::temp_dir().join(format!("scr1b3-absent-probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(!dir.exists(), "probe must start absent");
+    assert_eq!(
+        ScribeApp::wiped(dir.clone()),
+        dir,
+        "NotFound must be ignored"
+    );
+}

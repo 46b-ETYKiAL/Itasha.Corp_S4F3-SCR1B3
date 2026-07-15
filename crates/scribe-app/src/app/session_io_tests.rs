@@ -6,15 +6,19 @@
 //! silently diverging, an attacker-chosen path becoming a save target). All of
 //! it is real file IO against temp dirs — nothing here needs a render loop.
 //!
-//! `save_as_active` itself is still absent: it opens a native `rfd::FileDialog`
-//! and blocks on a human, so it cannot be driven headless. Per ADR-0007 that is
-//! an exclusion, not something to fake a test for. But the exclusion used to
-//! swallow the whole function — including everything decidable BEFORE the
-//! dialog and everything done AFTER it, none of which needs a human. Mutation
-//! testing found that dead zone (its `>=` bound check and its `!=` filter loop
-//! could both be inverted with every test still green), so the decision half is
-//! now `save_as_prompt` and the commit half is `commit_save_as`, both tested
-//! below. Only the dialog call is excluded now.
+//! `save_as_active` is covered here too, which it never used to be. Per ADR-0007
+//! it was excluded because it opens a native `rfd::FileDialog` and blocks on a
+//! human — true of the dialog, but the exclusion had swallowed the whole
+//! function, including everything decidable BEFORE the dialog and everything
+//! done AFTER it, none of which needs a human. Mutation testing found that dead
+//! zone: its `>=` bound check and its `!=` filter loop could both be inverted
+//! with every test green, and later the whole body could be replaced with `()`.
+//!
+//! So it is split — `save_as_prompt` decides, `commit_save_as` writes — and the
+//! dialog's ANSWER is injected via `dialogs::test_hooks::set_next_save_path`.
+//! Stubbing the OS boundary is not the same as supplying the wire: the tests run
+//! the real prompt and the real commit, and only the OS's reply is faked. The
+//! exclusion is now the `rfd` call itself and nothing else.
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
@@ -315,6 +319,55 @@ fn commit_save_as_respects_an_extension_the_user_typed() {
     assert!(
         !dir.join("notes.txt.md").exists(),
         "the default extension must NOT be stacked onto an explicit one"
+    );
+}
+
+#[test]
+fn save_as_active_runs_prompt_then_dialog_then_commit() {
+    // The whole flow, for real: the REAL save_as_prompt decides the name and
+    // filters, the dialog's ANSWER is injected (that is the OS boundary, and the
+    // only part a test cannot drive), and the REAL commit_save_as writes. Until
+    // this existed, `replace save_as_active with ()` was MISSED — a fn nothing
+    // can call is a fn whose body can be deleted with the suite still green.
+    let (mut app, _) = app_with_file("orig.md", "on disk");
+    let active = app.active;
+    app.tabs[active].set_text("edited".into());
+
+    let dir = temp_dir("save-as-active");
+    // No extension: proves commit_save_as's ensure_extension really ran.
+    super::dialogs::test_hooks::set_next_save_path(dir.join("picked"));
+
+    app.save_as_active();
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("picked.md")).unwrap(),
+        "edited",
+        "Save-As must write the buffer to the picked path, extension appended"
+    );
+    assert!(
+        !app.tabs[active].is_dirty(),
+        "a completed Save-As leaves the buffer clean"
+    );
+}
+
+#[test]
+fn save_as_active_writes_nothing_when_the_user_cancels() {
+    // Nothing injected => the dialog reports cancel. The buffer must be left
+    // exactly as it was: no write, and still dirty.
+    let (mut app, path) = app_with_file("orig.md", "on disk");
+    let active = app.active;
+    app.tabs[active].set_text("edited".into());
+
+    app.save_as_active();
+
+    assert!(
+        app.tabs[active].is_dirty(),
+        "a cancelled Save-As must NOT mark the buffer saved"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "on disk",
+        "a cancelled Save-As must not touch the original file either"
     );
 }
 
