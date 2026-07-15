@@ -251,12 +251,17 @@ impl ScribeApp {
         if tabs.is_empty() {
             return None;
         }
-        // Remap the persisted active index through dedup; clamp defensively.
-        let active = snap_to_tab
-            .get(&manifest.active)
-            .copied()
-            .unwrap_or(0)
-            .min(tabs.len() - 1);
+        // Remap the persisted active index through dedup.
+        //
+        // No clamp. Every value in `snap_to_tab` is an index we pushed ourselves
+        // (each < tabs.len()), and `tabs` is non-empty by the check above — so
+        // the `.min(tabs.len() - 1)` that used to sit here could never bind. It
+        // was dead code, not a safety net: 1065 tests never once reached it, and
+        // both mutations of its arithmetic were unkillable by construction.
+        // `manifest.active` is untrusted (the manifest is user-writable), but it
+        // is sanitised by the lookup itself: an out-of-range value simply misses
+        // the map and falls back to the first tab.
+        let active = snap_to_tab.get(&manifest.active).copied().unwrap_or(0);
         Some((tabs, active))
     }
 
@@ -342,61 +347,110 @@ impl ScribeApp {
         }
     }
 
-    pub(super) fn save_as_active(&mut self) {
+    /// Everything Save-As can decide WITHOUT the user: the file name to
+    /// pre-fill and the dialog's filter list. `None` when there is no active
+    /// tab.
+    ///
+    /// Split out of [`Self::save_as_active`] because that fn is an ADR-0007
+    /// exclusion — it blocks on a native `rfd` dialog, so no headless test can
+    /// drive it. That exclusion used to swallow this decision logic too, which
+    /// left it wholly unasserted (mutating its `>=` and its `!=` changed nothing
+    /// any test could see). The exclusion now covers only the dialog call.
+    pub(super) fn save_as_prompt(&self) -> Option<SaveAsPrompt> {
         let active = self.active;
         if active >= self.tabs.len() {
-            return;
+            return None;
         }
-        // Build the Save-As dialog from the configured default format so a new
-        // file suggests e.g. `untitled.md` (Markdown by default). The configured
-        // format is the PRIMARY filter; the other built-in formats follow as
-        // secondary filters, then an "All files" catch-all.
+        // The configured default format drives the suggestion (so a new file
+        // offers e.g. `untitled.md`) and is the PRIMARY filter; the other
+        // built-ins follow, then an "All files" catch-all.
         let fmt = self.config.integration.default_save_format;
         let stem = self.tabs[active]
             .doc
             .path()
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned());
-        let suggested = fmt.suggested_file_name(stem.as_deref());
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter(fmt.filter_label(), &[fmt.extension()])
-            .set_file_name(&suggested);
+        let mut filters = vec![(fmt.filter_label(), fmt.extension())];
         for other in scribe_core::config::DefaultSaveFormat::ALL {
             if other != fmt {
-                dialog = dialog.add_filter(other.filter_label(), &[other.extension()]);
+                filters.push((other.filter_label(), other.extension()));
             }
         }
-        dialog = dialog.add_filter("All files", &["*"]);
-        if let Some(path) = dialog.save_file() {
-            // If the user typed a name with no extension, append the configured
-            // default (so `notes` → `notes.md`); a name that already carries an
-            // explicit extension is respected exactly as given.
-            let path = scribe_core::config::ensure_extension(&path, fmt.extension());
-            let text = self.tabs[active].text.clone();
-            self.tabs[active].doc.set_text(&text);
-            match self.tabs[active].doc.save_as(&path) {
-                Ok(lossy) => {
-                    self.status = format!("saved {}", path.display());
-                    if lossy {
-                        self.toast = Some(format!(
-                            "Saved, but some characters can't be written as {} — they were \
-                             replaced. Convert the file to UTF-8 to keep them.",
-                            self.tabs[active].doc.encoding().name
-                        ));
-                    }
-                    // Change-bar: the saved baseline now includes this session's
-                    // edits, so they flip from unsaved to saved.
-                    self.tabs[active].mark_change_saved();
+        filters.push(("All files", "*"));
+        Some(SaveAsPrompt {
+            suggested: fmt.suggested_file_name(stem.as_deref()),
+            filters,
+            fmt,
+        })
+    }
+
+    /// Commit a Save-As to the `path` the user picked — everything AFTER the
+    /// dialog returns, so it is testable without one.
+    pub(super) fn commit_save_as(
+        &mut self,
+        path: &Path,
+        fmt: scribe_core::config::DefaultSaveFormat,
+    ) {
+        let active = self.active;
+        if active >= self.tabs.len() {
+            return;
+        }
+        // If the user typed a name with no extension, append the configured
+        // default (so `notes` → `notes.md`); a name that already carries an
+        // explicit extension is respected exactly as given.
+        let path = scribe_core::config::ensure_extension(path, fmt.extension());
+        let text = self.tabs[active].text.clone();
+        self.tabs[active].doc.set_text(&text);
+        match self.tabs[active].doc.save_as(&path) {
+            Ok(lossy) => {
+                self.status = format!("saved {}", path.display());
+                if lossy {
+                    self.toast = Some(format!(
+                        "Saved, but some characters can't be written as {} — they were \
+                         replaced. Convert the file to UTF-8 to keep them.",
+                        self.tabs[active].doc.encoding().name
+                    ));
                 }
-                Err(e) => {
-                    tracing::warn!("save failed: {e}");
-                    self.toast = Some(
-                        "Couldn't save the file. Check that you have permission to write here \
+                // Change-bar: the saved baseline now includes this session's
+                // edits, so they flip from unsaved to saved.
+                self.tabs[active].mark_change_saved();
+            }
+            Err(e) => {
+                tracing::warn!("save failed: {e}");
+                self.toast = Some(
+                    "Couldn't save the file. Check that you have permission to write here \
                      and that the disk isn't full, then try again."
-                            .into(),
-                    );
-                }
+                        .into(),
+                );
             }
         }
     }
+
+    /// ADR-0007 exclusion: blocks on a native `rfd` dialog. Keep this body a
+    /// thin seam between [`Self::save_as_prompt`] and [`Self::commit_save_as`] —
+    /// anything decidable belongs in one of those, where tests can reach it.
+    pub(super) fn save_as_active(&mut self) {
+        let Some(prompt) = self.save_as_prompt() else {
+            return;
+        };
+        let mut dialog = rfd::FileDialog::new().set_file_name(&prompt.suggested);
+        for (label, ext) in &prompt.filters {
+            dialog = dialog.add_filter(*label, &[*ext]);
+        }
+        if let Some(path) = dialog.save_file() {
+            self.commit_save_as(&path, prompt.fmt);
+        }
+    }
+}
+
+/// What the Save-As dialog should ask, decided before it opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SaveAsPrompt {
+    /// The pre-filled file name, e.g. `notes.md`.
+    pub suggested: String,
+    /// `(label, extension)` filters IN ORDER — the configured format first, so
+    /// it is the dialog's default.
+    pub filters: Vec<(&'static str, &'static str)>,
+    /// The configured format, appended to a name typed without an extension.
+    pub fmt: scribe_core::config::DefaultSaveFormat,
 }

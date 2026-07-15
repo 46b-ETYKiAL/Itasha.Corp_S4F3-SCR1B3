@@ -6,9 +6,15 @@
 //! silently diverging, an attacker-chosen path becoming a save target). All of
 //! it is real file IO against temp dirs — nothing here needs a render loop.
 //!
-//! `save_as_active` is deliberately absent: it opens a native `rfd::FileDialog`
+//! `save_as_active` itself is still absent: it opens a native `rfd::FileDialog`
 //! and blocks on a human, so it cannot be driven headless. Per ADR-0007 that is
-//! an exclusion, not something to fake a test for.
+//! an exclusion, not something to fake a test for. But the exclusion used to
+//! swallow the whole function — including everything decidable BEFORE the
+//! dialog and everything done AFTER it, none of which needs a human. Mutation
+//! testing found that dead zone (its `>=` bound check and its `!=` filter loop
+//! could both be inverted with every test still green), so the decision half is
+//! now `save_as_prompt` and the commit half is `commit_save_as`, both tested
+//! below. Only the dialog call is excluded now.
 #![allow(clippy::wildcard_imports)]
 use super::*;
 
@@ -85,6 +91,88 @@ fn save_active_writes_the_buffer_and_refreshes_the_disk_baseline() {
     assert!(!app.tabs[active].is_dirty(), "a saved buffer is clean");
 }
 
+// ---- plugin on_save hooks ----
+//
+// `fire_save_hooks` had NO test at all: cargo-mutants could replace the whole
+// function with `()` and every test stayed green. It lets a plugin rewrite the
+// user's buffer on every save, which is about as consequential as this file
+// gets. These drive it through `save_active`, the real caller, rather than
+// reaching for the private fn — the wiring is the part worth protecting.
+
+/// An app with one file-backed tab plus `script` loaded as a plugin.
+fn app_with_save_hook(name: &str, text: &str, script: &str) -> (ScribeApp, PathBuf) {
+    let (mut app, path) = app_with_file(name, text);
+    app.plugins
+        .load_script("test-hook", script)
+        .expect("script");
+    (app, path)
+}
+
+#[test]
+fn a_save_hook_transform_is_applied_to_the_live_buffer() {
+    let (mut app, _path) = app_with_save_hook(
+        "hook.md",
+        "before",
+        r#"
+        fn on_save() { set_buffer_text(buffer_text().to_upper()); }
+        on_event("save", "on_save");
+        "#,
+    );
+    let active = app.active;
+    app.tabs[active].set_text("hello".into());
+
+    app.save_active();
+
+    assert_eq!(
+        app.tabs[active].text, "HELLO",
+        "the on_save hook's transform must land in the live buffer"
+    );
+}
+
+#[test]
+fn a_save_hook_that_changes_nothing_does_not_touch_the_buffer() {
+    // The `pctx.text != text` guard exists so a hook that only notifies does not
+    // fabricate an edit. `set_text` bumps `edit_gen` (and drops the rope cache),
+    // so an unchanged generation is the proof that it was never called.
+    let (mut app, _path) = app_with_save_hook(
+        "noop.md",
+        "before",
+        r#"
+        fn on_save() { notify("looked, touched nothing"); }
+        on_event("save", "on_save");
+        "#,
+    );
+    let active = app.active;
+    app.tabs[active].set_text("hello".into());
+    let gen_before = app.tabs[active].edit_gen;
+
+    app.save_active();
+
+    assert_eq!(app.tabs[active].text, "hello", "text is unchanged");
+    assert_eq!(
+        app.tabs[active].edit_gen, gen_before,
+        "a hook that changes nothing must not re-set the buffer"
+    );
+}
+
+#[test]
+fn the_last_save_hook_notification_becomes_the_status_line() {
+    let (mut app, _path) = app_with_save_hook(
+        "note.md",
+        "before",
+        r#"
+        fn on_save() { notify("first"); notify("formatted by plugin"); }
+        on_event("save", "on_save");
+        "#,
+    );
+    app.save_active();
+
+    assert_eq!(
+        app.status, "formatted by plugin",
+        "the LAST notification wins, and it overrides the `saved …` status"
+    );
+}
+
 #[test]
 fn save_active_applies_the_opt_in_hygiene_and_reflects_it_into_the_buffer() {
     // trim-trailing-whitespace + final-newline are opt-in, and the CLEANED text
@@ -132,6 +220,122 @@ fn save_active_out_of_range_is_a_noop() {
     let (mut app, _) = app_with_file("n.md", "x");
     app.active = 999;
     app.save_active(); // must not panic on the tabs[active] index
+}
+
+// ---- Save-As: everything except the dialog ----
+
+use scribe_core::config::DefaultSaveFormat;
+
+#[test]
+fn save_as_prompt_is_none_without_an_active_tab() {
+    let (mut app, _) = app_with_file("n.md", "x");
+    app.active = 999;
+    assert!(
+        app.save_as_prompt().is_none(),
+        "no active tab means nothing to ask about — and tabs[999] must not be indexed"
+    );
+}
+
+#[test]
+fn save_as_prompt_suggests_the_current_stem_in_the_configured_format() {
+    let (mut app, _) = app_with_file("notes.txt", "x");
+    app.config.integration.default_save_format = DefaultSaveFormat::Markdown;
+
+    let p = app.save_as_prompt().expect("an active tab");
+
+    assert_eq!(
+        p.suggested, "notes.md",
+        "the stem is kept, the configured format supplies the extension"
+    );
+    assert_eq!(p.fmt, DefaultSaveFormat::Markdown);
+}
+
+#[test]
+fn save_as_prompt_offers_the_configured_format_first_and_every_other_exactly_once() {
+    // The `other != fmt` loop exists so the configured format is not listed
+    // twice. Inverting it duplicated the configured format AND dropped every
+    // other one, with nothing to notice.
+    let (mut app, _) = app_with_file("n.md", "x");
+    app.config.integration.default_save_format = DefaultSaveFormat::PlainText;
+
+    let p = app.save_as_prompt().expect("an active tab");
+
+    assert_eq!(
+        p.filters[0],
+        (
+            DefaultSaveFormat::PlainText.filter_label(),
+            DefaultSaveFormat::PlainText.extension()
+        ),
+        "the configured format must be the dialog's default filter"
+    );
+    assert_eq!(
+        *p.filters.last().expect("filters are never empty"),
+        ("All files", "*"),
+        "the catch-all comes last"
+    );
+    for f in DefaultSaveFormat::ALL {
+        let n = p
+            .filters
+            .iter()
+            .filter(|(label, _)| *label == f.filter_label())
+            .count();
+        assert_eq!(n, 1, "{f:?} must be offered exactly once, got {n}");
+    }
+}
+
+#[test]
+fn commit_save_as_appends_the_configured_extension_to_a_bare_name() {
+    let (mut app, _) = app_with_file("orig.md", "body");
+    let dir = temp_dir("saveas-bare");
+    let chosen = dir.join("notes"); // the user typed no extension
+
+    app.commit_save_as(&chosen, DefaultSaveFormat::Markdown);
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("notes.md")).unwrap(),
+        "body",
+        "`notes` must be written as `notes.md`"
+    );
+    assert!(
+        app.status.contains("notes.md"),
+        "the save is reported with the real path, got: {:?}",
+        app.status
+    );
+}
+
+#[test]
+fn commit_save_as_respects_an_extension_the_user_typed() {
+    let (mut app, _) = app_with_file("orig.md", "body");
+    let dir = temp_dir("saveas-explicit");
+    let chosen = dir.join("notes.txt"); // deliberate, despite Markdown default
+
+    app.commit_save_as(&chosen, DefaultSaveFormat::Markdown);
+
+    assert!(chosen.exists(), "the user's chosen name is used verbatim");
+    assert!(
+        !dir.join("notes.txt.md").exists(),
+        "the default extension must NOT be stacked onto an explicit one"
+    );
+}
+
+#[test]
+fn commit_save_as_leaves_the_buffer_clean() {
+    let (mut app, _) = app_with_file("orig.md", "on disk");
+    let active = app.active;
+    app.tabs[active].set_text("edited".into());
+    assert!(app.tabs[active].is_dirty(), "precondition: dirty");
+
+    let dir = temp_dir("saveas-clean");
+    app.commit_save_as(&dir.join("out.md"), DefaultSaveFormat::Markdown);
+
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.md")).unwrap(),
+        "edited"
+    );
+    assert!(
+        !app.tabs[active].is_dirty(),
+        "a saved buffer is clean — the change bar must flip from unsaved to saved"
+    );
 }
 
 // ---- snapshot_session_backups (hot exit) ----
@@ -273,8 +477,18 @@ fn restore_from(
     snaps: Vec<scribe_core::session::TabSnapshot>,
     restore_session: bool,
 ) -> Option<(Vec<EditorTab>, usize)> {
+    restore_from_active(dir, snaps, restore_session, 0)
+}
+
+/// `restore_from` with control over the manifest's persisted active index.
+fn restore_from_active(
+    dir: &Path,
+    snaps: Vec<scribe_core::session::TabSnapshot>,
+    restore_session: bool,
+    active: usize,
+) -> Option<(Vec<EditorTab>, usize)> {
     use scribe_core::session;
-    let manifest = session::SessionManifest::new(snaps, 0);
+    let manifest = session::SessionManifest::new(snaps, active);
     session::save_manifest(dir, &manifest).unwrap();
     with_config_dir(dir, || {
         ScribeApp::restore_tabs_from_manifest(restore_session)
@@ -398,6 +612,63 @@ fn restore_collapses_two_manifest_entries_for_one_file_into_one_tab() {
 }
 
 #[test]
+fn restore_remaps_the_active_index_when_dedup_collapses_entries() {
+    // Two manifest entries for ONE file collapse into a single tab. A persisted
+    // active of 1 pointed at the SECOND entry, so it has to follow that entry to
+    // the tab it merged into (0) rather than dangle past the end.
+    let dir = temp_dir("restore-active-remap");
+    let file = dir.join("dup.md");
+    std::fs::write(&file, "on disk").unwrap();
+    let p = file.display().to_string();
+    scribe_core::session::write_backup(
+        &scribe_core::session::backup_dir(&dir),
+        "d0.bak",
+        "unsaved",
+    )
+    .unwrap();
+
+    let (tabs, active) = restore_from_active(
+        &dir,
+        vec![
+            snap(Some(p.clone()), true, Some("d0.bak".into())),
+            snap(Some(p), false, None),
+        ],
+        true,
+        1,
+    )
+    .expect("restores");
+
+    assert_eq!(tabs.len(), 1, "one file, one tab");
+    assert_eq!(
+        active, 0,
+        "the active pointer follows its entry through dedup"
+    );
+}
+
+#[test]
+fn restore_falls_back_to_the_first_tab_when_the_manifest_active_is_out_of_range() {
+    // `session.json` is user-writable, so `active` is untrusted input. An index
+    // naming no entry must land on the first tab, never past the end.
+    let dir = temp_dir("restore-active-bogus");
+    let file = dir.join("one.md");
+    std::fs::write(&file, "on disk").unwrap();
+
+    let (tabs, active) = restore_from_active(
+        &dir,
+        vec![snap(Some(file.display().to_string()), false, None)],
+        true,
+        999,
+    )
+    .expect("restores");
+
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(
+        active, 0,
+        "a bogus active index falls back to the first tab"
+    );
+}
+
+#[test]
 fn restore_skips_a_tampered_unc_path_but_keeps_its_unsaved_content() {
     // S-04: `session.json` is user-writable. A tampered UNC path must never be
     // auto-opened (SMB/NTLM credential leak) — but the user's unsaved content is
@@ -459,6 +730,130 @@ fn restore_falls_back_to_disk_when_the_backup_is_unreadable() {
     )
     .expect("falls back to the file on disk");
     assert_eq!(tabs[0].text, "disk copy");
+}
+
+#[test]
+fn an_unreadable_backup_does_not_reopen_from_disk_when_restore_session_is_off() {
+    // The OFF mirror of the test above. The fall-through is gated on
+    // `restore_session`, and only the ON side was ever asserted — so forcing
+    // that guard to `true` changed nothing any test could see.
+    let dir = temp_dir("restore-badbackup-off");
+    let file = dir.join("f.md");
+    std::fs::write(&file, "disk copy").unwrap();
+
+    let got = restore_from(
+        &dir,
+        vec![snap(
+            Some(file.display().to_string()),
+            true,
+            Some("missing.bak".into()),
+        )],
+        false,
+    );
+    assert!(
+        got.is_none(),
+        "restore_session is OFF: an unreadable backup must not silently reopen \
+         the file from disk"
+    );
+}
+
+/// Point `link` at `target`, or fail with the reason.
+///
+/// Windows needs Developer Mode (or an elevated shell) for `symlink_file`. This
+/// refuses to skip on failure: the symlink is the only fixture that exercises
+/// the S-04 restore guard at all (see below), and a security test that silently
+/// skips is indistinguishable from one that passes.
+fn symlink_file_or_explain(target: &Path, link: &Path) {
+    #[cfg(windows)]
+    let r = std::os::windows::fs::symlink_file(target, link);
+    #[cfg(unix)]
+    let r = std::os::unix::fs::symlink(target, link);
+    if let Err(e) = r {
+        panic!(
+            "could not create the symlink fixture {} -> {}: {e}\n\
+             On Windows this needs Developer Mode (Settings ▸ System ▸ For \
+             developers) or an elevated shell.",
+            link.display(),
+            target.display()
+        );
+    }
+}
+
+#[test]
+fn restore_refuses_a_symlink_whose_target_escapes_the_prior_session_roots() {
+    // The wiring test that `restore_skips_a_clean_tab_whose_path_is_untrusted`
+    // only LOOKS like it is. That one declares `\\attacker\share\evil.md`, which
+    // does not exist — so `EditorTab::from_path` fails to open it whether or not
+    // the guard runs, and it passes with the guard REMOVED. cargo-mutants proved
+    // that: forcing the `is_safe_restore_path` guard to `true` left all nine
+    // restore tests green, and `allowed_roots` merely became an unused variable.
+    //
+    // A symlink is the discriminating fixture, because `Document::open` FOLLOWS
+    // it and succeeds. The guard is then the only thing between a tampered
+    // `session.json` and the file it aims at.
+    let dir = temp_dir("restore-symlink-escape");
+    let inside = dir.join("inside");
+    std::fs::create_dir_all(&inside).unwrap();
+    let outside = temp_dir("restore-symlink-escape-outside");
+    let secret = outside.join("secret.md");
+    std::fs::write(&secret, "top secret").unwrap();
+
+    // The manifest declares ONLY the link, so the sole allowed root is
+    // `inside/` — and the link's canonical target lands in `outside/`.
+    let link = inside.join("notes.md");
+    symlink_file_or_explain(&secret, &link);
+
+    let got = restore_from(
+        &dir,
+        vec![snap(Some(link.display().to_string()), false, None)],
+        true,
+    );
+    assert!(
+        got.is_none(),
+        "a symlink whose canonical target escapes the prior session roots must \
+         never be auto-opened"
+    );
+}
+
+#[test]
+fn restore_never_makes_an_escaping_symlink_a_save_target() {
+    // The same escape, but with unsaved work to recover: the content must
+    // survive (we never lose the user's work) while the attacker-chosen path is
+    // stripped — otherwise a later Ctrl+S writes straight through the link into
+    // the outside file.
+    use scribe_core::session;
+    let dir = temp_dir("restore-symlink-target");
+    let inside = dir.join("inside");
+    std::fs::create_dir_all(&inside).unwrap();
+    let outside = temp_dir("restore-symlink-target-outside");
+    let secret = outside.join("secret.md");
+    std::fs::write(&secret, "top secret").unwrap();
+    let link = inside.join("notes.md");
+    symlink_file_or_explain(&secret, &link);
+
+    session::write_backup(&session::backup_dir(&dir), "u0.bak", "my work").unwrap();
+    let (tabs, _) = restore_from(
+        &dir,
+        vec![snap(
+            Some(link.display().to_string()),
+            true,
+            Some("u0.bak".into()),
+        )],
+        true,
+    )
+    .expect("the unsaved content still restores");
+
+    assert_eq!(tabs[0].text, "my work", "unsaved work is never lost");
+    assert!(
+        tabs[0].doc.path().is_none(),
+        "the escaping path MUST be stripped: saving through it would write to \
+         the symlink's target outside every allowed root"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&secret).unwrap(),
+        "top secret",
+        "the outside file must be untouched by the restore"
+    );
 }
 
 #[test]
