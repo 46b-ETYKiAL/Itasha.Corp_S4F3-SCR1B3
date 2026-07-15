@@ -1055,3 +1055,49 @@ fn move_line_down_from_the_last_line_is_a_no_op() {
         "nothing is below the last line"
     );
 }
+
+// ---- duplicate_cursor_line ----
+
+#[test]
+fn duplicate_line_inserts_an_exact_copy_below_the_cursor_line() {
+    let (mut app, _ctx) = app_with_lines(1);
+    app.duplicate_cursor_line();
+    assert_eq!(app.tabs[app.active].text, "alpha\nbravo\nbravo\ncharlie");
+}
+
+#[test]
+fn duplicate_line_on_an_empty_buffer_yields_two_empty_lines() {
+    // The ONLY input that discriminates the `trailing_nl && last.is_empty()`
+    // guard. On every other input `&&` and `||` agree, which is why flipping it
+    // survived the whole suite. An empty buffer holds ONE empty line, so
+    // duplicating it must give two — i.e. a single newline. With `||` the guard
+    // pops the only line and the whole operation becomes a silent no-op.
+    let (mut app, _ctx) = app();
+    let i = app.active;
+    app.tabs[i].text = String::new();
+    set_caret_line0(&mut app, 0);
+
+    app.duplicate_cursor_line();
+
+    assert_eq!(
+        app.tabs[i].text, "\n",
+        "duplicating the empty line must produce a second one"
+    );
+}
+
+#[test]
+fn duplicate_line_keeps_a_trailing_newline_from_growing() {
+    // The guard's real job: `"alpha\n"` splits to ["alpha", ""], and that
+    // phantom empty last element must not be duplicated or counted as a line.
+    let (mut app, _ctx) = app();
+    let i = app.active;
+    app.tabs[i].text = "alpha\n".to_string();
+    set_caret_line0(&mut app, 0);
+
+    app.duplicate_cursor_line();
+
+    assert_eq!(
+        app.tabs[i].text, "alpha\nalpha\n",
+        "exactly one trailing newline survives"
+    );
+}

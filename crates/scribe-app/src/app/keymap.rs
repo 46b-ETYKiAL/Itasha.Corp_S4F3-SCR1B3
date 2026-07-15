@@ -427,6 +427,76 @@ mod tests {
         ));
     }
 
+    // ---- exact modifier matching (the PRIMARY branch) ----
+    //
+    // `pressed`'s contract is the first line of its docstring: "Modifiers must
+    // match EXACTLY, so `mod+o` does not fire on Ctrl+Shift+O." Nothing tested
+    // it. Every `&&` in the primary branch could be flipped to `||` with the
+    // whole suite green (cargo-mutants 312a / 312b / 314:33 all survived).
+    //
+    // The reason they all hid: every test above presses `Key::Plus` — the WRONG
+    // key — so `i.key_pressed(c.key)` is always false, which short-circuits the
+    // primary branch and masks everything inside it. Those tests only ever
+    // exercised the Plus-tolerance arm. The shape that discriminates is the
+    // opposite: press the RIGHT key with the WRONG modifiers, so `mods_ok` is
+    // the term that has to decide.
+    //
+    // `find` is `mod+f` and `find_in_files` is `mod+shift+f` — they differ by
+    // exactly one modifier, so a `mods_ok` that stops being exact collapses the
+    // two chords into one.
+
+    const ALT: egui::Modifiers = egui::Modifiers::ALT;
+
+    #[test]
+    fn a_chord_does_not_fire_when_an_extra_modifier_is_held() {
+        let km = Keymap::resolve(&Keybindings::default());
+        assert!(
+            fired(&km, action::FIND, egui::Key::F, CMD),
+            "precondition: Ctrl+F fires find"
+        );
+        assert!(
+            !fired(&km, action::FIND, egui::Key::F, CMD | SHIFT),
+            "Ctrl+Shift+F must not fire the plain `mod+f` chord — that is \
+             find-in-files, a different action"
+        );
+        assert!(
+            !fired(&km, action::FIND, egui::Key::F, CMD | ALT),
+            "Ctrl+Alt+F must not fire `mod+f` either"
+        );
+    }
+
+    #[test]
+    fn a_chord_does_not_fire_when_a_required_modifier_is_missing() {
+        let km = Keymap::resolve(&Keybindings::default());
+        assert!(
+            !fired(&km, action::FIND, egui::Key::F, egui::Modifiers::NONE),
+            "a bare `f` is a character being typed into a note, not a Find"
+        );
+        assert!(
+            !fired(&km, action::FIND, egui::Key::F, SHIFT),
+            "Shift+F is a capital F, not a Find"
+        );
+        assert!(
+            !fired(&km, action::FIND, egui::Key::F, ALT),
+            "Alt+F is not `mod+f`"
+        );
+    }
+
+    #[test]
+    fn a_shifted_chord_is_not_fired_by_its_unshifted_twin() {
+        // The other direction: `mod+shift+f` must need its Shift, or Find and
+        // Find-in-Files both fire on one keypress.
+        let km = Keymap::resolve(&Keybindings::default());
+        assert!(
+            fired(&km, action::FIND_IN_FILES, egui::Key::F, CMD | SHIFT),
+            "precondition: Ctrl+Shift+F fires find-in-files"
+        );
+        assert!(
+            !fired(&km, action::FIND_IN_FILES, egui::Key::F, CMD),
+            "Ctrl+F must not fire the `mod+shift+f` action"
+        );
+    }
+
     #[test]
     fn action_names_match_the_config_schema() {
         // Bidirectional parity: every const names a real binding, and every
