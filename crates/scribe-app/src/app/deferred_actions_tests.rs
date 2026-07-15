@@ -854,3 +854,106 @@ fn bookmark_navigation_says_so_when_there_are_none() {
     );
     assert_eq!(app.status, "no bookmarks in this buffer");
 }
+
+// ---- want_open_cfg (F-038 "open the config file") ----
+//
+// Untested until mutation testing flipped `if !p.exists()` to `if p.exists()`
+// with the suite green. That mutant is destructive: on a machine that HAS a
+// config it rewrites the file from the in-memory struct — silently discarding
+// the user's comments and formatting — and on a cold install it seeds nothing,
+// so the button does nothing at all.
+//
+// These read the GLOBAL `Config::config_file_path()` (not the instance dir), so
+// the env redirect has to be exclusive: cargo runs tests in parallel.
+static CFG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_config_dir<T>(dir: &Path, body: impl FnOnce() -> T) -> T {
+    let _guard = CFG_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let prev = std::env::var_os("SCR1B3_CONFIG_DIR");
+    std::env::set_var("SCR1B3_CONFIG_DIR", dir);
+    let out = body();
+    match prev {
+        Some(v) => std::env::set_var("SCR1B3_CONFIG_DIR", v),
+        None => std::env::remove_var("SCR1B3_CONFIG_DIR"),
+    }
+    out
+}
+
+fn cfg_temp_dir(tag: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "scr1b3-open-cfg/{}-{}-{}",
+        tag,
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn open_cfg_never_overwrites_an_existing_config_file() {
+    // THE destructive case. The user's file is theirs — hand-written comments and
+    // all. "Open" must open it, byte for byte, never rewrite it from the struct.
+    let dir = cfg_temp_dir("existing");
+    let path = dir.join("scr1b3.toml");
+    let hand_written = "# my notes, keep me\n[editor]\nshow_minimap = true\n";
+    std::fs::write(&path, hand_written).unwrap();
+    let (mut app, ctx) = app();
+
+    with_config_dir(&dir, || {
+        apply_flags(
+            &mut app,
+            &ctx,
+            DeferredFlags {
+                want_open_cfg: true,
+                ..flags()
+            },
+        );
+    });
+
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        hand_written,
+        "an existing config must be opened UNTOUCHED — never rewritten from the \
+         in-memory struct, which would eat the user's comments"
+    );
+    assert!(
+        app.tabs.iter().any(|t| t.text == hand_written),
+        "and it must actually open in a tab"
+    );
+}
+
+#[test]
+fn open_cfg_seeds_defaults_on_a_cold_install() {
+    // No file yet: seed it so the user has something to edit, then open it.
+    let dir = cfg_temp_dir("cold");
+    let path = dir.join("scr1b3.toml");
+    assert!(!path.exists(), "fixture starts with no config file");
+    let (mut app, ctx) = app();
+    let before = app.tabs.len();
+
+    with_config_dir(&dir, || {
+        apply_flags(
+            &mut app,
+            &ctx,
+            DeferredFlags {
+                want_open_cfg: true,
+                ..flags()
+            },
+        );
+    });
+
+    assert!(path.exists(), "a cold install seeds the config file");
+    assert_eq!(
+        app.tabs.len(),
+        before + 1,
+        "and opens it, not an empty buffer"
+    );
+    assert!(
+        !std::fs::read_to_string(&path).unwrap().is_empty(),
+        "the seed must have content"
+    );
+}
