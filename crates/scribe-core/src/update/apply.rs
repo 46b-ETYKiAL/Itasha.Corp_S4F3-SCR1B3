@@ -61,7 +61,24 @@ pub fn backup_path_for(exe: &Path) -> PathBuf {
 /// Before this kept-one-prior backup, an update obliterated the old binary with
 /// no recovery path; the backup is what makes the relaunch-failure rollback in
 /// the UI possible.
+///
+/// Fails fast — WITHOUT touching the running binary — when `new` is not a
+/// readable file. Callers verify checksum + signature at DOWNLOAD time, but the
+/// staged file can still be gone by APPLY time (a temp sweeper or AV quarantine
+/// between the two). `self_replace` renames the running executable aside before
+/// it discovers the source is unusable, and does not put it back, so without this
+/// guard that window ends with the user having NO binary at all — the exact
+/// "obliterated with no recovery path" outcome the backup exists to prevent.
+/// See `replace_running_executable_with_missing_source_is_a_noop`.
 pub fn replace_running_executable(new: &Path) -> io::Result<PathBuf> {
+    // Probe the source by OPENING it: `exists()` would still race, and an
+    // unreadable-but-present file must not reach `self_replace` either.
+    fs::File::open(new).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("staged update binary is not readable, running binary left untouched: {e}"),
+        )
+    })?;
     let exe = std::env::current_exe()?;
     let backup = backup_path_for(&exe);
     fs::copy(&exe, &backup)?;
@@ -110,6 +127,50 @@ mod tests {
     fn write(path: &Path, content: &[u8]) {
         let mut f = fs::File::create(path).unwrap();
         f.write_all(content).unwrap();
+    }
+
+    /// A missing staged binary must abort BEFORE the running executable is
+    /// touched — no `.bak` written, and the running binary still on disk.
+    ///
+    /// This is the one `replace_running_executable` case that is safe to run for
+    /// real, precisely BECAUSE it must not reach `self_replace`. It is also how
+    /// the bug it guards was found: `updater::tests::downloaded_ok_chains_into_
+    /// apply_and_surfaces_an_install_failure` feeds a nonexistent staged path to
+    /// this function, and `self_replace` renamed the TEST RUNNER's own binary
+    /// aside and left it there. Under `cargo test` that is invisible (one
+    /// process, binary already loaded, 1785 green). Under `cargo nextest` —
+    /// process-per-test, which is what the coverage job runs — the binary was
+    /// gone and the next 24 updater tests died with "error spawning child
+    /// process: The system cannot find the file specified".
+    ///
+    /// Asserting on `current_exe` is deliberate: a tempdir stand-in would not
+    /// reproduce it, since the destructive call is hard-wired to the RUNNING exe.
+    #[test]
+    fn replace_running_executable_with_missing_source_is_a_noop() {
+        let exe = std::env::current_exe().expect("the test runner has a path");
+        let backup = backup_path_for(&exe);
+        // Do not let a previous run's leftovers decide the result.
+        let _ = fs::remove_file(&backup);
+
+        let missing = exe.with_file_name("definitely-not-a-staged-binary-9f3a");
+        assert!(!missing.exists(), "fixture must not exist");
+
+        let err = replace_running_executable(&missing)
+            .expect_err("a missing staged binary must not be installed");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(
+            err.to_string().contains("running binary left untouched"),
+            "the error must say the binary was spared, got: {err}"
+        );
+        assert!(
+            exe.exists(),
+            "THE RUNNING TEST BINARY WAS DESTROYED — every later nextest process \
+             would fail to spawn"
+        );
+        assert!(
+            !backup.exists(),
+            "a failed apply must not leave a .bak behind: nothing was replaced"
+        );
     }
 
     #[test]

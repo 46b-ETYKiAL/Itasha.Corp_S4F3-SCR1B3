@@ -520,6 +520,15 @@ type CountCache = Option<(u64, crate::grid::DocId, DocCounts)>;
 
 pub struct ScribeApp {
     config: Config,
+    /// The user's `[keybindings]`, resolved into matchable egui chords.
+    ///
+    /// Cached rather than re-parsed per frame: config live-reloads, so
+    /// `handle_keyboard_shortcuts` rebuilds this whenever `keymap_src` no longer
+    /// equals `config.keybindings`, and otherwise reuses it.
+    keymap: keymap::Keymap,
+    /// The `[keybindings]` value `keymap` was built from — the live-reload
+    /// invalidation key.
+    keymap_src: scribe_core::config::Keybindings,
     /// Resolved config/runtime directory (where `scr1b3.toml`, the session
     /// manifest, and the unsaved-buffer backups live). Resolved ONCE at build
     /// from `Config::config_dir()`. `new_test` overrides it to a per-instance
@@ -991,13 +1000,81 @@ impl ScribeApp {
         app
     }
 
-    /// A process-unique, per-call temp directory for hermetic test config I/O.
+    /// R6 / S-04 — filter and open the legacy paths-only session list. A path
+    /// that reaches off this machine is never auto-opened.
+    ///
+    /// Split out of `build` so it is REACHABLE. Its only caller is gated on
+    /// `watch_config`, which is false under `new_test` (a test must not inherit
+    /// the host's real on-disk session), so this loop could never run in a
+    /// test — and the in-diff mutation gate proved what that cost: deleting the
+    /// `!` on the guard, which inverts it into "open exactly the unsafe paths
+    /// and skip the safe ones", left the whole suite green. Taking the list as
+    /// an ARGUMENT is what makes the logic testable at all; an ambient input
+    /// is an untestable one.
+    ///
+    /// (This site used to build a "self-rooted" allowed set from the listed
+    /// paths' own parents — a fence that could not fail. See
+    /// `session_path_guard` for why it was removed rather than repaired.)
+    #[allow(clippy::needless_pass_by_value)]
+    fn restore_legacy_tabs(listed: Vec<PathBuf>) -> Vec<EditorTab> {
+        let mut out = Vec::new();
+        for path in listed {
+            if !crate::session_path_guard::is_safe_restore_path(&path) {
+                tracing::debug!(
+                    "session restore (legacy): skipping {} (resolves off this machine, \
+                     or is gone) — not auto-opening",
+                    path.display()
+                );
+                continue;
+            }
+            if let Ok(t) = EditorTab::from_path(path) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
+    /// A per-call temp directory for hermetic test config I/O, guaranteed EMPTY.
+    ///
+    /// `{pid}-{seq}` is unique among *live* processes, but it is NOT unique over
+    /// time: the OS recycles PIDs and these dirs are never cleaned up, so a fresh
+    /// process can be handed a path a long-dead one already populated. Wiping the
+    /// dir is what makes the name a hermetic dir rather than just a unique one.
+    ///
+    /// This is not hypothetical. It failed `approve_plugin_allows_first_contact_
+    /// signed_key` in a full-suite run: a stale dir already pinned `goodplug` to
+    /// an older random key, so `pin_or_match` reported Rotated instead of first
+    /// contact and approval was (correctly) refused. The danger is the SILENT
+    /// case — inheriting state doesn't make a test fail, it makes it test
+    /// something else. That test quietly stopped covering first contact and
+    /// started re-covering key rotation, and nothing said so.
     #[cfg(test)]
     fn unique_test_config_dir() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("scr1b3-test-{}-{n}", std::process::id()))
+        Self::wiped(std::env::temp_dir().join(format!("scr1b3-test-{}-{n}", std::process::id())))
+    }
+
+    /// Guarantee `dir` holds no state from a previous process, then hand it back.
+    ///
+    /// Split out from [`Self::unique_test_config_dir`] purely so it is reachable:
+    /// the caller's path depends on a live PID and an atomic counter, so a test
+    /// cannot arrange for it to be stale. Here the path is an argument, so the
+    /// stale case is directly constructible — see `a_stale_config_dir_is_wiped_
+    /// before_a_test_gets_it`.
+    #[cfg(test)]
+    fn wiped(dir: PathBuf) -> PathBuf {
+        // Ignore NotFound (the normal case); anything else would resurface as a
+        // confusing failure in whichever test happens to land on this path.
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            assert!(
+                e.kind() == std::io::ErrorKind::NotFound,
+                "could not clear stale test config dir {}: {e}",
+                dir.display()
+            );
+        }
+        dir
     }
 
     fn build(
@@ -1021,11 +1098,42 @@ impl ScribeApp {
         if let Some(e) = config_err.as_ref() {
             tracing::warn!("settings file failed to load, using defaults: {e}");
         }
-        let config_error_banner: Option<String> = config_err.as_ref().map(|_| {
-            "Your settings file couldn't be read, so the app is using default settings. \
-             Open it to check for typos, or restore the defaults."
-                .to_string()
-        });
+        // A keymap problem is not a parse error — the file loaded fine — but it
+        // has the same consequence for the user: a shortcut that does nothing.
+        // Now that `[keybindings]` actually drives input, an unreachable or
+        // colliding binding MUST be surfaced, or the user is back to guessing why
+        // their key "doesn't work". A parse error wins the banner: defaults are in
+        // force, so any keymap complaint would be about bindings that aren't live.
+        // Grammar problems (blank / unparseable / colliding) come from core;
+        // unknown-key problems can only be known once the chord is resolved
+        // against the UI layer's key table, so `keymap` contributes those.
+        let keybinding_issues: Vec<String> = config
+            .keybindings
+            .validate()
+            .iter()
+            .map(|i| i.message())
+            .chain(keymap::Keymap::unknown_key_messages(&config.keybindings))
+            .collect();
+        for issue in &keybinding_issues {
+            tracing::warn!("keybinding problem: {issue}");
+        }
+        let config_error_banner: Option<String> = config_err
+            .as_ref()
+            .map(|_| {
+                "Your settings file couldn't be read, so the app is using default settings. \
+                 Open it to check for typos, or restore the defaults."
+                    .to_string()
+            })
+            .or_else(|| {
+                keybinding_issues.first().map(|first| {
+                    let rest = match keybinding_issues.len() - 1 {
+                        0 => String::new(),
+                        1 => " (and 1 more keybinding problem)".to_string(),
+                        n => format!(" (and {n} more keybinding problems)"),
+                    };
+                    format!("Keyboard shortcut problem: {first}.{rest}")
+                })
+            });
         let mut toast = config_err.map(|_| {
             "Your settings file couldn't be read — using default settings for now.".to_string()
         });
@@ -1066,30 +1174,7 @@ impl ScribeApp {
             // scratch_tab` saw the dev machine's live session and restored 2 tabs
             // instead of the expected scratch). Production launches pass
             // watch_config = true, so real restore is unchanged.
-            // R6 / S-04 — the legacy paths-only session file is also a
-            // user-writable on-disk artifact. Apply the same restore guard:
-            // reject UNC / nonexistent / root-escaping paths, self-rooting the
-            // allowed set on the listed paths' own parent directories.
-            let listed = load_session();
-            let legacy_roots = crate::session_path_guard::allowed_roots(
-                listed
-                    .iter()
-                    .filter(|p| !crate::session_path_guard::is_unc_path(p))
-                    .filter_map(|p| p.parent())
-                    .collect::<Vec<_>>(),
-            );
-            for path in listed {
-                if !crate::session_path_guard::is_safe_restore_path(&path, &legacy_roots) {
-                    tracing::warn!(
-                        "session restore (legacy): skipping untrusted path {} — not auto-opening",
-                        path.display()
-                    );
-                    continue;
-                }
-                if let Ok(t) = EditorTab::from_path(path) {
-                    tabs.push(t);
-                }
-            }
+            tabs.extend(Self::restore_legacy_tabs(load_session()));
         }
         if tabs.is_empty() {
             tabs.push(EditorTab::scratch());
@@ -1116,9 +1201,13 @@ impl ScribeApp {
 
         // Built from `config` before the struct literal moves `config` in.
         let spell = build_spell_engine(&config);
+        let keymap_src = config.keybindings.clone();
+        let keymap = keymap::Keymap::resolve(&keymap_src);
 
         let app = Self {
             config,
+            keymap,
+            keymap_src,
             issue_intake: crate::issue_intake::IssueIntakeState::default(),
             config_dir: Config::config_dir(),
             theme,
@@ -1279,20 +1368,26 @@ impl ScribeApp {
     /// Graceful: missing/unconfigured servers just surface a notice.
     fn start_lsp_for_active(&mut self) {
         let active = self.active.min(self.tabs.len().saturating_sub(1));
+        // Match on the PATH first. `language_hint()` is derived from the path
+        // (it is the file's extension), so `Some(lang)` cannot occur without a
+        // path — matching on the hint first made the `(_, None)` arm dead code,
+        // and an UNSAVED buffer fell into the no-language arm and was told
+        // "couldn't detect this file's language" when the real problem is that
+        // it has never been saved. Each case now gets the message written for it.
         let (lang, path, text) = match self.tabs.get(active) {
-            Some(t) => match (t.doc.language_hint(), t.doc.path()) {
-                (Some(lang), Some(path)) => (lang, path.to_path_buf(), t.text.clone()),
+            Some(t) => match (t.doc.path(), t.doc.language_hint()) {
+                (Some(path), Some(lang)) => (lang, path.to_path_buf(), t.text.clone()),
                 (None, _) => {
+                    self.toast =
+                        Some("Save the file first, then start the language server.".into());
+                    return;
+                }
+                (Some(_), None) => {
                     self.toast = Some(
                         "Couldn't detect this file's language. Save it with a file extension \
                          (like .rs or .py) to enable language features."
                             .into(),
                     );
-                    return;
-                }
-                (_, None) => {
-                    self.toast =
-                        Some("Save the file first, then start the language server.".into());
                     return;
                 }
             },
@@ -1942,6 +2037,8 @@ mod build_plugins;
 mod builtins;
 mod chrome;
 mod deferred_actions;
+/// The single seam to the OS file dialogs — headless under `cfg(test)`.
+pub(crate) mod dialogs;
 mod drag_scroll;
 mod editor_overlays;
 mod file_ops;
@@ -1952,6 +2049,7 @@ mod frame_tick;
 mod grid_methods;
 mod grid_render;
 mod keyboard_input;
+mod keymap;
 mod modals;
 mod multi_cursor_glue;
 mod render_support;
@@ -2030,6 +2128,24 @@ mod indent_tests;
 
 #[cfg(test)]
 mod text_ops_tests;
+
+#[cfg(test)]
+mod text_ops_selection_tests;
+
+#[cfg(test)]
+mod session_io_tests;
+
+#[cfg(test)]
+mod file_ops_tests;
+
+#[cfg(test)]
+mod deferred_actions_tests;
+
+#[cfg(test)]
+mod keyboard_input_tests;
+
+#[cfg(test)]
+mod mod_logic_tests;
 
 #[cfg(test)]
 mod execute_builtin_tests;

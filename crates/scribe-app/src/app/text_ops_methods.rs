@@ -410,6 +410,11 @@ impl ScribeApp {
             return;
         }
         let copy = lines[ln].clone();
+        // `ln + 1` (below) reads as the intent. Note for anyone chasing the
+        // permanently-surviving `+`→`*` mutant here: it is EQUIVALENT, not a
+        // test gap. `copy == lines[ln]`, so inserting it before or after itself
+        // both yield `[…, X, X, …]` — identical output for every input. No test
+        // can kill it because there is nothing to detect.
         lines.insert(ln + 1, copy);
         *text = lines.join("\n");
         if trailing_nl {

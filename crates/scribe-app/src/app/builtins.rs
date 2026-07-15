@@ -22,7 +22,7 @@ impl ScribeApp {
             BuiltinCommand::NewFile => self.new_tab(),
             BuiltinCommand::OpenFile => self.open_dialog(),
             BuiltinCommand::OpenFolder => {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                if let Some(folder) = super::dialogs::pick_folder() {
                     self.status = format!("folder: {}", folder.display());
                     self.open_folder_root(folder);
                 }

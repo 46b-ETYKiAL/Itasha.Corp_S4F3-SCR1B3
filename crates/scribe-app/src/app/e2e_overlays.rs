@@ -37,6 +37,75 @@ fn caption_app() -> ScribeApp {
     ScribeApp::new_test(cfg)
 }
 
+// ─────────────────────────── F1 cheatsheet ↔ live keymap ────────────────────
+
+/// A cheatsheet app with `[keybindings]` overridden, ready to render the modal.
+fn cheatsheet_app(edit: impl FnOnce(&mut Config)) -> ScribeApp {
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = true;
+    cfg.appearance.frameless = false;
+    edit(&mut cfg);
+    let mut app = ScribeApp::new_test(cfg);
+    app.cheatsheet_open = true;
+    app
+}
+
+/// How `mod` reads on THIS platform. The editor renders Cmd on macOS and Ctrl
+/// elsewhere, so a test that hard-codes "Ctrl" only tests two of the three OSes
+/// CI builds — as the macOS runner duly proved.
+const MOD: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
+
+/// The F1 cheatsheet shows the chord the user ACTUALLY has.
+///
+/// The table hard-coded "Ctrl+N". That was accurate only while chords were
+/// hard-wired; once rebinding works, a static table teaches the wrong key. Drives
+/// the real modal and reads the rendered text, so it fails if the render path
+/// ever goes back to `entry.chord`.
+#[test]
+fn cheatsheet_renders_the_rebound_chord_not_the_default() {
+    let mut h = harness(cheatsheet_app(|c| c.keybindings.new_file = "mod+e".into()));
+    h.run();
+    assert!(
+        h.query_by_label(&format!("{MOD}+E")).is_some(),
+        "the cheatsheet must show the rebound {MOD}+E for New file"
+    );
+    assert!(
+        h.query_by_label(&format!("{MOD}+N")).is_none(),
+        "the cheatsheet must NOT still advertise the displaced {MOD}+N"
+    );
+}
+
+/// An unbound action says so rather than advertising a key that does nothing.
+#[test]
+fn cheatsheet_marks_an_unbound_action() {
+    let mut h = harness(cheatsheet_app(|c| c.keybindings.new_file = String::new()));
+    h.run();
+    assert!(
+        h.query_by_label("unbound").is_some(),
+        "a blank binding must render as 'unbound', not as its old default chord"
+    );
+}
+
+/// A hard-wired row keeps its static text (the fallback path still works), with
+/// the platform's own modifier name.
+///
+/// Copy is `Key::C + Modifiers::COMMAND`, which IS Cmd+C on macOS — so the whole
+/// table reads in one voice rather than half "Cmd+E", half "Ctrl+C".
+#[test]
+fn cheatsheet_keeps_static_text_for_non_rebindable_rows() {
+    let mut h = harness(cheatsheet_app(|_| {}));
+    h.run();
+    assert!(
+        h.query_by_label(&format!("{MOD}+C")).is_some(),
+        "Copy is not rebindable, so its row must still render its static chord — \
+         localized to this platform's modifier"
+    );
+}
+
 // ───────────────────── every settings pane renders its body ─────────────────
 
 /// Each settings category, navigated by its accessible label, must render its

@@ -10,11 +10,24 @@
 //! `app/mod.rs` via `pub(crate) use commands::*;` so existing call sites
 //! (`crate::app::BUILTIN_COMMANDS`, `super::*`, …) are unchanged.
 
+use super::keymap::action;
+
 // ---- Keyboard shortcut cheatsheet table (F-014) ----
 
 pub(crate) struct ShortcutEntry {
+    /// Fallback chord text, used only when `bindings` is empty (a shortcut that
+    /// is not rebindable). For a rebindable row this is the DEFAULT chord and is
+    /// not what gets rendered — the live keymap is.
     pub chord: &'static str,
     pub action: &'static str,
+    /// The `[keybindings]` actions this row describes, or `&[]` when the shortcut
+    /// is hard-wired.
+    ///
+    /// A rebindable row MUST list its actions: the cheatsheet renders the user's
+    /// CURRENT chord from these, so a row left at `&[]` would keep showing the
+    /// default after a rebind and quietly lie. Several actions render as one row
+    /// (font zoom is in / out / reset).
+    pub bindings: &'static [&'static str],
 }
 
 /// The canonical "what shortcuts does SCR1B3 ship?" table. Rendered by the
@@ -26,200 +39,268 @@ pub(crate) const KEYBOARD_SHORTCUTS: &[ShortcutEntry] = &[
     ShortcutEntry {
         chord: "Ctrl+N",
         action: "New file",
+        bindings: &[action::NEW_FILE],
     },
     ShortcutEntry {
         chord: "Ctrl+O",
         action: "Open file…",
+        bindings: &[action::OPEN_FILE],
     },
     ShortcutEntry {
         chord: "Ctrl+S",
         action: "Save active buffer",
+        bindings: &[action::SAVE],
     },
     ShortcutEntry {
         chord: "Ctrl+W",
         action: "Close active tab",
+        bindings: &[action::CLOSE_TAB],
     },
     ShortcutEntry {
         chord: "Ctrl+Tab",
         action: "Cycle to next tab",
+        bindings: &[action::NEXT_TAB],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+Tab",
         action: "Cycle to previous tab",
+        bindings: &[action::PREV_TAB],
     },
     ShortcutEntry {
         chord: "Ctrl+\\",
         action: "Toggle multi-note grid",
+        bindings: &[action::TOGGLE_GRID],
     },
     ShortcutEntry {
         chord: "Ctrl+F",
         action: "Find in buffer",
+        bindings: &[action::FIND],
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+F",
+        action: "Find in files (project-wide)",
+        bindings: &[action::FIND_IN_FILES],
     },
     ShortcutEntry {
         chord: "Ctrl+H",
         action: "Find + replace in buffer",
+        bindings: &[action::REPLACE],
     },
     ShortcutEntry {
         chord: "Ctrl+/",
         action: "Toggle line comment (per-language prefix)",
+        bindings: &[action::TOGGLE_COMMENT],
     },
     ShortcutEntry {
         chord: "Ctrl+G",
         action: "Go to line (or line:column)",
+        bindings: &[action::GOTO_LINE],
     },
     ShortcutEntry {
         chord: "Ctrl+R",
         action: "Open a recent file (MRU list)",
+        bindings: &[action::RECENT_FILES],
     },
     ShortcutEntry {
         chord: "Ctrl+P",
         action: "Fuzzy-find a file in the project",
+        bindings: &[action::FUZZY_FINDER],
     },
     ShortcutEntry {
         chord: "Ctrl+F2",
         action: "Toggle a bookmark on the cursor line",
+        bindings: &[action::TOGGLE_BOOKMARK],
     },
     ShortcutEntry {
         chord: "F2",
         action: "Jump to the next bookmark",
+        bindings: &[action::NEXT_BOOKMARK],
     },
     ShortcutEntry {
         chord: "Shift+F2",
         action: "Jump to the previous bookmark",
+        bindings: &[action::PREV_BOOKMARK],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+O",
         action: "Go to a symbol (definition) in the active buffer",
+        bindings: &[action::GOTO_SYMBOL],
     },
     ShortcutEntry {
         chord: "Alt+Up",
         action: "Move cursor line up",
+        bindings: &[action::MOVE_LINE_UP],
     },
     ShortcutEntry {
         chord: "Alt+Down",
         action: "Move cursor line down",
+        bindings: &[action::MOVE_LINE_DOWN],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+D",
         action: "Duplicate cursor line",
+        bindings: &[action::DUPLICATE_LINE],
     },
     ShortcutEntry {
         chord: "Ctrl+J",
         action: "Join cursor line with next",
+        bindings: &[action::JOIN_LINES],
     },
     ShortcutEntry {
         chord: "Ctrl+Space",
         action: "Identifier completion (popup)",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+P",
         action: "Command palette",
+        bindings: &[action::COMMAND_PALETTE],
     },
     ShortcutEntry {
         chord: "F1",
         action: "Show this keyboard cheatsheet",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "F11",
         action: "Toggle fullscreen — editor only, all chrome hidden (Esc exits)",
+        bindings: &[action::TOGGLE_FULLSCREEN],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+T",
         action: "Cycle to the next built-in theme",
+        bindings: &[action::CYCLE_THEME],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+M",
         action: "Toggle minimap on/off",
+        bindings: &[action::TOGGLE_MINIMAP],
+    },
+    ShortcutEntry {
+        chord: "Ctrl+Shift+V",
+        action: "Toggle the markdown live-preview panel",
+        bindings: &[action::TOGGLE_MD_PREVIEW],
+    },
+    ShortcutEntry {
+        chord: "Ctrl+M",
+        action: "Jump to the matching bracket",
+        bindings: &[action::JUMP_BRACKET],
     },
     ShortcutEntry {
         chord: "Esc",
         action: "Close find / palette / cheatsheet / completion popup",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+[",
         action: "Fold every region in the active buffer",
+        bindings: &[action::FOLD_ALL],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+]",
         action: "Expand every folded region",
+        bindings: &[action::EXPAND_ALL],
     },
     ShortcutEntry {
         chord: "Ctrl+C",
         action: "Copy selection to clipboard",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+X",
         action: "Cut selection to clipboard",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+V",
         action: "Paste from clipboard",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+Z",
         action: "Undo",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+Z",
         action: "Redo",
+        bindings: &[],
     },
     ShortcutEntry {
         // Phosphor (Thin) ARROW_DOWN (U+E03E) / ARROW_UP (U+E08E) — the bare
         // U+2193/U+2191 arrows were tofu in the bundled fonts.
         chord: "Ctrl+Alt+\u{E03E} / \u{E08E}",
         action: "Add caret below / above (multi-cursor — in-house editor)",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+D",
         action: "Select word, then add caret on next occurrence (in-house editor)",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Alt+drag",
         action: "Column / block selection (in-house editor)",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Esc",
         action: "Collapse multi-cursor to one caret",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+= / Ctrl+- / Ctrl+0",
         action: "Zoom font in / out / reset (also Ctrl+scroll)",
+        bindings: &[
+            action::INCREASE_FONT,
+            action::DECREASE_FONT,
+            action::RESET_FONT,
+        ],
     },
     ShortcutEntry {
         chord: "Ctrl+.",
         action: "Toggle zen / distraction-free mode (Esc exits)",
+        bindings: &[action::TOGGLE_ZEN],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+R",
         action: "Reopen the most recently closed tab",
+        bindings: &[action::REOPEN_TAB],
     },
     ShortcutEntry {
         chord: "Tab / Shift+Tab",
         action: "Indent / outdent selected lines (experimental editor)",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+K",
         action: "Delete the current line (experimental editor)",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+U / Ctrl+Shift+U",
         action: "Lowercase / uppercase the selection (experimental editor)",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+Enter",
         action: "Toggle the task checkbox on the caret / selected lines",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+B / Ctrl+I",
         action: "Toggle bold / italic on the selection",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+`",
         action: "Toggle inline code on the selection",
+        bindings: &[],
     },
     ShortcutEntry {
         chord: "Ctrl+Shift+X",
         action: "Toggle strikethrough on the selection",
+        bindings: &[],
     },
 ];
 
@@ -321,8 +402,14 @@ pub(crate) enum EditorAction {
 
 pub(crate) struct BuiltinEntry {
     pub label: &'static str,
+    /// Fallback shortcut hint, used only when `bindings` is empty (a hard-wired
+    /// shortcut, or no shortcut at all). For a rebindable command this is the
+    /// DEFAULT chord and is not what the palette renders — the live keymap is.
     pub shortcut: &'static str,
     pub action: BuiltinCommand,
+    /// The `[keybindings]` actions behind this command, or `&[]` when it has no
+    /// rebindable chord. See [`ShortcutEntry::bindings`].
+    pub bindings: &'static [&'static str],
 }
 
 /// The full registry, alphabetised by label so the palette is stable across
@@ -333,322 +420,386 @@ pub(crate) const BUILTIN_COMMANDS: &[BuiltinEntry] = &[
         label: "Close active tab",
         shortcut: "",
         action: BuiltinCommand::CloseActiveTab,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Close all tabs",
         shortcut: "",
         action: BuiltinCommand::CloseAllTabs,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Convert to Markdown and save as .md",
         shortcut: "",
         action: BuiltinCommand::ConvertToMarkdown,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Copy",
         shortcut: "Ctrl+C",
         action: BuiltinCommand::Copy,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Cut",
         shortcut: "Ctrl+X",
         action: BuiltinCommand::Cut,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Cycle theme",
         shortcut: "",
         action: BuiltinCommand::CycleTheme,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Expand all folds",
         shortcut: "Ctrl+Shift+]",
         action: BuiltinCommand::ExpandAll,
+        bindings: &[action::EXPAND_ALL],
     },
     BuiltinEntry {
         label: "Export as HTML…",
         shortcut: "",
         action: BuiltinCommand::ExportAsHtml,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Find in buffer",
         shortcut: "Ctrl+F",
         action: BuiltinCommand::OpenFind,
+        bindings: &[action::FIND],
     },
     BuiltinEntry {
         label: "Fold all regions",
         shortcut: "Ctrl+Shift+[",
         action: BuiltinCommand::FoldAll,
+        bindings: &[action::FOLD_ALL],
     },
     BuiltinEntry {
         label: "Line endings: CR (classic Mac)",
         shortcut: "",
         action: BuiltinCommand::SetLineEndingsCr,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Line endings: CRLF (Windows)",
         shortcut: "",
         action: BuiltinCommand::SetLineEndingsCrlf,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Line endings: LF (Unix)",
         shortcut: "",
         action: BuiltinCommand::SetLineEndingsLf,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Go to symbol…",
         shortcut: "Ctrl+Shift+O",
         action: BuiltinCommand::GoToSymbol,
+        bindings: &[action::GOTO_SYMBOL],
     },
     BuiltinEntry {
         label: "Manage plugins",
         shortcut: "",
         action: BuiltinCommand::OpenPluginManager,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Navigate to next bookmark",
         shortcut: "F2",
         action: BuiltinCommand::NextBookmark,
+        bindings: &[action::NEXT_BOOKMARK],
     },
     BuiltinEntry {
         label: "Navigate to previous bookmark",
         shortcut: "Shift+F2",
         action: BuiltinCommand::PrevBookmark,
+        bindings: &[action::PREV_BOOKMARK],
     },
     BuiltinEntry {
         label: "New file",
         shortcut: "Ctrl+N",
         action: BuiltinCommand::NewFile,
+        bindings: &[action::NEW_FILE],
     },
     BuiltinEntry {
         label: "Next tab",
         shortcut: "",
         action: BuiltinCommand::CycleTabNext,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Open file…",
         shortcut: "Ctrl+O",
         action: BuiltinCommand::OpenFile,
+        bindings: &[action::OPEN_FILE],
     },
     BuiltinEntry {
         label: "Open folder…",
         shortcut: "",
         action: BuiltinCommand::OpenFolder,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Open recent folder",
         shortcut: "",
         action: BuiltinCommand::OpenRecentFolder,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Open settings",
         shortcut: "",
         action: BuiltinCommand::OpenSettings,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Paste",
         shortcut: "Ctrl+V",
         action: BuiltinCommand::Paste,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Previous tab",
         shortcut: "",
         action: BuiltinCommand::CycleTabPrev,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Redo",
         shortcut: "Ctrl+Shift+Z",
         action: BuiltinCommand::Redo,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Report an issue…",
         shortcut: "",
         action: BuiltinCommand::ReportIssue,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Save",
         shortcut: "Ctrl+S",
         action: BuiltinCommand::Save,
+        bindings: &[action::SAVE],
     },
     BuiltinEntry {
         label: "Show command palette",
         shortcut: "Ctrl+Shift+P",
         action: BuiltinCommand::OpenPalette,
+        bindings: &[action::COMMAND_PALETTE],
     },
     BuiltinEntry {
         label: "Sort lines (A-Z)",
         shortcut: "",
         action: BuiltinCommand::SortLines,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Sort lines (A-Z, unique)",
         shortcut: "",
         action: BuiltinCommand::SortLinesUnique,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Trim trailing whitespace",
         shortcut: "",
         action: BuiltinCommand::TrimTrailingWhitespace,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Ensure final newline",
         shortcut: "",
         action: BuiltinCommand::EnsureFinalNewline,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Convert indentation to spaces",
         shortcut: "",
         action: BuiltinCommand::ConvertIndentToSpaces,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Convert indentation to tabs",
         shortcut: "",
         action: BuiltinCommand::ConvertIndentToTabs,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Reveal file in explorer",
         shortcut: "",
         action: BuiltinCommand::RevealInExplorer,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Copy file path",
         shortcut: "",
         action: BuiltinCommand::CopyFilePath,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Jump to matching bracket",
         shortcut: "Ctrl+M",
         action: BuiltinCommand::JumpMatchingBracket,
+        bindings: &[action::JUMP_BRACKET],
     },
     BuiltinEntry {
         label: "Insert date/time (UTC, ISO-8601)",
         shortcut: "",
         action: BuiltinCommand::InsertDateTime,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Duplicate selection (or line)",
         shortcut: "",
         action: BuiltinCommand::DuplicateSelection,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Start language server for current file",
         shortcut: "",
         action: BuiltinCommand::StartLsp,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle bookmark on cursor line",
         shortcut: "Ctrl+F2",
         action: BuiltinCommand::ToggleBookmark,
+        bindings: &[action::TOGGLE_BOOKMARK],
     },
     BuiltinEntry {
         label: "Toggle line numbers",
         shortcut: "",
         action: BuiltinCommand::ToggleLineNumbers,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle change bar (edited-line markers)",
         shortcut: "",
         action: BuiltinCommand::ToggleChangeBar,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle diff vs disk",
         shortcut: "",
         action: BuiltinCommand::ToggleDiffView,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle markdown preview",
         shortcut: "Ctrl+Shift+V",
         action: BuiltinCommand::ToggleMarkdownPreview,
+        bindings: &[action::TOGGLE_MD_PREVIEW],
     },
     BuiltinEntry {
         label: "Toggle minimap",
         shortcut: "",
         action: BuiltinCommand::ToggleMinimap,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle spellcheck",
         shortcut: "",
         action: BuiltinCommand::ToggleSpellcheck,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle split / grid view",
         shortcut: "",
         action: BuiltinCommand::ToggleSplitView,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle word wrap",
         shortcut: "",
         action: BuiltinCommand::ToggleWordWrap,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle zen / distraction-free mode",
         shortcut: "Ctrl+.",
         action: BuiltinCommand::ToggleZen,
+        bindings: &[action::TOGGLE_ZEN],
     },
     BuiltinEntry {
         label: "Undo",
         shortcut: "Ctrl+Z",
         action: BuiltinCommand::Undo,
+        bindings: &[],
     },
     // ---- Note-usability actions (P0–P3) ----
     BuiltinEntry {
         label: "Toggle task checkbox",
         shortcut: "Ctrl+Enter",
         action: BuiltinCommand::ToggleTaskCheckbox,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle bold",
         shortcut: "Ctrl+B",
         action: BuiltinCommand::ToggleBold,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle italic",
         shortcut: "Ctrl+I",
         action: BuiltinCommand::ToggleItalic,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle inline code",
         shortcut: "Ctrl+`",
         action: BuiltinCommand::ToggleInlineCode,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Toggle strikethrough",
         shortcut: "Ctrl+Shift+X",
         action: BuiltinCommand::ToggleStrikethrough,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Uppercase selection",
         shortcut: "",
         action: BuiltinCommand::UppercaseSelection,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Lowercase selection",
         shortcut: "",
         action: BuiltinCommand::LowercaseSelection,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Title Case selection",
         shortcut: "",
         action: BuiltinCommand::TitlecaseSelection,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "Format markdown table",
         shortcut: "",
         action: BuiltinCommand::FormatTable,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "New note from checklist template",
         shortcut: "",
         action: BuiltinCommand::NewChecklistNote,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "New note from meeting template",
         shortcut: "",
         action: BuiltinCommand::NewMeetingNote,
+        bindings: &[],
     },
     BuiltinEntry {
         label: "New note from daily template",
         shortcut: "",
         action: BuiltinCommand::NewDailyNote,
+        bindings: &[],
     },
 ];
 
@@ -991,6 +1142,55 @@ mod tests {
         for s in KEYBOARD_SHORTCUTS {
             assert!(!s.chord.is_empty(), "empty chord");
             assert!(!s.action.is_empty(), "empty action for chord {}", s.chord);
+        }
+    }
+
+    /// The cheatsheet's own promise — "every shortcut the editor actually responds
+    /// to must appear in this list" — checked rather than trusted.
+    ///
+    /// It was not true: `find_in_files`, `toggle_md_preview` and `jump_bracket`
+    /// were all live shortcuts absent from the F1 modal. Nothing noticed, because
+    /// nothing compared the table against the action list.
+    #[test]
+    fn every_rebindable_action_appears_in_the_cheatsheet() {
+        let listed: Vec<&str> = KEYBOARD_SHORTCUTS
+            .iter()
+            .flat_map(|e| e.bindings.iter().copied())
+            .collect();
+        for name in super::super::keymap::action::ALL {
+            assert!(
+                listed.contains(name),
+                "action '{name}' is a live shortcut but no cheatsheet row lists it — \
+                 the F1 modal claims to show every shortcut",
+            );
+        }
+    }
+
+    /// Every `bindings` entry must name a real action.
+    ///
+    /// The consts make a typo a compile error, but a row could still cite an
+    /// action that no longer exists after a rename; then the row would silently
+    /// fall back to its stale static chord.
+    #[test]
+    fn cheatsheet_and_palette_bindings_name_real_actions() {
+        let known = super::super::keymap::action::ALL;
+        for e in KEYBOARD_SHORTCUTS {
+            for b in e.bindings {
+                assert!(
+                    known.contains(b),
+                    "cheatsheet row '{}' cites unknown action '{b}'",
+                    e.action
+                );
+            }
+        }
+        for e in BUILTIN_COMMANDS {
+            for b in e.bindings {
+                assert!(
+                    known.contains(b),
+                    "palette command '{}' cites unknown action '{b}'",
+                    e.label
+                );
+            }
         }
     }
 

@@ -1242,18 +1242,39 @@ fn completion_popup_renders_in_frame() {
 // produces) against ONE persistent `Context` so focus + widget state carry
 // across frames, then assert what the app did.
 
-struct Driver {
+/// Drives the real `frame_tick` render loop with synthetic input.
+///
+/// `pub(super)` so sibling test modules (`keyboard_input_tests`) reuse it rather
+/// than each cloning a RawInput builder that then drifts.
+pub(super) struct Driver {
     ctx: egui::Context,
 }
 
 impl Driver {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             ctx: egui::Context::default(),
         }
     }
 
-    fn frame(&self, app: &mut ScribeApp, modifiers: egui::Modifiers, events: Vec<egui::Event>) {
+    pub(super) fn frame(
+        &self,
+        app: &mut ScribeApp,
+        modifiers: egui::Modifiers,
+        events: Vec<egui::Event>,
+    ) {
+        self.frame_with(app, modifiers, events, Vec::new());
+    }
+
+    /// `frame`, plus `dropped_files` — the one RawInput field the drag-drop
+    /// handler reads, which no `Event` can carry.
+    pub(super) fn frame_with(
+        &self,
+        app: &mut ScribeApp,
+        modifiers: egui::Modifiers,
+        events: Vec<egui::Event>,
+        dropped_files: Vec<egui::DroppedFile>,
+    ) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(0.0, 0.0),
@@ -1261,13 +1282,60 @@ impl Driver {
             )),
             modifiers,
             events,
+            dropped_files,
             ..Default::default()
         };
         let _ = self.ctx.run(input, |ctx| app.frame_tick(ctx));
     }
 
-    fn idle(&self, app: &mut ScribeApp) {
+    /// Simulate dropping `paths` onto the window (F-011).
+    pub(super) fn drop_files(&self, app: &mut ScribeApp, paths: &[PathBuf]) {
+        let dropped = paths
+            .iter()
+            .map(|p| egui::DroppedFile {
+                path: Some(p.clone()),
+                ..Default::default()
+            })
+            .collect();
+        self.frame_with(app, egui::Modifiers::NONE, vec![], dropped);
+    }
+
+    pub(super) fn idle(&self, app: &mut ScribeApp) {
         self.frame(app, egui::Modifiers::NONE, vec![]);
+    }
+
+    /// Press `key` and return what the shortcut layer collected, by driving
+    /// `handle_keyboard_shortcuts` alone.
+    ///
+    /// `find_nav` is an out-param that `frame_tick` consumes and turns into a
+    /// find-bar scroll, so a full frame gives no way to observe it directly.
+    pub(super) fn shortcuts(
+        &self,
+        app: &mut ScribeApp,
+        key: egui::Key,
+        modifiers: egui::Modifiers,
+    ) -> (Pending, Option<bool>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1100.0, 720.0),
+            )),
+            modifiers,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+            ..Default::default()
+        };
+        let mut act = Pending::default();
+        let mut find_nav = None;
+        let _ = self.ctx.run(input, |ctx| {
+            app.handle_keyboard_shortcuts(ctx, &mut act, &mut find_nav);
+        });
+        (act, find_nav)
     }
 
     fn click(&self, app: &mut ScribeApp, pos: egui::Pos2) {
@@ -1293,7 +1361,7 @@ impl Driver {
         );
     }
 
-    fn key(&self, app: &mut ScribeApp, key: egui::Key, modifiers: egui::Modifiers) {
+    pub(super) fn key(&self, app: &mut ScribeApp, key: egui::Key, modifiers: egui::Modifiers) {
         self.frame(
             app,
             modifiers,
@@ -1323,6 +1391,179 @@ impl Driver {
             vec![egui::Event::Text(s.to_string())],
         );
     }
+}
+
+/// A keymap problem is surfaced to the user, not swallowed.
+///
+/// `Keybindings::validate` existed to catch exactly this, but nothing called it —
+/// so a typo'd combo produced silence and no explanation. Now that the keymap
+/// actually drives input, an unreachable binding has to say so.
+#[test]
+fn keybinding_issues_surface_in_the_config_banner() {
+    let mut cfg = Config::default();
+    cfg.keybindings.save = "mod+nosuchkey".into(); // parses, but names no real key
+    cfg.keybindings.find = String::new(); // unreachable
+    let app = ScribeApp::new_test(cfg);
+    let banner = app
+        .config_error_banner
+        .as_ref()
+        .expect("a broken keymap must raise the config banner");
+    assert!(
+        banner.contains("Keyboard shortcut problem"),
+        "the banner must name the problem class, got: {banner}"
+    );
+    assert_eq!(
+        banner.as_str(),
+        "Keyboard shortcut problem: 'find' has no key bound — it cannot be triggered. (and 1 more keybinding problem)",
+        "the banner must name the first problem AND count the rest exactly"
+    );
+}
+
+/// The "(and N more)" tail counts the OTHER issues — N is `len() - 1`, not `len()`.
+///
+/// The original assertion here was `banner.contains("more keybinding problem")`,
+/// which is true of "(and 1 more keybinding problem)", "(and 2 more keybinding
+/// problems)" and "(and 3 ...)" alike — so it could not see the count at all, and
+/// `len() - 1` -> `len() + 1` survived. Assert the rendered text.
+#[test]
+fn the_banner_counts_the_remaining_keybinding_problems_exactly() {
+    let one = {
+        let mut cfg = Config::default();
+        cfg.keybindings.find = String::new();
+        ScribeApp::new_test(cfg)
+            .config_error_banner
+            .expect("banner")
+    };
+    assert!(
+        !one.contains("more keybinding problem"),
+        "a lone problem has no others to count, got: {one}"
+    );
+
+    let three = {
+        let mut cfg = Config::default();
+        cfg.keybindings.find = String::new();
+        cfg.keybindings.save = "mod+nosuchkey".into();
+        cfg.keybindings.new_file = String::new();
+        ScribeApp::new_test(cfg)
+            .config_error_banner
+            .expect("banner")
+    };
+    assert!(
+        three.ends_with("(and 2 more keybinding problems)"),
+        "three problems means the first plus TWO more (plural), got: {three}"
+    );
+}
+
+/// A clean keymap raises no banner (the guard above must not cry wolf).
+#[test]
+fn a_valid_keymap_raises_no_config_banner() {
+    let app = ScribeApp::new_test(Config::default());
+    assert!(
+        app.config_error_banner.is_none(),
+        "the default keymap is clean and must not raise a banner: {:?}",
+        app.config_error_banner
+    );
+}
+
+/// A REBOUND action fires on its new chord and no longer fires on the old one.
+///
+/// This is the discriminating test for the `[keybindings]` wiring: it fails
+/// against a build where the config section is parsed but ignored (the shortcut
+/// stays hard-wired to Ctrl+N), which is exactly what shipped before. The
+/// `default_keymap_matches_current_hardwired_shortcuts` parity test in
+/// `scribe-core` cannot catch that — it only compares the default STRINGS, which
+/// are identical whether or not anything reads them.
+#[test]
+fn input_rebound_keybinding_replaces_the_default_chord() {
+    let mut cfg = Config::default();
+    cfg.keybindings.new_file = "mod+e".into();
+    let mut app = ScribeApp::new_test(cfg);
+    let d = Driver::new();
+    d.idle(&mut app);
+
+    let before = app.tabs.len();
+    d.key(&mut app, egui::Key::E, egui::Modifiers::COMMAND);
+    assert_eq!(
+        app.tabs.len(),
+        before + 1,
+        "the rebound chord (Ctrl+E) must open a new tab — if this fails, \
+         [keybindings] is not wired to the input layer"
+    );
+
+    // The displaced default must go quiet, otherwise the action is bound twice.
+    d.key(&mut app, egui::Key::N, egui::Modifiers::COMMAND);
+    assert_eq!(
+        app.tabs.len(),
+        before + 1,
+        "the old default (Ctrl+N) must NOT still fire after rebinding"
+    );
+}
+
+/// Modifiers match exactly: a `mod+…` binding does not fire when Shift is held.
+///
+/// The hard-wired handler tested `cmd && key_pressed(S)`, so Ctrl+Shift+S also
+/// triggered a plain Save. Exact matching is what lets `mod+o` (open) and
+/// `mod+shift+o` (go to symbol) coexist without hand-written shift guards.
+#[test]
+fn input_modifiers_must_match_the_binding_exactly() {
+    let mut app = ScribeApp::new_test(Config::default());
+    let d = Driver::new();
+    d.idle(&mut app);
+
+    let before = app.tabs.len();
+    d.key(
+        &mut app,
+        egui::Key::N,
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+    );
+    assert_eq!(
+        app.tabs.len(),
+        before,
+        "Ctrl+Shift+N must not fire the `mod+n` new-file binding"
+    );
+
+    // The exact chord still works.
+    d.key(&mut app, egui::Key::N, egui::Modifiers::COMMAND);
+    assert_eq!(app.tabs.len(), before + 1, "Ctrl+N still opens a new tab");
+}
+
+/// An unparseable binding disables its action rather than falling back to the
+/// old hard-wired chord — the keymap is the single source of truth.
+#[test]
+fn input_unparseable_binding_disables_the_action() {
+    let mut cfg = Config::default();
+    cfg.keybindings.new_file = "mod+nosuchkey".into();
+    let mut app = ScribeApp::new_test(cfg);
+    let d = Driver::new();
+    d.idle(&mut app);
+
+    let before = app.tabs.len();
+    d.key(&mut app, egui::Key::N, egui::Modifiers::COMMAND);
+    assert_eq!(
+        app.tabs.len(),
+        before,
+        "a binding that names an unknown key must leave the action unbound, \
+         not silently revert to Ctrl+N"
+    );
+}
+
+/// Editing `[keybindings]` at runtime (config live-reload) re-resolves the
+/// keymap — the cache must not pin the chords from launch.
+#[test]
+fn input_keymap_follows_a_live_config_reload() {
+    let mut app = ScribeApp::new_test(Config::default());
+    let d = Driver::new();
+    d.idle(&mut app);
+
+    // Rebind after the app is already running, as a live config reload would.
+    app.config.keybindings.new_file = "mod+e".into();
+    let before = app.tabs.len();
+    d.key(&mut app, egui::Key::E, egui::Modifiers::COMMAND);
+    assert_eq!(
+        app.tabs.len(),
+        before + 1,
+        "a keymap change after launch must take effect without a restart"
+    );
 }
 
 #[test]
@@ -1932,24 +2173,15 @@ fn builtin_commands_registry_is_populated_and_unique() {
 fn every_builtin_command_dispatches_without_panic() {
     let mut app = ScribeApp::new_test(Config::default());
     for entry in BUILTIN_COMMANDS {
-        // The three rfd-touching variants would either hang the test
-        // runner waiting for user input (Linux/Windows) or panic in
-        // rfd's macOS backend (no NSApplication main thread on CI):
-        //   - OpenFile / OpenFolder call rfd::FileDialog directly.
-        //   - Save falls through to save_as → rfd::FileDialog when the
-        //     active buffer has no path. After CloseAllTabs in this
-        //     same loop the active tab IS a pathless scratch, so the
-        //     fall-through fires. Easier to skip than to keep the
-        //     fixture path alive across CloseAllTabs side-effects.
-        //   - ConvertToMarkdown / ExportAsHtml open an rfd save dialog.
-        match entry.action {
-            BuiltinCommand::OpenFile
-            | BuiltinCommand::OpenFolder
-            | BuiltinCommand::Save
-            | BuiltinCommand::ConvertToMarkdown
-            | BuiltinCommand::ExportAsHtml => continue,
-            _ => app.execute_builtin(entry.action),
-        }
+        // No skip list. The five rfd-touching variants (OpenFile, OpenFolder,
+        // Save via the pathless save_as fall-through, ConvertToMarkdown,
+        // ExportAsHtml) used to be skipped here because a native dialog blocks
+        // the runner on a human (Linux/Windows) or panics in rfd's macOS backend
+        // with no NSApplication main thread. They now route through
+        // `app::dialogs`, which is headless under cfg(test) and returns None —
+        // the same as the user cancelling — so every variant really is
+        // dispatched, which is what this test claims to check.
+        app.execute_builtin(entry.action);
     }
 }
 
@@ -2685,9 +2917,15 @@ fn toolbar_fold_and_linenumbers_buttons_flip_their_flags() {
 
 /// Clicking the LSP toolbar button on a plain scratch tab surfaces a toast
 /// explaining why no server starts — the observable outcome of the button
-/// wiring. A scratch tab has no detectable language, so the toast is the
-/// "no language detected" notice (the path-missing branch fires only once a
-/// language is known).
+/// wiring. A scratch tab has never been saved, so the toast is the
+/// "save the file first" notice.
+///
+/// This previously asserted the "no language detected" copy, and its comment
+/// explained that "the path-missing branch fires only once a language is
+/// known". That was the bug, rationalised: `language_hint()` IS the path's
+/// extension, so a language can never be known without a path and the
+/// path-missing branch was unreachable. The scratch tab — whose actual problem
+/// is that it has no path — was told to add a file extension instead.
 #[test]
 fn toolbar_lsp_button_on_scratch_tab_sets_toast() {
     let mut app = toolbar_app();
@@ -2699,10 +2937,7 @@ fn toolbar_lsp_button_on_scratch_tab_sets_toast() {
     h.run();
     assert_eq!(
         h.state().toast.as_deref(),
-        Some(
-            "Couldn't detect this file's language. Save it with a file extension \
-             (like .rs or .py) to enable language features."
-        ),
+        Some("Save the file first, then start the language server."),
         "the LSP button on a scratch tab must explain why it can't start"
     );
 }

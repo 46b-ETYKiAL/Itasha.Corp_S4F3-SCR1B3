@@ -130,4 +130,36 @@ mod packaging_consistency_tests {
             }
         }
     }
+
+    /// The CI mutation gate EXCLUDES `integration/windows.rs`, and this is the
+    /// premise that makes that exclusion honest rather than a blind spot.
+    ///
+    /// The gate runs on ubuntu. `windows.rs` is `#[cfg(windows)]`, so it is not
+    /// compiled there: mutating it changes nothing that builds, no test can
+    /// fail, and every mutant reports MISSED. Excluding it drops 100% false
+    /// positives — but ONLY while it stays cfg-gated. If it is ever made
+    /// cross-platform (or test-compiled like its `windows_entries` sibling), its
+    /// mutants become real signal and the `--exclude` in .github/workflows/ci.yml
+    /// would start hiding genuine gaps. Fail here so that cannot happen quietly.
+    #[test]
+    fn windows_module_is_cfg_gated_so_the_mutation_exclusion_stays_honest() {
+        let src = include_str!("mod.rs");
+        // ASSEMBLED, never written as a literal. This test reads its OWN file, so
+        // a literal needle would sit in the source and `contains` would match the
+        // needle itself — passing no matter what the real declaration said. The
+        // first draft did exactly that, and only re-running the premise (flip the
+        // gate, expect a failure) caught it. Building the string from parts keeps
+        // the declaration up top the one and only match.
+        let needle = ["#[cfg(", "windows", ")]\n", "mod windows;"].concat();
+        assert_eq!(
+            src.matches(needle.as_str()).count(),
+            1,
+            "`mod windows;` is no longer exactly `#[cfg(windows)]`-gated (or this \
+             test now self-matches). If that module compiles off Windows its \
+             mutants are real signal: DROP `--exclude \
+             '**/src/integration/windows.rs'` from the mutation-in-diff job in \
+             .github/workflows/ci.yml and delete this test, rather than leaving a \
+             gate that silently skips a file it claims to cover."
+        );
+    }
 }

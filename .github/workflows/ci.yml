@@ -127,6 +127,39 @@ jobs:
       - name: Audit forge-wire-manifest.toml
         run: python3 scripts/verify_forge_wire_manifest.py
 
+  bench-smoke:
+    # The four criterion benches (file_load, rope_edits, search,
+    # syntax_highlight) had NO gate: `clippy --all-targets` compile-checks them,
+    # but nothing ever RAN them, so a bench could panic or drift away from the
+    # API it measures and stay green indefinitely.
+    #
+    # `cargo bench -- --test` is criterion's run-once test mode: each benchmark
+    # body executes a single iteration and asserts nothing about timing. That
+    # catches bit-rot deterministically, which is the part CI can actually judge
+    # — wall-clock numbers on a shared runner are noise and are NOT gated here.
+    name: benchmarks smoke (no timing)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Run every benchmark once (bit-rot guard, timing ignored)
+        # `--benches` also picks up the lib's implicit bench target, so this runs
+        # the scribe-core unit tests in RELEASE as well. That is a bonus, not the
+        # point (release-only behaviour differs — overflow checks are off), and
+        # it is why this job takes longer than the bench bodies alone. Keep
+        # `--benches` rather than listing each bench: a newly added bench must be
+        # gated automatically, not silently left out.
+        run: cargo bench -p scribe-core --benches --locked -- --test
+
   fuzz-build:
     # Compile-only check that the cargo-fuzz targets stay buildable (they need
     # nightly + libFuzzer, so they live outside the main workspace). No fuzzing
@@ -153,6 +186,20 @@ jobs:
             libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+      - name: fuzz/Cargo.lock is current
+        working-directory: fuzz
+        # Every other cargo call in this repo runs `--locked`; `cargo fuzz build`
+        # cannot (cargo-fuzz exposes no such flag and rejects it), so it silently
+        # REGENERATES fuzz/Cargo.lock in the runner and passes. Lockfile drift
+        # was therefore unfailable — and had already happened unnoticed: the
+        # committed lock pinned scribe-core 0.4.57 while the workspace was on
+        # 0.4.59, i.e. the fuzz targets linked a version we no longer ship.
+        #
+        # `cargo metadata --locked` re-resolves against the committed lock and
+        # exits non-zero if it is stale, which restores the guarantee without the
+        # nightly/sanitizer toolchain. Verified BOTH ways: exit 0 against the
+        # current lock, exit 101 against a deliberately staled one.
+        run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Build fuzz targets (compile-only)
         working-directory: fuzz
         run: cargo +nightly fuzz build
@@ -182,10 +229,86 @@ jobs:
       - name: Miri test (scribe-core soundness suite)
         run: cargo +nightly miri test -p scribe-core --test miri_soundness
 
+  mutation-in-diff:
+    # Mutation testing scoped to the lines THIS PR touched (`--in-diff`), across
+    # BOTH crates. The scheduled job below covers scribe-core only and is skipped
+    # on PRs, which left a hole big enough to drive a truck through: scribe-app —
+    # the crate with the app logic and ~1,000 of the tests — was NEVER mutation
+    # tested, on any run, ever. A PR could raise scribe-app's line coverage while
+    # adding tests that assert nothing, and every check would stay green.
+    #
+    # That is not hypothetical. The PR that added this job took
+    # text_ops_methods.rs from 33% to 95% line coverage, went 24/24 green, and
+    # still carried 6 surviving mutants — including a 500 KB perf guard that read
+    # as "covered" (the comparison executes on every test) while no fixture was
+    # big enough to tell `>` from `==`.
+    #
+    # Diff-scoped so it is fast enough to gate every PR: mutants apply to
+    # production code only (never `#[cfg(test)]`), so a test-only PR mutates
+    # nothing and this passes in seconds. `--in-place` keeps it to one build tree.
+    #
+    # KNOWN BLIND SPOT — `integration/windows.rs` is excluded below. It is
+    # declared `#[cfg(windows)] mod windows;`, so on this ubuntu runner it is not
+    # compiled at all: mutating it changes nothing that builds, no test can
+    # possibly fail, and EVERY mutant in it reports MISSED. Those are vacuous,
+    # 100% false positives, and left in they would hold this gate permanently red
+    # for any PR touching the file — and a gate that is always red gets ignored,
+    # which is worse than no gate.
+    #
+    # This exclusion is NOT a claim that the file is covered. It is not: on
+    # Windows its `register_under` mutant survives the default suite and is only
+    # killed by the `#[ignore]`d HKCU test (verified by hand). Its real coverage
+    # is `cargo test -p scribe-app --bin scr1b3 integration::windows -- --ignored`
+    # on a Windows host; the pure key/value generation it delegates to
+    # (`windows_entries.rs`, `#[cfg(any(test, windows))]`) IS compiled and
+    # mutation-tested here.
+    #
+    # `windows_module_is_cfg_gated_so_the_mutation_exclusion_stays_honest` fails
+    # if that premise ever stops holding, so the exclusion cannot silently rot
+    # into a real blind spot.
+    name: mutation testing (in-diff)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          # cargo-mutants diffs against the merge base, which needs real history.
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install cargo-mutants + nextest
+        run: cargo install cargo-mutants cargo-nextest --locked
+      - name: Diff against the merge base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: git diff "$BASE_SHA"...HEAD -- '*.rs' > pr.diff
+      - name: Mutation test (only what this PR changed)
+        # A surviving mutant here means a line this PR touched can be broken with
+        # the suite still green. Fix the test, or document the mutant as
+        # equivalent (see apply.rs for the precedent) — do not silence the job.
+        #
+        # The one `--exclude` below is NOT a silencing: `integration/windows.rs`
+        # is `#[cfg(windows)]`, so it is not compiled on this ubuntu runner and
+        # 100% of its mutants are vacuous MISSES that no test could ever kill.
+        # Adding a file here to make a REAL survivor go away is silencing; see
+        # the job comment above, and the test that pins this one's premise.
+        run: >
+          cargo mutants --in-diff pr.diff --test-tool nextest --timeout 300 --in-place
+          --exclude '**/src/integration/windows.rs'
+
   mutation:
     # Mutation testing (cargo-mutants) over scribe-core — too slow to gate every
     # PR, so it runs weekly (schedule) + on demand (workflow_dispatch). Surviving
     # mutants flag tests that execute a line but do not assert its behaviour.
+    # The `mutation-in-diff` job above is the per-PR counterpart.
     name: mutation testing (scribe-core, scheduled)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest

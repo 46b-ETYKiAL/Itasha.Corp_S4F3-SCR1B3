@@ -70,7 +70,7 @@ impl ScribeApp {
             self.save_config();
         }
         if act.open_folder {
-            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+            if let Some(folder) = super::dialogs::pick_folder() {
                 self.status = format!("folder: {}", folder.display());
                 self.file_tree_root = Some(folder);
             }
@@ -182,7 +182,15 @@ impl ScribeApp {
         // so the change is visible in the central panel.
         if act.fold_all && self.active < self.tabs.len() {
             let text = self.tabs[self.active].text.clone();
-            let regions = crate::editor_features::fold_regions(&text);
+            // P2-4: markdown/text notes fold by heading section, code by braces.
+            // This handler predates `fold_regions_for` and was moved here
+            // verbatim, so it kept calling the brace-only `fold_regions` — which
+            // finds nothing in a note. The Ctrl+Shift+[ shortcut therefore
+            // switched the user into fold view with zero regions folded, while
+            // the palette's `BuiltinCommand::FoldAll` and the gutter's
+            // "fold all" button (both language-aware) worked on the same buffer.
+            let lang = self.tabs[self.active].doc.language_hint();
+            let regions = crate::editor_features::fold_regions_for(&text, lang.as_deref());
             self.folds = regions.iter().map(|r| r.start_line).collect();
             self.fold_view = true;
             self.status = format!("folded {} region(s)", regions.len());

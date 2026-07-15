@@ -26,8 +26,11 @@
 //!
 //! Note on egui 0.34: this stack exposes `smooth_scroll_delta` (points, smoothed
 //! over frames) — there is NO `raw_scroll_delta`. Reusing the smoothed delta is
-//! also what the middle-click autoscroll and Ctrl+wheel zoom already do, so the
-//! feel stays consistent.
+//! also what the middle-click autoscroll does, so the feel stays consistent.
+//! Ctrl+wheel zoom does NOT: egui's `zoom_modifier` is COMMAND, so a wheel event
+//! carrying Ctrl is folded into egui's own zoom accumulator and
+//! `smooth_scroll_delta` is left at zero. That is why this module can read the
+//! delta for a plain drag-scroll and `keyboard_input` must read `zoom_delta()`.
 #![allow(clippy::wildcard_imports)]
 
 use super::*;

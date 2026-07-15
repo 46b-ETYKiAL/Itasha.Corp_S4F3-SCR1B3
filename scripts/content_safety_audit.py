@@ -21,6 +21,15 @@ SELF = Path(__file__).resolve()
 
 # Directories never scanned.
 SKIP_DIRS = {".git", "target", "dist", "node_modules", ".github/workflows/cache"}
+# Build-artifact directory PREFIXES never scanned. Same rationale as `target` /
+# `dist` above: this audit asks "is what we PUBLISH clean?", and these are
+# gitignored local output that is never committed. `cargo mutants` writes
+# `mutants.out/` and rotates the previous run to `mutants.out.old/`, both of which
+# embed absolute build paths — so running the two commands this repo documents
+# (`cargo mutants`, then this audit) reported 76 "windows dev path" violations
+# for files git will never see. Prefix-matched because of the `.old` rotation,
+# mirroring the `/mutants.out*/` entry in .gitignore.
+SKIP_DIR_PREFIXES = ("mutants.out",)
 # Files never scanned (binary-ish or intentional-token-bearing).
 SKIP_FILES = {SELF}
 # Extensions we treat as text.
@@ -56,6 +65,8 @@ def iter_text_files():
             continue
         rel = p.relative_to(ROOT)
         if any(part in SKIP_DIRS for part in rel.parts):
+            continue
+        if any(part.startswith(SKIP_DIR_PREFIXES) for part in rel.parts):
             continue
         if p.suffix.lower() in TEXT_EXT:
             yield p, rel

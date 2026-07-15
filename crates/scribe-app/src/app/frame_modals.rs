@@ -493,7 +493,7 @@ impl ScribeApp {
                 self.welcome_open = false;
             }
             if want_open_folder {
-                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                if let Some(folder) = super::dialogs::pick_folder() {
                     self.file_tree_root = Some(folder);
                 }
                 self.welcome_open = false;

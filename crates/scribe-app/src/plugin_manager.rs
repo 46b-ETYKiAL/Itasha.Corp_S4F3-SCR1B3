@@ -485,7 +485,7 @@ impl PluginManagerState {
                             .hint_text("path to the .tar.gz"),
                     );
                     if ui.small_button("browse…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().pick_file() {
+                        if let Some(p) = crate::app::dialogs::pick_file() {
                             self.install_tarball_path = p.display().to_string();
                         }
                     }
@@ -499,7 +499,7 @@ impl PluginManagerState {
                             .hint_text("path to the .minisig"),
                     );
                     if ui.small_button("browse…").clicked() {
-                        if let Some(p) = rfd::FileDialog::new().pick_file() {
+                        if let Some(p) = crate::app::dialogs::pick_file() {
                             self.install_sig_path = p.display().to_string();
                         }
                     }

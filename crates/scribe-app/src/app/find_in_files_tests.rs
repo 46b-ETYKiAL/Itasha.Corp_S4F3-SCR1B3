@@ -54,8 +54,15 @@ fn seed_folder() -> tempfile::TempDir {
 /// yields briefly so the worker thread can stream. `run_ok` (not `run`) is used
 /// because the focused query field's blinking-cursor keeps requesting repaints,
 /// which would otherwise trip `run`'s max-steps panic.
+/// Bounded by WALL-CLOCK for the same reason as its `qa_find_scale_tests` twin:
+/// an iteration cap starves silently under CPU contention (the worker thread
+/// gets less CPU while each `run_ok` gets slower, so the loop gives up having
+/// waited a long time and learned nothing). A deadline waits longer on a slower
+/// machine, which is what the starved worker actually needs.
 fn run_until_search_done(h: &mut egui_kittest::Harness<'static, ScribeApp>) {
-    for _ in 0..200 {
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+    let start = std::time::Instant::now();
+    while start.elapsed() < DEADLINE {
         h.run_ok();
         if !h.state().find_in_files_running {
             break;

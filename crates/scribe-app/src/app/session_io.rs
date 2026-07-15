@@ -143,23 +143,13 @@ impl ScribeApp {
         let bdir = session::backup_dir(&dir);
         let mut tabs: Vec<EditorTab> = Vec::new();
 
-        // R6 / S-04 — the manifest is a user-writable on-disk artifact; a
-        // tampered `session.json` can point at a `\\attacker\share\…` UNC path
-        // (→ SMB/NTLM credential leak) or a symlink escaping the prior working
-        // set. Derive the ALLOWED ROOTS for this restore from the parent
-        // directories of the manifest's OWN declared paths (the prior session
-        // roots). Only paths that canonicalize to stay under one of these roots
-        // — and are not UNC, and exist — are auto-opened. See
-        // `session_path_guard::is_safe_restore_path` for the fail-closed rules.
-        let root_candidates: Vec<PathBuf> = manifest
-            .tabs
-            .iter()
-            .filter_map(|s| s.path.as_ref().map(PathBuf::from))
-            .filter(|p| !crate::session_path_guard::is_unc_path(p))
-            .filter_map(|p| p.parent().map(|par| par.to_path_buf()))
-            .collect();
-        let allowed_roots =
-            crate::session_path_guard::allowed_roots(root_candidates.iter().map(|p| p.as_path()));
+        // R6 / S-04 — a tampered `session.json` can point at a
+        // `\\attacker\share\…` UNC path, and restore AUTO-opens it with no
+        // user interaction, which makes Windows authenticate to the attacker's
+        // SMB host and hand over a NetNTLMv2 response. That — a path that
+        // reaches off this machine — is the one thing the guard blocks. See
+        // `session_path_guard` for why it does not also try to fence the
+        // restore inside a "prior working set".
         // Enforce the one-tab-per-file invariant on restore: a file must NEVER be
         // reopened into two tabs. The manifest can legitimately carry two entries
         // for the same path — a stale unsaved-backup entry coexisting with a
@@ -179,18 +169,19 @@ impl ScribeApp {
         for (si, snap) in manifest.tabs.iter().enumerate() {
             let raw_path = snap.path.as_ref().map(PathBuf::from);
             // R6 / S-04 — classify this entry's declared path. A path that
-            // FAILS the restore guard (UNC, nonexistent, or escaping the
-            // allowed roots) is NEVER auto-opened from disk and NEVER carried
-            // as the tab's save target. `path` below is the SAFE path used for
-            // disk re-open / save-target; an unsafe path is dropped to `None`.
+            // FAILS the restore guard (reaches a remote host, or has vanished)
+            // is NEVER auto-opened from disk and NEVER carried as the tab's
+            // save target. `path` below is the SAFE path used for disk
+            // re-open / save-target; an unsafe path is dropped to `None`.
             let path: Option<PathBuf> = match &raw_path {
-                Some(p) if crate::session_path_guard::is_safe_restore_path(p, &allowed_roots) => {
-                    Some(p.clone())
-                }
+                Some(p) if crate::session_path_guard::is_safe_restore_path(p) => Some(p.clone()),
                 Some(p) => {
-                    tracing::warn!(
-                        "session restore: skipping untrusted path {} (UNC / nonexistent / \
-                         escapes the prior session roots) — not auto-opening",
+                    // debug!, not warn!: the path itself is untrusted content,
+                    // and `session.rs` keeps it out of higher log levels for
+                    // that reason. A skipped restore is not an alarm.
+                    tracing::debug!(
+                        "session restore: skipping {} (resolves off this machine, or is gone) \
+                         — not auto-opening",
                         p.display()
                     );
                     None
@@ -251,12 +242,17 @@ impl ScribeApp {
         if tabs.is_empty() {
             return None;
         }
-        // Remap the persisted active index through dedup; clamp defensively.
-        let active = snap_to_tab
-            .get(&manifest.active)
-            .copied()
-            .unwrap_or(0)
-            .min(tabs.len() - 1);
+        // Remap the persisted active index through dedup.
+        //
+        // No clamp. Every value in `snap_to_tab` is an index we pushed ourselves
+        // (each < tabs.len()), and `tabs` is non-empty by the check above — so
+        // the `.min(tabs.len() - 1)` that used to sit here could never bind. It
+        // was dead code, not a safety net: 1065 tests never once reached it, and
+        // both mutations of its arithmetic were unkillable by construction.
+        // `manifest.active` is untrusted (the manifest is user-writable), but it
+        // is sanitised by the lookup itself: an out-of-range value simply misses
+        // the map and falls back to the first tab.
+        let active = snap_to_tab.get(&manifest.active).copied().unwrap_or(0);
         Some((tabs, active))
     }
 
@@ -342,61 +338,112 @@ impl ScribeApp {
         }
     }
 
-    pub(super) fn save_as_active(&mut self) {
+    /// Everything Save-As can decide WITHOUT the user: the file name to
+    /// pre-fill and the dialog's filter list. `None` when there is no active
+    /// tab.
+    ///
+    /// Split out of [`Self::save_as_active`] because that fn is an ADR-0007
+    /// exclusion — it blocks on a native `rfd` dialog, so no headless test can
+    /// drive it. That exclusion used to swallow this decision logic too, which
+    /// left it wholly unasserted (mutating its `>=` and its `!=` changed nothing
+    /// any test could see). The exclusion now covers only the dialog call.
+    pub(super) fn save_as_prompt(&self) -> Option<SaveAsPrompt> {
         let active = self.active;
         if active >= self.tabs.len() {
-            return;
+            return None;
         }
-        // Build the Save-As dialog from the configured default format so a new
-        // file suggests e.g. `untitled.md` (Markdown by default). The configured
-        // format is the PRIMARY filter; the other built-in formats follow as
-        // secondary filters, then an "All files" catch-all.
+        // The configured default format drives the suggestion (so a new file
+        // offers e.g. `untitled.md`) and is the PRIMARY filter; the other
+        // built-ins follow, then an "All files" catch-all.
         let fmt = self.config.integration.default_save_format;
         let stem = self.tabs[active]
             .doc
             .path()
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned());
-        let suggested = fmt.suggested_file_name(stem.as_deref());
-        let mut dialog = rfd::FileDialog::new()
-            .add_filter(fmt.filter_label(), &[fmt.extension()])
-            .set_file_name(&suggested);
+        let mut filters = vec![(fmt.filter_label(), fmt.extension())];
         for other in scribe_core::config::DefaultSaveFormat::ALL {
             if other != fmt {
-                dialog = dialog.add_filter(other.filter_label(), &[other.extension()]);
+                filters.push((other.filter_label(), other.extension()));
             }
         }
-        dialog = dialog.add_filter("All files", &["*"]);
-        if let Some(path) = dialog.save_file() {
-            // If the user typed a name with no extension, append the configured
-            // default (so `notes` → `notes.md`); a name that already carries an
-            // explicit extension is respected exactly as given.
-            let path = scribe_core::config::ensure_extension(&path, fmt.extension());
-            let text = self.tabs[active].text.clone();
-            self.tabs[active].doc.set_text(&text);
-            match self.tabs[active].doc.save_as(&path) {
-                Ok(lossy) => {
-                    self.status = format!("saved {}", path.display());
-                    if lossy {
-                        self.toast = Some(format!(
-                            "Saved, but some characters can't be written as {} — they were \
-                             replaced. Convert the file to UTF-8 to keep them.",
-                            self.tabs[active].doc.encoding().name
-                        ));
-                    }
-                    // Change-bar: the saved baseline now includes this session's
-                    // edits, so they flip from unsaved to saved.
-                    self.tabs[active].mark_change_saved();
+        filters.push(("All files", "*"));
+        Some(SaveAsPrompt {
+            suggested: fmt.suggested_file_name(stem.as_deref()),
+            filters,
+            fmt,
+        })
+    }
+
+    /// Commit a Save-As to the `path` the user picked — everything AFTER the
+    /// dialog returns, so it is testable without one.
+    pub(super) fn commit_save_as(
+        &mut self,
+        path: &Path,
+        fmt: scribe_core::config::DefaultSaveFormat,
+    ) {
+        let active = self.active;
+        if active >= self.tabs.len() {
+            return;
+        }
+        // If the user typed a name with no extension, append the configured
+        // default (so `notes` → `notes.md`); a name that already carries an
+        // explicit extension is respected exactly as given.
+        let path = scribe_core::config::ensure_extension(path, fmt.extension());
+        let text = self.tabs[active].text.clone();
+        self.tabs[active].doc.set_text(&text);
+        match self.tabs[active].doc.save_as(&path) {
+            Ok(lossy) => {
+                self.status = format!("saved {}", path.display());
+                if lossy {
+                    self.toast = Some(format!(
+                        "Saved, but some characters can't be written as {} — they were \
+                         replaced. Convert the file to UTF-8 to keep them.",
+                        self.tabs[active].doc.encoding().name
+                    ));
                 }
-                Err(e) => {
-                    tracing::warn!("save failed: {e}");
-                    self.toast = Some(
-                        "Couldn't save the file. Check that you have permission to write here \
+                // Change-bar: the saved baseline now includes this session's
+                // edits, so they flip from unsaved to saved.
+                self.tabs[active].mark_change_saved();
+            }
+            Err(e) => {
+                tracing::warn!("save failed: {e}");
+                self.toast = Some(
+                    "Couldn't save the file. Check that you have permission to write here \
                      and that the disk isn't full, then try again."
-                            .into(),
-                    );
-                }
+                        .into(),
+                );
             }
         }
     }
+
+    /// Save-As, end to end: decide → ask → commit. Keep this body a thin seam;
+    /// anything decidable belongs in [`Self::save_as_prompt`] or
+    /// [`Self::commit_save_as`].
+    ///
+    /// No longer an ADR-0007 exclusion. The dialog still cannot be driven by a
+    /// test, but it is now the ONLY part that cannot: `super::dialogs` is
+    /// headless under `cfg(test)` and a test injects the path the user "picked"
+    /// via `dialogs::test_hooks::set_next_save_path`, so this whole flow is
+    /// exercised for real. Nothing injected = the user cancelled.
+    pub(super) fn save_as_active(&mut self) {
+        let Some(prompt) = self.save_as_prompt() else {
+            return;
+        };
+        if let Some(path) = super::dialogs::save_file(&prompt.suggested, &prompt.filters) {
+            self.commit_save_as(&path, prompt.fmt);
+        }
+    }
+}
+
+/// What the Save-As dialog should ask, decided before it opens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SaveAsPrompt {
+    /// The pre-filled file name, e.g. `notes.md`.
+    pub suggested: String,
+    /// `(label, extension)` filters IN ORDER — the configured format first, so
+    /// it is the dialog's default.
+    pub filters: Vec<(&'static str, &'static str)>,
+    /// The configured format, appended to a name typed without an extension.
+    pub fmt: scribe_core::config::DefaultSaveFormat,
 }

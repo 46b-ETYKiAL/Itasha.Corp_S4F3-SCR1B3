@@ -399,15 +399,32 @@ fn scene_highlight_occurrences() {
                 app.frame_tick(ctx);
                 frame += 1;
                 if frame == 1 {
-                    let id = egui::Id::new("scr1b3-central-editor");
-                    if let Some(mut st) = egui::TextEdit::load_state(ctx, id) {
-                        st.cursor.set_char_range(Some(egui::text::CCursorRange {
-                            primary: egui::text::CCursor::new(3),
-                            secondary: egui::text::CCursor::new(0),
-                            h_pos: None,
-                        }));
-                        st.store(ctx, id);
-                    }
+                    // The editor's state is keyed on the SALTED id — `.with(doc_id)`,
+                    // added so a selection in one note stops leaking into every other
+                    // note. This scene still used the bare id, so `load_state` returned
+                    // None, the `if let` swallowed it, and the selection was NEVER
+                    // injected: the scene named `highlight_occurrences` has been
+                    // rendering a golden with no selection and no occurrence boxes —
+                    // it never exercised the feature it exists for.
+                    //
+                    // `request_focus` sat OUTSIDE that `if let`, so it fired anyway and
+                    // focused an id no widget owns. That leaves the AccessKit tree
+                    // naming a focused node absent from the node list, which is exactly
+                    // the panic this scene hit the first time it was ever run.
+                    //
+                    // `expect` rather than `if let`: a silent skip is what hid this.
+                    let id =
+                        egui::Id::new("scr1b3-central-editor").with(app.tabs[app.active].doc_id);
+                    let mut st = egui::TextEdit::load_state(ctx, id).expect(
+                        "the central editor must have stored a TextEditState by frame 1 \
+                         — if this is None the id has drifted again",
+                    );
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange {
+                        primary: egui::text::CCursor::new(3),
+                        secondary: egui::text::CCursor::new(0),
+                        h_pos: None,
+                    }));
+                    st.store(ctx, id);
                     ctx.memory_mut(|m| m.request_focus(id));
                 }
             },
