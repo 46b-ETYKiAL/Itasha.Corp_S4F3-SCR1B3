@@ -788,3 +788,69 @@ fn no_fullscreen_request_when_the_action_was_not_asked_for() {
         "an idle frame must not touch fullscreen, got: {cmds:?}"
     );
 }
+
+// ---- bookmark navigation (F2 / Shift+F2) ----
+//
+// `pick_bookmark` is thoroughly unit-tested as a pure function, both directions
+// including wrap. What was NOT tested is the WIRING: that `prev_bookmark` passes
+// -1. Mutation testing deleted the `-` in `navigate_bookmark(-1)` and every test
+// stayed green — Shift+F2 would jump FORWARD, i.e. "previous bookmark" and "next
+// bookmark" become the same key. A correct helper called with the wrong argument
+// is still a broken feature.
+
+/// Put the caret on `line0` for `cursor_line0()`, which reads the 1-based pair.
+fn set_caret_line0(app: &mut ScribeApp, line0: usize) {
+    app.last_cursor_line_col = Some((line0 + 1, 1));
+}
+
+#[test]
+fn prev_bookmark_goes_backward_and_next_goes_forward() {
+    let (mut app, ctx) = app();
+    let active = app.active;
+    app.tabs[active].bookmarks = [2usize, 5, 9].into_iter().collect();
+
+    set_caret_line0(&mut app, 5);
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            prev_bookmark: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        app.status, "go to line 3",
+        "Shift+F2 from line 6 must land on the bookmark ABOVE it (0-based 2)"
+    );
+
+    set_caret_line0(&mut app, 5);
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            next_bookmark: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        app.status, "go to line 10",
+        "F2 from line 6 must land on the bookmark BELOW it (0-based 9)"
+    );
+}
+
+#[test]
+fn bookmark_navigation_says_so_when_there_are_none() {
+    // The empty-set arm: a plain message rather than a silent no-op, so F2 on a
+    // buffer with no bookmarks explains itself.
+    let (mut app, ctx) = app();
+    assert!(app.tabs[app.active].bookmarks.is_empty());
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            next_bookmark: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(app.status, "no bookmarks in this buffer");
+}
