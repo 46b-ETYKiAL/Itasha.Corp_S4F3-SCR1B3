@@ -21,10 +21,10 @@
 //!
 //! 1. **It was circular.** The roots were the parent directories of the
 //!    manifest's OWN declared paths — derived from the very artifact they were
-//!    meant to police. A manifest naming `C:\Users\victim\.ssh\id_rsa` made
-//!    `C:\Users\victim\.ssh` an allowed root, so the path authorised itself
-//!    and was ACCEPTED. It never stopped the attack it was written for, while
-//!    its docstring claimed "a tampered/attacker-chosen path is NEVER
+//!    meant to police. A manifest naming `%USERPROFILE%\.ssh\id_rsa` made
+//!    `%USERPROFILE%\.ssh` an allowed root, so the path authorised itself and
+//!    was ACCEPTED. It never stopped the attack it was written for, while its
+//!    docstring claimed "a tampered/attacker-chosen path is NEVER
 //!    auto-opened".
 //! 2. **It defended a non-harm.** Auto-opening a local file shows the user a
 //!    file they can already read, on their own screen; the attacker learns
