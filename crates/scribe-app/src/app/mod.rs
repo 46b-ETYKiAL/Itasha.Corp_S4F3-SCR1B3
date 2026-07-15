@@ -2139,6 +2139,9 @@ mod session_io_tests;
 mod file_ops_tests;
 
 #[cfg(test)]
+mod build_plugins_tests;
+
+#[cfg(test)]
 mod deferred_actions_tests;
 
 #[cfg(test)]
