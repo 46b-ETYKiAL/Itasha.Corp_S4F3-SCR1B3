@@ -5,6 +5,17 @@
 
 use scribe_core::config::ClaimType;
 
+/// The `RegisteredApplications` value name used by the throwaway-root tests.
+///
+/// Deliberately NOT `"SCR1B3"`: that key is a fixed Windows location shared with
+/// a real installation, so the value name is the only thing keeping a test out
+/// of the user's actual registration. Defined once, here, so the entry builder
+/// and the `#[ignore]`d integration test that cleans up after it cannot drift
+/// apart — a test that registered one name and deleted another would either
+/// leak a value or delete someone else's.
+#[cfg(test)]
+pub(crate) const TEST_APP_NAME: &str = "SCR1B3-Test";
+
 /// One registry write: a key path under HKCU, a value name (`""` = the key's
 /// default value), and the string data.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,11 +32,21 @@ pub(crate) struct RegEntry {
 /// gets our ProgID added (it never overwrites the user's existing default), and
 /// `Capabilities` + `RegisteredApplications` make SCR1B3 a first-class entry in
 /// the Default Apps UI.
+///
+/// `app_name` is the VALUE name written under `Software\RegisteredApplications`;
+/// production passes `"SCR1B3"`. It is a parameter because that key is a
+/// Windows-defined location — unlike the other two roots it CANNOT be relocated
+/// into a throwaway subtree, so scoping the value name is the only way a test
+/// stays out of the real registration. It was hard-coded, which meant the
+/// `#[ignore]`d Windows integration test overwrote the real user registration
+/// and then DELETED it on cleanup, removing SCR1B3 from Settings ▸ Default Apps
+/// on any machine where it was actually installed.
 pub(crate) fn registry_entries(
     types: &[ClaimType],
     exe: &str,
     class_root: &str,
     app_root: &str,
+    app_name: &str,
 ) -> Vec<RegEntry> {
     let mut out = Vec::new();
 
@@ -43,7 +64,7 @@ pub(crate) fn registry_entries(
     });
     out.push(RegEntry {
         key: "Software\\RegisteredApplications".into(),
-        name: "SCR1B3".into(),
+        name: app_name.into(),
         data: format!("{app_root}\\Capabilities"),
     });
 
@@ -92,7 +113,13 @@ mod tests {
     const EXE: &str = r"C:\Apps\SCR 1B3\scr1b3.exe";
 
     fn entries(types: &[ClaimType]) -> Vec<RegEntry> {
-        registry_entries(types, EXE, "Software\\Classes", "Software\\SCR1B3")
+        registry_entries(
+            types,
+            EXE,
+            "Software\\Classes",
+            "Software\\SCR1B3",
+            "SCR1B3",
+        )
     }
 
     #[test]
@@ -155,20 +182,58 @@ mod tests {
     fn a_test_class_root_keeps_all_writes_inside_the_throwaway_subtree() {
         // The Windows #[ignore] integration test relies on this: with a test
         // root, NO entry touches a real `Software\Classes\.<ext>` key.
+        //
+        // This guard used to read `|| e.key == "Software\\RegisteredApplications"`
+        // — it whitelisted the ONE write that escaped, so a test named "keeps ALL
+        // writes inside the throwaway subtree" proved nothing about the only
+        // entry that left it. That is exactly why the escape went unnoticed: the
+        // key is a fixed Windows location, so containment there is the VALUE
+        // NAME, and the value name was hard-coded to the real one.
         let es = registry_entries(
             &ClaimType::ALL,
             EXE,
             "Software\\SCR1B3-Test\\Classes",
             "Software\\SCR1B3-Test\\App",
+            TEST_APP_NAME,
         );
         for e in &es {
+            let contained = e.key.starts_with("Software\\SCR1B3-Test\\")
+                || (e.key == "Software\\RegisteredApplications" && e.name == TEST_APP_NAME);
             assert!(
-                e.key.starts_with("Software\\SCR1B3-Test\\")
-                    || e.key == "Software\\RegisteredApplications",
-                "entry escaped the test root: {}",
-                e.key
+                contained,
+                "entry escaped the test sandbox: key={} name={}",
+                e.key, e.name
             );
         }
+    }
+
+    #[test]
+    fn a_test_root_never_writes_the_real_registered_application_value() {
+        // The specific damage: `HKCU\Software\RegisteredApplications\SCR1B3` is
+        // the user's real Default-Apps registration. A test that writes it
+        // repoints their install at a throwaway path, and the test's own cleanup
+        // then deletes the value outright.
+        let es = registry_entries(
+            &ClaimType::ALL,
+            EXE,
+            "Software\\SCR1B3-Test\\Classes",
+            "Software\\SCR1B3-Test\\App",
+            TEST_APP_NAME,
+        );
+        assert!(
+            !es.iter()
+                .any(|e| e.key == "Software\\RegisteredApplications" && e.name == "SCR1B3"),
+            "a throwaway-root build must never name the REAL registration value"
+        );
+        // …and it must still register itself under its own name, or the
+        // integration test is asserting against a set it never wrote.
+        assert!(
+            es.iter()
+                .any(|e| e.key == "Software\\RegisteredApplications"
+                    && e.name == TEST_APP_NAME
+                    && e.data == "Software\\SCR1B3-Test\\App\\Capabilities"),
+            "the test-scoped registration entry must still be emitted"
+        );
     }
 
     #[test]
