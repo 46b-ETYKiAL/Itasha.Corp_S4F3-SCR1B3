@@ -2173,24 +2173,15 @@ fn builtin_commands_registry_is_populated_and_unique() {
 fn every_builtin_command_dispatches_without_panic() {
     let mut app = ScribeApp::new_test(Config::default());
     for entry in BUILTIN_COMMANDS {
-        // The three rfd-touching variants would either hang the test
-        // runner waiting for user input (Linux/Windows) or panic in
-        // rfd's macOS backend (no NSApplication main thread on CI):
-        //   - OpenFile / OpenFolder call rfd::FileDialog directly.
-        //   - Save falls through to save_as → rfd::FileDialog when the
-        //     active buffer has no path. After CloseAllTabs in this
-        //     same loop the active tab IS a pathless scratch, so the
-        //     fall-through fires. Easier to skip than to keep the
-        //     fixture path alive across CloseAllTabs side-effects.
-        //   - ConvertToMarkdown / ExportAsHtml open an rfd save dialog.
-        match entry.action {
-            BuiltinCommand::OpenFile
-            | BuiltinCommand::OpenFolder
-            | BuiltinCommand::Save
-            | BuiltinCommand::ConvertToMarkdown
-            | BuiltinCommand::ExportAsHtml => continue,
-            _ => app.execute_builtin(entry.action),
-        }
+        // No skip list. The five rfd-touching variants (OpenFile, OpenFolder,
+        // Save via the pathless save_as fall-through, ConvertToMarkdown,
+        // ExportAsHtml) used to be skipped here because a native dialog blocks
+        // the runner on a human (Linux/Windows) or panics in rfd's macOS backend
+        // with no NSApplication main thread. They now route through
+        // `app::dialogs`, which is headless under cfg(test) and returns None —
+        // the same as the user cancelling — so every variant really is
+        // dispatched, which is what this test claims to check.
+        app.execute_builtin(entry.action);
     }
 }
 

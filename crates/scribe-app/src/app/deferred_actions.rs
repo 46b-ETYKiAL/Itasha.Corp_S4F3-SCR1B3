@@ -70,7 +70,7 @@ impl ScribeApp {
             self.save_config();
         }
         if act.open_folder {
-            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+            if let Some(folder) = super::dialogs::pick_folder() {
                 self.status = format!("folder: {}", folder.display());
                 self.file_tree_root = Some(folder);
             }

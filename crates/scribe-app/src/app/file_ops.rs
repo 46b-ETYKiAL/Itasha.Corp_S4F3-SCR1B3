@@ -9,7 +9,7 @@ use super::*;
 
 impl ScribeApp {
     pub(super) fn open_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().pick_file() {
+        if let Some(path) = super::dialogs::pick_file() {
             match EditorTab::from_path(path.clone()) {
                 Ok(t) => {
                     self.tabs.push(t);
@@ -103,11 +103,7 @@ impl ScribeApp {
             .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
             .map(|stem| format!("{stem}.md"))
             .unwrap_or_else(|| "untitled.md".to_string());
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Markdown", &["md"])
-            .set_file_name(&suggested)
-            .save_file()
-        {
+        if let Some(path) = super::dialogs::save_file(&suggested, &[("Markdown", "md")]) {
             match std::fs::write(&path, md) {
                 Ok(()) => self.status = format!("converted to Markdown → {}", path.display()),
                 Err(e) => {
@@ -136,11 +132,7 @@ impl ScribeApp {
             .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
             .map(|stem| format!("{stem}.html"))
             .unwrap_or_else(|| "untitled.html".to_string());
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("HTML", &["html"])
-            .set_file_name(&suggested)
-            .save_file()
-        {
+        if let Some(path) = super::dialogs::save_file(&suggested, &[("HTML", "html")]) {
             match std::fs::write(&path, html) {
                 Ok(()) => self.status = format!("exported HTML → {}", path.display()),
                 Err(e) => {

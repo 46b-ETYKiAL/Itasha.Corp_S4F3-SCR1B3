@@ -1992,6 +1992,8 @@ mod build_plugins;
 mod builtins;
 mod chrome;
 mod deferred_actions;
+/// The single seam to the OS file dialogs — headless under `cfg(test)`.
+pub(crate) mod dialogs;
 mod drag_scroll;
 mod editor_overlays;
 mod file_ops;

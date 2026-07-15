@@ -426,18 +426,16 @@ impl ScribeApp {
         }
     }
 
-    /// ADR-0007 exclusion: blocks on a native `rfd` dialog. Keep this body a
-    /// thin seam between [`Self::save_as_prompt`] and [`Self::commit_save_as`] —
-    /// anything decidable belongs in one of those, where tests can reach it.
+    /// ADR-0007 exclusion: blocks on a native dialog. Keep this body a thin seam
+    /// between [`Self::save_as_prompt`] and [`Self::commit_save_as`] — anything
+    /// decidable belongs in one of those, where tests can reach it. Under
+    /// `cfg(test)` the dialog is headless and returns `None` (see
+    /// [`super::dialogs`]), i.e. the same as the user cancelling.
     pub(super) fn save_as_active(&mut self) {
         let Some(prompt) = self.save_as_prompt() else {
             return;
         };
-        let mut dialog = rfd::FileDialog::new().set_file_name(&prompt.suggested);
-        for (label, ext) in &prompt.filters {
-            dialog = dialog.add_filter(*label, &[*ext]);
-        }
-        if let Some(path) = dialog.save_file() {
+        if let Some(path) = super::dialogs::save_file(&prompt.suggested, &prompt.filters) {
             self.commit_save_as(&path, prompt.fmt);
         }
     }

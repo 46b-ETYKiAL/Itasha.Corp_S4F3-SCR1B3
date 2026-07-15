@@ -1058,6 +1058,77 @@ fn move_line_down_from_the_last_line_is_a_no_op() {
 
 // ---- duplicate_cursor_line ----
 
+// ---- join_cursor_line_with_next ----
+//
+// The only test that touched this fn lived in wave3_perf_tests and asserted
+// that `edit_gen` bumps — not what the text became. So the joining itself, the
+// whole point of the operation, was never asserted.
+
+#[test]
+fn join_merges_the_next_line_with_a_single_space() {
+    let (mut app, _ctx) = app_with_lines(0);
+    app.join_cursor_line_with_next();
+    assert_eq!(app.tabs[app.active].text, "alpha bravo\ncharlie");
+}
+
+#[test]
+fn join_does_not_leave_a_leading_space_when_the_line_is_empty() {
+    // The `cur.is_empty() || nxt.is_empty()` guard picks the no-space join.
+    // Flip it to `&&` and the no-space path only fires when BOTH are empty, so
+    // joining a blank line onto text yields " bravo" — Ctrl+J on an empty line
+    // would silently indent the joined text by one space.
+    let (mut app, _ctx) = app();
+    let i = app.active;
+    app.tabs[i].text = "\nbravo".to_string();
+    set_caret_line0(&mut app, 0);
+
+    app.join_cursor_line_with_next();
+
+    assert_eq!(
+        app.tabs[i].text, "bravo",
+        "joining onto an empty line must not fabricate a leading space"
+    );
+}
+
+#[test]
+fn join_does_not_leave_a_trailing_space_when_the_next_line_is_empty() {
+    let (mut app, _ctx) = app();
+    let i = app.active;
+    app.tabs[i].text = "alpha\n".to_string();
+    set_caret_line0(&mut app, 0);
+
+    // "alpha\n" is ONE line once the phantom trailing element is popped, so
+    // there is nothing below to join — the guard above must make this a no-op
+    // rather than an "alpha " with a fabricated trailing space.
+    app.join_cursor_line_with_next();
+
+    assert_eq!(app.tabs[i].text, "alpha\n", "nothing below the last line");
+}
+
+#[test]
+fn join_collapses_indentation_of_the_joined_line() {
+    let (mut app, _ctx) = app();
+    let i = app.active;
+    app.tabs[i].text = "alpha   \n    bravo".to_string();
+    set_caret_line0(&mut app, 0);
+
+    app.join_cursor_line_with_next();
+
+    assert_eq!(
+        app.tabs[i].text, "alpha bravo",
+        "the seam is trimmed on both sides down to exactly one space"
+    );
+}
+
+#[test]
+fn join_on_the_last_line_is_a_no_op() {
+    let (mut app, _ctx) = app_with_lines(2);
+    app.join_cursor_line_with_next();
+    assert_eq!(app.tabs[app.active].text, "alpha\nbravo\ncharlie");
+}
+
+// ---- duplicate_cursor_line ----
+
 #[test]
 fn duplicate_line_inserts_an_exact_copy_below_the_cursor_line() {
     let (mut app, _ctx) = app_with_lines(1);

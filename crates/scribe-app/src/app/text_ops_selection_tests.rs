@@ -310,6 +310,35 @@ fn indent_list_lines_indents_and_outdents_the_touched_lines() {
 }
 
 #[test]
+fn outdenting_pulls_a_caret_past_the_new_end_back_in() {
+    // `store_caret` is what re-anchors the caret after these ops, and it could
+    // be replaced with `()` wholesale without a single test noticing: every
+    // caller's test asserted the TEXT and never the caret. Most inputs cannot
+    // see it either — the checkbox toggle keeps the length identical, so
+    // re-storing the same caret is a no-op. The `caret.min(new_len)` clamp only
+    // becomes observable when the text SHRINKS PAST the caret, which is exactly
+    // what an outdent does. Without it the caret is left dangling beyond the end
+    // of the buffer it points into.
+    let width = Config::default().editor.tab_width;
+    let pad = " ".repeat(width);
+    let (mut app, ctx) = app_with("i.md", &format!("{pad}- one"));
+    let active = app.active;
+
+    let end = app.tabs[active].text.chars().count();
+    select(&ctx, end, end);
+
+    assert!(app.indent_list_lines_active(&ctx, edit_id(), active, -1));
+
+    assert_eq!(app.tabs[active].text, "- one", "outdent removed the pad");
+    let new_len = app.tabs[active].text.chars().count();
+    assert_eq!(
+        selection(&ctx),
+        (new_len, new_len),
+        "the caret follows the text in — it must never point past the end"
+    );
+}
+
+#[test]
 fn indent_list_lines_reports_false_when_it_changes_nothing() {
     // The bool is load-bearing: the Tab handler falls back to space-indent when
     // this returns false. Outdenting an already-flush list must not claim a
@@ -833,6 +862,17 @@ fn auto_pair_wraps_a_selection_in_the_typed_pair() {
         !survived,
         "the '(' MUST be consumed, or egui inserts it again and the text \
          becomes '((wrap) me'"
+    );
+    // The wrapped text must STAY selected, shifted right past the opening char,
+    // so wrapping twice ("wrap" -> ("wrap") -> ("(wrap)")) works. This test
+    // asserted the text and stopped there, which left all three offsets in
+    // `(s, lo + 1, hi + 1)` free to be anything: `lo * 1`, `hi - 1` and `hi * 1`
+    // all survived the suite. Its sibling below already checks `selection`; this
+    // one just never did.
+    assert_eq!(
+        selection(&ctx),
+        (1, 5),
+        "'wrap' stays selected INSIDE the new parens"
     );
 }
 
