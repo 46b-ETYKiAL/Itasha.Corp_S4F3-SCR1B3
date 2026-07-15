@@ -246,6 +246,26 @@ jobs:
     # Diff-scoped so it is fast enough to gate every PR: mutants apply to
     # production code only (never `#[cfg(test)]`), so a test-only PR mutates
     # nothing and this passes in seconds. `--in-place` keeps it to one build tree.
+    #
+    # KNOWN BLIND SPOT — `integration/windows.rs` is excluded below. It is
+    # declared `#[cfg(windows)] mod windows;`, so on this ubuntu runner it is not
+    # compiled at all: mutating it changes nothing that builds, no test can
+    # possibly fail, and EVERY mutant in it reports MISSED. Those are vacuous,
+    # 100% false positives, and left in they would hold this gate permanently red
+    # for any PR touching the file — and a gate that is always red gets ignored,
+    # which is worse than no gate.
+    #
+    # This exclusion is NOT a claim that the file is covered. It is not: on
+    # Windows its `register_under` mutant survives the default suite and is only
+    # killed by the `#[ignore]`d HKCU test (verified by hand). Its real coverage
+    # is `cargo test -p scribe-app --bin scr1b3 integration::windows -- --ignored`
+    # on a Windows host; the pure key/value generation it delegates to
+    # (`windows_entries.rs`, `#[cfg(any(test, windows))]`) IS compiled and
+    # mutation-tested here.
+    #
+    # `windows_module_is_cfg_gated_so_the_mutation_exclusion_stays_honest` fails
+    # if that premise ever stops holding, so the exclusion cannot silently rot
+    # into a real blind spot.
     name: mutation testing (in-diff)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -274,7 +294,15 @@ jobs:
         # A surviving mutant here means a line this PR touched can be broken with
         # the suite still green. Fix the test, or document the mutant as
         # equivalent (see apply.rs for the precedent) — do not silence the job.
-        run: cargo mutants --in-diff pr.diff --test-tool nextest --timeout 300 --in-place
+        #
+        # The one `--exclude` below is NOT a silencing: `integration/windows.rs`
+        # is `#[cfg(windows)]`, so it is not compiled on this ubuntu runner and
+        # 100% of its mutants are vacuous MISSES that no test could ever kill.
+        # Adding a file here to make a REAL survivor go away is silencing; see
+        # the job comment above, and the test that pins this one's premise.
+        run: >
+          cargo mutants --in-diff pr.diff --test-tool nextest --timeout 300 --in-place
+          --exclude '**/src/integration/windows.rs'
 
   mutation:
     # Mutation testing (cargo-mutants) over scribe-core — too slow to gate every
