@@ -668,3 +668,67 @@ fn save_cfg_writes_the_current_config() {
         "the live config is what gets written"
     );
 }
+
+#[test]
+fn cycle_tab_prev_steps_back_one_from_a_middle_tab() {
+    // `cycle_tab_next_and_prev_wrap_in_both_directions` starts prev from tab 0,
+    // so it only ever takes the WRAP branch (`tabs.len() - 1`) — the ordinary
+    // `self.active - 1` step never ran, and `- 1` could be `+ 1` with the suite
+    // still green. That mutant is Ctrl+Shift+Tab moving FORWARD.
+    let (mut app, ctx) = app();
+    for _ in 0..2 {
+        apply(
+            &mut app,
+            &ctx,
+            &mut Pending {
+                new: true,
+                ..Default::default()
+            },
+        );
+    }
+    assert!(app.tabs.len() >= 3);
+    app.active = 2;
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            cycle_tab_prev: true,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(
+        app.active, 1,
+        "Ctrl+Shift+Tab from a middle tab must step BACK one, not forward"
+    );
+}
+
+#[test]
+fn cycle_tab_next_steps_forward_one_from_a_middle_tab() {
+    // The mirror case: `(active + 1) % len` from a middle tab, so the non-wrap
+    // arm of next is pinned too.
+    let (mut app, ctx) = app();
+    for _ in 0..2 {
+        apply(
+            &mut app,
+            &ctx,
+            &mut Pending {
+                new: true,
+                ..Default::default()
+            },
+        );
+    }
+    app.active = 0;
+
+    apply(
+        &mut app,
+        &ctx,
+        &mut Pending {
+            cycle_tab_next: true,
+            ..Default::default()
+        },
+    );
+
+    assert_eq!(app.active, 1, "Ctrl+Tab from tab 0 must step FORWARD one");
+}
