@@ -519,3 +519,47 @@ fn ctrl_shift_p_on_an_open_palette_does_not_re_grab_focus() {
         "focus is a first-open latch, not a re-grab on every press"
     );
 }
+
+/// The wheel delta that makes egui's `zoom_delta()` return bit-exactly `target`.
+///
+/// Solved with Rust's OWN `exp`, which is the one egui uses, rather than
+/// hard-coding a constant: a magic float derived off-platform can be a whole ULP
+/// out, and a boundary fixture that lands one ULP off the edge silently stops
+/// discriminating `>` from `>=` while still passing. Panics rather than returns
+/// an approximation if no f32 hits the edge exactly, so this fixture cannot
+/// quietly decay into one that proves nothing.
+fn dy_landing_exactly_on(target: f32) -> f32 {
+    let speed = 1.0_f32 / 200.0;
+    let zoom_at = |dy: f32| (speed * dy).exp();
+    let mut x = (200.0 * f64::from(target).ln()) as f32;
+    for _ in 0..2_000 {
+        x = x.next_down();
+    }
+    for _ in 0..4_000 {
+        if zoom_at(x) == target {
+            return x;
+        }
+        x = x.next_up();
+    }
+    panic!("no f32 wheel delta makes zoom_delta() exactly {target}");
+}
+
+#[test]
+fn a_gesture_exactly_on_the_deadzone_edge_does_not_zoom() {
+    // The deadzone edges are EXCLUSIVE (`>` / `<`, not `>=` / `<=`). Each pair
+    // differs at exactly one value, so only a fixture landing bit-exactly on the
+    // edge can tell them apart — otherwise loosening the comparison is an
+    // undetectable change.
+    let mut app = app();
+    let dz = 1.0025_f32; // ZOOM_DEADZONE
+    assert_eq!(
+        wheel(&mut app, dy_landing_exactly_on(dz), true),
+        None,
+        "exactly AT the deadzone is still inside it — the edge is exclusive"
+    );
+    assert_eq!(
+        wheel(&mut app, dy_landing_exactly_on(1.0 / dz), true),
+        None,
+        "…and the same on the zoom-out edge"
+    );
+}
