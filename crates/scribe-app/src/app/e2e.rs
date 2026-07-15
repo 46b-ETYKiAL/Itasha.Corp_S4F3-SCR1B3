@@ -1412,9 +1412,45 @@ fn keybinding_issues_surface_in_the_config_banner() {
         banner.contains("Keyboard shortcut problem"),
         "the banner must name the problem class, got: {banner}"
     );
+    assert_eq!(
+        banner.as_str(),
+        "Keyboard shortcut problem: 'find' has no key bound — it cannot be triggered. (and 1 more keybinding problem)",
+        "the banner must name the first problem AND count the rest exactly"
+    );
+}
+
+/// The "(and N more)" tail counts the OTHER issues — N is `len() - 1`, not `len()`.
+///
+/// The original assertion here was `banner.contains("more keybinding problem")`,
+/// which is true of "(and 1 more keybinding problem)", "(and 2 more keybinding
+/// problems)" and "(and 3 ...)" alike — so it could not see the count at all, and
+/// `len() - 1` -> `len() + 1` survived. Assert the rendered text.
+#[test]
+fn the_banner_counts_the_remaining_keybinding_problems_exactly() {
+    let one = {
+        let mut cfg = Config::default();
+        cfg.keybindings.find = String::new();
+        ScribeApp::new_test(cfg)
+            .config_error_banner
+            .expect("banner")
+    };
     assert!(
-        banner.contains("more keybinding problem"),
-        "the banner must account for the additional issue, got: {banner}"
+        !one.contains("more keybinding problem"),
+        "a lone problem has no others to count, got: {one}"
+    );
+
+    let three = {
+        let mut cfg = Config::default();
+        cfg.keybindings.find = String::new();
+        cfg.keybindings.save = "mod+nosuchkey".into();
+        cfg.keybindings.new_file = String::new();
+        ScribeApp::new_test(cfg)
+            .config_error_banner
+            .expect("banner")
+    };
+    assert!(
+        three.ends_with("(and 2 more keybinding problems)"),
+        "three problems means the first plus TWO more (plural), got: {three}"
     );
 }
 
