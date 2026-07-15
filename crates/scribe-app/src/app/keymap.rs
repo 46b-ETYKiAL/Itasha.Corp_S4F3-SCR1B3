@@ -336,6 +336,97 @@ impl Keymap {
 mod tests {
     use super::*;
 
+    /// Run one frame carrying `key` + `mods` and ask the keymap whether `action`
+    /// fired. `pressed` takes an `&InputState`, which only egui can build.
+    fn fired(km: &Keymap, action: &str, key: egui::Key, mods: egui::Modifiers) -> bool {
+        let ctx = egui::Context::default();
+        let mut out = false;
+        let input = egui::RawInput {
+            modifiers: mods,
+            events: vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: mods,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            out = ctx.input(|i| km.pressed(i, action));
+        });
+        out
+    }
+
+    const SHIFT: egui::Modifiers = egui::Modifiers::SHIFT;
+    const CMD: egui::Modifiers = egui::Modifiers::COMMAND;
+
+    // ---- shifted-symbol tolerance ----
+    //
+    // The `Key::Plus` branch of `pressed` had no test at all: four mutants in it
+    // survived the whole suite (its `== Equals`, its `!c.shift`, and BOTH of its
+    // modifier equalities could be inverted undetected). It is a real feature —
+    // on most layouts `+` IS Shift+`=`, so Ctrl+`+` must zoom in — and every one
+    // of those inversions is a user-visible break.
+
+    #[test]
+    fn ctrl_plus_fires_the_zoom_in_chord_bound_to_mod_equals() {
+        // THE reason the branch exists. Ctrl+`+` arrives as (Plus, shift: true)
+        // while the chord is `mod+equals` (no shift), so exact matching alone
+        // would drop it.
+        let km = Keymap::resolve(&Keybindings::default());
+        assert!(
+            fired(&km, action::INCREASE_FONT, egui::Key::Plus, CMD | SHIFT),
+            "Ctrl++ must zoom in — it is the same physical key as Ctrl+="
+        );
+    }
+
+    #[test]
+    fn ctrl_equals_still_fires_zoom_in_by_exact_match() {
+        // The tolerance must not be the ONLY way in.
+        let km = Keymap::resolve(&Keybindings::default());
+        assert!(fired(&km, action::INCREASE_FONT, egui::Key::Equals, CMD));
+    }
+
+    #[test]
+    fn ctrl_plus_does_not_fire_chords_bound_to_other_keys() {
+        // The tolerance is scoped to `equals` chords. If it applied to every
+        // OTHER key instead, Ctrl+`+` would fire New File, Save, and the rest at
+        // once — pressing one key would run half the editor.
+        let km = Keymap::resolve(&Keybindings::default());
+        for action in [action::NEW_FILE, action::SAVE, action::FIND] {
+            assert!(
+                !fired(&km, action, egui::Key::Plus, CMD | SHIFT),
+                "Ctrl++ must not fire '{action}' — the Plus tolerance is only for `equals` chords"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plus_without_the_command_modifier_does_not_zoom() {
+        // Typing a literal `+` into a note is Shift+`=` and nothing else. If the
+        // tolerance stopped checking `command`, every `+` typed would resize the
+        // font.
+        let km = Keymap::resolve(&Keybindings::default());
+        assert!(
+            !fired(&km, action::INCREASE_FONT, egui::Key::Plus, SHIFT),
+            "a bare + is a character, not a zoom"
+        );
+    }
+
+    #[test]
+    fn alt_plus_does_not_zoom() {
+        // The chord is `mod+equals`: alt is NOT part of it, so Ctrl+Alt+`+` is a
+        // different chord and must not zoom.
+        let km = Keymap::resolve(&Keybindings::default());
+        assert!(!fired(
+            &km,
+            action::INCREASE_FONT,
+            egui::Key::Plus,
+            CMD | SHIFT | egui::Modifiers::ALT
+        ));
+    }
+
     #[test]
     fn action_names_match_the_config_schema() {
         // Bidirectional parity: every const names a real binding, and every
