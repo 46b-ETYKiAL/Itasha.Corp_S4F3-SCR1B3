@@ -76,6 +76,34 @@ fn parse_hex_color(s: &str) -> Option<egui::Color32> {
     Some(egui::Color32::from_rgb(comp(0)?, comp(2)?, comp(4)?))
 }
 
+/// Index of the theme reached by stepping `delta` from `current` in `names`.
+///
+/// `rem_euclid` wraps the list in both directions, so the prev/next arrows never
+/// dead-end. A `current` that is NOT a built-in (a user theme from
+/// `<config_dir>/themes/`) has no position to step from, so it lands on the
+/// first entry going forward and the last going backward — the arrows always
+/// have a defined landing spot.
+///
+/// Pure, and a free function rather than a closure inside the render body, so it
+/// can be tested without driving the UI. It was a closure, and every one of its
+/// mutants survived (`>` → `==`/`<`/`>=`, `+` → `-`/`*`, `n - 1` → `n + 1`, the
+/// `delta > 0` guard → both `true` AND `false`) because nothing clicks the
+/// arrows in a test. An input that is not a parameter is not testable.
+///
+/// # Panics
+/// Never for a non-empty `names`; the caller indexes with the returned value,
+/// which `rem_euclid` keeps in `0..names.len()`.
+fn step_theme_index(names: &[&str], current: &str, delta: isize) -> usize {
+    let n = names.len() as isize;
+    debug_assert!(n > 0, "there is always at least one built-in theme");
+    let next = match names.iter().position(|t| *t == current) {
+        Some(i) => (i as isize + delta).rem_euclid(n),
+        None if delta > 0 => 0,
+        None => n - 1,
+    };
+    next as usize
+}
+
 /// egui temp-data key holding the selected Settings category. Shared by
 /// [`show`] (read + write each frame) and [`request_category`] (host deep-link
 /// pre-select) so the two never drift apart.
@@ -444,14 +472,8 @@ fn render_sections(
                     // built-in so the arrows always have a defined landing spot
                     // (mirrors C0PL4ND's theme step arrows).
                     let step = |config: &mut Config, delta: isize| {
-                        let n = names.len() as isize;
-                        let cur = names.iter().position(|t| *t == config.appearance.theme);
-                        let next = match cur {
-                            Some(i) => (i as isize + delta).rem_euclid(n),
-                            None if delta > 0 => 0,
-                            None => n - 1,
-                        };
-                        config.appearance.theme = names[next as usize].to_string();
+                        let next = step_theme_index(names, &config.appearance.theme, delta);
+                        config.appearance.theme = names[next].to_string();
                         // #88/#106 — switching theme resets BOTH the app and note
                         // background overrides to the new theme (parity with the
                         // dropdown path below).
@@ -3248,6 +3270,137 @@ mod toolbar_drop {
     }
 }
 
+/// The theme prev/next arrows.
+///
+/// Every mutant of this logic survived the first cargo-mutants sweep of
+/// scribe-app, because it lived as a closure inside `render_sections` and
+/// nothing in the suite clicks the arrows. Extracting it to a pure function is
+/// what makes the assertions below possible at all; each test names the
+/// surviving mutant it kills.
+#[cfg(test)]
+mod theme_step {
+    use super::step_theme_index;
+
+    const NAMES: [&str; 4] = ["alpha", "beta", "gamma", "delta"];
+
+    /// Kills `+` → `-` and `+` → `*` at the `i as isize + delta` site.
+    #[test]
+    fn stepping_forward_moves_to_the_next_theme() {
+        assert_eq!(step_theme_index(&NAMES, "alpha", 1), 1, "alpha -> beta");
+        assert_eq!(step_theme_index(&NAMES, "beta", 1), 2, "beta -> gamma");
+    }
+
+    #[test]
+    fn stepping_backward_moves_to_the_previous_theme() {
+        assert_eq!(step_theme_index(&NAMES, "gamma", -1), 1, "gamma -> beta");
+    }
+
+    /// `rem_euclid` is the whole point: the arrows must never dead-end. A plain
+    /// `%` would give -1 here, which would panic the caller's index.
+    #[test]
+    fn the_ends_wrap_in_both_directions() {
+        assert_eq!(
+            step_theme_index(&NAMES, "alpha", -1),
+            3,
+            "backward off the front wraps to the last theme, never underflows"
+        );
+        assert_eq!(
+            step_theme_index(&NAMES, "delta", 1),
+            0,
+            "forward off the end wraps to the first theme"
+        );
+    }
+
+    /// Kills the `delta > 0` guard mutants — BOTH `true` and `false` survived,
+    /// which is what a wholly-undriven branch looks like. A user theme is not in
+    /// the built-in list, so it has no position to step from; the direction of
+    /// travel decides where it lands.
+    #[test]
+    fn a_user_theme_lands_on_the_end_it_is_travelling_toward() {
+        assert_eq!(
+            step_theme_index(&NAMES, "my-custom-theme", 1),
+            0,
+            "forward from a non-built-in lands on the FIRST built-in"
+        );
+        assert_eq!(
+            step_theme_index(&NAMES, "my-custom-theme", -1),
+            3,
+            "backward from a non-built-in lands on the LAST built-in — this is \
+             the arm the `delta > 0` guard selects, and replacing that guard \
+             with either true or false must not survive"
+        );
+    }
+
+    /// Kills `delta > 0` → `delta >= 0`: the guard is STRICTLY forward. Only a
+    /// positive step lands a non-built-in on the FIRST entry; a zero step (no
+    /// movement — outside the ±1 the arrows ever pass, but a valid input to this
+    /// pure function) is not "forward", so it falls to the same last-entry arm as
+    /// a backward step. Weakening `>` to `>=` would divert the zero case to the
+    /// first entry, which this pins against.
+    #[test]
+    fn a_zero_step_from_a_user_theme_is_not_forward() {
+        assert_eq!(
+            step_theme_index(&NAMES, "my-custom-theme", 0),
+            3,
+            "a zero step is not strictly forward, so a non-built-in lands on the              LAST built-in — `delta > 0` must not weaken to `delta >= 0`"
+        );
+    }
+
+    /// Kills `n - 1` → `n + 1` / `n / 1`: a wrong landing index here would be
+    /// out of bounds and panic the caller.
+    #[test]
+    fn the_backward_landing_spot_is_in_bounds() {
+        let i = step_theme_index(&NAMES, "not-a-builtin", -1);
+        assert!(
+            i < NAMES.len(),
+            "the returned index is used to index `names` directly, so it must be \
+             in bounds; got {i} for a list of {}",
+            NAMES.len()
+        );
+    }
+
+    /// Kills `==` → `!=` in the `position` predicate: matching the WRONG theme
+    /// would step from an unrelated entry.
+    #[test]
+    fn the_current_theme_is_matched_exactly() {
+        // With `!=`, `position` returns the first name that ISN'T "alpha" —
+        // index 0 would become index 1 and every step would be off by one.
+        assert_eq!(
+            step_theme_index(&NAMES, "alpha", 1),
+            1,
+            "stepping from alpha must start at alpha's own index"
+        );
+        assert_eq!(
+            step_theme_index(&NAMES, "delta", -1),
+            2,
+            "stepping from the LAST theme must start at its index, not the first \
+             non-match"
+        );
+    }
+
+    #[test]
+    fn a_single_theme_list_stays_put_in_both_directions() {
+        let one = ["only"];
+        assert_eq!(step_theme_index(&one, "only", 1), 0);
+        assert_eq!(step_theme_index(&one, "only", -1), 0);
+    }
+
+    /// The real built-in list must work, not just the synthetic one above.
+    #[test]
+    fn the_real_builtin_list_round_trips() {
+        let names = scribe_core::theme::Theme::builtin_names();
+        assert!(!names.is_empty(), "there must be built-in themes to step");
+        let first = names[0];
+        let back = step_theme_index(names, first, -1);
+        assert_eq!(back, names.len() - 1, "first steps back to last");
+        assert_eq!(
+            step_theme_index(names, names[back], 1),
+            0,
+            "and forward again returns to the first"
+        );
+    }
+}
+
 #[cfg(test)]
 mod hex_color {
     use super::parse_hex_color;
@@ -3269,6 +3422,36 @@ mod hex_color {
         assert_eq!(parse_hex_color("#123"), None);
         assert_eq!(parse_hex_color("nothex!"), None);
         assert_eq!(parse_hex_color(""), None);
+    }
+
+    /// A TOO-LONG all-hex string must be rejected, not silently truncated.
+    ///
+    /// Every case above is too SHORT or not hex at all, and that asymmetry hid a
+    /// real hole: the `|| h.len() != 6` guard could be broken to `&&` and the
+    /// whole suite stayed green. With `&&`, `"aabbccdd"` stops being rejected
+    /// and parses as `aabbcc` — an 8-digit `#rrggbbaa` silently loses its alpha
+    /// and yields a colour the user never chose, rather than falling back to the
+    /// default. The short cases cannot catch that: they fail later anyway when
+    /// `comp()` runs off the end of the string, so they pass either way.
+    ///
+    /// Found by cargo-mutants (`settings.rs:69 replace || with &&`, MISSED).
+    #[test]
+    fn rejects_too_long_even_when_every_digit_is_valid_hex() {
+        assert_eq!(
+            parse_hex_color("aabbccdd"),
+            None,
+            "an 8-digit hex must be rejected, not truncated to its first 6 digits"
+        );
+        assert_eq!(
+            parse_hex_color("#aabbccdd"),
+            None,
+            "the `#` prefix must not change the length verdict"
+        );
+        assert_eq!(
+            parse_hex_color("1122334"),
+            None,
+            "one digit too many is still too many"
+        );
     }
 
     #[test]
