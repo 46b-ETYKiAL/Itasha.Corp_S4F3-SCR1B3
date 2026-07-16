@@ -160,6 +160,66 @@ jobs:
         # gated automatically, not silently left out.
         run: cargo bench -p scribe-core --benches --locked -- --test
 
+  gpu-ignored:
+    # The 41 `#[ignore]`d tests NOTHING was running: 31 visual-QA render scenes,
+    # 3 visual-regression baselines, 7 heavy large-file scale tests. They pass
+    # when run by hand, but no workflow ever ran them, so as CI protection they
+    # were worth zero — a whole test category (VISUAL / E2E_UI render) with no
+    # gate. They render the REAL ScribeApp frame through egui_kittest's wgpu
+    # backend, which is the one thing the AccessKit e2e tests cannot do.
+    #
+    # A GPU is not required for that: lavapipe (mesa's software Vulkan device)
+    # resolves a real wgpu adapter on a bare ubuntu runner, no Xvfb needed.
+    #
+    # SCR1B3_REQUIRE_GPU=1 is what makes this job honest. Every caller of
+    # `render_scene` discards its Option, so with no adapter these tests do not
+    # fail or skip loudly — they PASS having rendered nothing. Without the env
+    # var, a broken/renamed mesa package would silently turn this whole job into
+    # 41 no-ops reporting green, which is worse than not having it. With it, the
+    # probe (app/gpu_probe.rs) turns a missing adapter into a hard failure.
+    #
+    # The 1 remaining `#[ignore]` (the Windows registry integration test) lives
+    # in a `#[cfg(windows)]` module and cannot compile here — that one is
+    # deliberately hand-run, since it writes to a real Windows registry root.
+    name: GPU render + heavy tests (lavapipe)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        with:
+          tool: cargo-nextest
+      - name: Install the egui/winit build deps + a software Vulkan adapter
+        # mesa-vulkan-drivers provides lavapipe; vulkan-tools is only for the
+        # probe step below.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libssl-dev mesa-vulkan-drivers vulkan-tools
+      - name: Prove an adapter actually resolves before trusting the run
+        # Fail here with a readable message rather than 41 confusing test panics.
+        run: vulkaninfo --summary | head -40
+      - name: Run the ignored GPU + heavy lane
+        env:
+          # Turn "no adapter" into a hard failure instead of a silent green.
+          SCR1B3_REQUIRE_GPU: "1"
+          # lavapipe is the software device; be explicit rather than hoping the
+          # default pick is the one we installed.
+          WGPU_BACKEND: vulkan
+        # ignored-only: the non-ignored tests are already covered by `build &
+        # test`. This job exists for the lane nothing else runs.
+        run: cargo nextest run -p scribe-app --bin scr1b3 --locked --run-ignored ignored-only
+
   fuzz-build:
     # Compile-only check that the cargo-fuzz targets stay buildable (they need
     # nightly + libFuzzer, so they live outside the main workspace). No fuzzing

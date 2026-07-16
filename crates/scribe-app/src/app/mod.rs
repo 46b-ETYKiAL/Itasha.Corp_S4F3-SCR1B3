@@ -2172,6 +2172,9 @@ mod multi_file_open_tests;
 mod change_bar_tests;
 
 #[cfg(test)]
+mod gpu_probe;
+
+#[cfg(test)]
 mod visual_qa;
 
 #[cfg(test)]
