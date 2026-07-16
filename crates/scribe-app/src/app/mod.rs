@@ -2139,6 +2139,9 @@ mod session_io_tests;
 mod file_ops_tests;
 
 #[cfg(test)]
+mod build_plugins_tests;
+
+#[cfg(test)]
 mod deferred_actions_tests;
 
 #[cfg(test)]
@@ -2167,6 +2170,9 @@ mod multi_file_open_tests;
 
 #[cfg(test)]
 mod change_bar_tests;
+
+#[cfg(test)]
+mod gpu_probe;
 
 #[cfg(test)]
 mod visual_qa;

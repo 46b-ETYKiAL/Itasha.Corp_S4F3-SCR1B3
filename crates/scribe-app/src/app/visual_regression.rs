@@ -135,16 +135,7 @@ fn diff_rejects_size_mismatch() {
 
 // ───────────────────────── GPU render → diff → assert ─────────────────────
 
-/// True if a usable wgpu adapter resolves on this host (mirrors `visual_qa`).
-fn gpu_available() -> bool {
-    let instance = wgpu::Instance::default();
-    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::LowPower,
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .is_ok()
-}
+use super::gpu_probe::gpu_available;
 
 /// `crates/scribe-app/tests/visual-baseline/` — committed known-good PNGs.
 fn baseline_dir() -> std::path::PathBuf {

@@ -10,20 +10,9 @@
 //!   cargo test -p scribe-app --features … visual_qa -- --ignored --nocapture
 //! Each scene prints the PNG path it wrote.
 
+use super::gpu_probe::gpu_available;
 use super::*;
 use egui_kittest::Harness;
-
-/// True if a usable wgpu adapter resolves on this host. Avoids the panic
-/// `Harness::wgpu()` raises when no adapter exists, so CI skips cleanly.
-fn gpu_available() -> bool {
-    let instance = wgpu::Instance::default();
-    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::LowPower,
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .is_ok()
-}
 
 fn out_dir() -> std::path::PathBuf {
     let d = std::env::temp_dir().join("scr1b3-visual-qa");
