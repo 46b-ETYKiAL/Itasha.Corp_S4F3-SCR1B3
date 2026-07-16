@@ -1,0 +1,33 @@
+# cargo-mutants config for scr1b3.
+#
+# Applies to BOTH the per-PR `mutation-in-diff` gate and the scheduled
+# `mutation` / `mutation-app` jobs. The excluded files have NO unit-testable
+# logic — egui/eframe per-frame render loops, native rfd dialogs, OS-shell
+# integration, and the app bootstrap. Excluding them stops the gates reporting
+# vacuous survivors on code that CANNOT be exercised without a live GUI/OS
+# (ADR-0007 §3) — the "rfd dialogs mask mutation verdicts" failure that commits
+# 5d6af04 / 7569a9a fixed at the CLI level, now made durable and consistent
+# across every mutation run.
+#
+# MIXED files (mod.rs, render_support.rs, text_ops_methods.rs, builtins.rs, …)
+# are DELIBERATELY NOT glob-excluded here: they carry real logic that must stay
+# mutation-gated. Their individual UI-render functions are excluded precisely
+# via `#[cfg_attr(test, mutants::skip)]` on the function, each with an ADR-0007
+# justification — never by a broad file/regex glob that could silently hide a
+# logic gap (a green-that-isn't-green).
+
+exclude_globs = [
+  # egui/eframe per-frame render + modal painting (no testable logic)
+  "crates/scribe-app/src/app/frame_tick.rs",
+  "crates/scribe-app/src/app/frame_modals.rs",
+  "crates/scribe-app/src/app/modals.rs",
+  "crates/scribe-app/src/app/grid_render.rs",
+  "crates/scribe-app/src/app/toolbar_render.rs",
+  # rfd native file dialogs (unreachable offline)
+  "crates/scribe-app/src/app/dialogs.rs",
+  # app + OS bootstrap / shell integration side-effects
+  "crates/scribe-app/src/main.rs",
+  "crates/scribe-app/src/integration/mod.rs",
+  "crates/scribe-app/src/integration/linux.rs",
+  "crates/scribe-app/src/integration/windows.rs",
+]

@@ -390,6 +390,51 @@ jobs:
       - name: Mutation test (scribe-core logic)
         run: cargo mutants -p scribe-core --test-tool nextest --timeout 120
 
+  mutation-app:
+    # Mutation testing (cargo-mutants) over scribe-app's LOGIC modules — the
+    # app-logic crate the per-PR `mutation-in-diff` job only covers on changed
+    # lines. Too slow to gate every PR (hundreds of mutants), so it runs weekly
+    # (schedule) + on demand (workflow_dispatch), SHARDED across a matrix for
+    # wall-clock. The UI-render / dialog / bootstrap modules are excluded via
+    # .cargo/mutants.toml (ADR-0007 §3 — unreachable without a live GUI/OS);
+    # MIXED-file UI functions carry per-fn `#[cfg_attr(test, mutants::skip)]`.
+    # A surviving mutant flags a test that executes a line but does not assert
+    # its behaviour. The mutants.out dir is uploaded on every run (even a red
+    # one) so the survivor inventory is readable from the job artifact.
+    name: mutation testing (scribe-app, scheduled)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - name: Harden the runner (egress audit)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Install cargo-mutants + nextest
+        run: cargo install cargo-mutants cargo-nextest --locked
+      - name: Mutation test (scribe-app logic, shard ${{ matrix.shard }}/4)
+        run: >
+          cargo mutants -p scribe-app --test-tool nextest --timeout 120
+          --shard ${{ matrix.shard }}/4 --output mutants-app-shard-${{ matrix.shard }}
+      - name: Upload survivor inventory (always)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutation-app-shard-${{ matrix.shard }}
+          path: mutants-app-shard-${{ matrix.shard }}/mutants.out/
+          if-no-files-found: warn
+
   unused-deps:
     # cargo-machete fails the build on an UNUSED dependency. An unused dep is
     # unaudited code sitting in the lockfile + attack surface for no benefit;
