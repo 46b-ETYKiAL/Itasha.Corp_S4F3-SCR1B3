@@ -77,7 +77,22 @@ test_tool = "nextest"
 #   telemetry-disabled suppresses) with a capturing sink. The `\(\)` bound matches
 #   the wrapper's whole-body mutant ONLY, never `log_outcome_with` (the `_with`
 #   breaks the ` with ` match). See crates/scribe-app/src/reporting.rs.
+# - effects.rs CRT/VHS paint functions (6): each takes `ctx: &egui::Context` and
+#   paints directly (`ctx.layer_painter(...).rect_filled/circle_filled/line_segment`);
+#   their internal alpha/phase/drift/position arithmetic is observable ONLY through
+#   GPU-painted pixels (ADR-0007 "egui-paint" — no return value, no assertable
+#   state). Confirmed by a real 197-mutant run: ALL 14 MISSED land in exactly these
+#   6 functions; the one pure helper `wired_mesh_node_count` is separately tested
+#   (the run's 1 caught) and its token does NOT collide with `paint_wired_mesh`.
+#   paint_tint_overlay is a deliberate no-op stub with NO surviving mutant, so it is
+#   NOT pardoned here (only confirmed survivors are excluded).
 exclude_re = [
   "replace path -> Option<&'static PathBuf>",
   'replace log_outcome with \(\)',
+  "paint_crt_scanlines",
+  "paint_flicker",
+  "paint_vhs_tracking",
+  "paint_wired_mesh",
+  "paint_caret_trail",
+  "paint_boot_glitch",
 ]
