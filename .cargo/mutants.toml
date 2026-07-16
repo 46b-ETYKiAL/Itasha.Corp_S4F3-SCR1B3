@@ -67,6 +67,17 @@ test_tool = "nextest"
 #   observed deterministically by a unit test. The RESOLUTION logic it caches is
 #   fully covered by the `resolve_log_path` unit tests; only this untestable cache
 #   wrapper is pardoned. See crates/scribe-app/src/action_log.rs.
+#
+# - `reporting::log_outcome -> ()` (the thin wrapper only): `log_outcome` forwards
+#   to `log_outcome_with`, whose sole side effect is `action_log::record` — which
+#   routes through that same process-global first-caller-wins `OnceLock` path
+#   cache, so "did the wrapper call the real sink" is not deterministically
+#   observable under a shared-process test runner. The GATE + payload logic is
+#   split into `log_outcome_with` and fully covered (telemetry-enabled forwards,
+#   telemetry-disabled suppresses) with a capturing sink. The `\(\)` bound matches
+#   the wrapper's whole-body mutant ONLY, never `log_outcome_with` (the `_with`
+#   breaks the ` with ` match). See crates/scribe-app/src/reporting.rs.
 exclude_re = [
   "replace path -> Option<&'static PathBuf>",
+  'replace log_outcome with \(\)',
 ]
