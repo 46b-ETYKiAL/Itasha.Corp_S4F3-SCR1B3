@@ -599,6 +599,85 @@ fn restore_recovers_unsaved_content_even_with_restore_session_off() {
 }
 
 #[test]
+fn an_unresolvable_symlink_chain_is_stripped_even_though_the_os_would_open_it() {
+    // R6 / S-04 — the `Some(p) if is_safe_restore_path(p)` guard at
+    // session_io.rs:177 must strip ANY restore path it cannot PROVE resolves to
+    // local storage, never carrying it as the tab's save target.
+    //
+    // The subtle part: a naive `//attacker/share/secret.md` entry does NOT pin
+    // that guard. Such a path is unopenable, so `from_backup` falls back to a
+    // pathless scratch on BOTH clean and mutated code — the tab is pathless
+    // either way and the `->true` mutant SURVIVES. To observe the guard we need a
+    // path that is simultaneously guard-REJECTED and OS-OPENABLE. A symlink chain
+    // longer than the guard's MAX_LINK_HOPS (8) is exactly that: `resolves_locally`
+    // gives up after 8 hops and fails closed (unsafe), but the OS follows the whole
+    // chain and opens the real file. Clean code strips the path → pathless scratch;
+    // the `is_safe_restore_path`->`true` mutant carries the path through, binds it,
+    // and opens the chain — so asserting the restored tab is pathless is the only
+    // thing that kills that mutant. Cross-platform (unix + Windows Developer-Mode/
+    // admin); where symlinks are unprivileged we skip loudly rather than lie.
+    use scribe_core::session;
+
+    fn make_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    }
+
+    let dir = temp_dir("restore-unresolvable-symlink-chain");
+    let real = dir.join("real_target.md");
+    std::fs::write(&real, "ON DISK").unwrap();
+
+    // A chain of 12 symlinks (> MAX_LINK_HOPS = 8) ending at the real file:
+    // hop11 -> hop10 -> ... -> hop0 -> real_target.md.
+    let mut current = real.clone();
+    let mut head = None;
+    for i in 0..12 {
+        let link = dir.join(format!("hop{i}.lnk"));
+        if make_symlink(&current, &link).is_err() {
+            eprintln!(
+                "SKIP an_unresolvable_symlink_chain_is_stripped_*: symlinks are not \
+                 permitted on this host; the line-177 guard mutant is exercised by the \
+                 ubuntu mutation lane instead"
+            );
+            return;
+        }
+        current = link.clone();
+        head = Some(link);
+    }
+    let head = head.expect("a 12-link chain was built");
+
+    session::write_backup(&session::backup_dir(&dir), "b0.bak", "UNSAVED WORK").unwrap();
+    let (tabs, _) = restore_from(
+        &dir,
+        vec![snap(
+            Some(head.display().to_string()),
+            true,
+            Some("b0.bak".into()),
+        )],
+        true,
+    )
+    .expect("a backup always restores its unsaved content, even from an unsafe path");
+
+    assert_eq!(tabs.len(), 1);
+    assert_eq!(
+        tabs[0].text, "UNSAVED WORK",
+        "the unsaved content must survive"
+    );
+    assert!(
+        tabs[0].doc.path().is_none(),
+        "a path the guard cannot resolve within MAX_LINK_HOPS must be stripped to a \
+         pathless scratch — the OS may open the chain, but the restore guard must not \
+         carry it as the tab's save target; else `is_safe_restore_path`->`true` survives",
+    );
+}
+
+#[test]
 fn restore_session_off_does_not_reopen_clean_files() {
     // The toggle is authoritative: with it off, a clean file-backed tab from the
     // last session must NOT be reopened. (It used to be reopened anyway, which
