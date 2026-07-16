@@ -665,7 +665,10 @@ fn an_unresolvable_symlink_chain_is_stripped_even_though_the_os_would_open_it() 
     .expect("a backup always restores its unsaved content, even from an unsafe path");
 
     assert_eq!(tabs.len(), 1);
-    assert_eq!(tabs[0].text, "UNSAVED WORK", "the unsaved content must survive");
+    assert_eq!(
+        tabs[0].text, "UNSAVED WORK",
+        "the unsaved content must survive"
+    );
     assert!(
         tabs[0].doc.path().is_none(),
         "a path the guard cannot resolve within MAX_LINK_HOPS must be stripped to a \
