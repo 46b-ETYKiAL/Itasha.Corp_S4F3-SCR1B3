@@ -543,6 +543,88 @@ mod tests {
     }
 
     #[test]
+    fn backward_selection_range_and_start_use_min_max_order() {
+        // A backward drag (anchor > head: shift+Home, or shift+Left dragging the
+        // head left past the anchor). range() must sort to min..max and start()
+        // to the lower offset. Every other test builds forward selections
+        // (anchor <= head), so a mutant that drops the .min()/.max() (using
+        // self.anchor / self.head directly) is byte-identical for them and only
+        // observable here.
+        let back = Caret::selection(7, 3);
+        assert_eq!(back.range(), 3..7, "range() sorts anchor/head to min..max");
+        assert_eq!(back.start(), 3, "start() is the lower offset regardless of drag direction");
+        // forward direction still holds (guards against an over-correction):
+        assert_eq!(Caret::selection(2, 5).range(), 2..5);
+        assert_eq!(Caret::selection(2, 5).start(), 2);
+    }
+
+    #[test]
+    fn caret_is_empty_reflects_zero_width_in_both_directions() {
+        // is_empty() has zero call sites in the crate — pin it directly so the
+        // `anchor == head` -> `!=` mutant cannot survive.
+        assert!(Caret::at(3).is_empty(), "a bare caret is empty");
+        assert!(!Caret::selection(1, 4).is_empty(), "a forward selection is not empty");
+        assert!(!Caret::selection(4, 1).is_empty(), "a backward selection is not empty either");
+    }
+
+    #[test]
+    fn char_to_byte_maps_multibyte_char_indices_to_byte_offsets() {
+        // Every other fixture in this module is pure ASCII, where char index ==
+        // byte offset, so any arithmetic bug in char_to_byte is invisible. Use a
+        // multibyte string: 'é'=2 bytes, '中'=3 bytes, 'z'=1 byte.
+        let text = "é中z";
+        assert_eq!(char_to_byte(text, 0), 0);
+        assert_eq!(char_to_byte(text, 1), 2, "after 'é' (2 bytes)");
+        assert_eq!(char_to_byte(text, 2), 5, "after 'é中' (2+3 bytes)");
+        assert_eq!(char_to_byte(text, 3), 6, "char count maps to len()");
+        assert_eq!(char_to_byte(text, 99), 6, "an index past the end clamps to len()");
+    }
+
+    #[test]
+    fn adjacent_touching_selections_do_not_conflict_but_overlaps_do() {
+        // Exactly-touching ranges (end == next.start), e.g. non-overlapping Ctrl+D
+        // matches 0..2 / 2..4, must NOT conflict (both kept) per carets_conflict's
+        // documented contract. No existing fixture has touching ranges (they all
+        // have a gap), so the `br.start < ar.end` -> `<=` mutant survives them.
+        let a = Caret::selection(0, 2);
+        let b = Caret::selection(2, 4);
+        assert!(!carets_conflict(&a, &b), "touching-but-not-overlapping selections are both kept");
+        // A genuine 1-char overlap DOES conflict (guards against inverting the test):
+        assert!(carets_conflict(&Caret::selection(0, 3), &Caret::selection(2, 4)));
+    }
+
+    #[test]
+    fn is_active_requires_both_engaged_and_a_nonempty_secondary_set() {
+        let mut mc = MultiCursor::default();
+        assert!(!mc.is_active(), "default: not engaged, no secondaries");
+        // toggle_caret coincident with the primary engages (active=true) but adds
+        // NO secondary — is_active must still be false. This is the only state in
+        // the suite where active==true and secondaries is empty, so it kills the
+        // `self.active && !self.secondaries.is_empty()` -> `self.active` mutant.
+        mc.toggle_caret(Caret::at(5), Caret::at(5));
+        assert!(!mc.is_active(), "engaged with zero secondaries is NOT active");
+        mc.add_caret(Caret::at(9));
+        assert!(mc.is_active(), "a real secondary makes it active");
+    }
+
+    #[test]
+    fn word_bounds_include_underscores_and_digits() {
+        // Every Ctrl+D fixture uses pure-alpha words, so a mutant dropping the
+        // `c == '_'` disjunct or narrowing is_alphanumeric() -> is_alphabetic()
+        // is invisible to them. A snake_case identifier with a digit pins both.
+        let chars = cv("snake_case1 x"); // "snake_case1" is 11 chars (0..11)
+        assert_eq!(
+            word_bounds_chars(&chars, 3),
+            (0, 11),
+            "an identifier with '_' and a digit is one whole word"
+        );
+        assert!(is_word_char('_'), "underscore is a word char");
+        assert!(is_word_char('7'), "a digit is a word char");
+        assert!(!is_word_char(' '), "space is not a word char");
+        assert!(!is_word_char('-'), "hyphen is not a word char");
+    }
+
+    #[test]
     fn insert_at_two_carets_edits_both_spots() {
         // "aaa\naaa": primary at char 0, secondary at char 4 (start of line 2).
         let mut text = "aaa\naaa".to_string();
