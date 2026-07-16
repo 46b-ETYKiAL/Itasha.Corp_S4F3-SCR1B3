@@ -3771,3 +3771,50 @@ fn topbar_click_does_not_scroll_the_note() {
         after - before
     );
 }
+
+/// `modal_owns_keyboard` is a 6-way `||` of modal-open flags. The prior coverage
+/// only set `find_open`; because Rust `&&` binds tighter than `||`, each
+/// `|| -> &&` mutant reparses as `... || (X && Y) || ...` which stays TRUE when a
+/// NON-neighbouring flag (find) is set — so find-only never kills them. Setting
+/// EACH modal flag alone and asserting the method is still true kills every
+/// `|| -> &&` survivor (each isolated `(X && Y)` conjunct is false with one flag).
+#[test]
+fn modal_owns_keyboard_true_for_each_single_open_modal() {
+    let setters: [fn(&mut ScribeApp); 6] = [
+        |a| a.find_open = true,
+        |a| a.palette_open = true,
+        |a| a.settings_open = true,
+        |a| a.fuzzy_open = true,
+        |a| a.goto_open = true,
+        |a| a.goto_symbol_open = true,
+    ];
+    for set in setters {
+        let mut app = fresh_app();
+        assert!(!app.modal_owns_keyboard(), "precondition: no modal open");
+        set(&mut app);
+        assert!(
+            app.modal_owns_keyboard(),
+            "a single open modal must own the keyboard (kills the || -> && collapse)"
+        );
+    }
+}
+
+/// `replace_in_active` guards with `find_query.is_empty() || active >= tabs.len()`.
+/// The existing empty-pattern test asserts only `text` — but on an empty pattern
+/// the body makes no edit, so the `|| -> &&` mutant (which, with a valid active,
+/// falls THROUGH into the body) leaves text unchanged and survives. The body DOES
+/// set `self.status`, so asserting `status` is untouched is the killing assertion.
+#[test]
+fn replace_in_active_empty_pattern_early_returns_without_touching_status() {
+    let mut app = ScribeApp::new_test(Config::default());
+    app.tabs[0].text = "hello hello".into();
+    app.find_query.clear();
+    app.replace_query = "world".into();
+    let status_before = app.status.clone();
+    app.replace_in_active(true);
+    assert_eq!(app.tabs[0].text, "hello hello", "empty pattern must not edit text");
+    assert_eq!(
+        app.status, status_before,
+        "empty-pattern replace must EARLY-RETURN, never run the body (kills || -> &&)"
+    );
+}

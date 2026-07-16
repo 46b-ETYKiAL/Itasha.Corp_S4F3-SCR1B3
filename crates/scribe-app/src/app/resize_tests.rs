@@ -66,3 +66,38 @@ fn outside_the_window_is_none() {
     assert_eq!(resize_dir_at(pos2(-5.0, 350.0), win(), 6.0, 12.0), None);
     assert_eq!(resize_dir_at(pos2(500.0, 800.0), win(), 6.0, 12.0), None);
 }
+
+#[test]
+fn resize_dir_at_kills_offset_and_boundary_mutants() {
+    // The tests above all use a (0,0)-origin `win()`, under which
+    // `p.x - rect.left()` == `p.x + rect.left()` (left=0) — so the offset
+    // mutants (`- -> +`) are equivalent, and they never probe the exact-border
+    // (`==0`) or single-corner-band points, so the guard (`< -> <=`) and the
+    // corner (`|| -> &&`) mutants survive. A NON-zero-origin rect plus
+    // exact-border and single-corner-band probes make each one diverge.
+    let r = Rect::from_min_max(pos2(10.0, 20.0), pos2(110.0, 220.0));
+    let (e, c) = (8.0, 12.0);
+
+    // (A) West-edge interior: l = p.x - left = 5. `- -> +` -> l=25 -> None.
+    assert_eq!(resize_dir_at(pos2(15.0, 120.0), r, e, c), Some(D::West));
+    // (B) North-edge interior: t = p.y - top = 4. `- -> +` -> t=44 -> None.
+    assert_eq!(resize_dir_at(pos2(60.0, 24.0), r, e, c), Some(D::North));
+    // (C) Just LEFT of window (l=-5): outside-guard `|| -> &&` at the l/r pair
+    //     would make `(l<0 && r<0)` false -> proceed -> West; orig short-circuits None.
+    assert_eq!(resize_dir_at(pos2(5.0, 120.0), r, e, c), None);
+    // (D) EXACT left border (l==0): `l < 0.0 -> <=` guards it to None.
+    assert_eq!(resize_dir_at(pos2(10.0, 120.0), r, e, c), Some(D::West));
+    // (E) EXACT right border (r==0): `r < 0.0 -> <=`/`== 0.0` -> None.
+    assert_eq!(resize_dir_at(pos2(110.0, 120.0), r, e, c), Some(D::East));
+    // (F) EXACT top border (t==0): `t < 0.0 -> <=`/`== 0.0` -> None.
+    assert_eq!(resize_dir_at(pos2(60.0, 20.0), r, e, c), Some(D::North));
+    // (G) EXACT bottom border (b==0): `b < 0.0 -> <=` -> None.
+    assert_eq!(resize_dir_at(pos2(60.0, 220.0), r, e, c), Some(D::South));
+    // (H) NE: north edge, RIGHT corner band, OUTSIDE right edge band (r=10 in (8,12]).
+    //     Only `(n && ne)` is true; `|| -> &&` collapses it to North.
+    assert_eq!(resize_dir_at(pos2(100.0, 24.0), r, e, c), Some(D::NorthEast));
+    // (I) SW: bottom edge, LEFT corner band, outside left edge band (l=10 in (8,12]).
+    assert_eq!(resize_dir_at(pos2(20.0, 214.0), r, e, c), Some(D::SouthWest));
+    // (J) SE: bottom edge, RIGHT corner band, outside right edge band (r=10 in (8,12]).
+    assert_eq!(resize_dir_at(pos2(100.0, 214.0), r, e, c), Some(D::SouthEast));
+}
