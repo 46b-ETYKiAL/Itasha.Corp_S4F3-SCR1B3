@@ -3271,6 +3271,36 @@ mod hex_color {
         assert_eq!(parse_hex_color(""), None);
     }
 
+    /// A TOO-LONG all-hex string must be rejected, not silently truncated.
+    ///
+    /// Every case above is too SHORT or not hex at all, and that asymmetry hid a
+    /// real hole: the `|| h.len() != 6` guard could be broken to `&&` and the
+    /// whole suite stayed green. With `&&`, `"aabbccdd"` stops being rejected
+    /// and parses as `aabbcc` — an 8-digit `#rrggbbaa` silently loses its alpha
+    /// and yields a colour the user never chose, rather than falling back to the
+    /// default. The short cases cannot catch that: they fail later anyway when
+    /// `comp()` runs off the end of the string, so they pass either way.
+    ///
+    /// Found by cargo-mutants (`settings.rs:69 replace || with &&`, MISSED).
+    #[test]
+    fn rejects_too_long_even_when_every_digit_is_valid_hex() {
+        assert_eq!(
+            parse_hex_color("aabbccdd"),
+            None,
+            "an 8-digit hex must be rejected, not truncated to its first 6 digits"
+        );
+        assert_eq!(
+            parse_hex_color("#aabbccdd"),
+            None,
+            "the `#` prefix must not change the length verdict"
+        );
+        assert_eq!(
+            parse_hex_color("1122334"),
+            None,
+            "one digit too many is still too many"
+        );
+    }
+
     #[test]
     fn rejects_non_ascii_without_panicking() {
         // A multibyte char can make a value 6 BYTES long while crossing a char
