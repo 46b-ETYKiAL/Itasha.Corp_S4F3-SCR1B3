@@ -31,3 +31,21 @@ exclude_globs = [
   "crates/scribe-app/src/integration/linux.rs",
   "crates/scribe-app/src/integration/windows.rs",
 ]
+
+# Exclude the heavy scale/perf test modules from every mutation TEST RUN.
+#
+# cargo-mutants re-runs the whole test suite once per mutant. The non-ignored
+# scale tests (s5 ~53s, s11 ~31s in qa_largefile_scale_tests; scenario3 ~32s in
+# qa_find_scale_tests) drag the scribe-app baseline from ~33s to ~73s — a cost
+# paid on EVERY mutant, and enough to blow a tight per-mutant timeout. These
+# tests assert panic-freedom / no-OOB at size N; they do NOT assert fine-grained
+# logic, so they kill ~no logic mutant a fast unit test doesn't already kill, and
+# the scale-SENSITIVE logic (mmap threshold, chunking) lives in scribe-core,
+# which has its own mutation coverage. Excluding them keeps the run tractable
+# without dropping logic kill-power. (This is a TEST-selection filter, not a
+# code-exclusion glob — the scale MODULES' own source can still be mutated; only
+# their slow tests are skipped while OTHER tests hunt those mutants.)
+additional_cargo_test_args = [
+  "-E",
+  "not (test(/qa_largefile_scale_tests/) | test(/qa_find_scale_tests/))",
+]
