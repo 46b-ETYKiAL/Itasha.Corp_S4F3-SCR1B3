@@ -49,3 +49,24 @@ additional_cargo_test_args = [
   "-E",
   "not (test(/qa_largefile_scale_tests/) | test(/qa_find_scale_tests/))",
 ]
+
+# nextest is the test tool for every mutation run. Making it the config default
+# (not just a per-invocation `--test-tool nextest` flag) keeps the `-E` filter
+# above valid on ANY invocation — a plain `cargo test` would reject `-E` and fail
+# the baseline. All CI jobs already pass `--test-tool nextest`; this removes the
+# footgun for ad-hoc local runs.
+test_tool = "nextest"
+
+# Pardoned mutants (equivalent or untestable — never a floor-lowering shortcut):
+#
+# - `action_log::path -> Option<&'static PathBuf>` body mutants (`-> None`,
+#   `-> Some(default)`): `path` is a process-global first-caller-wins `OnceLock`
+#   cache over `resolve_log_path`. 8 production `record` call sites prime it and
+#   app-level tests trigger them under a shared `cargo test` process, so its
+#   cached value is fixed for the binary's lifetime and a body mutation cannot be
+#   observed deterministically by a unit test. The RESOLUTION logic it caches is
+#   fully covered by the `resolve_log_path` unit tests; only this untestable cache
+#   wrapper is pardoned. See crates/scribe-app/src/action_log.rs.
+exclude_re = [
+  "replace path -> Option<&'static PathBuf>",
+]
