@@ -3331,6 +3331,21 @@ mod theme_step {
         );
     }
 
+    /// Kills `delta > 0` → `delta >= 0`: the guard is STRICTLY forward. Only a
+    /// positive step lands a non-built-in on the FIRST entry; a zero step (no
+    /// movement — outside the ±1 the arrows ever pass, but a valid input to this
+    /// pure function) is not "forward", so it falls to the same last-entry arm as
+    /// a backward step. Weakening `>` to `>=` would divert the zero case to the
+    /// first entry, which this pins against.
+    #[test]
+    fn a_zero_step_from_a_user_theme_is_not_forward() {
+        assert_eq!(
+            step_theme_index(&NAMES, "my-custom-theme", 0),
+            3,
+            "a zero step is not strictly forward, so a non-built-in lands on the              LAST built-in — `delta > 0` must not weaken to `delta >= 0`"
+        );
+    }
+
     /// Kills `n - 1` → `n + 1` / `n / 1`: a wrong landing index here would be
     /// out of bounds and panic the caller.
     #[test]
