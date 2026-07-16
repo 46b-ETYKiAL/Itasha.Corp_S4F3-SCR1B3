@@ -424,3 +424,148 @@ fn an_empty_plugins_dir_is_quiet() {
     assert!(pending.is_empty());
     assert!(toast.is_none(), "nothing to say when there are no plugins");
 }
+
+// ---- the shared strict-mode gate: `admit_signed_plugin` ----
+//
+// These pin the SAME `admit_signed_plugin` function that BOTH the load path
+// (`load_plugins`) and the "Approve & run" path (`ScribeApp::approve_plugin`)
+// route through — every `SignedAdmission` variant on the exact production gate.
+// The rotated-key test is the SEC-3 load-bearing invariant that the deleted
+// `pinned_keys::decide_approval` test used to assert on a wrapper; it now
+// asserts on the real gate.
+
+use super::build_plugins::{admit_signed_plugin, SignedAdmission};
+
+/// A fresh pinned-key store rooted at a per-test temp dir.
+fn fresh_store(tag: &str) -> scribe_core::plugin::PinnedKeyStore {
+    scribe_core::plugin::PinnedKeyStore::new(&temp_dir(tag))
+}
+
+#[test]
+fn admit_allows_a_signed_first_contact_with_consent() {
+    let (kp, pk) = gen_pk();
+    let sig = sign_entry(&kp);
+    let mut store = fresh_store("admit-allow");
+    // Valid signature, no key pinned yet, explicit prior consent → Allow.
+    let decision = admit_signed_plugin(
+        &mut store,
+        "p",
+        Some(&pk),
+        Some(&sig),
+        ENTRY.as_bytes(),
+        true,
+    );
+    assert!(
+        matches!(decision, SignedAdmission::Allow),
+        "a signed first-contact plugin the user consented to must be admitted, got {decision:?}"
+    );
+}
+
+#[test]
+fn admit_holds_a_signed_first_contact_without_consent() {
+    let (kp, pk) = gen_pk();
+    let sig = sign_entry(&kp);
+    let mut store = fresh_store("admit-hold");
+    // Valid signature, no pin, NO prior consent → held for first-contact consent.
+    let decision = admit_signed_plugin(
+        &mut store,
+        "p",
+        Some(&pk),
+        Some(&sig),
+        ENTRY.as_bytes(),
+        false,
+    );
+    assert!(
+        matches!(decision, SignedAdmission::NeedsFirstConsent),
+        "a valid signature is not consent: a first-seen key with no consent must be held, got {decision:?}"
+    );
+}
+
+#[test]
+fn admit_rejects_unsigned() {
+    let (kp, pk) = gen_pk();
+    let sig = sign_entry(&kp);
+    let mut store = fresh_store("admit-unsigned");
+    // Missing signature → Unsigned (even with consent + a valid key present).
+    let no_sig = admit_signed_plugin(&mut store, "p", Some(&pk), None, ENTRY.as_bytes(), true);
+    assert!(
+        matches!(no_sig, SignedAdmission::Unsigned),
+        "a plugin with an author key but no signature is Unsigned, got {no_sig:?}"
+    );
+    // Missing author key → Unsigned.
+    let no_key = admit_signed_plugin(&mut store, "p", None, Some(&sig), ENTRY.as_bytes(), true);
+    assert!(
+        matches!(no_key, SignedAdmission::Unsigned),
+        "a plugin with a signature but no author key is Unsigned, got {no_key:?}"
+    );
+}
+
+#[test]
+fn admit_rejects_a_bad_signature() {
+    let (_kp, pk) = gen_pk();
+    let mut store = fresh_store("admit-badsig");
+    // A bogus signature string that cannot verify the entry under `pk`.
+    let decision = admit_signed_plugin(
+        &mut store,
+        "p",
+        Some(&pk),
+        Some("untrusted comment: forged\nRWQbogusSignatureThatWillNotVerifyAAAAAAAAAAAAAAAAAAAA"),
+        ENTRY.as_bytes(),
+        true,
+    );
+    assert!(
+        matches!(decision, SignedAdmission::BadSignature),
+        "a signature that does not verify against the declared key is BadSignature, got {decision:?}"
+    );
+}
+
+#[test]
+fn admit_blocks_a_rotated_key_even_with_consent() {
+    // SEC-3 load-bearing invariant: a CHANGED author key can NEVER be
+    // silently admitted, even with explicit first-contact consent. Consent is
+    // consent to trust a FIRST key, never consent to a key ROTATION.
+    let (_kp_a, pk_a) = gen_pk();
+    let (kp_b, pk_b) = gen_pk();
+    let sig_b = sign_entry(&kp_b);
+    let mut store = fresh_store("admit-rotate");
+    // Key A is the pinned trust anchor.
+    store.pin_or_match("p", &pk_a).unwrap();
+    // The plugin now ships key B with a signature that VERIFIES under key B,
+    // and the user clicks Approve (first_consent = true).
+    let decision = admit_signed_plugin(
+        &mut store,
+        "p",
+        Some(&pk_b),
+        Some(&sig_b),
+        ENTRY.as_bytes(),
+        true,
+    );
+    match decision {
+        SignedAdmission::BlockKeyChanged { old, new } => {
+            assert_eq!(
+                old, pk_a,
+                "the blocked decision must name the original pinned key"
+            );
+            assert_eq!(
+                new, pk_b,
+                "the blocked decision must name the presented rotated key"
+            );
+        }
+        other => panic!("a rotated author key must BLOCK even with consent, got {other:?}"),
+    }
+    // Strongest form: a rotation is never the Allow variant.
+    assert!(
+        !matches!(
+            admit_signed_plugin(
+                &mut store,
+                "p",
+                Some(&pk_b),
+                Some(&sig_b),
+                ENTRY.as_bytes(),
+                true
+            ),
+            SignedAdmission::Allow
+        ),
+        "a changed author key must never be admitted"
+    );
+}

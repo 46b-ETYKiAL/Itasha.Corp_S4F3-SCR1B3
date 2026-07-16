@@ -1610,43 +1610,45 @@ impl ScribeApp {
         // under `require_signed` the approve path must enforce the SAME strict
         // policy as the load path (`build_plugins`), not a weaker one:
         //   1. a signed plugin MUST carry BOTH an `author_pubkey` AND a
-        //      `signature` — an unsigned/partial plugin is refused (the load
-        //      path's `_ => false` "require_signed is on but it is unsigned" arm);
+        //      `signature` — an unsigned/partial plugin is refused;
         //   2. the minisign signature over the entry script MUST verify;
-        //   3. the pinned-key trust gate (`decide_approval`) must allow it —
-        //      a first-seen key is pinned + upgraded to Allow, but a CHANGED key
-        //      yields `BlockKeyChanged` and is refused (rotation requires the
-        //      explicit `replace_with_consent` path in Settings, never this
-        //      button).
-        // Consent never downgrades any of these checks; it only upgrades a New
-        // first-contact key to Allow.
+        //   3. the pinned-key trust gate must allow it — a first-seen key is
+        //      pinned + upgraded to Allow, but a CHANGED key yields
+        //      `BlockKeyChanged` and is refused (rotation requires the explicit
+        //      `replace_with_consent` path in Settings, never this button).
+        // Both paths now route through the SINGLE shared `admit_signed_plugin`
+        // gate so the policy lives in ONE place and cannot drift. Consent never
+        // downgrades any of these checks; it only upgrades a New first-contact
+        // key to Allow.
         if self.config.plugins.require_signed {
-            let (Some(pk), Some(sig)) = (
+            let mut key_store = scribe_core::plugin::PinnedKeyStore::new(&dir);
+            match crate::app::build_plugins::admit_signed_plugin(
+                &mut key_store,
+                id,
                 p.manifest.author_pubkey.as_deref(),
                 p.manifest.signature.as_deref(),
-            ) else {
-                tracing::warn!("plugin '{id}' approval rejected: unsigned in signed-only mode");
-                self.toast = Some(format!(
-                    "'{id}' was NOT approved — signed-plugin mode only runs plugins that \
-                     are signed by their author. Reinstall it from a source that provides \
-                     a signed build."
-                ));
-                return;
-            };
-            if scribe_core::update::verify::verify_signature(src.as_bytes(), sig, pk).is_err() {
-                tracing::warn!("plugin '{id}' approval rejected: signature did not verify");
-                self.toast = Some(format!(
-                    "'{id}' was NOT approved — its signature couldn't be verified, so it may \
-                     have been tampered with. Reinstall it from a source you trust."
-                ));
-                return;
-            }
-            let mut key_store = scribe_core::plugin::PinnedKeyStore::new(&dir);
-            match scribe_core::plugin::pinned_keys::decide_approval(&mut key_store, id, pk) {
-                Ok(scribe_core::plugin::pinned_keys::PluginLoadDecision::BlockKeyChanged {
-                    old,
-                    new,
-                }) => {
+                src.as_bytes(),
+                true, // the user clicked "Approve" — that IS explicit first-contact consent
+            ) {
+                crate::app::build_plugins::SignedAdmission::Allow => {}
+                crate::app::build_plugins::SignedAdmission::Unsigned => {
+                    tracing::warn!("plugin '{id}' approval rejected: unsigned in signed-only mode");
+                    self.toast = Some(format!(
+                        "'{id}' was NOT approved — signed-plugin mode only runs plugins that \
+                         are signed by their author. Reinstall it from a source that provides \
+                         a signed build."
+                    ));
+                    return;
+                }
+                crate::app::build_plugins::SignedAdmission::BadSignature => {
+                    tracing::warn!("plugin '{id}' approval rejected: signature did not verify");
+                    self.toast = Some(format!(
+                        "'{id}' was NOT approved — its signature couldn't be verified, so it may \
+                         have been tampered with. Reinstall it from a source you trust."
+                    ));
+                    return;
+                }
+                crate::app::build_plugins::SignedAdmission::BlockKeyChanged { old, new } => {
                     tracing::warn!("plugin '{id}' author key changed: old={old} new={new}");
                     self.toast = Some(format!(
                         "'{id}' was NOT approved — its author key changed, which can mean \
@@ -1655,9 +1657,19 @@ impl ScribeApp {
                     ));
                     return;
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!("plugin '{id}' approval: key store read failed: {e}");
+                crate::app::build_plugins::SignedAdmission::NeedsFirstConsent => {
+                    // Unreachable: approve passes first_consent = true, so New -> Allow.
+                    // Defensive: refuse rather than silently proceed.
+                    tracing::warn!(
+                        "plugin '{id}' approval: unexpected needs-consent with consent granted"
+                    );
+                    self.toast = Some(format!(
+                        "'{id}' could not be approved right now. Try again."
+                    ));
+                    return;
+                }
+                crate::app::build_plugins::SignedAdmission::StoreError => {
+                    tracing::warn!("plugin '{id}' approval: key store read failed");
                     self.toast = Some(format!(
                         "Couldn't approve '{id}' — its security record couldn't be read. \
                          Try again, or reinstall the plugin."

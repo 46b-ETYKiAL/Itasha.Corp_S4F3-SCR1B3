@@ -98,31 +98,6 @@ pub fn decide_key_trust(outcome: PinOutcome, first_consent_granted: bool) -> Plu
     }
 }
 
-/// SEC-3 (defense-in-depth): the single decision an "Approve & run" flow MUST
-/// route through, so the user-approval load path converges on the SAME central
-/// trust gate ([`decide_key_trust`]) as the normal load path — a key-changed
-/// (`Mismatch`) plugin can therefore NEVER be silently approved-and-run, even
-/// if a future edit to the approve UI forgets to consult the gate directly.
-///
-/// `decide_approval` pins-or-matches the presented key, then maps the outcome
-/// through [`decide_key_trust`] with `first_consent_granted = true` (the user
-/// clicked Approve — that IS the explicit first-contact consent). The crucial
-/// property: explicit consent upgrades a `New` first contact to [`Allow`], but
-/// it does NOT override a `Mismatch` — a changed author key still yields
-/// [`PluginLoadDecision::BlockKeyChanged`]. Approval is consent to TRUST a
-/// first key, never consent to silently accept a key ROTATION (which requires
-/// the explicit [`PinnedKeyStore::replace_with_consent`] path).
-pub fn decide_approval(
-    store: &mut PinnedKeyStore,
-    plugin_id: &str,
-    pubkey: &str,
-) -> std::io::Result<PluginLoadDecision> {
-    let outcome = store.pin_or_match(plugin_id, pubkey)?;
-    // The user clicked "Approve", so first-contact consent is granted — but
-    // `decide_key_trust` still BLOCKS a `Mismatch` regardless of consent.
-    Ok(decide_key_trust(outcome, true))
-}
-
 /// On-disk pinned-keys store. Cheap to construct (just records a path);
 /// the file is read on each call to amortise restart cost over the
 /// "user opens settings, looks at 1 plugin" pattern.
@@ -471,55 +446,6 @@ mod tests {
                 "a changed author key must never silently load"
             );
         }
-    }
-
-    // --- SEC-3: the "Approve & run" convergence on the central trust gate ---
-
-    #[test]
-    fn approve_of_first_contact_allows_and_pins() {
-        // A genuine first-contact approval (user clicked Approve) loads + pins.
-        let (_dir, mut s) = fresh_store();
-        let decision = decide_approval(&mut s, "p.id", "K_FIRST").unwrap();
-        assert_eq!(decision, PluginLoadDecision::Allow);
-        // The key is now pinned (a re-approval Matches).
-        assert_eq!(
-            s.pin_or_match("p.id", "K_FIRST").unwrap(),
-            PinOutcome::Match
-        );
-    }
-
-    #[test]
-    fn approve_of_key_changed_plugin_is_not_silently_approved() {
-        // SEC-3 — the load-bearing invariant: routing the approval through the
-        // central gate means a CHANGED author key (a possible plugin takeover)
-        // can NEVER be silently approved-and-run. Approval is consent to trust a
-        // FIRST key, not consent to accept a key ROTATION (which requires
-        // `replace_with_consent`).
-        let (_dir, mut s) = fresh_store();
-        // Pin an original author key.
-        s.pin_or_match("p.id", "K_ORIGINAL").unwrap();
-        // An attacker re-submits the plugin with a DIFFERENT author key and the
-        // user clicks "Approve & run".
-        let decision = decide_approval(&mut s, "p.id", "K_ATTACKER").unwrap();
-        match decision {
-            PluginLoadDecision::BlockKeyChanged { old, new } => {
-                assert_eq!(old, "K_ORIGINAL");
-                assert_eq!(new, "K_ATTACKER");
-            }
-            other => panic!("a key-changed approve must BLOCK, not allow; got {other:?}"),
-        }
-        // Strongest form: it is NEVER the Allow variant.
-        assert_ne!(
-            decide_approval(&mut s, "p.id", "K_ATTACKER").unwrap(),
-            PluginLoadDecision::Allow,
-            "approving a key-changed plugin must never load it"
-        );
-        // The original pin is unchanged — approval did not silently rotate it.
-        assert_eq!(
-            s.pin_or_match("p.id", "K_ORIGINAL").unwrap(),
-            PinOutcome::Match,
-            "the original key remains the trust anchor"
-        );
     }
 
     #[test]
