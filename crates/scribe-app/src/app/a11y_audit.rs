@@ -268,6 +268,20 @@ fn ensure_readable_tone_leaves_already_legible_tone_untouched() {
     );
 }
 
+#[test]
+fn ensure_readable_tone_lifts_against_bright_bg() {
+    use egui::Color32;
+    // The existing a11y tests use near-black bg (bg_l ~= 0.004) where sum ~= diff,
+    // so the `- -> +` mutants on the early-return / loop-break contrast guards
+    // (281:34, 294:37) survived. A BRIGHT bg makes |rl + bg| huge: a sum-not-diff
+    // mutant returns the tone unchanged. Kills render_support 281:34, 294:37.
+    let bright_bg = Color32::from_rgb(220, 220, 220); // rl ~= 0.716
+    let mid_tone = Color32::from_rgb(190, 190, 190); // rl ~= 0.514, gap ~= 0.20 < 0.34
+    let out = ensure_readable_tone(mid_tone, bright_bg);
+    assert_ne!(out, mid_tone, "guard must adjust a low-contrast tone on a bright bg");
+    assert!(out.r() < mid_tone.r(), "should darken, got {out:?}");
+}
+
 // ───────────────────── AccessKit role + name + state ─────────────────────
 
 fn audit_app() -> ScribeApp {

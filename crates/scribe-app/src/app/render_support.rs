@@ -847,6 +847,40 @@ pub(crate) fn spawn_config_watcher(
 #[cfg(test)]
 mod tint_tests {
     use super::*;
+
+    #[test]
+    fn blend_tint_midpoint_is_true_lerp() {
+        // Existing tests use s=0/1/0.8 with saturating base/tint, so the CLAMP to
+        // 255 hid the `+ -> *` / `* -> /` lerp mutants. A non-clamping midpoint
+        // (100->200 @ 0.5 = 150) exposes both. Kills 180:23, 180:55.
+        let out = blend_tint(Color32::from_rgb(100, 100, 100), Color32::from_rgb(200, 200, 200), 0.5);
+        assert_eq!((out.r(), out.g(), out.b()), (150, 150, 150), "0.5 blend of 100->200 must be 150 per channel");
+    }
+
+    #[test]
+    fn linearize_channel_low_branch_divides() {
+        // c=10 lands in the linear (<=0.04045) branch: 10/255/12.92. `/ -> %` and
+        // `/ -> *` both diverge from 0.003035. Kills 247:12.
+        let v = linearize_channel(10);
+        assert!((v - 0.003_035).abs() < 1e-4, "low-branch linearize wrong: {v}");
+    }
+
+    #[test]
+    fn relative_luminance_white_is_one() {
+        // WCAG sum 0.2126R + 0.7152G + 0.0722B. For WHITE clean=1.0; a `+ -> -` on
+        // either term diverges. a11y_audit uses a LOCAL lum copy, never this fn.
+        // Kills 258:9, 259:9.
+        assert!((relative_luminance(Color32::WHITE) - 1.0).abs() < 1e-3);
+        assert!(relative_luminance(Color32::BLACK).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lerp_rgb_midpoint() {
+        // Same no-clamp midpoint trick: 100->200 @ 0.5 = 150 per channel. Kills the
+        // four 266 arithmetic mutants (+->*, -->+, *->+, *->/).
+        let o = lerp_rgb(Color32::from_rgb(100, 100, 100), Color32::from_rgb(200, 200, 200), 0.5);
+        assert_eq!((o.r(), o.g(), o.b()), (150, 150, 150));
+    }
     use scribe_core::config::WindowConfig;
 
     /// A representative "text/foreground" theme colour. This is the colour the
