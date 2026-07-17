@@ -261,3 +261,86 @@ pub(super) fn mc_collect_edit_ops(events: &mut Vec<egui::Event>) -> Vec<EditOp> 
     });
     ops
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grid::DocId;
+
+    #[test]
+    fn collect_edit_ops_ignores_empty_text_events() {
+        // An empty Text event must NOT become a spurious Insert(""). The
+        // `if !t.is_empty() -> if true` mutant captures it. Kills 229:33.
+        let mut events = vec![egui::Event::Text(String::new())];
+        let ops = mc_collect_edit_ops(&mut events);
+        assert!(ops.is_empty(), "empty text produces no edit op");
+        assert_eq!(events.len(), 1, "the empty text event is left for egui");
+    }
+
+    #[test]
+    fn collect_edit_ops_respects_the_modifier_gate_for_edit_keys() {
+        // Plain edit key -> captured + removed; modified combo -> left for egui.
+        // The `modifiers.is_none() -> false` drops the plain key; `-> true`
+        // wrongly captures a Ctrl+combo. Kills 238:14, 247:14, 256:14.
+        fn key(k: egui::Key, m: egui::Modifiers) -> egui::Event {
+            egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: m }
+        }
+        for (k, op) in [
+            (egui::Key::Backspace, EditOp::Backspace),
+            (egui::Key::Delete, EditOp::Delete),
+            (egui::Key::Enter, EditOp::Insert("\n".to_string())),
+        ] {
+            let mut plain = vec![key(k, egui::Modifiers::NONE)];
+            let ops = mc_collect_edit_ops(&mut plain);
+            assert_eq!(ops, vec![op.clone()], "plain {k:?} is captured");
+            assert!(plain.is_empty(), "captured event removed from the queue");
+            let mut ctrl = vec![key(k, egui::Modifiers::CTRL)];
+            let ops2 = mc_collect_edit_ops(&mut ctrl);
+            assert!(ops2.is_empty(), "modified {k:?} is NOT captured");
+            assert_eq!(ctrl.len(), 1, "modified event left for egui");
+        }
+    }
+
+    #[test]
+    fn mc_reconcile_owner_keeps_owner_when_no_carets_are_live() {
+        // Empty multi-cursor state is NOT dirty -> reconcile must NOT clear the
+        // owner even on a doc mismatch. The `!secondaries.is_empty() ->
+        // secondaries.is_empty()` mutant reads empty as dirty. Kills 77:16.
+        let mut app = ScribeApp::new_test(Config::default());
+        let active_doc = app.tabs[0].doc_id;
+        let other = DocId(active_doc.0 + 1);
+        app.multi_cursor.clear();
+        app.column_anchor = None;
+        app.mc_owner_doc = Some(other);
+        app.mc_reconcile_owner(0);
+        assert_eq!(app.mc_owner_doc, Some(other), "an empty multi-cursor state is not dirty; owner untouched");
+    }
+
+    #[test]
+    fn mc_reconcile_owner_clears_a_bare_column_anchor_on_doc_mismatch() {
+        // A live column_anchor with no secondaries is still dirty and MUST be
+        // dropped on a doc mismatch. The second `|| -> &&` makes a bare anchor
+        // read as not-dirty. Kills 78:13.
+        let mut app = ScribeApp::new_test(Config::default());
+        let active_doc = app.tabs[0].doc_id;
+        let other = DocId(active_doc.0 + 1);
+        app.multi_cursor.clear();
+        app.column_anchor = Some(3);
+        app.mc_owner_doc = Some(other);
+        app.mc_reconcile_owner(0);
+        assert!(app.column_anchor.is_none(), "the stale column anchor was dropped");
+        assert_eq!(app.mc_owner_doc, None, "and the owner was reset");
+    }
+
+    #[test]
+    fn mc_record_owner_marks_dirty_for_a_bare_column_anchor() {
+        // A column_anchor alone (no secondaries) is dirty state that must be
+        // attributed to the active tab. The second `|| -> &&` makes a bare anchor
+        // read as not-dirty -> owner wrongly None. Kills 95:13.
+        let mut app = ScribeApp::new_test(Config::default());
+        app.multi_cursor.clear();
+        app.column_anchor = Some(2);
+        app.mc_record_owner(0);
+        assert_eq!(app.mc_owner_doc, Some(app.tabs[0].doc_id), "a column_anchor alone marks the state as owned");
+    }
+}

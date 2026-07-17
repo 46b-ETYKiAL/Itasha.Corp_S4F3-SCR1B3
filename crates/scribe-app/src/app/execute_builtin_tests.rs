@@ -276,3 +276,31 @@ fn editor_intent_commands_set_their_pending_flags() {
     a.execute_builtin(BuiltinCommand::DuplicateSelection);
     assert!(a.pending_dup_selection);
 }
+
+#[test]
+fn cycle_theme_advances_from_current() {
+    // CycleTheme finds the current theme's index then advances. The
+    // `position(|n| *n == cur) -> !=` mutant finds the FIRST non-matching name
+    // (index 0 unless names[0]==cur) -> wrong "current" -> no advance. Kills 117:60.
+    let names = scribe_core::theme::Theme::builtin_names();
+    assert!(names.len() >= 2);
+    let mut cfg = Config::default();
+    cfg.appearance.theme = names[1].to_string();
+    let mut app = ScribeApp::new_test(cfg);
+    app.execute_builtin(BuiltinCommand::CycleTheme);
+    let expected = names[(1 + 1) % names.len()].to_string();
+    assert_eq!(app.config.appearance.theme, expected);
+    assert_ne!(app.config.appearance.theme, names[1], "must advance off the current theme");
+}
+
+#[test]
+fn drain_pending_editor_action_consumes_request() {
+    // drain_pending_editor_action always take()s pending_editor_action. The
+    // `replace body with ()` mutant leaves it set. Kills 271:9. A default Context
+    // is enough (no frame render needed to call ctx.memory_mut/input_mut).
+    let mut app = ScribeApp::new_test(Config::default());
+    app.pending_editor_action = Some(super::EditorAction::Copy);
+    let ctx = egui::Context::default();
+    app.drain_pending_editor_action(&ctx);
+    assert!(app.pending_editor_action.is_none(), "drain must take() the pending action");
+}

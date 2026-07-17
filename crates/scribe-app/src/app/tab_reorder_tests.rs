@@ -211,3 +211,25 @@ fn close_all_tabs_except_focuses_the_kept_tab() {
         "active focuses the kept tab, not the surviving pinned tab"
     );
 }
+
+#[test]
+fn close_tab_out_of_range_is_noop() {
+    // close_tab(len) is out of range: clean no-ops; the `idx < self.tabs.len()`
+    // -> `<=` mutants (77:16, 82:16) enter the block and panic on self.tabs[len].
+    let mut app = ScribeApp::new_test(Config::default());
+    let before = app.tabs.len();
+    app.close_tab(before);
+    assert_eq!(app.tabs.len(), before, "closing an out-of-range index changes nothing");
+}
+
+#[test]
+fn reopen_closed_tab_focuses_last_index() {
+    // After push, `self.active = self.tabs.len() - 1` points at the just-pushed
+    // (last) tab. The `- -> +` / `- -> /` mutants (151:39) leave active off the
+    // end. Assert active == last index (a tabs.len()-only check would not kill it).
+    let mut app = ScribeApp::new_test(Config::default());
+    app.closed_tabs.push(super::ClosedTab { path: None, text: "recovered".into(), cursor: 0 });
+    app.reopen_closed_tab();
+    assert_eq!(app.active, app.tabs.len() - 1, "reopened tab must be focused (last index)");
+    assert_eq!(app.tabs.last().unwrap().text, "recovered");
+}
