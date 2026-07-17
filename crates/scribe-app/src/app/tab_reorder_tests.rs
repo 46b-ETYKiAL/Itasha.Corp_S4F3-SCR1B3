@@ -255,6 +255,36 @@ fn closed_tabs_stack_is_capped_at_twenty() {
 }
 
 #[test]
+fn sync_grid_state_discards_a_stale_layout_that_no_longer_matches() {
+    // The persisted layout is restored only when its pane doc-id SET still equals
+    // the reopened tabs; otherwise a fresh default grid is built. Here the layout
+    // references d3, which is NOT open. Clean: `pane_doc_ids == want` is false ->
+    // rebuild default {d1,d2}. The `== -> !=` mutant (grid_methods 236:62) KEEPS
+    // the stale {d1,d3} layout. pane_doc_ids (a BTreeSet) is an order-stable probe.
+    use crate::grid::{build_default_grid, pane_doc_ids, to_json, DocId};
+    let (d1, d2, d3) = (DocId(1), DocId(2), DocId(3));
+    let mut cfg = Config::default();
+    cfg.editor.grid_enabled = true;
+    cfg.editor.grid_layout = to_json(&build_default_grid(&[d1, d3])); // stale: d3 not open
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    for d in [d1, d2] {
+        let mut t = EditorTab::scratch();
+        t.doc_id = d;
+        app.tabs.push(t);
+    }
+    app.active = 0;
+    app.grid_tree = None;
+    app.sync_grid_state();
+    let want: std::collections::BTreeSet<DocId> = [d1, d2].into_iter().collect();
+    assert_eq!(
+        pane_doc_ids(app.grid_tree.as_ref().expect("grid built")),
+        want,
+        "a stale layout is discarded; the grid matches the OPEN tabs, not {{d1,d3}}"
+    );
+}
+
+#[test]
 fn close_tab_evicts_a_cursor_position_at_the_cap() {
     // When restoring cursor positions, close_tab evicts the oldest entry once the
     // map is at SCROLL_POS_CAP before inserting the closed tab's position. The
