@@ -697,6 +697,15 @@ mod tests {
     }
 
     #[test]
+    fn word_bounds_left_scan_reads_the_char_before_the_cursor() {
+        // A word PRECEDED by a non-word char: the left scan `chars[s - 1]` must
+        // stop at the space. The "snake_case1" fixture scans to 0 either way, so
+        // it missed 373:41. Here `s - 1 -> s + 1` reads chars[4] (OOB -> panic)
+        // and `s - 1 -> s / 1` reads chars[s] -> stops one char late (start 1).
+        assert_eq!(word_bounds_chars(&cv("a bc"), 3), (2, 4), "word 'bc' starts at index 2");
+    }
+
+    #[test]
     fn insert_at_two_carets_edits_both_spots() {
         // "aaa\naaa": primary at char 0, secondary at char 4 (start of line 2).
         let mut text = "aaa\naaa".to_string();

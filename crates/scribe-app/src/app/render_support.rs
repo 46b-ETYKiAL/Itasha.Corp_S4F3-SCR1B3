@@ -875,6 +875,16 @@ mod tint_tests {
     }
 
     #[test]
+    fn newline_with_indent_preserves_leading_whitespace() {
+        // Cursor at the end of an indented line: the inserted newline copies the
+        // "  " indent. `line_start = rfind('\n').map(|i| i + 1)` -> `i * 1` (= i)
+        // / `i - 1` makes line_start point AT/BEFORE the '\n', so the indent scan
+        // starts on the newline and collects nothing. Kills 772:57.
+        let (out, _cur) = newline_with_indent("x\n  foo", 7);
+        assert_eq!(out, "x\n  foo\n  ", "the new line inherits the two-space indent");
+    }
+
+    #[test]
     fn lerp_rgb_midpoint() {
         // Same no-clamp midpoint trick: 100->200 @ 0.5 = 150 per channel. Kills the
         // four 266 arithmetic mutants (+->*, -->+, *->+, *->/).

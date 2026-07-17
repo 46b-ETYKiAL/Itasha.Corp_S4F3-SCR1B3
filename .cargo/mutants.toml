@@ -159,6 +159,11 @@ exclude_re = [
   '\bopen_in_file_manager\b',     # OS shell
   '\bcopy_to_clipboard\b',        # issue_intake.rs OS clipboard
   '\bmc_push_undo_checkpoint\b',  # manipulates egui's live Undoer state, no pure observable
+  # updater.rs powershell_runas_script is #[cfg(windows)]: cargo-mutants generates
+  # its mutant from source, but on the ubuntu-latest mutation runner the fn is
+  # never compiled, so no Linux test can kill it. Its exact output IS pinned by
+  # the #[cfg(windows)] test powershell_runas_script_quotes_and_escapes_path.
+  '\bpowershell_runas_script\b',
   # egui TextFormat struct-field deletes: only change painted-glyph font/colour
   # (ADR-0007). These carry NO `in <fn>` suffix in the match string, so a
   # function-name token cannot catch them — match the field-delete shape.
