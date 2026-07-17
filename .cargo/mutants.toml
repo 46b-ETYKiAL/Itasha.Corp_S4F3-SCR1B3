@@ -206,4 +206,11 @@ exclude_re = [
   'app/builtins\.rs:147:27:',       # SortLines active<len: same len-1-clamp invariant as 126 (147:45 IS tested)
   'app/multi_cursor_glue\.rs:77:13:',  # mc_reconcile is_active()||!secondaries: unreachable divergence (77:16/78:13 tested)
   'app/multi_cursor_glue\.rs:94:13:',  # mc_record same predicate (95:13 tested)
+  # session_persist content_sig loop: whether a NON-dirty tab (clean-saved or
+  # empty-untitled) contributes to the change-detection hash. Including it (mutant)
+  # can at most cause a SPURIOUS extra backup, never a MISSED one — a non-dirty
+  # tab's content is stable, so real edits (a dirty tab) still change the sig
+  # (pinned by backup_content_sig_tracks_a_dirty_tabs_edits, which kills 54:37).
+  'app/session_persist\.rs:54:64:',
+  'app/session_persist\.rs:54:67:',
 ]

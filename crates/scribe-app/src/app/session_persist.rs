@@ -155,6 +155,29 @@ mod tests {
     }
 
     #[test]
+    fn backup_content_sig_tracks_a_dirty_tabs_edits() {
+        // The change-detection signature MUST include a dirty file-backed tab's
+        // content, so a SECOND distinct edit re-triggers the backup. The 54:37
+        // `|| -> &&` excludes the dirty tab from the hash, so the sig freezes and
+        // the re-backup is silently missed.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("edited.txt");
+        std::fs::write(&p, "on disk").unwrap();
+        let mut t = EditorTab::from_path(p).expect("open");
+        t.text = "edit one".into();
+        t.doc_id = crate::grid::DocId(1);
+        let mut app = due_backup_app(t);
+        app.persist_session_and_autosave();
+        let sig1 = app.last_backup_sig;
+        assert_ne!(sig1, 0, "first edit backed up");
+        // A second, different edit + a re-due clock: the content sig must change.
+        app.tabs[0].text = "edit two is different".into();
+        app.last_backup_at = Some(Instant::now().checked_sub(Duration::from_secs(5)).unwrap());
+        app.persist_session_and_autosave();
+        assert_ne!(app.last_backup_sig, sig1, "a changed dirty tab updates the content sig (re-backup)");
+    }
+
+    #[test]
     fn backup_fires_for_a_dirty_file_backed_buffer() {
         // has_unsaved = is_dirty(true) || ... = true -> fires. The `|| -> &&`
         // (46:39 / 54:37) makes `is_dirty() && (path.is_none() && ...)` false for a
