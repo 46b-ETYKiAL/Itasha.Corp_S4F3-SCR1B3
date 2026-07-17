@@ -90,3 +90,84 @@ impl ScribeApp {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    // A backup-enabled app whose single tab is `tab`, with the backup clock set
+    // >4s ago (so it's DUE) and last_backup_sig cleared. The hot-exit branch
+    // stamps `last_backup_sig` iff (due && has_unsaved && content_sig != sig);
+    // snapshot_session_backups is a no-op under new_test (config_dir is None), so
+    // `last_backup_sig != 0` is a clean fire/no-fire observable.
+    fn due_backup_app(tab: EditorTab) -> ScribeApp {
+        let mut cfg = Config::default();
+        cfg.editor.session_backup = true;
+        let mut app = ScribeApp::new_test(cfg);
+        app.tabs.clear();
+        app.tabs.push(tab);
+        app.active = 0;
+        app.last_backup_at = Some(Instant::now().checked_sub(Duration::from_secs(5)).unwrap());
+        app.last_backup_sig = 0;
+        app
+    }
+
+    #[test]
+    fn backup_fires_for_a_due_untitled_unsaved_buffer() {
+        // due(true) && has_unsaved(true) && content_sig!=0 -> fires. Kills the
+        // due `elapsed >= INTERVAL -> <` (41:38).
+        let mut t = EditorTab::scratch();
+        t.text = "unsaved".into();
+        t.doc_id = crate::grid::DocId(1);
+        let mut app = due_backup_app(t);
+        app.persist_session_and_autosave();
+        assert_ne!(app.last_backup_sig, 0, "a due, unsaved buffer triggers the hot-exit backup");
+    }
+
+    #[test]
+    fn backup_skips_when_only_a_clean_saved_file_is_open() {
+        // has_unsaved = is_dirty(false) || (path.is_none(false) && ...) = false ->
+        // no fire. The `|| -> &&` in the 2nd disjunct (46:66 / 54:64) would make a
+        // clean saved file read as unsaved and fire.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("saved.txt");
+        std::fs::write(&p, "on disk").unwrap();
+        let mut t = EditorTab::from_path(p).expect("open");
+        t.doc_id = crate::grid::DocId(1);
+        let mut app = due_backup_app(t);
+        assert!(!app.tabs[0].is_dirty(), "precondition: the opened file is clean");
+        app.persist_session_and_autosave();
+        assert_eq!(app.last_backup_sig, 0, "a clean saved file is not 'unsaved'");
+    }
+
+    #[test]
+    fn backup_skips_for_an_empty_untitled_buffer() {
+        // has_unsaved = is_dirty(false) || (path.is_none(true) && !empty(false)) =
+        // false -> no fire. The `delete !` in `!text.is_empty()` (46:69 / 54:67)
+        // would make an empty untitled buffer read as unsaved and fire.
+        let mut t = EditorTab::scratch();
+        t.doc_id = crate::grid::DocId(1);
+        let mut app = due_backup_app(t);
+        assert!(!app.tabs[0].is_dirty(), "precondition: an empty scratch is clean");
+        app.persist_session_and_autosave();
+        assert_eq!(app.last_backup_sig, 0, "an empty untitled buffer has nothing to back up");
+    }
+
+    #[test]
+    fn backup_fires_for_a_dirty_file_backed_buffer() {
+        // has_unsaved = is_dirty(true) || ... = true -> fires. The `|| -> &&`
+        // (46:39 / 54:37) makes `is_dirty() && (path.is_none() && ...)` false for a
+        // file-backed tab, suppressing the fire.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("edited.txt");
+        std::fs::write(&p, "on disk").unwrap();
+        let mut t = EditorTab::from_path(p).expect("open");
+        t.text = "edited in memory".into();
+        t.doc_id = crate::grid::DocId(1);
+        let mut app = due_backup_app(t);
+        assert!(app.tabs[0].is_dirty(), "precondition: the edited file is dirty");
+        app.persist_session_and_autosave();
+        assert_ne!(app.last_backup_sig, 0, "a dirty file-backed buffer is unsaved");
+    }
+}
