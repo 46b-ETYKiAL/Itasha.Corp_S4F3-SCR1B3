@@ -213,4 +213,10 @@ exclude_re = [
   # (pinned by backup_content_sig_tracks_a_dirty_tabs_edits, which kills 54:37).
   'app/session_persist\.rs:54:64:',
   'app/session_persist\.rs:54:67:',
+  # auto-save dirty filter `path.is_some() && is_dirty()` -> `||`: at most spuriously
+  # saves a CLEAN file-backed tab (save_active rewrites identical bytes -> no
+  # observable change) or attempts an untitled tab (no path -> save_active cannot
+  # write). Neither is an observable correctness difference for the "flush dirty
+  # FILE-BACKED buffers" contract (74:38/80:20 ARE tested).
+  'app/session_persist\.rs:78:68:',
 ]
