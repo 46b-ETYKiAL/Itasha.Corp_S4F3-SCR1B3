@@ -1792,31 +1792,27 @@ pub(crate) fn toolbar_widget(
     job.append(
         primary,
         0.0,
-        egui::TextFormat {
-            font_id: egui::FontId::proportional(size),
-            // #22/#105 — the primary colour is supplied by the caller. PLACEHOLDER
-            // makes the widget substitute its normal text colour, so an unselected
-            // English label is the SAME colour whether kanji labels are on or off.
-            // A SELECTED toolbar TOGGLE passes a CONCRETE accent here so the label
-            // stays theme-accent in BOTH kanji-on and kanji-off states — egui's
-            // `selectable_label` only recolours PLACEHOLDER text to its strong
-            // contrast colour, so a concrete accent survives the selected state
-            // (kanji-on previously rendered white because the LayoutJob's
-            // PLACEHOLDER primary was recoloured by the selected widget).
-            color: primary_color,
-            ..Default::default()
-        },
+        // #22/#105 — the primary colour is supplied by the caller. PLACEHOLDER
+        // makes the widget substitute its normal text colour, so an unselected
+        // English label is the SAME colour whether kanji labels are on or off.
+        // A SELECTED toolbar TOGGLE passes a CONCRETE accent here so the label
+        // stays theme-accent in BOTH kanji-on and kanji-off states — egui's
+        // `selectable_label` only recolours PLACEHOLDER text to its strong
+        // contrast colour, so a concrete accent survives the selected state
+        // (kanji-on previously rendered white because the LayoutJob's
+        // PLACEHOLDER primary was recoloured by the selected widget).
+        // `TextFormat::simple` = the same {font_id, color, ..Default::default()}.
+        egui::TextFormat::simple(egui::FontId::proportional(size), primary_color),
     );
     // Only the appended kanji is tinted (a dim "instrument-plate" colour) — a
     // different colour for the kanji, never for the English text.
     job.append(
         &format!("  {kanji}"),
         0.0,
-        egui::TextFormat {
-            font_id: egui::FontId::proportional(kanji_size),
-            color: egui::Color32::from_rgba_unmultiplied(180, 180, 180, 160),
-            ..Default::default()
-        },
+        egui::TextFormat::simple(
+            egui::FontId::proportional(kanji_size),
+            egui::Color32::from_rgba_unmultiplied(180, 180, 180, 160),
+        ),
     );
     egui::WidgetText::LayoutJob(job.into())
 }

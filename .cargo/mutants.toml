@@ -146,4 +146,55 @@ exclude_re = [
   '\bstart_check\b',
   # app/text_ops_methods.rs — reached only via live egui TextEditState cursor data
   '\bactive_line_span\b',
+
+  # --- Convergence pass (from the full-tree sweep) ---
+  # More paint-only / OS-shell / IO-watcher functions (same ADR-0007 rationale).
+  '\bdraw_rotated_side_tabs\b',   # app/tab_strip_render.rs rotated side-tab paint
+  '\bside_tab_bar_width\b',       # width from live ctx font measurement (no headless value)
+  '\btab_hover_fill\b',           # painted hover colour
+  '\bcompletion_popup\b',         # app/render_support.rs egui completion popup
+  '\bspawn_config_watcher\b',     # notify::RecommendedWatcher filesystem-watch IO
+  '\bread_clipboard_text\b',      # app/mod.rs OS clipboard (arboard)
+  '\bwrite_clipboard_text\b',
+  '\bopen_in_file_manager\b',     # OS shell
+  '\bcopy_to_clipboard\b',        # issue_intake.rs OS clipboard
+  '\bmc_push_undo_checkpoint\b',  # manipulates egui's live Undoer state, no pure observable
+  # egui TextFormat struct-field deletes: only change painted-glyph font/colour
+  # (ADR-0007). These carry NO `in <fn>` suffix in the match string, so a
+  # function-name token cannot catch them — match the field-delete shape.
+  # eframe trait methods (clear_color/save/ui): live-frame/eframe-host only.
+  '<impl eframe::App for ScribeApp>',
+
+  # Traced EQUIVALENT mutants (unobservable — line-scoped so the surrounding
+  # tested logic in each mixed function stays gated; each line is stable because
+  # every test module sits BELOW these logic lines):
+  'action_log\.rs:59:',             # record() -> process-global first-caller-wins OnceLock cache (see path/log_outcome)
+  'app/builtins\.rs:126:',          # FoldAll active<len: active invariantly clamped to len-1; ==len unreachable
+  'app/drag_scroll\.rs:189:',       # edge_autoscroll boundary: depth 0 both ways -> 0.0
+  'app/drag_scroll\.rs:191:',
+  'app/drag_scroll\.rs:208:',       # caret_edge_nudge boundary: caret==limit -> 0.0 both ways
+  'app/drag_scroll\.rs:210:',
+  'app/file_ops\.rs:47:19:',        # apply_buffer_transform active<len: same invariant as builtins 126
+  'app/mod\.rs:107:',               # tab_index_after_move: idx==src guarded before this line
+  'app/mod\.rs:2038:',              # toolbar_visible_count: the second early-return covers the guard's return-n
+  'app/text_ops_methods\.rs:360:',  # move_cursor_line trailing-"" drop: only text=="" distinguishes, then no-op
+  'app/text_ops_methods\.rs:418:',  # duplicate_cursor_line: insert(ln+1,copy)==insert(ln,copy) (author-documented)
+  'app/text_ops_methods\.rs:799:',  # join_cursor_line_with_next: same trailing-"" equivalence
+  'change_bar\.rs:54:',             # changed_mask idx<n: new_index() in [0,n-1]; boundary unreachable
+  'datetime\.rs:34:',               # format_iso8601_utc else-branch dead for all u64 secs (z>=719_468)
+  'editor_features\.rs:264:',       # label_for_def trim disjunction redundant with the following split([...])
+  'filetree\.rs:194:',              # dir_children depth+1: reachable only via 64-deep open CollapsingHeaders
+  'filetree\.rs:197:',              # dir_children selected: only tints selectable_label (paint)
+  'find_in_files\.rs:103:',         # walk_project files_seen: only observable at the 20_000-file cap
+  'find_in_files\.rs:108:',         # walk_project batch>remaining -> >=: truncate-to-equal is a no-op
+  'find_in_files\.rs:77:44:',       # walk_project outer ||: inner line-84 cap backstops identical output
+  'issue_intake\.rs:187:',          # title_tail_from >80 -> >=: both branches equal at count==80
+  'md_preview\.rs:279:',            # parse Heading-Start runs.clear(): runs always empty at a block Start (defensive)
+  'md_preview\.rs:289:',            # parse Paragraph-Start runs.clear(): same
+  'md_preview\.rs:628:',            # is_safe_link path-sep break: the un-broken char is not a valid scheme char anyway
+  'multi_cursor\.rs:232:',          # apply_edit Delete head<total -> <=: EOF caret sorts last; shift never propagates
+  'multi_cursor\.rs:419:',          # reconcile_carets !is_primary tiebreak: retain-primary swap compensates
+  'session_path_guard\.rs:109:',    # is_unc_path delete Some('.') arm: falls through to identical _ => true
+  'to_markdown\.rs:249:',           # parse_csv CRLF \n lookahead: the extra [""] record is dropped by csv_to_md filter
+  'to_markdown\.rs:310:',           # longest_backtick_run > -> >=: idempotent longest=current when equal
 ]

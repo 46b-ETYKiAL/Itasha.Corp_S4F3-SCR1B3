@@ -612,11 +612,7 @@ impl ScribeApp {
                             side_tab_label_wrap(ui.available_width(), selected, two_line);
                         let mut job = egui::text::LayoutJob::single_section(
                             shown.clone(),
-                            egui::text::TextFormat {
-                                font_id: label_font.clone(),
-                                color: label_color,
-                                ..Default::default()
-                            },
+                            egui::text::TextFormat::simple(label_font.clone(), label_color),
                         );
                         job.wrap = egui::text::TextWrapping {
                             max_width,
