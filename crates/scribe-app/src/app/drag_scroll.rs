@@ -223,6 +223,32 @@ mod tests {
     }
 
     #[test]
+    fn scroll_step_sub_epsilon_move_is_not_a_target() {
+        // A move of exactly f32::EPSILON is below the "did the offset really
+        // change?" denoise threshold -> None. The `> EPSILON` -> `>= EPSILON`
+        // mutant treats an exactly-EPSILON delta as real motion. Kills 179:29.
+        assert_eq!(scroll_step_target(0.0, f32::EPSILON, 500.0), None);
+    }
+
+    #[test]
+    fn caret_nudge_top_limit_includes_the_caret_row_height() {
+        // top keep-away limit = top + margin + line_px = 100+40+16 = 156. A caret
+        // at y=130 is inside the band -> nudged up by exactly (130-156). The
+        // `+ line_px` -> `- line_px` mutant drops the limit to 124. Kills 206:45.
+        let n = caret_edge_nudge(130.0, vp(), 40.0, 16.0);
+        assert_eq!(n, 130.0 - 156.0);
+        assert!(n < 0.0);
+    }
+
+    #[test]
+    fn caret_nudge_bottom_is_distance_below_the_limit() {
+        // bottom nudge = caret_bottom_y - bot_limit exactly. vp bottom=500,
+        // margin=40 => bot_limit=460; caret 495 nudges down by 35. The `-`->`+`
+        // and `-`->`/` mutants both diverge from 35. Kills 211:24 (x2).
+        assert_eq!(caret_edge_nudge(495.0, vp(), 40.0, 16.0), 35.0);
+    }
+
+    #[test]
     fn edge_step_zero_in_neutral_band() {
         // A pointer in the middle of the viewport does not autoscroll.
         assert_eq!(edge_autoscroll_step(300.0, vp(), 1.0 / 60.0), 0.0);

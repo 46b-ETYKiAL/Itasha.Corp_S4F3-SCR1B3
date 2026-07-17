@@ -543,6 +543,78 @@ mod tests {
     }
 
     #[test]
+    fn normalize_sorts_and_dedups_secondaries() {
+        // set_secondaries takes an UNSORTED, DUPLICATED vec; normalize() must sort
+        // ascending by start and drop the exact duplicate. With normalize a no-op
+        // the vec stays [9,3,3]. Kills 182:9 (replace normalize with ()).
+        let mut mc = MultiCursor::default();
+        mc.set_secondaries(vec![Caret::at(9), Caret::at(3), Caret::at(3)]);
+        assert_eq!(mc.secondaries(), &[Caret::at(3), Caret::at(9)]);
+    }
+
+    #[test]
+    fn backspace_at_offset_zero_is_a_noop_not_an_underflow() {
+        // A bare caret at offset 0 backspacing has nothing before it: the
+        // `c.head > 0` guard must be strict; the `>=` mutant makes `0 - 1`
+        // underflow-panic in debug. Kills 225:35.
+        let mut text = "abc".to_string();
+        let mut mc = MultiCursor::default();
+        mc.add_caret(Caret::at(2));
+        let np = mc.apply_edit(&mut text, Caret::at(0), EditOp::Backspace);
+        assert_eq!(text, "ac", "offset-0 caret deletes nothing; the caret at 2 removes 'b'");
+        assert_eq!(np, 0);
+    }
+
+    #[test]
+    fn ctrl_d_scans_forward_from_the_seed_not_backward() {
+        // "x x x x": seed the primary on the THIRD "x" (4..5). The forward scan
+        // (`r.start >= cursor && !is_occupied`) must add the FOURTH "x" (6..7),
+        // never wrap backward to the first. Kills 346:31, 346:41, 346:44.
+        let text = "x x x x";
+        let mut mc = MultiCursor::default();
+        let out = mc.select_next_occurrence(text, Caret::selection(4, 5));
+        assert_eq!(out, CtrlDOutcome::Added(Caret::selection(6, 7)));
+    }
+
+    #[test]
+    fn toggle_caret_removes_a_secondary_when_clicking_inside_its_selection() {
+        // caret_hits' SELECTION branch is only reached for a ranged caret. Add a
+        // secondary selection 3..7, then Ctrl+click at offset 5 (strictly inside)
+        // -> hits -> removes it. Kills 391:17 and 391:31.
+        let mut mc = MultiCursor::default();
+        let primary = Caret::at(0);
+        mc.add_caret(Caret::selection(3, 7));
+        mc.toggle_caret(Caret::at(5), primary);
+        assert!(mc.secondaries().is_empty(), "clicking inside a secondary's selection toggles it off");
+        assert!(!mc.is_active());
+    }
+
+    #[test]
+    fn toggle_caret_just_past_a_selection_end_adds_not_removes() {
+        // pos == r.end + 1 is OUTSIDE the range: start<=pos && pos<=end = true &&
+        // false = false (no hit) -> the click ADDS a caret. Kills 391:24 and 391:31.
+        let mut mc = MultiCursor::default();
+        let primary = Caret::at(0);
+        mc.add_caret(Caret::selection(3, 7));
+        mc.toggle_caret(Caret::at(8), primary);
+        assert_eq!(mc.secondaries(), &[Caret::selection(3, 7), Caret::at(8)]);
+    }
+
+    #[test]
+    fn reconcile_keeps_the_primary_when_it_conflicts_with_an_earlier_secondary() {
+        // Secondary selection 0..5 sorts first; the primary bare caret at 3 (nested)
+        // must be SWAPPED IN (primary always survives) -> one insert at offset 3.
+        // The `!*prev_primary` -> `*prev_primary` mutant never swaps. Kills 426:34.
+        let mut text = "abcdefghij".to_string();
+        let mut mc = MultiCursor::default();
+        mc.add_caret(Caret::selection(0, 5));
+        let np = mc.apply_edit(&mut text, Caret::at(3), EditOp::Insert("X".into()));
+        assert_eq!(text, "abcXdefghij");
+        assert_eq!(np, 4);
+        assert!(mc.secondaries().is_empty());
+    }
+
+    #[test]
     fn backward_selection_range_and_start_use_min_max_order() {
         // A backward drag (anchor > head: shift+Home, or shift+Left dragging the
         // head left past the anchor). range() must sort to min..max and start()

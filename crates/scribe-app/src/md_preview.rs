@@ -803,6 +803,142 @@ mod tests {
     }
 
     #[test]
+    fn compute_line_starts_points_one_byte_past_each_newline() {
+        // Each line starts ONE byte after its '\n'. The `i + 1 -> i * 1` (= i)
+        // mutant yields [0,1,4,8] instead. byte_to_line's saturating_sub masked it.
+        assert_eq!(compute_line_starts("a\nbb\nccc\n"), vec![0, 2, 5, 9]);
+    }
+
+    #[test]
+    fn a_second_top_level_list_starts_at_depth_zero() {
+        // After the first list ends its level must be popped; a following sibling
+        // list's items are depth 0. Deleting the List-end arm leaves the level on
+        // the stack -> the second list's items wrongly compute depth 1. Kills 341:13.
+        let b = parse("1. a\n2. b\n\n- c\n- d\n");
+        let depths: Vec<u8> = b
+            .iter()
+            .filter_map(|blk| match blk {
+                MdBlock::ListItem { depth, .. } => Some(*depth),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(depths, vec![0, 0, 0, 0], "two sibling top-level lists are all depth 0, got {b:?}");
+    }
+
+    #[test]
+    fn strong_end_stops_bold_for_following_text() {
+        // Deleting the Strong-End arm makes bold "stick" to following text. Kills 397:13.
+        let b = parse("**bold** plain\n");
+        let MdBlock::Paragraph(runs) = &b[0] else { panic!("expected paragraph") };
+        assert!(runs.iter().any(|r| r.bold && r.text == "bold"));
+        let plain = runs.iter().find(|r| r.text.contains("plain")).expect("plain run");
+        assert!(!plain.bold, "text after **bold** is not bold");
+    }
+
+    #[test]
+    fn emphasis_end_stops_italic_for_following_text() {
+        // Deleting the Emphasis-End arm makes italic stick. Kills 399:13.
+        let b = parse("*em* plain\n");
+        let MdBlock::Paragraph(runs) = &b[0] else { panic!("expected paragraph") };
+        assert!(runs.iter().any(|r| r.italic && r.text == "em"));
+        let plain = runs.iter().find(|r| r.text.contains("plain")).expect("plain run");
+        assert!(!plain.italic, "text after *em* is not italic");
+    }
+
+    #[test]
+    fn link_end_clears_link_for_following_text() {
+        // Deleting the Link-End arm makes the link stick to trailing text. Kills 401:13.
+        let b = parse("[site](https://example.com) after\n");
+        let MdBlock::Paragraph(runs) = &b[0] else { panic!("expected paragraph") };
+        let after = runs.iter().find(|r| r.text.contains("after")).expect("trailing run");
+        assert_eq!(after.link, None, "text after the closed link carries no link");
+    }
+
+    #[test]
+    fn parse_emits_no_trailing_empty_paragraph() {
+        // For a well-formed doc runs is drained before the post-loop; the
+        // `if !runs.is_empty()` -> `if runs.is_empty()` mutant appends a stray
+        // empty Paragraph. Assert exact block count. Kills 428:8.
+        let b = parse("# Only\n");
+        assert_eq!(b.len(), 1, "a single heading yields exactly one block, got {b:?}");
+        assert!(matches!(&b[0], MdBlock::Heading { .. }));
+    }
+
+    #[test]
+    fn callout_split_rejects_a_non_alphanumeric_type() {
+        // A `[!a-b]` (non-empty, non-alnum) reaches the type check: clean returns
+        // None; the `|| -> &&` mutant accepts it as a callout. Kills 554:24.
+        let runs = vec![MdRun { text: "[!a-b] body".into(), bold: false, italic: false, code: false, link: None }];
+        assert!(callout_split(&runs).is_none(), "a hyphenated type is not a callout");
+        let empty = vec![MdRun { text: "[!] body".into(), bold: false, italic: false, code: false, link: None }];
+        assert!(callout_split(&empty).is_none(), "an empty type is not a callout");
+    }
+
+    #[test]
+    fn callout_icon_maps_each_type_group_to_its_glyph() {
+        // callout_split's title assert only checks the TYPE, never the icon, so
+        // the whole-body / deleted-arm mutants survived. Pin each group. Kills
+        // 574:5(x2), 576:9, 577:9, 578:9, 579:9.
+        use egui_phosphor::thin as ph;
+        assert_eq!(callout_icon("warning"), ph::WARNING);
+        assert_eq!(callout_icon("caution"), ph::WARNING);
+        assert_eq!(callout_icon("danger"), ph::WARNING);
+        assert_eq!(callout_icon("tip"), ph::LIGHTBULB);
+        assert_eq!(callout_icon("hint"), ph::LIGHTBULB);
+        assert_eq!(callout_icon("important"), ph::LIGHTBULB);
+        assert_eq!(callout_icon("todo"), ph::CHECK_SQUARE);
+        assert_eq!(callout_icon("question"), ph::QUESTION);
+        assert_eq!(callout_icon("faq"), ph::QUESTION);
+        assert_eq!(callout_icon("unknown"), ph::NOTE);
+        assert_eq!(callout_icon("WARNING"), ph::WARNING, "case-insensitive");
+    }
+
+    #[test]
+    fn link_scheme_parses_plus_minus_dot_scheme_chars_then_rejects_unknown() {
+        // '+','-','.' are valid RFC-3986 scheme chars: they must be consumed so an
+        // unknown scheme is REJECTED. The `==`->`!=` and `||`->`&&` scheme-char
+        // mutants break parsing at that char -> mis-classify as a relative link.
+        // Kills 631:43, 631:50, 631:55, 631:62, 631:67.
+        assert!(!is_safe_link_scheme("coap+ws://host"));
+        assert!(!is_safe_link_scheme("view-source:http://x"));
+        assert!(!is_safe_link_scheme("a.b://host"));
+    }
+
+    #[test]
+    fn tag_spans_segment_boundaries_are_pinned_both_sides() {
+        // The hashtag-only existing test missed the non-tag segment boundaries.
+        // Kills 763:30(x3), 774:18(x3).
+        assert_eq!(tag_spans("a #b"), vec![(0, 2, false), (2, 4, true)]);
+        assert_eq!(tag_spans("#a b"), vec![(0, 2, true), (2, 4, false)]);
+    }
+
+    #[test]
+    fn image_only_paragraph_emits_no_empty_block() {
+        // An image with empty alt yields no inline runs, so Paragraph-end has empty
+        // runs and the guard skips it. The `!runs.is_empty()` -> `true` mutant
+        // pushes a stray empty Paragraph. Kills 290:46 (if pulldown nests as expected).
+        let b = parse("![](http://x/y.png)\n\nreal text\n");
+        assert_eq!(b.len(), 1, "no empty block for the image-only paragraph, got {b:?}");
+        assert!(matches!(&b[0], MdBlock::Paragraph(runs) if runs_text(runs) == "real text"));
+    }
+
+    #[test]
+    fn textless_parent_item_flushes_after_its_children_not_before() {
+        // A textless parent item has EMPTY runs when the nested list starts; clean
+        // does not early-flush (child first, empty parent last). The `&& -> ||`
+        // mutant flushes the empty parent first -> items swap order. Kills 334:38.
+        let b = parse("- \n    - child\n");
+        let depths: Vec<u8> = b
+            .iter()
+            .filter_map(|blk| match blk {
+                MdBlock::ListItem { depth, .. } => Some(*depth),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(depths, vec![1, 0], "child (depth 1) before the textless parent (depth 0), got {b:?}");
+    }
+
+    #[test]
     fn parses_task_items_with_state_and_source_line() {
         // Task boxes become TaskItem blocks carrying their checked state and the
         // 0-based source line of the box (for click-to-source editing).

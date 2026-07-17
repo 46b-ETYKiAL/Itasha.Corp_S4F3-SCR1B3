@@ -104,6 +104,25 @@ fn rotate_if_oversized(path: &Path, max_bytes: u64) {
 mod tests {
     use super::{append_line, resolve_log_path, rotate_if_oversized, ACTION_LOG_MAX_BYTES};
 
+    #[test]
+    fn a_log_exactly_at_the_cap_is_not_rotated() {
+        // At len == max_bytes: clean `>` is false (not oversized, no rotation);
+        // the `> -> >=` mutant rotates. No existing test seeds a file exactly at
+        // the cap. Kills 75:26.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.log");
+        let rotated = {
+            let mut s = p.as_os_str().to_owned();
+            s.push(".1");
+            std::path::PathBuf::from(s)
+        };
+        let max: u64 = 4096;
+        std::fs::write(&p, vec![b'x'; max as usize]).unwrap();
+        rotate_if_oversized(&p, max);
+        assert!(p.exists(), "a log exactly at the cap must not be rotated");
+        assert!(!rotated.exists(), "no rotation at exactly the cap");
+    }
+
     /// Serializes tests that mutate the process-global action-log env vars.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
