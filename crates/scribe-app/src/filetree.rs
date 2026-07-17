@@ -248,6 +248,31 @@ mod tests {
         assert!(clicked.is_none());
     }
 
+    #[test]
+    fn dir_children_skips_target_and_node_modules() {
+        // `... || name == "target" || name == "node_modules"` -> `... || (a && b)`
+        // (the `|| -> &&` mutant): no name equals both, so target/node_modules stop
+        // being skipped. The existing sort-order test uses no such dir. Kills 168:54.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        create_dir(root.join("target")).unwrap();
+        create_dir(root.join("node_modules")).unwrap();
+        File::create(root.join("keep.txt")).unwrap();
+        let mut visible = Vec::<PathBuf>::new();
+        let mut clicked: Option<PathBuf> = None;
+        let mut visited = HashSet::new();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            dir_children(ui, root, &mut clicked, &mut visible, None, 0, &mut visited);
+        });
+        assert!(visible.iter().any(|p| p.ends_with("keep.txt")));
+        assert!(!visible.iter().any(|p| p.ends_with("target")), "target must be skipped");
+        assert!(
+            !visible.iter().any(|p| p.ends_with("node_modules")),
+            "node_modules must be skipped"
+        );
+    }
+
     #[cfg(unix)]
     fn try_symlink_dir(src: &Path, dst: &Path) -> bool {
         std::os::unix::fs::symlink(src, dst).is_ok()

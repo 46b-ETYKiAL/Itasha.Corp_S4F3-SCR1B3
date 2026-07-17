@@ -280,6 +280,19 @@ impl<'a> egui_tiles::Behavior<Pane> for AppGridBehavior<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_doc_ids_returns_every_pane_doc_id() {
+        // The round-trip test only asserts pane_doc_ids(back) == pane_doc_ids(tree)
+        // — both collapse to the EMPTY set under the `delete Tile::Pane arm` mutant,
+        // so equality still held. Assert the ACTUAL doc ids. Kills 160:13.
+        use std::collections::BTreeSet;
+        let docs = [DocId(10), DocId(20), DocId(30)];
+        let tree = build_default_grid(&docs);
+        let ids = pane_doc_ids(&tree);
+        assert_eq!(ids, BTreeSet::from([DocId(10), DocId(20), DocId(30)]));
+        assert_eq!(ids.len(), 3); // mutant collapses to an empty set
+    }
     // The grid behaviour is exercised through the egui_tiles `Behavior` trait
     // (tab_title_for_pane / min_size / gap_width / retain_pane); bring it into
     // scope so the tests can call those trait methods.

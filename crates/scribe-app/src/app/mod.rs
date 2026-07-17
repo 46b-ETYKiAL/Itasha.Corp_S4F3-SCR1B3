@@ -2112,6 +2112,9 @@ fn side_tab_insertion_y(idx: usize, row_top: f32, prev_bottom: Option<f32>) -> f
 mod restore_dedup_tests;
 
 #[cfg(test)]
+mod find_nav_tests;
+
+#[cfg(test)]
 mod resize_tests;
 
 #[cfg(test)]

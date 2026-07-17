@@ -378,6 +378,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn csv_keeps_a_row_whose_first_cell_is_empty() {
+        // The drop-filter must only drop the (len==1 AND empty) trailing-newline
+        // artifact, not a real >1-column row with an empty first cell. Kills 154:36
+        // (&& -> ||): `,d` -> ["","d"] must survive.
+        let md = to_markdown("a,b\n,d\n", Some("csv"));
+        assert!(md.contains("| d |"), "the empty-first-cell data row must survive:\n{md}");
+    }
+
+    #[test]
+    fn csv_single_field_no_newline_flushes() {
+        // "abc" with no comma/newline -> one field, empty record -> clean flushes
+        // to a 1-col table; a broken final-flush guard drops it to a fenced block.
+        // Kills 272:8 (drop first !) and 272:26 (|| -> &&).
+        let md = to_markdown("abc", Some("csv"));
+        assert!(md.contains("| abc |"), "final no-newline field must flush to a table:\n{md}");
+        assert!(!md.starts_with("```"), "must not degrade to a fence:\n{md}");
+    }
+
+    #[test]
+    fn csv_trailing_empty_field_no_newline_flushes() {
+        // "a," -> field="" but record=["a"] -> clean flushes (the second ! term).
+        // Kills 272:29 (dropping that ! makes record.is_empty() -> no flush -> fence).
+        let md = to_markdown("a,", Some("csv"));
+        assert!(md.contains("| --- | --- |"), "a trailing empty field still flushes a 2-col table:\n{md}");
+    }
+
+    #[test]
+    fn ext_to_lang_maps_toml_and_json_on_a_direct_call() {
+        // toml/json are dispatched to toml_to_md/json_to_md BEFORE ext_to_lang in
+        // to_markdown, so these arms are only reachable directly. Kills 335:9, 336:9.
+        assert_eq!(ext_to_lang(Some("toml")), "toml");
+        assert_eq!(ext_to_lang(Some("json")), "json");
+    }
+
+    #[test]
     fn html_basic() {
         let md = to_markdown("<h1>Hi</h1><p>x</p>", Some("html"));
         assert!(md.contains("# Hi"), "expected '# Hi' in:\n{md}");
