@@ -233,3 +233,42 @@ fn reopen_closed_tab_focuses_last_index() {
     assert_eq!(app.active, app.tabs.len() - 1, "reopened tab must be focused (last index)");
     assert_eq!(app.tabs.last().unwrap().text, "recovered");
 }
+
+#[test]
+fn closed_tabs_stack_is_capped_at_twenty() {
+    // Close 22 non-empty tabs; each pushes onto the reopen stack, which caps at
+    // MAX_CLOSED=20. The `> -> ==` / `> -> >=` mutants (tabs.rs 125:43) mis-fire
+    // the trim and leave the stack at 19. A strict `> 20` holds it at exactly 20.
+    let mut app = ScribeApp::new_test(Config::default());
+    app.tabs.clear();
+    for i in 0..23u64 {
+        let mut t = EditorTab::scratch();
+        t.text = format!("content{i}");
+        t.doc_id = crate::grid::DocId(i + 1);
+        app.tabs.push(t);
+    }
+    app.active = 0;
+    for _ in 0..22 {
+        app.close_tab(0);
+    }
+    assert_eq!(app.closed_tabs.len(), 20, "the closed-tab history caps at MAX_CLOSED=20");
+}
+
+#[test]
+fn close_tab_clamps_active_into_range() {
+    // Closing the active LAST tab must clamp `active` back into range via
+    // `active.min(len - 1)`. The `- -> +` / `- -> /` mutants (tabs.rs 133:59)
+    // leave active off the end.
+    let mut app = ScribeApp::new_test(Config::default());
+    app.tabs.clear();
+    for i in 0..4u64 {
+        let mut t = EditorTab::scratch();
+        t.text = format!("t{i}");
+        t.doc_id = crate::grid::DocId(i + 1);
+        app.tabs.push(t);
+    }
+    app.active = 3;
+    app.close_tab(3);
+    assert_eq!(app.active, app.tabs.len() - 1, "active clamps to the last valid index");
+    assert!(app.active < app.tabs.len(), "active stays in range");
+}
