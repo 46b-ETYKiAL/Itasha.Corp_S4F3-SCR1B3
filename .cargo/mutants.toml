@@ -219,4 +219,12 @@ exclude_re = [
   # write). Neither is an observable correctness difference for the "flush dirty
   # FILE-BACKED buffers" contract (74:38/80:20 ARE tested).
   'app/session_persist\.rs:78:68:',
+  # `... && !tab.doc.is_read_only_large()` guards (skip transform/sort on a huge
+  # read-only buffer): is_read_only_large is true ONLY for files >=
+  # LARGE_FILE_THRESHOLD = 256 MiB, so for every unit-testable buffer it is false
+  # and the `&&`/`||` branches are identical. Only a 256 MiB read-only file (not
+  # unit-feasible) distinguishes them. The active<len half is the same len-clamp
+  # invariant already exercised.
+  'app/file_ops\.rs:47:37:',
+  'app/builtins\.rs:147:45:',
 ]

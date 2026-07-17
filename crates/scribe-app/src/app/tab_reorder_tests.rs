@@ -255,6 +255,32 @@ fn closed_tabs_stack_is_capped_at_twenty() {
 }
 
 #[test]
+fn close_tab_evicts_a_cursor_position_at_the_cap() {
+    // When restoring cursor positions, close_tab evicts the oldest entry once the
+    // map is at SCROLL_POS_CAP before inserting the closed tab's position. The
+    // `>= -> <` mutant (tabs.rs 102:25) never evicts, growing the map past the cap.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("f.txt");
+    std::fs::write(&p, "content").unwrap();
+    let mut cfg = Config::default();
+    cfg.editor.restore_cursor_position = true;
+    for i in 0..scribe_core::config::SCROLL_POS_CAP {
+        cfg.editor.cursor_positions.insert(format!("dummy-{i}"), 0);
+    }
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::from_path(p).expect("open");
+    t.doc_id = crate::grid::DocId(1);
+    app.tabs.push(t);
+    app.active = 0;
+    app.close_tab(0);
+    assert!(
+        app.config.editor.cursor_positions.len() <= scribe_core::config::SCROLL_POS_CAP,
+        "the cursor-position map stays capped at SCROLL_POS_CAP"
+    );
+}
+
+#[test]
 fn close_tab_clamps_active_into_range() {
     // Closing the active LAST tab must clamp `active` back into range via
     // `active.min(len - 1)`. The `- -> +` / `- -> /` mutants (tabs.rs 133:59)
