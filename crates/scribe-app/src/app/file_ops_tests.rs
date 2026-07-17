@@ -260,3 +260,46 @@ fn an_injected_folder_pick_is_consumed_once_then_reads_as_cancelled() {
         "second call reads as cancelled"
     );
 }
+
+#[test]
+fn change_states_computed_for_a_buffer_under_the_two_mib_cap() {
+    // A ~1.6 MiB buffer that DIFFERS from its baseline: under the real 2 MiB cap
+    // the change-bar diff runs (non-empty). The shrunk-cap mutants on
+    // CHANGE_BAR_MAX_BYTES = 2 * 1024 * 1024 (67:47 / 67:54 `* -> +`) drop the cap
+    // below the buffer -> it clears instead.
+    let mut cfg = Config::default();
+    cfg.editor.show_change_bar = true;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs[0].session_baseline = "old line\n".repeat(200_000);
+    app.tabs[0].saved_baseline = app.tabs[0].session_baseline.clone();
+    app.tabs[0].text = "new line\n".repeat(180_000); // ~1.6 MiB, < 2 MiB, differs
+    app.tabs[0].edit_gen = app.tabs[0].edit_gen.wrapping_add(1);
+    app.tabs[0].change_gen = None;
+    app.ensure_change_states(0);
+    assert!(
+        !app.tabs[0].change_states.is_empty(),
+        "a <2 MiB changed buffer must have its change bar computed"
+    );
+}
+
+#[test]
+fn change_states_computed_for_a_buffer_exactly_at_the_cap() {
+    // A buffer of EXACTLY 2 MiB that differs from its baseline: clean `len > cap`
+    // is false -> the diff runs. The 75:27 `> -> ==` / `> -> >=` mutants clear it
+    // at exactly the cap.
+    let cap = 2 * 1024 * 1024;
+    let mut cfg = Config::default();
+    cfg.editor.show_change_bar = true;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs[0].session_baseline = "y".repeat(cap);
+    app.tabs[0].saved_baseline = app.tabs[0].session_baseline.clone();
+    app.tabs[0].text = "x".repeat(cap);
+    assert_eq!(app.tabs[0].text.len(), cap, "the buffer is exactly at the cap");
+    app.tabs[0].edit_gen = app.tabs[0].edit_gen.wrapping_add(1);
+    app.tabs[0].change_gen = None;
+    app.ensure_change_states(0);
+    assert!(
+        !app.tabs[0].change_states.is_empty(),
+        "a buffer exactly AT the cap is still diffed (the check is strictly `>`)"
+    );
+}
