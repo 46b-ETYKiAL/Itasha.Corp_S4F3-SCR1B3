@@ -115,6 +115,23 @@ fn side_tab_insertion_line_is_in_the_gap() {
     assert_eq!(side_tab_insertion_y(0, 50.0, Some(10.0)), 49.0);
 }
 
+/// With restore_cursor_position + a stored cursor for the path, open_path
+/// restores the caret on the just-pushed tab at index `self.tabs.len() - 1`. The
+/// `- 1 -> + 1` / `- 1 -> / 1` mutants (mod.rs 1474:51) index past the end and
+/// OOB-panic, so simply reaching the restore branch kills them.
+#[test]
+fn open_path_restore_cursor_indexes_the_new_tab_without_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("restore.txt");
+    std::fs::write(&p, "abcdef").unwrap();
+    let mut cfg = Config::default();
+    cfg.editor.restore_cursor_position = true;
+    cfg.editor.cursor_positions.insert(p.display().to_string(), 3);
+    let mut app = ScribeApp::new_test(cfg);
+    app.open_path(p.clone());
+    assert_eq!(app.tabs.last().unwrap().text, "abcdef", "the file opened and the restore branch ran");
+}
+
 /// Two DIRTY restored copies: `candidate.is_dirty() && !existing.is_dirty()` is
 /// `true && false` = false -> the existing tab is KEPT. The `&& -> ||` mutant
 /// (mod.rs 455:33) makes it `true || false` = true -> wrongly replaces. The other
