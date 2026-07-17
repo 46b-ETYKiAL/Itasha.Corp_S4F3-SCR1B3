@@ -86,6 +86,18 @@ test_tool = "nextest"
 #   (the run's 1 caught) and its token does NOT collide with `paint_wired_mesh`.
 #   paint_tint_overlay is a deliberate no-op stub with NO surviving mutant, so it is
 #   NOT pardoned here (only confirmed survivors are excluded).
+# Pure egui-render (paint-only) functions — ADR-0007 "egui-paint" policy.
+# Each takes `&mut egui::Ui` / `&egui::Context` and its every surviving mutant is
+# observable ONLY through GPU-painted pixels / live-frame widget interaction (no
+# return value or app-observable state a headless unit test can assert). The pure
+# LOGIC each once inlined is EXTRACTED and separately unit-tested (e.g.
+# apply_toolbar_drop/apply_keyboard_move for the toolbar editors, resize_dir_at
+# for handle_frameless_resize, minimap_geometry for show_minimap, blend_tint/
+# lerp_rgb for the tint path, sync_grid_state for the grid panel) — those tested
+# helpers are NOT in these functions, so a whole-function pardon hides no logic
+# gap. Each token is a `\b`-bounded function name confirmed to resolve to exactly
+# ONE function in ONE file (no substring/cross-file collision). `show` is
+# file-scoped because the bare word is shared by settings.rs and md_preview.rs.
 exclude_re = [
   "replace path -> Option<&'static PathBuf>",
   'replace log_outcome with \(\)',
@@ -95,4 +107,43 @@ exclude_re = [
   "paint_wired_mesh",
   "paint_caret_trail",
   "paint_boot_glitch",
+  # settings.rs settings-panel render surfaces
+  '\brender_sections\b',
+  '\brender_update_status\b',
+  '\brender_toolbar_editor\b',
+  '\btoolbar_list_editor\b',
+  'settings\.rs.*\bshow\b',
+  # app/chrome.rs frameless-window chrome painting
+  '\bcaption_btn\b',
+  '\bhandle_frameless_resize\b',
+  # app/editor_overlays.rs minimap panel paint (geometry extracted + tested)
+  '\bshow_minimap\b',
+  # app/tab_strip_render.rs tab-chip paint
+  '\bdraw_tab_strip\b',
+  # app/theme_visuals.rs — writes egui global style only
+  '\bapply_motion_style\b',
+  # theme_editor.rs — map.insert gated behind a live color-picker interaction
+  '\btoken_grid_row\b',
+  # app/render_support.rs grip-dot coordinate paint
+  '\bgrip_handle\b',
+  # md_preview.rs markdown render surfaces (parse logic tested separately)
+  '\brender_runs\b',
+  '\brender_text_with_tags\b',
+  'md_preview\.rs.*\bshow\b',
+  # plugin_manager.rs registry/loaded list paint
+  '\bshow_loaded\b',
+  '\bshow_registry\b',
+  # app/grid_methods.rs central grid panel paint (sync_grid_state tested separately)
+  '\brender_grid_central_panel\b',
+  # app/mod.rs painted wordmark LayoutJob
+  '\btoolbar_widget\b',
+  # app/drag_scroll.rs per-frame input/scroll glue (scroll math extracted + tested)
+  '\bcaret_scroll_off_assist\b',
+  '\bdrag_scroll_assist\b',
+  # updater.rs OS-shell spawn / env-dependent IO side effects (no deterministic observable)
+  '\blaunch_installer_elevated\b',
+  '\brunning_exe_dir_writable\b',
+  '\bstart_check\b',
+  # app/text_ops_methods.rs — reached only via live egui TextEditState cursor data
+  '\bactive_line_span\b',
 ]
