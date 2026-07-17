@@ -114,3 +114,23 @@ fn side_tab_insertion_line_is_in_the_gap() {
     // Defensive: idx 0 ignores any stray prev_bottom (guarded by `idx > 0`).
     assert_eq!(side_tab_insertion_y(0, 50.0, Some(10.0)), 49.0);
 }
+
+/// Two DIRTY restored copies: `candidate.is_dirty() && !existing.is_dirty()` is
+/// `true && false` = false -> the existing tab is KEPT. The `&& -> ||` mutant
+/// (mod.rs 455:33) makes it `true || false` = true -> wrongly replaces. The other
+/// merge tests only exercise the TRUE branch (a clean existing), so this pins the
+/// FALSE branch and kills 455:33.
+#[test]
+fn merge_keeps_existing_when_both_copies_are_dirty() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("note.txt");
+    std::fs::write(&p, "DISK").unwrap();
+    let mut existing = EditorTab::from_backup(Some(p.clone()), "ORIGINAL".to_string());
+    let candidate = EditorTab::from_backup(Some(p.clone()), "OTHER".to_string());
+    assert!(existing.is_dirty() && candidate.is_dirty(), "both restored snapshots differ from disk -> dirty");
+    EditorTab::merge_restored_duplicate(&mut existing, candidate);
+    assert_eq!(
+        existing.text, "ORIGINAL",
+        "a dirty existing tab must NOT be replaced by another dirty candidate"
+    );
+}
