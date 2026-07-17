@@ -294,6 +294,27 @@ fn cycle_theme_advances_from_current() {
 }
 
 #[test]
+fn prev_bookmark_navigates_backward_not_forward() {
+    // PrevBookmark => navigate_bookmark(-1). From cursor line 5 with bookmarks at
+    // lines 2 and 8, it lands on the PREVIOUS bookmark (line 2 -> goto_line(3) ->
+    // pending_scroll for line index 2). The `delete -` mutant (234:68) makes it
+    // navigate_bookmark(1) -> the NEXT bookmark (line 8).
+    let mut app = ScribeApp::new_test(Config::default());
+    app.tabs[0].text = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n".into();
+    app.tabs[0].bookmarks = [2usize, 8].into_iter().collect();
+    app.last_cursor_line_col = Some((6, 0)); // 1-based line 6 -> cursor_line0 == 5
+    app.pending_scroll = None;
+    app.execute_builtin(BuiltinCommand::PrevBookmark);
+    let size = app.config.fonts.clamped_editor_size();
+    let lh = app.config.fonts.clamped_line_height();
+    assert_eq!(
+        app.pending_scroll,
+        Some(2.0 * (size * lh)),
+        "prev bookmark lands on the PREVIOUS bookmark (line 2), not the next (line 8)"
+    );
+}
+
+#[test]
 fn drain_pending_editor_action_consumes_request() {
     // drain_pending_editor_action always take()s pending_editor_action. The
     // `replace body with ()` mutant leaves it set. Kills 271:9. A default Context
