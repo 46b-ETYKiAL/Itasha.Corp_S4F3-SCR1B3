@@ -204,7 +204,7 @@ exclude_re = [
   'to_markdown\.rs:249:',           # parse_csv CRLF \n lookahead: the extra [""] record is dropped by csv_to_md filter
   'to_markdown\.rs:310:',           # longest_backtick_run > -> >=: idempotent longest=current when equal
   # col-scoped (the SAME line also carries tested LOGIC at a different column):
-  'app/builtins\.rs:147:27:',       # SortLines active<len: same len-1-clamp invariant as 126 (147:45 IS tested)
+  'app/builtins\.rs:147:27:',       # SortLines active<len: same len-1-clamp invariant as 126 (147:45 read-only-large guard is pardoned below)
   'app/multi_cursor_glue\.rs:77:13:',  # mc_reconcile is_active()||!secondaries: unreachable divergence (77:16/78:13 tested)
   'app/multi_cursor_glue\.rs:94:13:',  # mc_record same predicate (95:13 tested)
   # session_persist content_sig loop: whether a NON-dirty tab (clean-saved or
