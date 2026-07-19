@@ -875,6 +875,114 @@ mod tint_tests {
     }
 
     #[test]
+    fn ensure_readable_tone_pushes_away_from_a_dark_background() {
+        // On a DARK titlebar (bg_l < 0.5) a low-contrast tone must be pushed
+        // TOWARD WHITE (lightened), never toward black. This pins the
+        // `if bg_l < 0.5` direction choice: `< -> ==` and `< -> >` both collapse
+        // to target=BLACK for a dark bg, darkening instead of lightening and
+        // inverting the contrast fix. (`< -> <=` differs only at bg_l == 0.5
+        // exactly — unreachable from u8 channels — so it is pardoned.)
+        let bg = Color32::from_gray(20); // dark titlebar
+        let tone = Color32::from_gray(45); // low-contrast vs bg (< MIN_GAP)
+        let out = ensure_readable_tone(tone, bg);
+        assert!(
+            relative_luminance(out) > relative_luminance(tone),
+            "a dark bg must LIGHTEN the tone (push toward white): out_l={} tone_l={}",
+            relative_luminance(out),
+            relative_luminance(tone)
+        );
+        assert!(
+            (relative_luminance(out) - relative_luminance(bg)).abs() >= 0.34,
+            "the pushed tone must reach the MIN_GAP contrast floor"
+        );
+    }
+
+    #[test]
+    fn load_snippets_reads_a_real_snippets_file() {
+        // load_snippets() reads `<config-dir>/snippets.toml`. Point
+        // SCR1B3_CONFIG_DIR at a temp dir holding a real one and assert the
+        // parsed set is non-empty + contains the trigger — this kills the whole
+        // `load_snippets -> Default::default()` (empty-set) body replacement.
+        static LK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("SCR1B3_CONFIG_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("snippets.toml"),
+            "[[snippets]]\nprefix = \"fn\"\nbody = \"fn ${1}() {}\"\n",
+        )
+        .unwrap();
+        std::env::set_var("SCR1B3_CONFIG_DIR", dir.path());
+        let set = load_snippets();
+        match prev {
+            Some(v) => std::env::set_var("SCR1B3_CONFIG_DIR", v),
+            None => std::env::remove_var("SCR1B3_CONFIG_DIR"),
+        }
+        assert!(!set.is_empty(), "a real snippets.toml must load a non-empty set");
+        assert!(
+            set.lookup("fn").is_some(),
+            "the 'fn' trigger from the file must be present (not the empty default)"
+        );
+    }
+
+    #[test]
+    fn highlight_job_underlines_url_spans_only() {
+        // append_split sub-segments a line at URL byte-boundaries: the URL portion
+        // gets the underlined url_fmt, the rest keeps base. The returned LayoutJob
+        // (epaint data, no GUI) exposes .text and per-section .format.underline.
+        // This pins the append_split loop + the no-URL fast path: dropping the
+        // loop/stub loses the URL text, and mis-classifying the in-URL test
+        // under- or over-underlines.
+        let hl = Highlighter::new();
+        let build = |text: &str| {
+            let mut inc = IncrementalHighlightState::default();
+            highlight_job(
+                &hl,
+                text,
+                Some("txt"),
+                egui::FontId::monospace(12.0),
+                1.0,
+                &mut inc,
+                Color32::WHITE,
+                Color32::from_rgb(0, 0, 255),
+                true, // detect_links
+            )
+        };
+
+        // (a) URL line → the sub-segmenting while-loop. The URL text must survive
+        // and be underlined; the surrounding prose must NOT be.
+        let url_text = "visit http://example.com now\n";
+        let url = "http://example.com";
+        let ustart = url_text.find(url).unwrap();
+        let uend = ustart + url.len();
+        let job = build(url_text);
+        assert!(job.text.contains(url), "the URL text must survive append_split: {:?}", job.text);
+        let underlined_at = |b: usize| {
+            job.sections
+                .iter()
+                .any(|s| s.byte_range.contains(&b) && s.format.underline.width > 0.0)
+        };
+        assert!(underlined_at(ustart + 1), "a byte inside the URL must be underlined");
+        assert!(!underlined_at(1), "the leading 'visit' prose must NOT be underlined");
+        assert!(!underlined_at(uend + 1), "the trailing ' now' prose must NOT be underlined");
+
+        // (b) No-URL line → the `urls.is_empty()` fast path. Its whole text must
+        // survive (kills the `!seg.is_empty()` drop) with zero underline.
+        let plain = build("just plain prose line\n");
+        // Exact-equality (not `contains`): the trailing '\n' is appended by the
+        // tail branch (`byte < line.len()`), so a dropped/mis-guarded tail
+        // (458 `< -> ==` / `> ` / delete) loses the newline and fails here.
+        assert_eq!(
+            plain.text, "just plain prose line\n",
+            "the no-URL line (incl. its trailing newline tail) must survive verbatim"
+        );
+        assert!(
+            plain.sections.iter().all(|s| s.format.underline.width == 0.0),
+            "a line with no URL must have no underlined section"
+        );
+    }
+
+    #[test]
     fn newline_with_indent_preserves_leading_whitespace() {
         // Cursor at the end of an indented line: the inserted newline copies the
         // "  " indent. `line_start = rfind('\n').map(|i| i + 1)` -> `i * 1` (= i)

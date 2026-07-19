@@ -377,6 +377,16 @@ fn toolbar_visible_count_folds_overflow_into_dropdown() {
     assert_eq!(toolbar_visible_count(100.0, 0.0, 28.0, 4), 4);
     assert_eq!(toolbar_visible_count(0.0, 30.0, 28.0, 0), 0);
     assert!(toolbar_visible_count(50.0, 30.0, 28.0, 100) <= 100);
+    // The `n == 0 || item_w <= 0.0` short-circuit is load-bearing: a zero item_w
+    // MUST return early to avoid the `usable / item_w` div-by-zero (→ NaN → 0)
+    // path. A defensively-negative avail exposes it — with `&&` instead of `||`,
+    // the zero-item_w case falls through (n != 0) past the second guard
+    // (0 <= -1 is false) into the NaN division and returns 0 instead of n.
+    assert_eq!(
+        toolbar_visible_count(-1.0, 0.0, 28.0, 4),
+        4,
+        "a zero item_w must short-circuit to n regardless of avail (no div-by-zero)"
+    );
 }
 
 // NOTE: the "caption buttons go over the toolbar when narrow" fix (titlebar
