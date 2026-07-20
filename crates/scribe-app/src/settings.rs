@@ -584,16 +584,7 @@ fn render_sections(
             "Appearance",
             "Theme, window chrome, and toolbar look. Changes apply live.",
         );
-        // -- Theme & scale -- (header intentionally NOT the bare word "Theme":
-        // it would collide with the "Theme" row label under search, giving two
-        // identically-labelled AccessKit nodes.)
-        group(
-            ui,
-            "Theme & scale",
-            "The active colour theme, OS matching, and overall interface scale.",
-        );
-        ui.add_space(4.0);
-        settings_grid(ui, "settings-appearance-theme", |ui| {
+        settings_grid(ui, "settings-appearance", |ui| {
             if row_visible(q, "theme") {
                 // Phase 17 T17.2: theme picker over the built-ins + a free text
                 // field for user themes under <config_dir>/themes/<name>.toml.
@@ -696,27 +687,6 @@ fn render_sections(
                 changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
                 ui.end_row();
             }
-            changed |= grid_bool(
-                ui,
-                q,
-                "follow os dark light",
-                "Follow OS dark/light",
-                "Automatically switch between a light and dark theme to match the operating \
-                 system's appearance setting.",
-                &mut config.appearance.follow_os_theme,
-                &def.appearance.follow_os_theme,
-            );
-        });
-        ui.add_space(6.0);
-
-        // -- Backgrounds --
-        group(
-            ui,
-            "Backgrounds",
-            "Override the app and note background colours independently of the theme.",
-        );
-        ui.add_space(4.0);
-        settings_grid(ui, "settings-appearance-backgrounds", |ui| {
             if row_visible(q, "background colour color app override") {
                 // #88 — app background colour, independent of the theme.
                 ui.label("App background").on_hover_text(
@@ -790,17 +760,16 @@ fn render_sections(
                 });
                 ui.end_row();
             }
-        });
-        ui.add_space(6.0);
-
-        // -- Window chrome --
-        group(
-            ui,
-            "Window chrome",
-            "How the window frame, title bar, and status bar are drawn.",
-        );
-        ui.add_space(4.0);
-        settings_grid(ui, "settings-appearance-chrome", |ui| {
+            changed |= grid_bool(
+                ui,
+                q,
+                "follow os dark light",
+                "Follow OS dark/light",
+                "Automatically switch between a light and dark theme to match the operating \
+                 system's appearance setting.",
+                &mut config.appearance.follow_os_theme,
+                &def.appearance.follow_os_theme,
+            );
             changed |= grid_bool(
                 ui,
                 q,
@@ -836,13 +805,6 @@ fn render_sections(
                 &mut config.appearance.show_status_bar,
                 &def.appearance.show_status_bar,
             );
-        });
-        ui.add_space(6.0);
-
-        // -- Toolbar look --
-        group(ui, "Toolbar look", "How toolbar items are labelled.");
-        ui.add_space(4.0);
-        settings_grid(ui, "settings-appearance-toolbar", |ui| {
             changed |= grid_bool(
                 ui,
                 q,
@@ -3575,6 +3537,56 @@ mod toolbar_drop {
 /// nothing in the suite clicks the arrows. Extracting it to a pure function is
 /// what makes the assertions below possible at all; each test names the
 /// surviving mutant it kills.
+#[cfg(test)]
+mod index_step {
+    use super::step_index;
+
+    /// Forward stepping (kills `+` → `-`/`*` at the `i + delta` site).
+    #[test]
+    fn forward_moves_to_the_next_index() {
+        assert_eq!(step_index(4, Some(0), 1), 1);
+        assert_eq!(step_index(4, Some(1), 1), 2);
+    }
+
+    /// Backward stepping.
+    #[test]
+    fn backward_moves_to_the_previous_index() {
+        assert_eq!(step_index(4, Some(2), -1), 1);
+    }
+
+    /// `rem_euclid` wraps both ways — a plain `%` would give -1 and panic the
+    /// caller's index.
+    #[test]
+    fn the_ends_wrap_in_both_directions() {
+        assert_eq!(step_index(4, Some(0), -1), 3, "off the front wraps to last");
+        assert_eq!(step_index(4, Some(3), 1), 0, "off the end wraps to first");
+    }
+
+    /// A `None` current (value not in the list) lands on the end it travels
+    /// toward — kills the `delta > 0` guard (true/false both wrong) and the
+    /// `len - 1` backward arm.
+    #[test]
+    fn a_missing_current_lands_on_the_end_it_travels_toward() {
+        assert_eq!(step_index(4, None, 1), 0, "forward → first");
+        assert_eq!(step_index(4, None, -1), 3, "backward → last");
+    }
+
+    /// Kills `delta > 0` → `delta >= 0`: a zero step is not strictly forward, so
+    /// a missing current falls to the last-entry arm, not the first.
+    #[test]
+    fn a_zero_step_from_a_missing_current_is_not_forward() {
+        assert_eq!(step_index(4, None, 0), 3);
+    }
+
+    /// The empty-list guard returns 0 (never indexes an empty slice / divides by
+    /// zero in `rem_euclid`).
+    #[test]
+    fn an_empty_list_returns_zero() {
+        assert_eq!(step_index(0, None, 1), 0);
+        assert_eq!(step_index(0, None, -1), 0);
+    }
+}
+
 #[cfg(test)]
 mod theme_step {
     use super::step_theme_index;
