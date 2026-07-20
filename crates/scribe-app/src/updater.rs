@@ -90,9 +90,19 @@ fn powershell_runas_script(
     let inst = q(installer);
     let dir = q(install_dir);
     let app = q(app_exe);
+    // The `--dir` VALUE is wrapped in embedded double-quotes (`'"{dir}"'`), not
+    // bare (`'{dir}'`). PowerShell's `Start-Process -ArgumentList` joins the
+    // array elements with spaces WITHOUT re-quoting any element, so a bare
+    // `--dir C:\Program Files\Itasha.Corp\SCR1B3` reaches setup.exe as a raw
+    // command line that `CommandLineToArgvW` splits on the space — the installer
+    // then sees `--dir C:\Program` and extracts the update to `C:\Program\`
+    // while the app relaunches the untouched copy in Program Files (the
+    // "update installs but the version never changes" bug). The double-quotes
+    // survive as literal chars and keep the space-bearing path a single argv
+    // token; the installer's `--dir` parser trims the surrounding quotes.
     format!(
         "try {{ Start-Process -FilePath '{inst}' \
-         -ArgumentList '--silent','--dir','{dir}' -Verb RunAs -Wait }} catch {{ }}; \
+         -ArgumentList '--silent','--dir','\"{dir}\"' -Verb RunAs -Wait }} catch {{ }}; \
          Start-Process -FilePath '{app}'"
     )
 }
@@ -752,7 +762,10 @@ mod tests {
         // The fallback (Program-Files) install now runs the setup.exe SILENTLY:
         // `--silent --dir <install_dir>` (no installer UI, no click-through),
         // waits for the elevated install, then relaunches the app in place.
-        // Every path is single-quoted; the exact shape is pinned here.
+        // Every path element is single-quoted for PowerShell; the `--dir` VALUE
+        // additionally carries embedded double-quotes so a space-bearing install
+        // dir survives `CommandLineToArgvW` in setup.exe as one argv token (see
+        // powershell_runas_script). The exact shape is pinned here.
         assert_eq!(
             powershell_runas_script(
                 Path::new(r"C:\tmp\scr1b3-setup.exe"),
@@ -760,13 +773,13 @@ mod tests {
                 Path::new(r"C:\Program Files\Itasha.Corp\SCR1B3\scr1b3.exe"),
             ),
             "try { Start-Process -FilePath 'C:\\tmp\\scr1b3-setup.exe' \
-             -ArgumentList '--silent','--dir','C:\\Program Files\\Itasha.Corp\\SCR1B3' \
+             -ArgumentList '--silent','--dir','\"C:\\Program Files\\Itasha.Corp\\SCR1B3\"' \
              -Verb RunAs -Wait } catch { }; \
              Start-Process -FilePath 'C:\\Program Files\\Itasha.Corp\\SCR1B3\\scr1b3.exe'"
         );
         // An embedded single quote in ANY path is escaped by doubling (the
         // PowerShell rule), so a crafted path can never break out of the quoted
-        // string.
+        // string. The `--dir` value keeps its embedded double-quotes too.
         assert_eq!(
             powershell_runas_script(
                 Path::new(r"C:\o'brien\scr1b3-setup.exe"),
@@ -774,9 +787,24 @@ mod tests {
                 Path::new(r"C:\o'brien\app\scr1b3.exe"),
             ),
             "try { Start-Process -FilePath 'C:\\o''brien\\scr1b3-setup.exe' \
-             -ArgumentList '--silent','--dir','C:\\o''brien\\app' \
+             -ArgumentList '--silent','--dir','\"C:\\o''brien\\app\"' \
              -Verb RunAs -Wait } catch { }; \
              Start-Process -FilePath 'C:\\o''brien\\app\\scr1b3.exe'"
+        );
+        // Regression (the install-to-C:\Program bug): a space-bearing install
+        // dir MUST be emitted as a single double-quoted token, never bare.
+        let spaced = powershell_runas_script(
+            Path::new(r"C:\tmp\setup.exe"),
+            Path::new(r"C:\Program Files\Itasha.Corp\SCR1B3"),
+            Path::new(r"C:\Program Files\Itasha.Corp\SCR1B3\scr1b3.exe"),
+        );
+        assert!(
+            spaced.contains(r#"'--dir','"C:\Program Files\Itasha.Corp\SCR1B3"'"#),
+            "the space-bearing --dir must be double-quoted so CommandLineToArgvW keeps it one token: {spaced}"
+        );
+        assert!(
+            !spaced.contains(r"'--dir','C:\Program Files"),
+            "the --dir value must NOT be emitted bare (would split on the space): {spaced}"
         );
     }
 
@@ -801,8 +829,8 @@ mod tests {
             "must run unattended: {script}"
         );
         assert!(
-            script.contains(r"'--dir','C:\pf\SCR1B3'"),
-            "must target the running install dir in place: {script}"
+            script.contains(r#"'--dir','"C:\pf\SCR1B3"'"#),
+            "must target the running install dir in place (double-quoted so it survives argv split): {script}"
         );
         assert!(
             script.contains("-Verb RunAs"),
