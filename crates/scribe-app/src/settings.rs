@@ -681,9 +681,7 @@ fn render_sections(
                     "Zoom the entire interface — text, chrome, and controls — for readability. \
                      1.0 is the standard size; the range is 0.5× to 3×.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(&mut config.ui_scale, 0.5..=3.0))
-                    .changed();
+                changed |= stepped_slider(ui, true, &mut config.ui_scale, 0.5..=3.0, 0.1);
                 changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
                 ui.end_row();
             }
@@ -864,24 +862,22 @@ fn render_sections(
             if row_visible(q, "font family theme editor note") {
                 ui.label("Note font")
                     .on_hover_text("Font for the note/editor text. Applies live, no restart.");
-                egui::ComboBox::from_id_salt("note-font-picker")
-                    .selected_text(config.fonts.editor_family.clone())
-                    .show_ui(ui, |ui| {
-                        for (display, _key) in crate::app::FONT_FAMILIES {
-                            if ui
-                                .selectable_value(
-                                    &mut config.fonts.editor_family,
-                                    (*display).to_string(),
-                                    *display,
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text("Choose one of the bundled coding fonts for the note text.");
+                let fams = crate::app::FONT_FAMILIES;
+                let cur = fams
+                    .iter()
+                    .position(|(d, _)| *d == config.fonts.editor_family.as_str());
+                let sel = config.fonts.editor_family.clone();
+                changed |= stepper_combo(
+                    ui,
+                    "note-font-picker",
+                    168.0,
+                    "note font",
+                    fams.len(),
+                    cur,
+                    &sel,
+                    |i| fams[i].0.to_string(),
+                    |i| config.fonts.editor_family = fams[i].0.to_string(),
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.fonts.editor_family,
@@ -894,34 +890,38 @@ fn render_sections(
                     "Font for the app interface (toolbar, settings, status). 'System default' \
                      keeps the built-in UI font. Applies live.",
                 );
-                egui::ComboBox::from_id_salt("ui-font-picker")
-                    .selected_text(config.fonts.ui_family.clone())
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_value(
-                                &mut config.fonts.ui_family,
-                                "System default".to_string(),
-                                "System default",
-                            )
-                            .changed()
-                        {
-                            changed = true;
+                let fams = crate::app::FONT_FAMILIES;
+                let cur = if config.fonts.ui_family == "System default" {
+                    Some(0)
+                } else {
+                    fams.iter()
+                        .position(|(d, _)| *d == config.fonts.ui_family.as_str())
+                        .map(|i| i + 1)
+                };
+                let sel = config.fonts.ui_family.clone();
+                changed |= stepper_combo(
+                    ui,
+                    "ui-font-picker",
+                    168.0,
+                    "app UI font",
+                    fams.len() + 1,
+                    cur,
+                    &sel,
+                    |i| {
+                        if i == 0 {
+                            "System default".to_string()
+                        } else {
+                            fams[i - 1].0.to_string()
                         }
-                        for (display, _key) in crate::app::FONT_FAMILIES {
-                            if ui
-                                .selectable_value(
-                                    &mut config.fonts.ui_family,
-                                    (*display).to_string(),
-                                    *display,
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text("Choose the app-interface font (or keep the system default).");
+                    },
+                    |i| {
+                        config.fonts.ui_family = if i == 0 {
+                            "System default".to_string()
+                        } else {
+                            fams[i - 1].0.to_string()
+                        };
+                    },
+                );
                 changed |= reset_to_default(ui, &mut config.fonts.ui_family, &def.fonts.ui_family);
                 ui.end_row();
             }
@@ -930,24 +930,22 @@ fn render_sections(
                     "Colour scheme for the note text / syntax highlighting, separate from the \
                      app theme. Applies live.",
                 );
-                egui::ComboBox::from_id_salt("note-theme-picker")
-                    .selected_text(config.editor.note_theme.clone())
-                    .show_ui(ui, |ui| {
-                        for name in crate::app::NOTE_THEMES {
-                            if ui
-                                .selectable_value(
-                                    &mut config.editor.note_theme,
-                                    (*name).to_string(),
-                                    *name,
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text("Pick a note text colour scheme.");
+                let themes = crate::app::NOTE_THEMES;
+                let cur = themes
+                    .iter()
+                    .position(|n| *n == config.editor.note_theme.as_str());
+                let sel = config.editor.note_theme.clone();
+                changed |= stepper_combo(
+                    ui,
+                    "note-theme-picker",
+                    168.0,
+                    "note colour theme",
+                    themes.len(),
+                    cur,
+                    &sel,
+                    |i| themes[i].to_string(),
+                    |i| config.editor.note_theme = themes[i].to_string(),
+                );
                 changed |=
                     reset_to_default(ui, &mut config.editor.note_theme, &def.editor.note_theme);
                 ui.end_row();
@@ -1100,9 +1098,7 @@ fn render_sections(
             if row_visible(q, "tab width") {
                 ui.label("Tab width")
                     .on_hover_text("How many columns a tab character occupies.");
-                changed |= ui
-                    .add(egui::Slider::new(&mut config.editor.tab_width, 1..=8))
-                    .changed();
+                changed |= stepped_slider(ui, true, &mut config.editor.tab_width, 1..=8, 1.0);
                 changed |=
                     reset_to_default(ui, &mut config.editor.tab_width, &def.editor.tab_width);
                 ui.end_row();
@@ -1250,21 +1246,23 @@ fn render_sections(
                 ];
                 ui.label("Caret style")
                     .on_hover_text("Shape of the text caret: thin bar, full block, or underline.");
-                egui::ComboBox::from_id_salt("caret-style")
-                    .selected_text(
-                        styles
-                            .iter()
-                            .find(|(s, _)| *s == config.editor.caret_style)
-                            .map(|(_, l)| *l)
-                            .unwrap_or("bar"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (style, label) in styles {
-                            changed |= ui
-                                .selectable_value(&mut config.editor.caret_style, style, label)
-                                .changed();
-                        }
-                    });
+                let cur = styles.iter().position(|(s, _)| *s == config.editor.caret_style);
+                let sel = styles
+                    .iter()
+                    .find(|(s, _)| *s == config.editor.caret_style)
+                    .map(|(_, l)| *l)
+                    .unwrap_or("bar");
+                changed |= stepper_combo(
+                    ui,
+                    "caret-style",
+                    168.0,
+                    "caret style",
+                    styles.len(),
+                    cur,
+                    sel,
+                    |i| styles[i].1.to_string(),
+                    |i| config.editor.caret_style = styles[i].0,
+                );
                 changed |=
                     reset_to_default(ui, &mut config.editor.caret_style, &def.editor.caret_style);
                 ui.end_row();
@@ -1272,9 +1270,7 @@ fn render_sections(
             if row_visible(q, "caret width cursor thickness") {
                 ui.label("Caret width")
                     .on_hover_text("Caret thickness for the bar/underline styles (points).");
-                changed |= ui
-                    .add(egui::Slider::new(&mut config.editor.caret_width, 1.0..=4.0))
-                    .changed();
+                changed |= stepped_slider(ui, true, &mut config.editor.caret_width, 1.0..=4.0, 0.5);
                 changed |=
                     reset_to_default(ui, &mut config.editor.caret_width, &def.editor.caret_width);
                 ui.end_row();
@@ -1288,21 +1284,25 @@ fn render_sections(
                 ];
                 ui.label("Scrollbar style")
                     .on_hover_text("Editor scrollbar chrome: default, a slim bar, or hidden.");
-                egui::ComboBox::from_id_salt("scrollbar-style")
-                    .selected_text(
-                        styles
-                            .iter()
-                            .find(|(s, _)| *s == config.editor.scrollbar_style)
-                            .map(|(_, l)| *l)
-                            .unwrap_or("auto"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (style, label) in styles {
-                            changed |= ui
-                                .selectable_value(&mut config.editor.scrollbar_style, style, label)
-                                .changed();
-                        }
-                    });
+                let cur = styles
+                    .iter()
+                    .position(|(s, _)| *s == config.editor.scrollbar_style);
+                let sel = styles
+                    .iter()
+                    .find(|(s, _)| *s == config.editor.scrollbar_style)
+                    .map(|(_, l)| *l)
+                    .unwrap_or("auto");
+                changed |= stepper_combo(
+                    ui,
+                    "scrollbar-style",
+                    168.0,
+                    "scrollbar style",
+                    styles.len(),
+                    cur,
+                    sel,
+                    |i| styles[i].1.to_string(),
+                    |i| config.editor.scrollbar_style = styles[i].0,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.editor.scrollbar_style,
@@ -1326,9 +1326,7 @@ fn render_sections(
                     "Mouse-wheel scrolling speed. egui's default (40) feels slow next to \
                      Windows; 75 is the SCR1B3 default.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(&mut config.scroll.speed, 10.0..=200.0))
-                    .changed();
+                changed |= stepped_slider(ui, true, &mut config.scroll.speed, 10.0..=200.0, 1.0);
                 changed |= reset_to_default(ui, &mut config.scroll.speed, &def.scroll.speed);
                 ui.end_row();
             }
@@ -1356,12 +1354,13 @@ fn render_sections(
                     "How fast middle-click autoscroll drifts per pixel of pointer offset \
                      from the click point.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(
-                        &mut config.scroll.autoscroll_sensitivity,
-                        2.0..=15.0,
-                    ))
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    true,
+                    &mut config.scroll.autoscroll_sensitivity,
+                    2.0..=15.0,
+                    1.0,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.scroll.autoscroll_sensitivity,
@@ -1374,12 +1373,13 @@ fn render_sections(
                     "Radius (px) around the middle-click origin where the pointer produces NO \
                      scrolling — a still zone so small jitters don't drift the page.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(
-                        &mut config.scroll.autoscroll_dead_zone,
-                        4.0..=40.0,
-                    ))
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    true,
+                    &mut config.scroll.autoscroll_dead_zone,
+                    4.0..=40.0,
+                    1.0,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.scroll.autoscroll_dead_zone,
@@ -1413,12 +1413,7 @@ fn render_sections(
                     "Keep the caret at least this many lines from the top/bottom edge when \
                      navigating by keyboard (Vim scrolloff). 0 disables.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(
-                        &mut config.scroll.caret_scroll_off,
-                        0..=12,
-                    ))
-                    .changed();
+                changed |= stepped_slider(ui, true, &mut config.scroll.caret_scroll_off, 0..=12, 1.0);
                 changed |= reset_to_default(
                     ui,
                     &mut config.scroll.caret_scroll_off,
@@ -1448,34 +1443,35 @@ fn render_sections(
                 ];
                 ui.label("Tab bar position")
                     .on_hover_text("Where the strip of open-file tabs sits around the editor.");
-                egui::ComboBox::from_id_salt("tab-bar-position")
-                    .selected_text(
-                        positions
-                            .iter()
-                            .find(|(p, _)| *p == config.editor.tab_bar_position)
-                            .map(|(_, s)| *s)
-                            .unwrap_or("top"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (pos, label) in positions {
-                            let prev = config.editor.tab_bar_position;
-                            if ui
-                                .selectable_value(&mut config.editor.tab_bar_position, pos, label)
-                                .changed()
-                            {
-                                changed = true;
-                                // Switching TO a Left/Right bar from a non-side one
-                                // defaults "rotate side tabs" ON (the requested
-                                // default for vertical bars); the user can turn it
-                                // back off. No effect Top/Bottom.
-                                if pos.is_vertical() && !prev.is_vertical() {
-                                    config.editor.side_tabs_rotated = true;
-                                }
-                            }
+                let cur = positions
+                    .iter()
+                    .position(|(p, _)| *p == config.editor.tab_bar_position);
+                let sel = positions
+                    .iter()
+                    .find(|(p, _)| *p == config.editor.tab_bar_position)
+                    .map(|(_, s)| *s)
+                    .unwrap_or("top");
+                changed |= stepper_combo(
+                    ui,
+                    "tab-bar-position",
+                    168.0,
+                    "tab bar position",
+                    positions.len(),
+                    cur,
+                    sel,
+                    |i| positions[i].1.to_string(),
+                    |i| {
+                        // Switching TO a Left/Right bar from a non-side one defaults
+                        // "rotate side tabs" ON (the requested default for vertical
+                        // bars); the user can turn it back off. No effect Top/Bottom.
+                        let prev = config.editor.tab_bar_position;
+                        let pos = positions[i].0;
+                        config.editor.tab_bar_position = pos;
+                        if pos.is_vertical() && !prev.is_vertical() {
+                            config.editor.side_tabs_rotated = true;
                         }
-                    })
-                    .response
-                    .on_hover_text("Choose the edge where the open-tab strip is shown.");
+                    },
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.editor.tab_bar_position,
@@ -1646,19 +1642,22 @@ fn render_sections(
                     "The file type a brand-new note suggests in the Save dialog. Markdown \
                      (.md) by default — you can still pick any name or extension when saving.",
                 );
-                egui::ComboBox::from_id_salt("default-save-format")
-                    .selected_text(config.integration.default_save_format.ui_label())
-                    .show_ui(ui, |ui| {
-                        for fmt in DefaultSaveFormat::ALL {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut config.integration.default_save_format,
-                                    fmt,
-                                    fmt.ui_label(),
-                                )
-                                .changed();
-                        }
-                    });
+                let formats = DefaultSaveFormat::ALL;
+                let cur = formats
+                    .iter()
+                    .position(|f| *f == config.integration.default_save_format);
+                let sel = config.integration.default_save_format.ui_label();
+                changed |= stepper_combo(
+                    ui,
+                    "default-save-format",
+                    168.0,
+                    "save format",
+                    formats.len(),
+                    cur,
+                    sel,
+                    |i| formats[i].ui_label().to_string(),
+                    |i| config.integration.default_save_format = formats[i],
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.integration.default_save_format,
@@ -1704,12 +1703,7 @@ fn render_sections(
                      and 2 is double that. This does NOT control the retro visual effects \
                      (flicker / VHS / mesh) — those have their own per-effect speed sliders below.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on,
-                        egui::Slider::new(&mut config.motion.intensity, 0.0..=2.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(ui, on, &mut config.motion.intensity, 0.0..=2.0, 0.1);
                 changed |=
                     reset_to_default(ui, &mut config.motion.intensity, &def.motion.intensity);
                 ui.end_row();
@@ -1754,12 +1748,13 @@ fn render_sections(
                 ui.label("Scanline darkness").on_hover_text(
                     "How dark the CRT scanlines are — 0 is invisible, 1 is strong dark bands.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.crt_scanlines,
-                        egui::Slider::new(&mut config.motion.scanline_darkness, 0.0..=1.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.crt_scanlines,
+                    &mut config.motion.scanline_darkness,
+                    0.0..=1.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.scanline_darkness,
@@ -1792,12 +1787,13 @@ fn render_sections(
                     "How many nodes the wired-mesh background draws (sparse to dense). \
                      Higher values scale the node count with the window size.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.wired_ambient,
-                        egui::Slider::new(&mut config.motion.mesh_density, 0.0..=2.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.wired_ambient,
+                    &mut config.motion.mesh_density,
+                    0.0..=2.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.mesh_density,
@@ -1810,12 +1806,13 @@ fn render_sections(
                     "How bright the wired-mesh lines and nodes are. 1 is the standard look; \
                      lower dims the lattice toward invisible, higher makes it pop.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.wired_ambient,
-                        egui::Slider::new(&mut config.motion.mesh_brightness, 0.0..=3.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.wired_ambient,
+                    &mut config.motion.mesh_brightness,
+                    0.0..=3.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.mesh_brightness,
@@ -1828,12 +1825,13 @@ fn render_sections(
                     "How fast the wired-mesh nodes drift. 1 is the standard rate; lower is a \
                      slower, calmer breathe and higher makes the lattice shift faster.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.wired_ambient,
-                        egui::Slider::new(&mut config.motion.mesh_drift_speed, 0.25..=3.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.wired_ambient,
+                    &mut config.motion.mesh_drift_speed,
+                    0.25..=3.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.mesh_drift_speed,
@@ -1915,12 +1913,13 @@ fn render_sections(
                     "How fast the VHS tracking bands sweep down the window. 1 is the standard \
                      rate; lower drifts more slowly and higher sweeps faster.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.vhs_tracking,
-                        egui::Slider::new(&mut config.motion.vhs_speed, 0.25..=3.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.vhs_tracking,
+                    &mut config.motion.vhs_speed,
+                    0.25..=3.0,
+                    0.1,
+                );
                 changed |=
                     reset_to_default(ui, &mut config.motion.vhs_speed, &def.motion.vhs_speed);
                 ui.end_row();
@@ -1939,12 +1938,13 @@ fn render_sections(
             if row_visible(q, "flicker strength motion") {
                 ui.label("Flicker strength")
                     .on_hover_text("How strong the screen flicker is (capped low for comfort).");
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.flicker,
-                        egui::Slider::new(&mut config.motion.flicker_strength, 0.0..=0.20),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.flicker,
+                    &mut config.motion.flicker_strength,
+                    0.0..=0.20,
+                    0.01,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.flicker_strength,
@@ -1957,12 +1957,13 @@ fn render_sections(
                     "How fast the screen flicker pulses. 1 is the standard cadence; lower is a \
                      slower shimmer and higher flickers faster. Independent of the strength.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.flicker,
-                        egui::Slider::new(&mut config.motion.flicker_speed, 0.25..=3.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.flicker,
+                    &mut config.motion.flicker_speed,
+                    0.25..=3.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.flicker_speed,
@@ -1987,12 +1988,13 @@ fn render_sections(
                     "How far the caret ghost-trail reaches — from a faint short flick to a \
                      bold, long comet tail.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.caret_trail,
-                        egui::Slider::new(&mut config.motion.caret_trail_intensity, 0.0..=2.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.caret_trail,
+                    &mut config.motion.caret_trail_intensity,
+                    0.0..=2.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.caret_trail_intensity,
@@ -2082,15 +2084,11 @@ fn render_sections(
                     "How see-through the window is — 1.0 is fully opaque, lower is more \
                      transparent. Only active for translucent modes.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        translucent,
-                        // Floor at 0.0 for MAXIMUM transparency — the chrome/panel
-                        // fills fully vanish; the editor text is painted opaque on
-                        // top so it stays legible even at zero.
-                        egui::Slider::new(&mut config.window.opacity, 0.0..=1.0),
-                    )
-                    .changed();
+                // Floor at 0.0 for MAXIMUM transparency — the chrome/panel fills
+                // fully vanish; the editor text is painted opaque on top so it
+                // stays legible even at zero.
+                changed |=
+                    stepped_slider(ui, translucent, &mut config.window.opacity, 0.0..=1.0, 0.1);
                 changed |= reset_to_default(ui, &mut config.window.opacity, &def.window.opacity);
                 ui.end_row();
             }
@@ -2155,12 +2153,8 @@ fn render_sections(
                     "How strongly the tint colour is blended over the surface — 0 is none, \
                      1 is full.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        tint_on,
-                        egui::Slider::new(&mut config.window.tint_strength, 0.0..=1.0),
-                    )
-                    .changed();
+                changed |=
+                    stepped_slider(ui, tint_on, &mut config.window.tint_strength, 0.0..=1.0, 0.1);
                 changed |= reset_to_default(
                     ui,
                     &mut config.window.tint_strength,
@@ -2344,41 +2338,36 @@ fn render_sections(
                      version exists), auto (check once per launch, ask before installing). A \
                      check reads only the public GitHub releases API and sends no identifiers.",
                 );
-                egui::ComboBox::from_id_salt("update-mode")
-                    .selected_text(
-                        modes
-                            .iter()
-                            .find(|(m, _)| *m == config.updates.mode)
-                            .map(|(_, s)| *s)
-                            .unwrap_or("notify"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (m, label) in modes {
-                            if ui
-                                .selectable_value(&mut config.updates.mode, m, label)
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "A check reads only the public GitHub releases API; no analytics or \
-                         identifiers are sent.",
-                    );
+                let cur = modes.iter().position(|(m, _)| *m == config.updates.mode);
+                let sel = modes
+                    .iter()
+                    .find(|(m, _)| *m == config.updates.mode)
+                    .map(|(_, s)| *s)
+                    .unwrap_or("notify");
+                changed |= stepper_combo(
+                    ui,
+                    "update-mode",
+                    168.0,
+                    "update mode",
+                    modes.len(),
+                    cur,
+                    sel,
+                    |i| modes[i].1.to_string(),
+                    |i| config.updates.mode = modes[i].0,
+                );
                 changed |= reset_to_default(ui, &mut config.updates.mode, &def.updates.mode);
                 ui.end_row();
             }
             if row_visible(q, "check interval hours") {
                 ui.label("Check interval (hours)")
                     .on_hover_text("How often, in hours, to check for a new release (1–168).");
-                changed |= ui
-                    .add(egui::Slider::new(
-                        &mut config.updates.check_interval_hours,
-                        1..=168,
-                    ))
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    true,
+                    &mut config.updates.check_interval_hours,
+                    1..=168,
+                    1.0,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.updates.check_interval_hours,
@@ -3200,13 +3189,9 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     // 4000-px-tall toolbar.
     ui.label(egui::RichText::new("Sizing").strong().small());
     ui.horizontal(|ui| {
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut config.toolbar.button_size_px, 16.0..=64.0)
-                    .text("Button height (px)"),
-            )
-            .on_hover_text("Height of each quick-access toolbar button, in pixels.")
-            .changed();
+        ui.label("Button height (px)")
+            .on_hover_text("Height of each quick-access toolbar button, in pixels.");
+        changed |= stepped_slider(ui, true, &mut config.toolbar.button_size_px, 16.0..=64.0, 1.0);
         changed |= reset_to_default(
             ui,
             &mut config.toolbar.button_size_px,
@@ -3214,13 +3199,10 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         );
     });
     ui.horizontal(|ui| {
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut config.toolbar.button_spacing_px, 0.0..=24.0)
-                    .text("Button spacing (px)"),
-            )
-            .on_hover_text("Gap between adjacent toolbar buttons, in pixels.")
-            .changed();
+        ui.label("Button spacing (px)")
+            .on_hover_text("Gap between adjacent toolbar buttons, in pixels.");
+        changed |=
+            stepped_slider(ui, true, &mut config.toolbar.button_spacing_px, 0.0..=24.0, 1.0);
         changed |= reset_to_default(
             ui,
             &mut config.toolbar.button_spacing_px,
@@ -3228,13 +3210,9 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         );
     });
     ui.horizontal(|ui| {
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut config.toolbar.icon_size_px, 10.0..=32.0)
-                    .text("Icon glyph size (px)"),
-            )
-            .on_hover_text("Active only when 'Toolbar shows icons' (Appearance) is on.")
-            .changed();
+        ui.label("Icon glyph size (px)")
+            .on_hover_text("Active only when 'Toolbar shows icons' (Appearance) is on.");
+        changed |= stepped_slider(ui, true, &mut config.toolbar.icon_size_px, 10.0..=32.0, 1.0);
         changed |= reset_to_default(
             ui,
             &mut config.toolbar.icon_size_px,
