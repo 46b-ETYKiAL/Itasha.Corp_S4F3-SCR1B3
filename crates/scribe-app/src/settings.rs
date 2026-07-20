@@ -431,6 +431,7 @@ fn step_index(len: usize, current: Option<usize>, delta: isize) -> usize {
 /// `on_pick(i)` applies option `i` (and performs any side-effects). Renders the
 /// control column only (the caller owns the label + ↺ reset columns). Returns
 /// whether the value changed.
+#[allow(clippy::too_many_arguments)]
 fn stepper_combo(
     ui: &mut egui::Ui,
     id_salt: &str,

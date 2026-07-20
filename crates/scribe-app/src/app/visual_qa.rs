@@ -260,6 +260,76 @@ fn scene_settings() {
     render_scene("settings", 1100.0, 720.0, app);
 }
 
+/// Render the Settings window open on a SPECIFIC category page by clicking its
+/// nav tab, so the new stepper-arrow dropdowns, −/+ slider buttons, and grouped
+/// sections are visible for visual QA. Returns the PNG path (None on no GPU).
+fn render_settings_category(name: &str, category: &str) -> Option<std::path::PathBuf> {
+    use egui_kittest::kittest::Queryable as _;
+    if !gpu_available() {
+        eprintln!("[visual-qa] no GPU adapter; skipping `{name}`");
+        return None;
+    }
+    let mut app = ScribeApp::new_test(qa_config());
+    app.tabs.clear();
+    let mut t = EditorTab::scratch();
+    t.text = SAMPLE.to_string();
+    app.tabs.push(t);
+    app.active = 0;
+    app.settings_open = true;
+    let mut harness: Harness<'static, ScribeApp> = Harness::builder()
+        .with_size(egui::vec2(920.0, 860.0))
+        .wgpu()
+        .build_state(|ctx, app: &mut ScribeApp| app.frame_tick(ctx), app);
+    for _ in 0..3 {
+        harness.step();
+    }
+    // Click the category tab in the settings left-nav, then let it settle.
+    // "Appearance" is the DEFAULT page, already shown — clicking it is redundant
+    // and its page heading duplicates the tab label (ambiguous `get_by_label`),
+    // so only click when switching AWAY from the default.
+    if category != "Appearance" {
+        harness.get_by_label(category).click();
+        for _ in 0..6 {
+            harness.step();
+        }
+    }
+    let img = harness
+        .render()
+        .expect("kittest wgpu render of the settings page must succeed");
+    let path = out_dir().join(format!("{name}.png"));
+    img.save(&path).expect("save visual-qa png");
+    eprintln!(
+        "[visual-qa] wrote {} ({}x{})",
+        path.display(),
+        img.width(),
+        img.height()
+    );
+    Some(path)
+}
+
+/// Motion page — the biggest regroup: 5 grouped sections, and every slider now
+/// carries −/+ buttons.
+#[test]
+#[ignore = "GPU render"]
+fn scene_settings_motion() {
+    render_settings_category("settings_motion", "Motion");
+}
+
+/// Fonts page — the note/UI/theme dropdowns now carry ◀/▶ stepper arrows, plus
+/// the Size/Line-height ±sliders, under 3 grouped sections.
+#[test]
+#[ignore = "GPU render"]
+fn scene_settings_fonts() {
+    render_settings_category("settings_fonts", "Fonts");
+}
+
+/// Appearance page — theme stepper, UI-scale ±slider, 4 grouped sections.
+#[test]
+#[ignore = "GPU render"]
+fn scene_settings_appearance() {
+    render_settings_category("settings_appearance", "Appearance");
+}
+
 /// Several tabs incl. a dirty one + a pinned one — checks the tab strip
 /// layout, the dirty `*` marker, the pin glyph, and active-tab styling.
 #[test]
