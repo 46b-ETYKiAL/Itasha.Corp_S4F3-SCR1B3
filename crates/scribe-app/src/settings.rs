@@ -402,6 +402,136 @@ fn grid_bool(
     changed
 }
 
+/// Step an index in a list of `len` options by `delta`, wrapping both ways
+/// (`rem_euclid`). A `current` of `None` (the selected value is not in the list,
+/// e.g. a user-typed theme name) lands on the first option stepping forward and
+/// the last stepping back, so the arrows always have a defined destination.
+/// Generalizes `step_theme_index` to any indexed option list.
+fn step_index(len: usize, current: Option<usize>, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let n = len as isize;
+    match current {
+        Some(i) => (i as isize + delta).rem_euclid(n) as usize,
+        None if delta > 0 => 0,
+        None => (n - 1) as usize,
+    }
+}
+
+/// A dropdown flanked by prev/next stepper arrows — the generalization of the
+/// theme step-arrows applied to EVERY settings dropdown so an option can be
+/// cycled in place without opening the menu (mirrors C0PL4ND). The `ComboBox` is
+/// pinned to `width` so the flanking arrows stay stationary as the selected label
+/// changes length; the Phosphor carets carry accessible hover names
+/// (`Previous {what}` / `Next {what}`) because a bare caret glyph reads only as a
+/// codepoint to AccessKit. `current_idx` is the selected option's index (`None`
+/// when the current value is not in the list → arrows land on an end).
+/// `on_pick(i)` applies option `i` (and performs any side-effects). Renders the
+/// control column only (the caller owns the label + ↺ reset columns). Returns
+/// whether the value changed.
+fn stepper_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    width: f32,
+    what: &str,
+    len: usize,
+    current_idx: Option<usize>,
+    selected: &str,
+    label_at: impl Fn(usize) -> String,
+    mut on_pick: impl FnMut(usize),
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui
+            .add(egui::Button::new(egui_phosphor::thin::CARET_LEFT))
+            .on_hover_text(format!("Previous {what}"))
+            .clicked()
+        {
+            on_pick(step_index(len, current_idx, -1));
+            changed = true;
+        }
+        // Track the pick locally so `selectable_value` closes the menu on select;
+        // apply it via `on_pick` after the menu closure.
+        let mut picked = current_idx;
+        egui::ComboBox::from_id_salt(id_salt)
+            .width(width)
+            .selected_text(selected.to_owned())
+            .show_ui(ui, |ui| {
+                for i in 0..len {
+                    ui.selectable_value(&mut picked, Some(i), label_at(i));
+                }
+            })
+            .response
+            .on_hover_text(format!("Choose a {what}, or use the arrows to cycle."));
+        if picked != current_idx {
+            if let Some(i) = picked {
+                on_pick(i);
+                changed = true;
+            }
+        }
+        if ui
+            .add(egui::Button::new(egui_phosphor::thin::CARET_RIGHT))
+            .on_hover_text(format!("Next {what}"))
+            .clicked()
+        {
+            on_pick(step_index(len, current_idx, 1));
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// A slider flanked by −/+ step buttons (minus LEFT, plus RIGHT) — added to
+/// every settings slider so a value can be nudged one `step` without dragging.
+/// The buttons CLAMP at the range bounds (no wrap) and are disabled at the bound
+/// (W3C ARIA APG slider guidance). `enabled` gates the whole control in lock-step
+/// with a parent toggle (the `add_enabled` gating several Motion/Window sliders
+/// already use). Generic over any `egui` numeric so integer sliders (tab width,
+/// scroll-off, check interval) step by 1 the same way. Renders the control column
+/// only (the caller owns the label + ↺ reset). Returns whether the value changed.
+fn stepped_slider<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    val: &mut N,
+    range: std::ops::RangeInclusive<N>,
+    step: f64,
+) -> bool {
+    let lo = range.start().to_f64();
+    let hi = range.end().to_f64();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let cur = val.to_f64();
+        if ui
+            .add_enabled(
+                enabled && cur > lo,
+                egui::Button::new(egui_phosphor::thin::MINUS),
+            )
+            .on_hover_text("Decrease")
+            .clicked()
+        {
+            *val = N::from_f64((cur - step).max(lo));
+            changed = true;
+        }
+        changed |= ui
+            .add_enabled(enabled, egui::Slider::new(val, range.clone()))
+            .changed();
+        let cur = val.to_f64();
+        if ui
+            .add_enabled(
+                enabled && cur < hi,
+                egui::Button::new(egui_phosphor::thin::PLUS),
+            )
+            .on_hover_text("Increase")
+            .clicked()
+        {
+            *val = N::from_f64((cur + step).min(hi));
+            changed = true;
+        }
+    });
+    changed
+}
+
 /// Render every category section that is visible for the current selection /
 /// search query. Comfortable spacing (group gaps) keeps it from feeling
 /// squished even at the default window size.
