@@ -95,11 +95,20 @@ fn resize_dir_at_kills_offset_and_boundary_mutants() {
     assert_eq!(resize_dir_at(pos2(60.0, 220.0), r, e, c), Some(D::South));
     // (H) NE: north edge, RIGHT corner band, OUTSIDE right edge band (r=10 in (8,12]).
     //     Only `(n && ne)` is true; `|| -> &&` collapses it to North.
-    assert_eq!(resize_dir_at(pos2(100.0, 24.0), r, e, c), Some(D::NorthEast));
+    assert_eq!(
+        resize_dir_at(pos2(100.0, 24.0), r, e, c),
+        Some(D::NorthEast)
+    );
     // (I) SW: bottom edge, LEFT corner band, outside left edge band (l=10 in (8,12]).
-    assert_eq!(resize_dir_at(pos2(20.0, 214.0), r, e, c), Some(D::SouthWest));
+    assert_eq!(
+        resize_dir_at(pos2(20.0, 214.0), r, e, c),
+        Some(D::SouthWest)
+    );
     // (J) SE: bottom edge, RIGHT corner band, outside right edge band (r=10 in (8,12]).
-    assert_eq!(resize_dir_at(pos2(100.0, 214.0), r, e, c), Some(D::SouthEast));
+    assert_eq!(
+        resize_dir_at(pos2(100.0, 214.0), r, e, c),
+        Some(D::SouthEast)
+    );
     // (K) RIGHT of the window (r<0), vertically inside: the 2nd guard `|| -> &&`
     //     makes `(r<0 && t<0)` false so it proceeds and returns East; orig None.
     assert_eq!(resize_dir_at(pos2(120.0, 120.0), r, e, c), None);

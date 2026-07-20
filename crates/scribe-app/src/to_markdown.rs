@@ -383,7 +383,10 @@ mod tests {
         // artifact, not a real >1-column row with an empty first cell. Kills 154:36
         // (&& -> ||): `,d` -> ["","d"] must survive.
         let md = to_markdown("a,b\n,d\n", Some("csv"));
-        assert!(md.contains("| d |"), "the empty-first-cell data row must survive:\n{md}");
+        assert!(
+            md.contains("| d |"),
+            "the empty-first-cell data row must survive:\n{md}"
+        );
     }
 
     #[test]
@@ -392,7 +395,10 @@ mod tests {
         // to a 1-col table; a broken final-flush guard drops it to a fenced block.
         // Kills 272:8 (drop first !) and 272:26 (|| -> &&).
         let md = to_markdown("abc", Some("csv"));
-        assert!(md.contains("| abc |"), "final no-newline field must flush to a table:\n{md}");
+        assert!(
+            md.contains("| abc |"),
+            "final no-newline field must flush to a table:\n{md}"
+        );
         assert!(!md.starts_with("```"), "must not degrade to a fence:\n{md}");
     }
 
@@ -401,7 +407,10 @@ mod tests {
         // "a," -> field="" but record=["a"] -> clean flushes (the second ! term).
         // Kills 272:29 (dropping that ! makes record.is_empty() -> no flush -> fence).
         let md = to_markdown("a,", Some("csv"));
-        assert!(md.contains("| --- | --- |"), "a trailing empty field still flushes a 2-col table:\n{md}");
+        assert!(
+            md.contains("| --- | --- |"),
+            "a trailing empty field still flushes a 2-col table:\n{md}"
+        );
     }
 
     #[test]

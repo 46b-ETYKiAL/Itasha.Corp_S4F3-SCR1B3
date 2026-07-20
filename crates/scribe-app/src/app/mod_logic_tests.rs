@@ -166,7 +166,11 @@ fn build_does_not_restore_session_when_cli_files_are_open() {
         ScribeApp::build(cfg, None, vec![cli.display().to_string()], true) // watch_config = true
     });
 
-    assert_eq!(app.tabs.len(), 1, "only the CLI file opens; restore is gated off by non-empty tabs");
+    assert_eq!(
+        app.tabs.len(),
+        1,
+        "only the CLI file opens; restore is gated off by non-empty tabs"
+    );
     assert!(
         app.tabs[0].text.contains("CLI-FILE-CONTENT"),
         "the CLI file stays; neither restore path replaced/appended to it: {:?}",
@@ -204,7 +208,11 @@ fn build_manifest_restore_requires_the_session_backup_flag() {
     let app = with_config_dir(&dir, || ScribeApp::build(cfg, None, vec![], true));
 
     assert_eq!(app.tabs.len(), 1, "backup off + no CLI → one scratch tab");
-    assert!(app.tabs[0].text.is_empty(), "an empty scratch tab, not the restored manifest file: {:?}", app.tabs[0].text);
+    assert!(
+        app.tabs[0].text.is_empty(),
+        "an empty scratch tab, not the restored manifest file: {:?}",
+        app.tabs[0].text
+    );
     assert!(
         !app.tabs[0].text.contains("MANIFEST-CONTENT"),
         "the manifest must NOT restore when session_backup is off"
@@ -227,7 +235,11 @@ fn build_legacy_restore_requires_the_restore_session_flag() {
     let app = with_config_dir(&dir, || ScribeApp::build(cfg, None, vec![], true));
 
     assert_eq!(app.tabs.len(), 1, "restore off + no CLI → one scratch tab");
-    assert!(app.tabs[0].text.is_empty(), "an empty scratch tab, not the legacy-restored file: {:?}", app.tabs[0].text);
+    assert!(
+        app.tabs[0].text.is_empty(),
+        "an empty scratch tab, not the legacy-restored file: {:?}",
+        app.tabs[0].text
+    );
     assert!(
         !app.tabs[0].text.contains("LEGACY-CONTENT"),
         "the legacy list must NOT restore when restore_session is off"

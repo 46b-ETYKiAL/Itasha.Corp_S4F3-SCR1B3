@@ -853,8 +853,16 @@ mod tint_tests {
         // Existing tests use s=0/1/0.8 with saturating base/tint, so the CLAMP to
         // 255 hid the `+ -> *` / `* -> /` lerp mutants. A non-clamping midpoint
         // (100->200 @ 0.5 = 150) exposes both. Kills 180:23, 180:55.
-        let out = blend_tint(Color32::from_rgb(100, 100, 100), Color32::from_rgb(200, 200, 200), 0.5);
-        assert_eq!((out.r(), out.g(), out.b()), (150, 150, 150), "0.5 blend of 100->200 must be 150 per channel");
+        let out = blend_tint(
+            Color32::from_rgb(100, 100, 100),
+            Color32::from_rgb(200, 200, 200),
+            0.5,
+        );
+        assert_eq!(
+            (out.r(), out.g(), out.b()),
+            (150, 150, 150),
+            "0.5 blend of 100->200 must be 150 per channel"
+        );
     }
 
     #[test]
@@ -862,7 +870,10 @@ mod tint_tests {
         // c=10 lands in the linear (<=0.04045) branch: 10/255/12.92. `/ -> %` and
         // `/ -> *` both diverge from 0.003035. Kills 247:12.
         let v = linearize_channel(10);
-        assert!((v - 0.003_035).abs() < 1e-4, "low-branch linearize wrong: {v}");
+        assert!(
+            (v - 0.003_035).abs() < 1e-4,
+            "low-branch linearize wrong: {v}"
+        );
     }
 
     #[test]
@@ -918,7 +929,10 @@ mod tint_tests {
             Some(v) => std::env::set_var("SCR1B3_CONFIG_DIR", v),
             None => std::env::remove_var("SCR1B3_CONFIG_DIR"),
         }
-        assert!(!set.is_empty(), "a real snippets.toml must load a non-empty set");
+        assert!(
+            !set.is_empty(),
+            "a real snippets.toml must load a non-empty set"
+        );
         assert!(
             set.lookup("fn").is_some(),
             "the 'fn' trigger from the file must be present (not the empty default)"
@@ -996,11 +1010,11 @@ mod tint_tests {
             let text = String::from("some buffer prose to lay out at two different widths");
             let _g_narrow = layouter(ui, &text, 60.0); // primes gcache with wrap=60
             let g_wide = layouter(ui, &text, 600.0); // SAME text (same key), wrap=600
-            // The galley RETAINS the wrap width it was laid out at
-            // (`job.wrap.max_width`) — a headless-robust observable that does not
-            // depend on real font metrics. On a wrap change the cache must MISS
-            // and re-layout at 600; the 664:38 mutant returns the stale wrap=60
-            // galley instead.
+                                                     // The galley RETAINS the wrap width it was laid out at
+                                                     // (`job.wrap.max_width`) — a headless-robust observable that does not
+                                                     // depend on real font metrics. On a wrap change the cache must MISS
+                                                     // and re-layout at 600; the 664:38 mutant returns the stale wrap=60
+                                                     // galley instead.
             assert!(
                 g_wide.job.wrap.max_width > 100.0,
                 "the galley cache must re-layout on a wrap change (expected the wide 600 layout, \
@@ -1041,15 +1055,28 @@ mod tint_tests {
         let ustart = url_text.find(url).unwrap();
         let uend = ustart + url.len();
         let job = build(url_text);
-        assert!(job.text.contains(url), "the URL text must survive append_split: {:?}", job.text);
+        assert!(
+            job.text.contains(url),
+            "the URL text must survive append_split: {:?}",
+            job.text
+        );
         let underlined_at = |b: usize| {
             job.sections
                 .iter()
                 .any(|s| s.byte_range.contains(&b) && s.format.underline.width > 0.0)
         };
-        assert!(underlined_at(ustart + 1), "a byte inside the URL must be underlined");
-        assert!(!underlined_at(1), "the leading 'visit' prose must NOT be underlined");
-        assert!(!underlined_at(uend + 1), "the trailing ' now' prose must NOT be underlined");
+        assert!(
+            underlined_at(ustart + 1),
+            "a byte inside the URL must be underlined"
+        );
+        assert!(
+            !underlined_at(1),
+            "the leading 'visit' prose must NOT be underlined"
+        );
+        assert!(
+            !underlined_at(uend + 1),
+            "the trailing ' now' prose must NOT be underlined"
+        );
 
         // (b) No-URL line → the `urls.is_empty()` fast path. Its whole text must
         // survive (kills the `!seg.is_empty()` drop) with zero underline.
@@ -1062,7 +1089,10 @@ mod tint_tests {
             "the no-URL line (incl. its trailing newline tail) must survive verbatim"
         );
         assert!(
-            plain.sections.iter().all(|s| s.format.underline.width == 0.0),
+            plain
+                .sections
+                .iter()
+                .all(|s| s.format.underline.width == 0.0),
             "a line with no URL must have no underlined section"
         );
     }
@@ -1074,14 +1104,21 @@ mod tint_tests {
         // / `i - 1` makes line_start point AT/BEFORE the '\n', so the indent scan
         // starts on the newline and collects nothing. Kills 772:57.
         let (out, _cur) = newline_with_indent("x\n  foo", 7);
-        assert_eq!(out, "x\n  foo\n  ", "the new line inherits the two-space indent");
+        assert_eq!(
+            out, "x\n  foo\n  ",
+            "the new line inherits the two-space indent"
+        );
     }
 
     #[test]
     fn lerp_rgb_midpoint() {
         // Same no-clamp midpoint trick: 100->200 @ 0.5 = 150 per channel. Kills the
         // four 266 arithmetic mutants (+->*, -->+, *->+, *->/).
-        let o = lerp_rgb(Color32::from_rgb(100, 100, 100), Color32::from_rgb(200, 200, 200), 0.5);
+        let o = lerp_rgb(
+            Color32::from_rgb(100, 100, 100),
+            Color32::from_rgb(200, 200, 200),
+            0.5,
+        );
         assert_eq!((o.r(), o.g(), o.b()), (150, 150, 150));
     }
     use scribe_core::config::WindowConfig;

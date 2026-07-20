@@ -290,7 +290,10 @@ fn cycle_theme_advances_from_current() {
     app.execute_builtin(BuiltinCommand::CycleTheme);
     let expected = names[(1 + 1) % names.len()].to_string();
     assert_eq!(app.config.appearance.theme, expected);
-    assert_ne!(app.config.appearance.theme, names[1], "must advance off the current theme");
+    assert_ne!(
+        app.config.appearance.theme, names[1],
+        "must advance off the current theme"
+    );
 }
 
 #[test]
@@ -323,5 +326,8 @@ fn drain_pending_editor_action_consumes_request() {
     app.pending_editor_action = Some(super::EditorAction::Copy);
     let ctx = egui::Context::default();
     app.drain_pending_editor_action(&ctx);
-    assert!(app.pending_editor_action.is_none(), "drain must take() the pending action");
+    assert!(
+        app.pending_editor_action.is_none(),
+        "drain must take() the pending action"
+    );
 }

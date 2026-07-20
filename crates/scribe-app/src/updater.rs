@@ -699,7 +699,10 @@ mod tests {
         std::fs::create_dir_all(&staging).unwrap();
         std::fs::write(staging.join("setup.exe"), b"x").unwrap();
         cleanup_after_update();
-        assert!(!staging.exists(), "cleanup_after_update must remove the staging directory");
+        assert!(
+            !staging.exists(),
+            "cleanup_after_update must remove the staging directory"
+        );
     }
 
     #[test]

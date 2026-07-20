@@ -479,7 +479,10 @@ mod tests {
     fn symbol_scopes_open_string_swallows_close() {
         // Kills 302:39.
         let s = symbol_scopes("fn a() {\nx;\n\"q\" }\n");
-        assert_eq!(s.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(), vec!["fn a"]);
+        assert_eq!(
+            s.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(),
+            vec!["fn a"]
+        );
         assert_eq!((s[0].start_line, s[0].end_line), (0, 2));
     }
 
@@ -487,7 +490,10 @@ mod tests {
     fn symbol_scopes_string_arm_hides_brace() {
         // Kills 307:21.
         let s = symbol_scopes("fn a() {\nx = \"{\"\ny;\n}\n");
-        assert_eq!(s.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(), vec!["fn a"]);
+        assert_eq!(
+            s.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(),
+            vec!["fn a"]
+        );
         assert_eq!(s[0].end_line, 3);
     }
 
@@ -515,7 +521,10 @@ mod tests {
         // `+ -> -` panics at i=0. Kills 360:33 (x2), 361:27.
         let out = outline_symbols("# A\n## B\n# C\n", Some("md"));
         let a = out.iter().find(|s| s.label == "A").expect("heading A");
-        assert_eq!(a.end_line, 1, "A must span to just before the next peer heading");
+        assert_eq!(
+            a.end_line, 1,
+            "A must span to just before the next peer heading"
+        );
         assert!(a.end_line > a.start_line);
     }
 

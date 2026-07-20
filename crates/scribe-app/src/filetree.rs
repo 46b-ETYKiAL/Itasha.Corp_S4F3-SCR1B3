@@ -266,7 +266,10 @@ mod tests {
             dir_children(ui, root, &mut clicked, &mut visible, None, 0, &mut visited);
         });
         assert!(visible.iter().any(|p| p.ends_with("keep.txt")));
-        assert!(!visible.iter().any(|p| p.ends_with("target")), "target must be skipped");
+        assert!(
+            !visible.iter().any(|p| p.ends_with("target")),
+            "target must be skipped"
+        );
         assert!(
             !visible.iter().any(|p| p.ends_with("node_modules")),
             "node_modules must be skipped"

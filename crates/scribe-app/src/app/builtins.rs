@@ -288,9 +288,10 @@ impl ScribeApp {
                 }
             },
             EditorAction::Undo => key_event(egui::Key::Z, egui::Modifiers::COMMAND),
-            EditorAction::Redo => {
-                key_event(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)
-            }
+            EditorAction::Redo => key_event(
+                egui::Key::Z,
+                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+            ),
         };
         ctx.input_mut(|i| i.events.push(event));
     }

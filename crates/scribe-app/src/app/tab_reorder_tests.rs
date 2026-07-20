@@ -219,7 +219,11 @@ fn close_tab_out_of_range_is_noop() {
     let mut app = ScribeApp::new_test(Config::default());
     let before = app.tabs.len();
     app.close_tab(before);
-    assert_eq!(app.tabs.len(), before, "closing an out-of-range index changes nothing");
+    assert_eq!(
+        app.tabs.len(),
+        before,
+        "closing an out-of-range index changes nothing"
+    );
 }
 
 #[test]
@@ -228,9 +232,17 @@ fn reopen_closed_tab_focuses_last_index() {
     // (last) tab. The `- -> +` / `- -> /` mutants (151:39) leave active off the
     // end. Assert active == last index (a tabs.len()-only check would not kill it).
     let mut app = ScribeApp::new_test(Config::default());
-    app.closed_tabs.push(super::ClosedTab { path: None, text: "recovered".into(), cursor: 0 });
+    app.closed_tabs.push(super::ClosedTab {
+        path: None,
+        text: "recovered".into(),
+        cursor: 0,
+    });
     app.reopen_closed_tab();
-    assert_eq!(app.active, app.tabs.len() - 1, "reopened tab must be focused (last index)");
+    assert_eq!(
+        app.active,
+        app.tabs.len() - 1,
+        "reopened tab must be focused (last index)"
+    );
     assert_eq!(app.tabs.last().unwrap().text, "recovered");
 }
 
@@ -251,7 +263,11 @@ fn closed_tabs_stack_is_capped_at_twenty() {
     for _ in 0..22 {
         app.close_tab(0);
     }
-    assert_eq!(app.closed_tabs.len(), 20, "the closed-tab history caps at MAX_CLOSED=20");
+    assert_eq!(
+        app.closed_tabs.len(),
+        20,
+        "the closed-tab history caps at MAX_CLOSED=20"
+    );
 }
 
 #[test]
@@ -325,6 +341,10 @@ fn close_tab_clamps_active_into_range() {
     }
     app.active = 3;
     app.close_tab(3);
-    assert_eq!(app.active, app.tabs.len() - 1, "active clamps to the last valid index");
+    assert_eq!(
+        app.active,
+        app.tabs.len() - 1,
+        "active clamps to the last valid index"
+    );
     assert!(app.active < app.tabs.len(), "active stays in range");
 }

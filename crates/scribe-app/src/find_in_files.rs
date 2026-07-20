@@ -218,7 +218,11 @@ mod tests {
         big.push_str("\nTODO here\n");
         std::fs::write(dir.path().join("mid.txt"), big).unwrap();
         let hits = search_project(dir.path(), &q("TODO"));
-        assert_eq!(hits.len(), 1, "a 2 MiB file is under the real cap and must be searched");
+        assert_eq!(
+            hits.len(),
+            1,
+            "a 2 MiB file is under the real cap and must be searched"
+        );
     }
 
     #[test]
@@ -231,7 +235,11 @@ mod tests {
         assert_eq!(content.len() as u64, MAX_FILE_BYTES);
         std::fs::write(dir.path().join("exact.txt"), content).unwrap();
         let hits = search_project(dir.path(), &q("TODO"));
-        assert_eq!(hits.len(), 1, "a file exactly AT the cap is included (check is strictly >)");
+        assert_eq!(
+            hits.len(),
+            1,
+            "a file exactly AT the cap is included (check is strictly >)"
+        );
     }
 
     #[test]
@@ -244,7 +252,11 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), &body).unwrap();
         std::fs::write(dir.path().join("b.txt"), &body).unwrap();
         let hits = search_project(dir.path(), &q("TODO"));
-        assert_eq!(hits.len(), MAX_TOTAL_MATCHES, "the walk caps the total at exactly 5000");
+        assert_eq!(
+            hits.len(),
+            MAX_TOTAL_MATCHES,
+            "the walk caps the total at exactly 5000"
+        );
     }
 
     #[test]
@@ -257,8 +269,15 @@ mod tests {
         std::fs::write(dir.path().join("c.txt"), format!("{line}\n")).unwrap();
         let hits = search_project(dir.path(), &q("TODO"));
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].line_text.chars().count(), MAX_LINE_DISPLAY, "kept whole at exactly the cap");
-        assert!(!hits[0].line_text.ends_with('…'), "no ellipsis at exactly the cap");
+        assert_eq!(
+            hits[0].line_text.chars().count(),
+            MAX_LINE_DISPLAY,
+            "kept whole at exactly the cap"
+        );
+        assert!(
+            !hits[0].line_text.ends_with('…'),
+            "no ellipsis at exactly the cap"
+        );
     }
 
     fn q(p: &str) -> Query {

@@ -294,7 +294,11 @@ fn change_states_computed_for_a_buffer_exactly_at_the_cap() {
     app.tabs[0].session_baseline = "y".repeat(cap);
     app.tabs[0].saved_baseline = app.tabs[0].session_baseline.clone();
     app.tabs[0].text = "x".repeat(cap);
-    assert_eq!(app.tabs[0].text.len(), cap, "the buffer is exactly at the cap");
+    assert_eq!(
+        app.tabs[0].text.len(),
+        cap,
+        "the buffer is exactly at the cap"
+    );
     app.tabs[0].edit_gen = app.tabs[0].edit_gen.wrapping_add(1);
     app.tabs[0].change_gen = None;
     app.ensure_change_states(0);

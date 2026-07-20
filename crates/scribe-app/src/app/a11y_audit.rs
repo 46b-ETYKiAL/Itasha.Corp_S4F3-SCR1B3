@@ -278,7 +278,10 @@ fn ensure_readable_tone_lifts_against_bright_bg() {
     let bright_bg = Color32::from_rgb(220, 220, 220); // rl ~= 0.716
     let mid_tone = Color32::from_rgb(190, 190, 190); // rl ~= 0.514, gap ~= 0.20 < 0.34
     let out = ensure_readable_tone(mid_tone, bright_bg);
-    assert_ne!(out, mid_tone, "guard must adjust a low-contrast tone on a bright bg");
+    assert_ne!(
+        out, mid_tone,
+        "guard must adjust a low-contrast tone on a bright bg"
+    );
     assert!(out.r() < mid_tone.r(), "should darken, got {out:?}");
 }
 

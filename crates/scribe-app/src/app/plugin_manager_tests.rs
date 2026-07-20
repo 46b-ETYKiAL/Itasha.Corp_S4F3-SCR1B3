@@ -240,6 +240,9 @@ fn discovered_plugin_rows_reflects_the_disabled_set() {
     // `replace body with vec![]` (1572) would return no rows.
     assert_eq!(rows.len(), 1, "the on-disk plugin is discovered");
     // `delete !` on `enabled: !disabled.contains(id)` (1578) would flip it to true.
-    assert!(!rows[0].enabled, "a plugin in the disabled set is reported as disabled");
+    assert!(
+        !rows[0].enabled,
+        "a plugin in the disabled set is reported as disabled"
+    );
     assert_eq!(rows[0].id, "uppercase");
 }

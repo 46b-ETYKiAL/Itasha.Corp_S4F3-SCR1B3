@@ -122,7 +122,10 @@ mod tests {
         t.doc_id = crate::grid::DocId(1);
         let mut app = due_backup_app(t);
         app.persist_session_and_autosave();
-        assert_ne!(app.last_backup_sig, 0, "a due, unsaved buffer triggers the hot-exit backup");
+        assert_ne!(
+            app.last_backup_sig, 0,
+            "a due, unsaved buffer triggers the hot-exit backup"
+        );
     }
 
     #[test]
@@ -136,9 +139,15 @@ mod tests {
         let mut t = EditorTab::from_path(p).expect("open");
         t.doc_id = crate::grid::DocId(1);
         let mut app = due_backup_app(t);
-        assert!(!app.tabs[0].is_dirty(), "precondition: the opened file is clean");
+        assert!(
+            !app.tabs[0].is_dirty(),
+            "precondition: the opened file is clean"
+        );
         app.persist_session_and_autosave();
-        assert_eq!(app.last_backup_sig, 0, "a clean saved file is not 'unsaved'");
+        assert_eq!(
+            app.last_backup_sig, 0,
+            "a clean saved file is not 'unsaved'"
+        );
     }
 
     #[test]
@@ -149,9 +158,15 @@ mod tests {
         let mut t = EditorTab::scratch();
         t.doc_id = crate::grid::DocId(1);
         let mut app = due_backup_app(t);
-        assert!(!app.tabs[0].is_dirty(), "precondition: an empty scratch is clean");
+        assert!(
+            !app.tabs[0].is_dirty(),
+            "precondition: an empty scratch is clean"
+        );
         app.persist_session_and_autosave();
-        assert_eq!(app.last_backup_sig, 0, "an empty untitled buffer has nothing to back up");
+        assert_eq!(
+            app.last_backup_sig, 0,
+            "an empty untitled buffer has nothing to back up"
+        );
     }
 
     #[test]
@@ -174,7 +189,10 @@ mod tests {
         app.tabs[0].text = "edit two is different".into();
         app.last_backup_at = Some(Instant::now().checked_sub(Duration::from_secs(5)).unwrap());
         app.persist_session_and_autosave();
-        assert_ne!(app.last_backup_sig, sig1, "a changed dirty tab updates the content sig (re-backup)");
+        assert_ne!(
+            app.last_backup_sig, sig1,
+            "a changed dirty tab updates the content sig (re-backup)"
+        );
     }
 
     #[test]
@@ -235,7 +253,10 @@ mod tests {
             Some(v) => std::env::set_var("SCR1B3_CONFIG_DIR", v),
             None => std::env::remove_var("SCR1B3_CONFIG_DIR"),
         }
-        assert!(!sig.is_empty(), "a changed open-set updates session_sig (kills the != -> ==)");
+        assert!(
+            !sig.is_empty(),
+            "a changed open-set updates session_sig (kills the != -> ==)"
+        );
     }
 
     #[test]
@@ -250,8 +271,14 @@ mod tests {
         t.text = "edited in memory".into();
         t.doc_id = crate::grid::DocId(1);
         let mut app = due_backup_app(t);
-        assert!(app.tabs[0].is_dirty(), "precondition: the edited file is dirty");
+        assert!(
+            app.tabs[0].is_dirty(),
+            "precondition: the edited file is dirty"
+        );
         app.persist_session_and_autosave();
-        assert_ne!(app.last_backup_sig, 0, "a dirty file-backed buffer is unsaved");
+        assert_ne!(
+            app.last_backup_sig, 0,
+            "a dirty file-backed buffer is unsaved"
+        );
     }
 }

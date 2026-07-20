@@ -207,8 +207,15 @@ fn symbol_scopes_scans_a_buffer_exactly_at_the_size_cap() {
     assert_eq!(text.len(), 500_000);
     let app = app_with(&text);
     let scopes = app.symbol_scopes_for_active();
-    assert!(!scopes.is_empty(), "a buffer exactly AT the cap must still be scanned");
-    assert_eq!(app.symbol_scan_count.get(), 1, "the O(n) scan ran (cap is exclusive)");
+    assert!(
+        !scopes.is_empty(),
+        "a buffer exactly AT the cap must still be scanned"
+    );
+    assert_eq!(
+        app.symbol_scan_count.get(),
+        1,
+        "the O(n) scan ran (cap is exclusive)"
+    );
 }
 
 #[test]
@@ -224,7 +231,11 @@ fn spell_count_is_zero_when_spellcheck_disabled() {
     tab.doc_id = crate::grid::DocId(3);
     app.tabs.push(tab);
     app.active = 0;
-    assert_eq!(app.spell_count(), 0, "no misspellings counted while spellcheck is off");
+    assert_eq!(
+        app.spell_count(),
+        0,
+        "no misspellings counted while spellcheck is off"
+    );
 }
 
 #[test]
@@ -246,9 +257,16 @@ fn spell_memo_recomputes_per_tab_not_stale_across_doc_ids() {
     app.tabs.push(t1);
 
     app.active = 0;
-    assert_eq!(app.spell_count(), 0, "empty tab primes the memo with a zero count");
+    assert_eq!(
+        app.spell_count(),
+        0,
+        "empty tab primes the memo with a zero count"
+    );
     app.active = 1;
-    assert!(app.spell_count() > 0, "the second tab must NOT reuse the first tab's memo");
+    assert!(
+        app.spell_count() > 0,
+        "the second tab must NOT reuse the first tab's memo"
+    );
 }
 
 #[test]
@@ -267,7 +285,10 @@ fn reload_spell_engine_picks_up_a_custom_dictionary() {
     app.active = 0;
 
     let before = app.compute_misspellings(0).len();
-    assert!(before >= 1, "the nonword is flagged before the custom dict loads");
+    assert!(
+        before >= 1,
+        "the nonword is flagged before the custom dict loads"
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let dict = dir.path().join("user.txt");
@@ -276,5 +297,8 @@ fn reload_spell_engine_picks_up_a_custom_dictionary() {
     app.reload_spell_engine();
 
     let after = app.compute_misspellings(0).len();
-    assert!(after < before, "reloading with the custom dict clears the flag (stub leaves it flagged)");
+    assert!(
+        after < before,
+        "reloading with the custom dict clears the flag (stub leaves it flagged)"
+    );
 }

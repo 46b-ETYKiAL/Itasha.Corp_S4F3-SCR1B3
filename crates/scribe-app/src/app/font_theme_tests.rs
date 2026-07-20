@@ -54,5 +54,8 @@ fn monospace_family_includes_phosphor_fallback_once() {
     let f = build_fonts("JetBrains Mono", "System default");
     let mono = &f.families[&egui::FontFamily::Monospace];
     let phos = mono.iter().filter(|x| x.as_str() == "phosphor").count();
-    assert_eq!(phos, 1, "phosphor must be a Monospace fallback exactly once: {mono:?}");
+    assert_eq!(
+        phos, 1,
+        "phosphor must be a Monospace fallback exactly once: {mono:?}"
+    );
 }

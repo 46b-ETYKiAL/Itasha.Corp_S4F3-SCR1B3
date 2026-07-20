@@ -283,7 +283,13 @@ mod tests {
         // The `modifiers.is_none() -> false` drops the plain key; `-> true`
         // wrongly captures a Ctrl+combo. Kills 238:14, 247:14, 256:14.
         fn key(k: egui::Key, m: egui::Modifiers) -> egui::Event {
-            egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: m }
+            egui::Event::Key {
+                key: k,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: m,
+            }
         }
         for (k, op) in [
             (egui::Key::Backspace, EditOp::Backspace),
@@ -313,7 +319,11 @@ mod tests {
         app.column_anchor = None;
         app.mc_owner_doc = Some(other);
         app.mc_reconcile_owner(0);
-        assert_eq!(app.mc_owner_doc, Some(other), "an empty multi-cursor state is not dirty; owner untouched");
+        assert_eq!(
+            app.mc_owner_doc,
+            Some(other),
+            "an empty multi-cursor state is not dirty; owner untouched"
+        );
     }
 
     #[test]
@@ -328,7 +338,10 @@ mod tests {
         app.column_anchor = Some(3);
         app.mc_owner_doc = Some(other);
         app.mc_reconcile_owner(0);
-        assert!(app.column_anchor.is_none(), "the stale column anchor was dropped");
+        assert!(
+            app.column_anchor.is_none(),
+            "the stale column anchor was dropped"
+        );
         assert_eq!(app.mc_owner_doc, None, "and the owner was reset");
     }
 
@@ -341,6 +354,10 @@ mod tests {
         app.multi_cursor.clear();
         app.column_anchor = Some(2);
         app.mc_record_owner(0);
-        assert_eq!(app.mc_owner_doc, Some(app.tabs[0].doc_id), "a column_anchor alone marks the state as owned");
+        assert_eq!(
+            app.mc_owner_doc,
+            Some(app.tabs[0].doc_id),
+            "a column_anchor alone marks the state as owned"
+        );
     }
 }

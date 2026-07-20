@@ -126,10 +126,16 @@ fn open_path_restore_cursor_indexes_the_new_tab_without_panicking() {
     std::fs::write(&p, "abcdef").unwrap();
     let mut cfg = Config::default();
     cfg.editor.restore_cursor_position = true;
-    cfg.editor.cursor_positions.insert(p.display().to_string(), 3);
+    cfg.editor
+        .cursor_positions
+        .insert(p.display().to_string(), 3);
     let mut app = ScribeApp::new_test(cfg);
     app.open_path(p.clone());
-    assert_eq!(app.tabs.last().unwrap().text, "abcdef", "the file opened and the restore branch ran");
+    assert_eq!(
+        app.tabs.last().unwrap().text,
+        "abcdef",
+        "the file opened and the restore branch ran"
+    );
 }
 
 /// Two DIRTY restored copies: `candidate.is_dirty() && !existing.is_dirty()` is
@@ -144,7 +150,10 @@ fn merge_keeps_existing_when_both_copies_are_dirty() {
     std::fs::write(&p, "DISK").unwrap();
     let mut existing = EditorTab::from_backup(Some(p.clone()), "ORIGINAL".to_string());
     let candidate = EditorTab::from_backup(Some(p.clone()), "OTHER".to_string());
-    assert!(existing.is_dirty() && candidate.is_dirty(), "both restored snapshots differ from disk -> dirty");
+    assert!(
+        existing.is_dirty() && candidate.is_dirty(),
+        "both restored snapshots differ from disk -> dirty"
+    );
     EditorTab::merge_restored_duplicate(&mut existing, candidate);
     assert_eq!(
         existing.text, "ORIGINAL",

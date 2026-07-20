@@ -561,7 +561,10 @@ mod tests {
         let mut mc = MultiCursor::default();
         mc.add_caret(Caret::at(2));
         let np = mc.apply_edit(&mut text, Caret::at(0), EditOp::Backspace);
-        assert_eq!(text, "ac", "offset-0 caret deletes nothing; the caret at 2 removes 'b'");
+        assert_eq!(
+            text, "ac",
+            "offset-0 caret deletes nothing; the caret at 2 removes 'b'"
+        );
         assert_eq!(np, 0);
     }
 
@@ -585,7 +588,10 @@ mod tests {
         let primary = Caret::at(0);
         mc.add_caret(Caret::selection(3, 7));
         mc.toggle_caret(Caret::at(5), primary);
-        assert!(mc.secondaries().is_empty(), "clicking inside a secondary's selection toggles it off");
+        assert!(
+            mc.secondaries().is_empty(),
+            "clicking inside a secondary's selection toggles it off"
+        );
         assert!(!mc.is_active());
     }
 
@@ -624,7 +630,11 @@ mod tests {
         // observable here.
         let back = Caret::selection(7, 3);
         assert_eq!(back.range(), 3..7, "range() sorts anchor/head to min..max");
-        assert_eq!(back.start(), 3, "start() is the lower offset regardless of drag direction");
+        assert_eq!(
+            back.start(),
+            3,
+            "start() is the lower offset regardless of drag direction"
+        );
         // forward direction still holds (guards against an over-correction):
         assert_eq!(Caret::selection(2, 5).range(), 2..5);
         assert_eq!(Caret::selection(2, 5).start(), 2);
@@ -635,8 +645,14 @@ mod tests {
         // is_empty() has zero call sites in the crate — pin it directly so the
         // `anchor == head` -> `!=` mutant cannot survive.
         assert!(Caret::at(3).is_empty(), "a bare caret is empty");
-        assert!(!Caret::selection(1, 4).is_empty(), "a forward selection is not empty");
-        assert!(!Caret::selection(4, 1).is_empty(), "a backward selection is not empty either");
+        assert!(
+            !Caret::selection(1, 4).is_empty(),
+            "a forward selection is not empty"
+        );
+        assert!(
+            !Caret::selection(4, 1).is_empty(),
+            "a backward selection is not empty either"
+        );
     }
 
     #[test]
@@ -649,7 +665,11 @@ mod tests {
         assert_eq!(char_to_byte(text, 1), 2, "after 'é' (2 bytes)");
         assert_eq!(char_to_byte(text, 2), 5, "after 'é中' (2+3 bytes)");
         assert_eq!(char_to_byte(text, 3), 6, "char count maps to len()");
-        assert_eq!(char_to_byte(text, 99), 6, "an index past the end clamps to len()");
+        assert_eq!(
+            char_to_byte(text, 99),
+            6,
+            "an index past the end clamps to len()"
+        );
     }
 
     #[test]
@@ -660,9 +680,15 @@ mod tests {
         // have a gap), so the `br.start < ar.end` -> `<=` mutant survives them.
         let a = Caret::selection(0, 2);
         let b = Caret::selection(2, 4);
-        assert!(!carets_conflict(&a, &b), "touching-but-not-overlapping selections are both kept");
+        assert!(
+            !carets_conflict(&a, &b),
+            "touching-but-not-overlapping selections are both kept"
+        );
         // A genuine 1-char overlap DOES conflict (guards against inverting the test):
-        assert!(carets_conflict(&Caret::selection(0, 3), &Caret::selection(2, 4)));
+        assert!(carets_conflict(
+            &Caret::selection(0, 3),
+            &Caret::selection(2, 4)
+        ));
     }
 
     #[test]
@@ -674,7 +700,10 @@ mod tests {
         // the suite where active==true and secondaries is empty, so it kills the
         // `self.active && !self.secondaries.is_empty()` -> `self.active` mutant.
         mc.toggle_caret(Caret::at(5), Caret::at(5));
-        assert!(!mc.is_active(), "engaged with zero secondaries is NOT active");
+        assert!(
+            !mc.is_active(),
+            "engaged with zero secondaries is NOT active"
+        );
         mc.add_caret(Caret::at(9));
         assert!(mc.is_active(), "a real secondary makes it active");
     }
@@ -702,7 +731,11 @@ mod tests {
         // stop at the space. The "snake_case1" fixture scans to 0 either way, so
         // it missed 373:41. Here `s - 1 -> s + 1` reads chars[4] (OOB -> panic)
         // and `s - 1 -> s / 1` reads chars[s] -> stops one char late (start 1).
-        assert_eq!(word_bounds_chars(&cv("a bc"), 3), (2, 4), "word 'bc' starts at index 2");
+        assert_eq!(
+            word_bounds_chars(&cv("a bc"), 3),
+            (2, 4),
+            "word 'bc' starts at index 2"
+        );
     }
 
     #[test]

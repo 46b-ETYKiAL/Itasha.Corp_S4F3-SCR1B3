@@ -3822,7 +3822,10 @@ fn replace_in_active_empty_pattern_early_returns_without_touching_status() {
     app.replace_query = "world".into();
     let status_before = app.status.clone();
     app.replace_in_active(true);
-    assert_eq!(app.tabs[0].text, "hello hello", "empty pattern must not edit text");
+    assert_eq!(
+        app.tabs[0].text, "hello hello",
+        "empty pattern must not edit text"
+    );
     assert_eq!(
         app.status, status_before,
         "empty-pattern replace must EARLY-RETURN, never run the body (kills || -> &&)"
