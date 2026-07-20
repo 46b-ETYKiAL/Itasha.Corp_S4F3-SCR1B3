@@ -127,6 +127,148 @@ fn save_session_with_no_paths_writes_an_empty_list() {
     assert!(got.is_empty(), "an empty save clears the list");
 }
 
+// ---- build() session-restore guards (watch_config gate) ----
+
+/// A real on-disk file `build` can open, inside `dir`.
+fn real_file(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    p
+}
+
+/// With CLI files open, `tabs` is non-empty, so NEITHER session-restore path may
+/// fire. Kills the `watch_config && tabs.is_empty()` → `||` mutants on BOTH
+/// guards (mod.rs 1161:25 manifest / 1169:25 legacy): the manifest `||` would
+/// REPLACE the CLI tab with the restore file; the legacy `||` would APPEND it.
+#[test]
+fn build_does_not_restore_session_when_cli_files_are_open() {
+    let dir = temp_dir("build-cli-vs-restore");
+    let cli = real_file(&dir, "cli.txt", "CLI-FILE-CONTENT\n");
+    let restore = real_file(&dir, "restore.txt", "RESTORE-FILE-CONTENT\n");
+    // Arm BOTH restore mechanisms on disk.
+    std::fs::write(dir.join("session.txt"), format!("{}\n", restore.display())).unwrap();
+    let manifest = scribe_core::session::SessionManifest::new(
+        vec![scribe_core::session::TabSnapshot {
+            path: Some(restore.display().to_string()),
+            dirty: false,
+            backup: None,
+            cursor: 0,
+        }],
+        0,
+    );
+    scribe_core::session::save_manifest(&dir, &manifest).unwrap();
+
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = true;
+    cfg.editor.session_backup = true; // arms the 1161 manifest guard
+    cfg.editor.restore_session = true; // arms the 1169 legacy guard
+    let app = with_config_dir(&dir, || {
+        ScribeApp::build(cfg, None, vec![cli.display().to_string()], true) // watch_config = true
+    });
+
+    assert_eq!(app.tabs.len(), 1, "only the CLI file opens; restore is gated off by non-empty tabs");
+    assert!(
+        app.tabs[0].text.contains("CLI-FILE-CONTENT"),
+        "the CLI file stays; neither restore path replaced/appended to it: {:?}",
+        app.tabs[0].text
+    );
+}
+
+/// Manifest (hot-exit) restore requires `session_backup`. With it OFF and no CLI
+/// files, a single scratch tab opens. Kills 1161:44 (`tabs.is_empty() &&
+/// session_backup` → `||`), which would restore the manifest despite backup off.
+#[test]
+fn build_manifest_restore_requires_the_session_backup_flag() {
+    let dir = temp_dir("build-manifest-flag");
+    let restore = real_file(&dir, "restore.txt", "MANIFEST-CONTENT\n");
+    let manifest = scribe_core::session::SessionManifest::new(
+        vec![scribe_core::session::TabSnapshot {
+            path: Some(restore.display().to_string()),
+            dirty: false,
+            backup: None,
+            cursor: 0,
+        }],
+        0,
+    );
+    scribe_core::session::save_manifest(&dir, &manifest).unwrap();
+
+    // NOTE: no `session.txt` is written, so the legacy 1169 path (armed by
+    // restore_session below) fires but restores nothing — this isolates the
+    // 1161:44 `tabs.is_empty() && session_backup` guard while keeping
+    // restore_session TRUE so the manifest restore actually yields content when
+    // the mutant fires it (restore_tabs_from_manifest gates on this flag).
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = true;
+    cfg.editor.session_backup = false; // manifest guard OFF (the mutated operand)
+    cfg.editor.restore_session = true; // manifest restore would produce content if it fired
+    let app = with_config_dir(&dir, || ScribeApp::build(cfg, None, vec![], true));
+
+    assert_eq!(app.tabs.len(), 1, "backup off + no CLI → one scratch tab");
+    assert!(app.tabs[0].text.is_empty(), "an empty scratch tab, not the restored manifest file: {:?}", app.tabs[0].text);
+    assert!(
+        !app.tabs[0].text.contains("MANIFEST-CONTENT"),
+        "the manifest must NOT restore when session_backup is off"
+    );
+}
+
+/// Legacy (paths-only) restore requires `restore_session`. With it OFF and no CLI
+/// files, a single scratch tab opens. Kills 1169:44 (`tabs.is_empty() &&
+/// restore_session` → `||`), which would restore the legacy list despite the flag.
+#[test]
+fn build_legacy_restore_requires_the_restore_session_flag() {
+    let dir = temp_dir("build-legacy-flag");
+    let restore = real_file(&dir, "legacy.txt", "LEGACY-CONTENT\n");
+    std::fs::write(dir.join("session.txt"), format!("{}\n", restore.display())).unwrap();
+
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = true;
+    cfg.editor.session_backup = false; // no manifest path
+    cfg.editor.restore_session = false; // legacy guard OFF
+    let app = with_config_dir(&dir, || ScribeApp::build(cfg, None, vec![], true));
+
+    assert_eq!(app.tabs.len(), 1, "restore off + no CLI → one scratch tab");
+    assert!(app.tabs[0].text.is_empty(), "an empty scratch tab, not the legacy-restored file: {:?}", app.tabs[0].text);
+    assert!(
+        !app.tabs[0].text.contains("LEGACY-CONTENT"),
+        "the legacy list must NOT restore when restore_session is off"
+    );
+}
+
+// ---- approve_plugin: pending-list bookkeeping ----
+
+/// Approving a plugin REMOVES it from `pending_plugins` (keeping the others).
+/// Kills mod.rs 1686 `retain(|p| p != id)` → `p == id`, which would instead keep
+/// ONLY the approved id and drop every other pending plugin. Driven with
+/// `require_signed = false` so the approve path skips the signed-admission gate
+/// and reaches `load_script` → the retain (a valid no-op rhai loads cleanly).
+#[test]
+fn approve_plugin_removes_only_the_approved_id_from_pending() {
+    let dir = temp_dir("approve-plugin-pending");
+    let pdir = dir.join("plugins").join("uppercase");
+    std::fs::create_dir_all(&pdir).unwrap();
+    std::fs::write(
+        pdir.join("plugin.toml"),
+        "id='uppercase'\nname='Uppercase'\napi_version=1\nentry='main.rhai'\n",
+    )
+    .unwrap();
+    std::fs::write(pdir.join("main.rhai"), "// noop").unwrap();
+
+    let mut cfg = Config::default();
+    cfg.editor.first_run_completed = true;
+    cfg.plugins.require_signed = false; // skip the signed-admission gate
+    let mut app = ScribeApp::new_test(cfg);
+    app.config_dir = Some(dir.clone()); // point the approve path at our plugin dir
+    app.pending_plugins = vec!["uppercase".to_string(), "keepme".to_string()];
+
+    app.approve_plugin("uppercase");
+
+    assert_eq!(
+        app.pending_plugins,
+        vec!["keepme".to_string()],
+        "the approved id is dropped from pending; the OTHER pending plugin is kept"
+    );
+}
+
 // ---- session_signature ----
 
 #[test]

@@ -164,6 +164,18 @@ exclude_re = [
   # never compiled, so no Linux test can kill it. Its exact output IS pinned by
   # the #[cfg(windows)] test powershell_runas_script_quotes_and_escapes_path.
   '\bpowershell_runas_script\b',
+  # drain_crash_spool `-> ()` whole-fn: crash-report spool DISPATCH — Off is a
+  # no-op (equivalent), Always calls auto_send_spooled_crashes which does a
+  # network send_report (no test network), and AskEachTime loads into the private
+  # CrashConsentState dialog queue (needs a Report spool fixture + private-field
+  # observation). No clean headless observable for the whole-fn no-op (ADR-0007).
+  'replace ScribeApp::drain_crash_spool with \(\)',
+  # start_lsp_for_active guard `self.lsp.is_some() && self.lsp_lang == Some(lang)`
+  # (1396:31 && / 1396:59 ==): the is_some() branch is UNREACHABLE-as-true
+  # headlessly — LspClient is only constructed by `LspClient::spawn`, which
+  # launches a live LSP subprocess. The `&&` short-circuits with lsp==None so the
+  # `==` never evaluates either. ADR-0007 (requires a live OS process).
+  'app/mod\.rs:1396:',
   # egui TextFormat struct-field deletes: only change painted-glyph font/colour
   # (ADR-0007). These carry NO `in <fn>` suffix in the match string, so a
   # function-name token cannot catch them — match the field-delete shape.
@@ -183,6 +195,7 @@ exclude_re = [
   'app/mod\.rs:107:',               # tab_index_after_move: idx==src guarded before this line
   'replace < with <= in ensure_readable_tone',  # bg_l<0.5 vs <=0.5 differ only at bg_l==0.5 exactly, unreachable from u8 channels (== and > ARE tested)
   'render_support\.rs:458:',        # highlight_job tail-append is defensive: syntect spans always cover the full line (byte==line.len()), so the tail branch never fires; the </>/==/&&->|| variants only toggle firing an EMPTY tail (no-op)
+  'replace > with >= in highlight_job::append_split',  # None-branch next-boundary filter: a url starting AT pos would put pos INSIDE it (in_url=Some), so the None branch never sees st==pos -> `>` and `>=` are identical (== and < variants ARE killed)
   'app/text_ops_methods\.rs:360:',  # move_cursor_line trailing-"" drop: only text=="" distinguishes, then no-op
   'app/text_ops_methods\.rs:418:',  # duplicate_cursor_line: insert(ln+1,copy)==insert(ln,copy) (author-documented)
   'app/text_ops_methods\.rs:799:',  # join_cursor_line_with_next: same trailing-"" equivalence
