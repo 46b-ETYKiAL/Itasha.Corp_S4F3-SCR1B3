@@ -114,3 +114,49 @@ fn side_tab_insertion_line_is_in_the_gap() {
     // Defensive: idx 0 ignores any stray prev_bottom (guarded by `idx > 0`).
     assert_eq!(side_tab_insertion_y(0, 50.0, Some(10.0)), 49.0);
 }
+
+/// With restore_cursor_position + a stored cursor for the path, open_path
+/// restores the caret on the just-pushed tab at index `self.tabs.len() - 1`. The
+/// `- 1 -> + 1` / `- 1 -> / 1` mutants (mod.rs 1474:51) index past the end and
+/// OOB-panic, so simply reaching the restore branch kills them.
+#[test]
+fn open_path_restore_cursor_indexes_the_new_tab_without_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("restore.txt");
+    std::fs::write(&p, "abcdef").unwrap();
+    let mut cfg = Config::default();
+    cfg.editor.restore_cursor_position = true;
+    cfg.editor
+        .cursor_positions
+        .insert(p.display().to_string(), 3);
+    let mut app = ScribeApp::new_test(cfg);
+    app.open_path(p.clone());
+    assert_eq!(
+        app.tabs.last().unwrap().text,
+        "abcdef",
+        "the file opened and the restore branch ran"
+    );
+}
+
+/// Two DIRTY restored copies: `candidate.is_dirty() && !existing.is_dirty()` is
+/// `true && false` = false -> the existing tab is KEPT. The `&& -> ||` mutant
+/// (mod.rs 455:33) makes it `true || false` = true -> wrongly replaces. The other
+/// merge tests only exercise the TRUE branch (a clean existing), so this pins the
+/// FALSE branch and kills 455:33.
+#[test]
+fn merge_keeps_existing_when_both_copies_are_dirty() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("note.txt");
+    std::fs::write(&p, "DISK").unwrap();
+    let mut existing = EditorTab::from_backup(Some(p.clone()), "ORIGINAL".to_string());
+    let candidate = EditorTab::from_backup(Some(p.clone()), "OTHER".to_string());
+    assert!(
+        existing.is_dirty() && candidate.is_dirty(),
+        "both restored snapshots differ from disk -> dirty"
+    );
+    EditorTab::merge_restored_duplicate(&mut existing, candidate);
+    assert_eq!(
+        existing.text, "ORIGINAL",
+        "a dirty existing tab must NOT be replaced by another dirty candidate"
+    );
+}

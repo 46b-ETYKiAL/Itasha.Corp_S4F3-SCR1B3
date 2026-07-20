@@ -49,6 +49,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn era_four_civil_year_boundary_1985_03_01() {
+        // 1985-03-01T00:00:00Z (day 5538) sits exactly on the era-4 civil-year
+        // boundary where the `+ doe/36524` century term is load-bearing: flipping
+        // it to `-` shifts yoe by one year (renders "1985-02-29"). No existing
+        // epoch lands here, so 36:33 survived. Kills the `+ -> -` mutant.
+        assert_eq!(format_iso8601_utc(478_483_200), "1985-03-01T00:00:00Z");
+    }
+
+    #[test]
     fn known_epochs_format_correctly() {
         assert_eq!(format_iso8601_utc(0), "1970-01-01T00:00:00Z");
         // 2001-09-09T01:46:40Z — the classic 1e9 epoch second.

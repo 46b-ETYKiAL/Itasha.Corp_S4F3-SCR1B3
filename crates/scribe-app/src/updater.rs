@@ -691,6 +691,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cleanup_after_update_removes_the_staging_dir() {
+        // cleanup_after_update's first duty is reaping the staging tree (via
+        // clean_staging_dir). The `replace with ()` mutant on EITHER function
+        // leaves it. Existing idempotent test only asserts no-panic. Kills 49:5, 62:5.
+        let staging = staging_dir();
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("setup.exe"), b"x").unwrap();
+        cleanup_after_update();
+        assert!(
+            !staging.exists(),
+            "cleanup_after_update must remove the staging directory"
+        );
+    }
+
+    #[test]
     fn build_target_is_baked_or_empty() {
         // build.rs bakes SCR1B3_TARGET; under `cargo test` it is present. Either
         // way the constant resolves (never panics) — that is the contract.

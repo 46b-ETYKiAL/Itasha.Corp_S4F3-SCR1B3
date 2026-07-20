@@ -79,10 +79,24 @@ impl ReportOutcome {
 /// `S4F3_DISABLE_TELEMETRY=1` (the latter is an explicit opt-out of any local
 /// diagnostic logging for this feature). Best-effort; never blocks.
 fn log_outcome(outcome: &ReportOutcome) {
+    log_outcome_with(outcome, |category, detail| {
+        crate::action_log::record(category, detail);
+    });
+}
+
+/// The testable core of [`log_outcome`]: applies the `S4F3_DISABLE_TELEMETRY`
+/// opt-out gate and, when logging is enabled, forwards the outcome's stable,
+/// non-identifying `(category, detail)` to `sink`. Split out from [`log_outcome`]
+/// so the gate + forwarded payload are unit-testable with a capturing sink,
+/// WITHOUT the process-global `action_log` path cache that the real sink in
+/// [`log_outcome`] writes through (that first-caller-wins cache is not
+/// deterministically observable under a shared-process test runner — the same
+/// untestable boundary pardoned for `action_log::path`).
+fn log_outcome_with(outcome: &ReportOutcome, sink: impl FnOnce(&str, &str)) {
     if std::env::var_os("S4F3_DISABLE_TELEMETRY").is_some() {
         return;
     }
-    crate::action_log::record("report", &outcome.log_detail());
+    sink("report", &outcome.log_detail());
 }
 
 /// Build a sanitized Tier-1 crash report from the panic's STATIC message + our
@@ -496,6 +510,62 @@ mod tests {
             outcome,
             ReportOutcome::RefusedNoEndpoint,
             "the outcome is still surfaced; only the logging is suppressed"
+        );
+    }
+
+    #[test]
+    fn a_configured_endpoint_is_read_and_trimmed() {
+        // A SET, non-empty endpoint must come back as Some(trimmed). This is the
+        // only case that distinguishes the real endpoint_from_env from a mutant
+        // that always returns None — every existing test uses an unset or
+        // whitespace-only value, so `-> None` survives them all. Asserting the
+        // trim also kills a `.trim()`-dropped mutant (the surrounding spaces
+        // would leak into the endpoint used to build the transport config).
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _g = EnvGuard::set(REPORT_ENDPOINT_ENV, "  https://ingest.example/report  ");
+        assert_eq!(
+            endpoint_from_env(),
+            Some("https://ingest.example/report".to_string()),
+            "a configured endpoint is read and surrounding whitespace trimmed"
+        );
+    }
+
+    #[test]
+    fn log_outcome_forwards_category_and_detail_when_telemetry_enabled() {
+        // Telemetry enabled (opt-out unset) => the outcome's stable, non-PII
+        // detail reaches the sink under the "report" category. Kills a mutant
+        // that no-ops the body (log_outcome_with -> ()) — the real record call
+        // in log_outcome routes through the process-global action_log path cache,
+        // so the forwarding logic is proven here with a capturing sink instead.
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _telemetry = EnvGuard::unset("S4F3_DISABLE_TELEMETRY");
+        let mut captured: Vec<(String, String)> = Vec::new();
+        log_outcome_with(&ReportOutcome::Spooled, |category, detail| {
+            captured.push((category.to_string(), detail.to_string()));
+        });
+        assert_eq!(
+            captured,
+            vec![("report".to_string(), "spooled".to_string())],
+            "an enabled telemetry gate forwards (category, detail) to the sink"
+        );
+    }
+
+    #[test]
+    fn log_outcome_suppresses_the_sink_when_telemetry_disabled() {
+        // S4F3_DISABLE_TELEMETRY=1 => the sink is NEVER called. Kills a mutant
+        // deleting/inverting the early-return gate: the privacy opt-out must
+        // suppress ALL local diagnostic logging for this feature. (The existing
+        // disable_telemetry_suppresses_outcome_logging test can only observe the
+        // returned outcome, not the suppressed side effect — this asserts it.)
+        let _lock = ENDPOINT_LOCK.lock().unwrap();
+        let _telemetry = EnvGuard::set("S4F3_DISABLE_TELEMETRY", "1");
+        let mut called = false;
+        log_outcome_with(&ReportOutcome::Sent, |_category, _detail| {
+            called = true;
+        });
+        assert!(
+            !called,
+            "the telemetry opt-out must suppress the sink entirely"
         );
     }
 

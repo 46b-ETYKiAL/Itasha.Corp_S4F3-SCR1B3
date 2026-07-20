@@ -218,3 +218,31 @@ fn tab_switch_round_trips_back_to_loaded() {
         "the Loaded pane re-renders its dir header after a round-trip"
     );
 }
+
+#[test]
+fn discovered_plugin_rows_reflects_the_disabled_set() {
+    // discovered_plugin_rows takes a plugins dir explicitly (bypassing the
+    // discovery gating in new_test), so it can be exercised directly. A plugin on
+    // disk that is in config.plugins.disabled must report enabled=false.
+    let tmp = tempfile::tempdir().unwrap();
+    let pdir = tmp.path().join("uppercase");
+    std::fs::create_dir_all(&pdir).unwrap();
+    std::fs::write(
+        pdir.join("plugin.toml"),
+        "id='uppercase'\nname='Uppercase'\napi_version=1\nentry='main.rhai'\n",
+    )
+    .unwrap();
+    std::fs::write(pdir.join("main.rhai"), "// noop").unwrap();
+    let mut cfg = Config::default();
+    cfg.plugins.disabled.push("uppercase".to_string());
+    let app = ScribeApp::new_test(cfg);
+    let rows = app.discovered_plugin_rows(tmp.path());
+    // `replace body with vec![]` (1572) would return no rows.
+    assert_eq!(rows.len(), 1, "the on-disk plugin is discovered");
+    // `delete !` on `enabled: !disabled.contains(id)` (1578) would flip it to true.
+    assert!(
+        !rows[0].enabled,
+        "a plugin in the disabled set is reported as disabled"
+    );
+    assert_eq!(rows[0].id, "uppercase");
+}

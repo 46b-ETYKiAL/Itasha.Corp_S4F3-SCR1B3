@@ -390,6 +390,34 @@ mod minimap_geom_tests {
 
     const EPS: f32 = 1e-3;
 
+    #[test]
+    fn geometry_kills_branch_and_arith_mutants() {
+        // Targets the four un-covered arithmetic/branch mutants no existing test
+        // exercised: the FIT/HUGE selector `drawn_h <= panel_h + 0.5`, the FIT
+        // ind_top clamp bound `(drawn_h - ind_h)`, and the HUGE `scroll_range`/`f`.
+        // (1) FIT/HUGE selector. panel=100, drawn=100.4 -> FIT -> map_offset==0.
+        //   `+ -> *`: 100.4<=50 false -> HUGE -> map_offset=-0.2 (killed);
+        //   `+ -> -`: 100.4<=99.5 false -> HUGE -> map_offset=-0.2 (killed).
+        let g = minimap_geometry((450.0, 1000.0, 100.0), 100.0, 100.4);
+        assert!((g.map_offset - 0.0).abs() < EPS);
+
+        // (2) FIT ind_top clamp upper bound `(drawn_h - ind_h)`. Scroll to the
+        //   bottom so the raw top exceeds the bound and the clamp bites: ind_h=10,
+        //   orig ind_top=90.0; `- -> +` widens the bound to 110 -> ind_top=100.0.
+        let g = minimap_geometry((1000.0, 1000.0, 100.0), 200.0, 100.0);
+        assert!((g.ind_h - 10.0).abs() < EPS);
+        assert!((g.ind_top - 90.0).abs() < EPS);
+
+        // (3) HUGE scroll_range + f. panel=100, drawn=300 -> HUGE. ind_h=30,
+        //   orig scroll_range=900, f=0.5, ind_top=35.0, map_offset=-100.0.
+        //   `- -> /`: scroll_range=1000/100=10 -> f clamps to 1 -> ind_top=70 (killed);
+        //   `/ -> *`: f=450*900 -> clamps to 1 -> ind_top=70 (killed).
+        let g = minimap_geometry((450.0, 1000.0, 100.0), 100.0, 300.0);
+        assert!((g.ind_h - 30.0).abs() < EPS);
+        assert!((g.ind_top - 35.0).abs() < EPS);
+        assert!((g.map_offset + 100.0).abs() < EPS);
+    }
+
     /// The core regression guard for the original bug: the indicator's
     /// fraction-of-drawn-content MUST equal the editor's visible fraction. The
     /// pre-fix code multiplied the indicator by an extra `scale` while the

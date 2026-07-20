@@ -211,3 +211,140 @@ fn close_all_tabs_except_focuses_the_kept_tab() {
         "active focuses the kept tab, not the surviving pinned tab"
     );
 }
+
+#[test]
+fn close_tab_out_of_range_is_noop() {
+    // close_tab(len) is out of range: clean no-ops; the `idx < self.tabs.len()`
+    // -> `<=` mutants (77:16, 82:16) enter the block and panic on self.tabs[len].
+    let mut app = ScribeApp::new_test(Config::default());
+    let before = app.tabs.len();
+    app.close_tab(before);
+    assert_eq!(
+        app.tabs.len(),
+        before,
+        "closing an out-of-range index changes nothing"
+    );
+}
+
+#[test]
+fn reopen_closed_tab_focuses_last_index() {
+    // After push, `self.active = self.tabs.len() - 1` points at the just-pushed
+    // (last) tab. The `- -> +` / `- -> /` mutants (151:39) leave active off the
+    // end. Assert active == last index (a tabs.len()-only check would not kill it).
+    let mut app = ScribeApp::new_test(Config::default());
+    app.closed_tabs.push(super::ClosedTab {
+        path: None,
+        text: "recovered".into(),
+        cursor: 0,
+    });
+    app.reopen_closed_tab();
+    assert_eq!(
+        app.active,
+        app.tabs.len() - 1,
+        "reopened tab must be focused (last index)"
+    );
+    assert_eq!(app.tabs.last().unwrap().text, "recovered");
+}
+
+#[test]
+fn closed_tabs_stack_is_capped_at_twenty() {
+    // Close 22 non-empty tabs; each pushes onto the reopen stack, which caps at
+    // MAX_CLOSED=20. The `> -> ==` / `> -> >=` mutants (tabs.rs 125:43) mis-fire
+    // the trim and leave the stack at 19. A strict `> 20` holds it at exactly 20.
+    let mut app = ScribeApp::new_test(Config::default());
+    app.tabs.clear();
+    for i in 0..23u64 {
+        let mut t = EditorTab::scratch();
+        t.text = format!("content{i}");
+        t.doc_id = crate::grid::DocId(i + 1);
+        app.tabs.push(t);
+    }
+    app.active = 0;
+    for _ in 0..22 {
+        app.close_tab(0);
+    }
+    assert_eq!(
+        app.closed_tabs.len(),
+        20,
+        "the closed-tab history caps at MAX_CLOSED=20"
+    );
+}
+
+#[test]
+fn sync_grid_state_discards_a_stale_layout_that_no_longer_matches() {
+    // The persisted layout is restored only when its pane doc-id SET still equals
+    // the reopened tabs; otherwise a fresh default grid is built. Here the layout
+    // references d3, which is NOT open. Clean: `pane_doc_ids == want` is false ->
+    // rebuild default {d1,d2}. The `== -> !=` mutant (grid_methods 236:62) KEEPS
+    // the stale {d1,d3} layout. pane_doc_ids (a BTreeSet) is an order-stable probe.
+    use crate::grid::{build_default_grid, pane_doc_ids, to_json, DocId};
+    let (d1, d2, d3) = (DocId(1), DocId(2), DocId(3));
+    let mut cfg = Config::default();
+    cfg.editor.grid_enabled = true;
+    cfg.editor.grid_layout = to_json(&build_default_grid(&[d1, d3])); // stale: d3 not open
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    for d in [d1, d2] {
+        let mut t = EditorTab::scratch();
+        t.doc_id = d;
+        app.tabs.push(t);
+    }
+    app.active = 0;
+    app.grid_tree = None;
+    app.sync_grid_state();
+    let want: std::collections::BTreeSet<DocId> = [d1, d2].into_iter().collect();
+    assert_eq!(
+        pane_doc_ids(app.grid_tree.as_ref().expect("grid built")),
+        want,
+        "a stale layout is discarded; the grid matches the OPEN tabs, not {{d1,d3}}"
+    );
+}
+
+#[test]
+fn close_tab_evicts_a_cursor_position_at_the_cap() {
+    // When restoring cursor positions, close_tab evicts the oldest entry once the
+    // map is at SCROLL_POS_CAP before inserting the closed tab's position. The
+    // `>= -> <` mutant (tabs.rs 102:25) never evicts, growing the map past the cap.
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("f.txt");
+    std::fs::write(&p, "content").unwrap();
+    let mut cfg = Config::default();
+    cfg.editor.restore_cursor_position = true;
+    for i in 0..scribe_core::config::SCROLL_POS_CAP {
+        cfg.editor.cursor_positions.insert(format!("dummy-{i}"), 0);
+    }
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t = EditorTab::from_path(p).expect("open");
+    t.doc_id = crate::grid::DocId(1);
+    app.tabs.push(t);
+    app.active = 0;
+    app.close_tab(0);
+    assert!(
+        app.config.editor.cursor_positions.len() <= scribe_core::config::SCROLL_POS_CAP,
+        "the cursor-position map stays capped at SCROLL_POS_CAP"
+    );
+}
+
+#[test]
+fn close_tab_clamps_active_into_range() {
+    // Closing the active LAST tab must clamp `active` back into range via
+    // `active.min(len - 1)`. The `- -> +` / `- -> /` mutants (tabs.rs 133:59)
+    // leave active off the end.
+    let mut app = ScribeApp::new_test(Config::default());
+    app.tabs.clear();
+    for i in 0..4u64 {
+        let mut t = EditorTab::scratch();
+        t.text = format!("t{i}");
+        t.doc_id = crate::grid::DocId(i + 1);
+        app.tabs.push(t);
+    }
+    app.active = 3;
+    app.close_tab(3);
+    assert_eq!(
+        app.active,
+        app.tabs.len() - 1,
+        "active clamps to the last valid index"
+    );
+    assert!(app.active < app.tabs.len(), "active stays in range");
+}

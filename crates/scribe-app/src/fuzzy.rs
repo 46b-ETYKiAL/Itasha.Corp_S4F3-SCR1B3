@@ -173,6 +173,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn exact_score_adjacent_basename_match_pins_all_bonuses() {
+        // 100 base + 10 (first-char boundary) + 20 (all-in-basename) + 50 (exact
+        // basename) = 180. Existing tests only assert is_some()/ranking, so every
+        // arithmetic mutant survived. Kills 70:33, 71:17, 76:23(x2), 78:18(x3),
+        // 89:15(x2), 98:15.
+        assert_eq!(score("abc", "abc"), Some(180));
+    }
+
+    #[test]
+    fn exact_score_with_path_separator_pins_basename_start() {
+        // 'b' matches after '/', all-in-basename, exact basename "bc": 100+10+20+50.
+        // Kills 53:51(x2): a wrong basename_start loses the +50 exact bonus (->130).
+        assert_eq!(score("a/bc", "bc"), Some(180));
+    }
+
+    #[test]
+    fn exact_score_skip_penalty_pins_skip_math() {
+        // 'a'@0 (+10 boundary), 'b'@2 (skip 1 -> -2), 'c'@3; all-in-basename +20;
+        // no exact. 100 + 10 - 2 + 20 = 128. Kills 65:40(x2) and 66:28.
+        assert_eq!(score("aXbc", "abc"), Some(128));
+    }
+
+    #[test]
     fn empty_query_returns_zero_for_every_path() {
         assert_eq!(score("anything.rs", ""), Some(0));
     }

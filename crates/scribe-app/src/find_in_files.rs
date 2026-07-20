@@ -209,6 +209,77 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    #[test]
+    fn a_2mib_file_is_under_the_real_cap_but_above_any_shrunk_cap() {
+        // A 2 MiB file is UNDER the real 8 MiB cap (searched) but ABOVE both
+        // shrunk-cap mutants of `8 * 1024 * 1024` (~1 MiB / ~9 KiB). Kills 24:35, 24:42.
+        let dir = tempfile::tempdir().unwrap();
+        let mut big = "x".repeat(2 * 1024 * 1024);
+        big.push_str("\nTODO here\n");
+        std::fs::write(dir.path().join("mid.txt"), big).unwrap();
+        let hits = search_project(dir.path(), &q("TODO"));
+        assert_eq!(
+            hits.len(),
+            1,
+            "a 2 MiB file is under the real cap and must be searched"
+        );
+    }
+
+    #[test]
+    fn a_file_exactly_at_the_byte_cap_is_searched_not_skipped() {
+        // A file of EXACTLY MAX_FILE_BYTES: clean `>` false -> searched; `>=` ->
+        // skipped. Kills 100:31.
+        let dir = tempfile::tempdir().unwrap();
+        let mut content = String::from("TODO\n");
+        content.push_str(&"x".repeat(MAX_FILE_BYTES as usize - content.len()));
+        assert_eq!(content.len() as u64, MAX_FILE_BYTES);
+        std::fs::write(dir.path().join("exact.txt"), content).unwrap();
+        let hits = search_project(dir.path(), &q("TODO"));
+        assert_eq!(
+            hits.len(),
+            1,
+            "a file exactly AT the cap is included (check is strictly >)"
+        );
+    }
+
+    #[test]
+    fn total_match_cap_truncates_the_trailing_file_batch() {
+        // Two files of 3000 TODO lines (6000 > 5000): clean caps at 5000. The
+        // remaining/truncate/accumulate mutants all skip the truncation -> 6000.
+        // Kills 106:51, 108:32(<), 108:32(==), 112:35.
+        let dir = tempfile::tempdir().unwrap();
+        let body = "TODO\n".repeat(3000);
+        std::fs::write(dir.path().join("a.txt"), &body).unwrap();
+        std::fs::write(dir.path().join("b.txt"), &body).unwrap();
+        let hits = search_project(dir.path(), &q("TODO"));
+        assert_eq!(
+            hits.len(),
+            MAX_TOTAL_MATCHES,
+            "the walk caps the total at exactly 5000"
+        );
+    }
+
+    #[test]
+    fn a_line_exactly_at_the_display_cap_is_kept_whole() {
+        // A match line of EXACTLY MAX_LINE_DISPLAY chars: clean `>` false -> kept
+        // whole (no ellipsis); `>=` -> truncate + ellipsis. Kills 194:38.
+        let dir = tempfile::tempdir().unwrap();
+        let mut line = String::from("TODO");
+        line.push_str(&"x".repeat(MAX_LINE_DISPLAY - 4));
+        std::fs::write(dir.path().join("c.txt"), format!("{line}\n")).unwrap();
+        let hits = search_project(dir.path(), &q("TODO"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].line_text.chars().count(),
+            MAX_LINE_DISPLAY,
+            "kept whole at exactly the cap"
+        );
+        assert!(
+            !hits[0].line_text.ends_with('…'),
+            "no ellipsis at exactly the cap"
+        );
+    }
+
     fn q(p: &str) -> Query {
         Query {
             pattern: p.into(),

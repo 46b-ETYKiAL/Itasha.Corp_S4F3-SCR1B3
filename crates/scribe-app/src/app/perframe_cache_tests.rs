@@ -192,3 +192,113 @@ fn spell_count_stable_and_correct_across_idle_frames() {
         assert_eq!(app.spell_count(), n0, "idle-frame count is stable");
     }
 }
+
+// ---- text_analysis.rs mutation-survivor kills ----
+
+#[test]
+fn symbol_scopes_scans_a_buffer_exactly_at_the_size_cap() {
+    // A buffer of EXACTLY MAX_SYMBOL_SCAN_BYTES (500_000): clean `>` false ->
+    // scans (scan_count 1); `>=` -> returns empty (scan_count 0). The existing
+    // oversize test uses 600_000 (skipped under both). Kills 132:27.
+    let mut text = String::from("fn a() {\n");
+    text.push_str(&"x".repeat(499_988));
+    text.push('\n');
+    text.push_str("}\n");
+    assert_eq!(text.len(), 500_000);
+    let app = app_with(&text);
+    let scopes = app.symbol_scopes_for_active();
+    assert!(
+        !scopes.is_empty(),
+        "a buffer exactly AT the cap must still be scanned"
+    );
+    assert_eq!(
+        app.symbol_scan_count.get(),
+        1,
+        "the O(n) scan ran (cap is exclusive)"
+    );
+}
+
+#[test]
+fn spell_count_is_zero_when_spellcheck_disabled() {
+    // With spellcheck OFF, with_active_misspellings returns f(&[]) -> 0, killing
+    // the `spell_count -> 1` stub (existing test uses a single misspelling == 1).
+    let mut cfg = Config::default();
+    cfg.spellcheck.enabled = false;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut tab = super::EditorTab::scratch();
+    tab.text = "zzqqxx wwvvbb".to_string();
+    tab.doc_id = crate::grid::DocId(3);
+    app.tabs.push(tab);
+    app.active = 0;
+    assert_eq!(
+        app.spell_count(),
+        0,
+        "no misspellings counted while spellcheck is off"
+    );
+}
+
+#[test]
+fn spell_memo_recomputes_per_tab_not_stale_across_doc_ids() {
+    // Two tabs with DIFFERENT doc_ids and different misspelling counts. A broken
+    // cache-key compare (40:19 == -> !=) or a constant key (56:9 -> 0/1) returns
+    // tab0's stale zero for tab1. Kills 40:19 and 56:9.
+    let mut cfg = Config::default();
+    cfg.spellcheck.enabled = true;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut t0 = super::EditorTab::scratch();
+    t0.text = String::new();
+    t0.doc_id = crate::grid::DocId(1);
+    app.tabs.push(t0);
+    let mut t1 = super::EditorTab::scratch();
+    t1.text = "deffinitely zzqqxx".to_string();
+    t1.doc_id = crate::grid::DocId(2);
+    app.tabs.push(t1);
+
+    app.active = 0;
+    assert_eq!(
+        app.spell_count(),
+        0,
+        "empty tab primes the memo with a zero count"
+    );
+    app.active = 1;
+    assert!(
+        app.spell_count() > 0,
+        "the second tab must NOT reuse the first tab's memo"
+    );
+}
+
+#[test]
+fn reload_spell_engine_picks_up_a_custom_dictionary() {
+    // reload_spell_engine replaces self.spell. Observe via the UNCACHED
+    // compute_misspellings: flag a nonword, add it to a custom dict, reload,
+    // re-check -> the flag clears. Under the `-> ()` stub self.spell is unchanged.
+    let mut cfg = Config::default();
+    cfg.spellcheck.enabled = true;
+    let mut app = ScribeApp::new_test(cfg);
+    app.tabs.clear();
+    let mut tab = super::EditorTab::scratch();
+    tab.text = "zqxwv".to_string();
+    tab.doc_id = crate::grid::DocId(9);
+    app.tabs.push(tab);
+    app.active = 0;
+
+    let before = app.compute_misspellings(0).len();
+    assert!(
+        before >= 1,
+        "the nonword is flagged before the custom dict loads"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let dict = dir.path().join("user.txt");
+    std::fs::write(&dict, "zqxwv\n").unwrap();
+    app.config.spellcheck.custom_dict_path = Some(dict);
+    app.reload_spell_engine();
+
+    let after = app.compute_misspellings(0).len();
+    assert!(
+        after < before,
+        "reloading with the custom dict clears the flag (stub leaves it flagged)"
+    );
+}

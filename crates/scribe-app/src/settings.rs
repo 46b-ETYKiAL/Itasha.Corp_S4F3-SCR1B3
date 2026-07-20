@@ -3185,6 +3185,42 @@ mod toolbar_drop {
     }
 
     #[test]
+    fn reorder_interior_and_in_place_kill_offset_and_boundary_mutants() {
+        // The existing reorder tests all drop at a target that, AFTER the remove,
+        // clamps to the list tail via `t.min(list.len())` — so every mutant on
+        // `let t = if from < target { target - 1 } else { target };` produces the
+        // same clamped output and survives. These two cases keep `t` INTERIOR
+        // (unclamped) so the offset (`- -> +`/`/`) and boundary (`< -> <=`/`==`)
+        // mutants each diverge.
+        // (A) from<target, interior insert: 0<2 -> t=1 -> [b,a,c,d].
+        //   `< -> ==`: t=target=2 -> [b,c,a,d]; `- -> +`: t=3 -> [b,c,d,a];
+        //   `- -> /`: t=2 -> [b,c,a,d]. All differ from [b,a,c,d].
+        let mut list = v(&["a", "b", "c", "d"]);
+        assert!(apply_toolbar_drop(
+            &mut list,
+            2,
+            ToolbarDrag::Reorder {
+                salt: "items",
+                from: 0
+            }
+        ));
+        assert_eq!(list, v(&["b", "a", "c", "d"]));
+
+        // (B) from == target: orig is a genuine no-op (t=target). The `< -> <=`
+        //   mutant makes 1<=1 true -> t=target-1=0 -> [b,a,c].
+        let mut list = v(&["a", "b", "c"]);
+        assert!(apply_toolbar_drop(
+            &mut list,
+            1,
+            ToolbarDrag::Reorder {
+                salt: "items",
+                from: 1
+            }
+        ));
+        assert_eq!(list, v(&["a", "b", "c"]));
+    }
+
+    #[test]
     fn reorder_moves_item_to_target_slot() {
         // Move index 0 to slot 3 (drop AFTER the 2nd row): a,b,c -> b,c,a.
         let mut list = v(&["a", "b", "c"]);

@@ -847,6 +847,280 @@ pub(crate) fn spawn_config_watcher(
 #[cfg(test)]
 mod tint_tests {
     use super::*;
+
+    #[test]
+    fn blend_tint_midpoint_is_true_lerp() {
+        // Existing tests use s=0/1/0.8 with saturating base/tint, so the CLAMP to
+        // 255 hid the `+ -> *` / `* -> /` lerp mutants. A non-clamping midpoint
+        // (100->200 @ 0.5 = 150) exposes both. Kills 180:23, 180:55.
+        let out = blend_tint(
+            Color32::from_rgb(100, 100, 100),
+            Color32::from_rgb(200, 200, 200),
+            0.5,
+        );
+        assert_eq!(
+            (out.r(), out.g(), out.b()),
+            (150, 150, 150),
+            "0.5 blend of 100->200 must be 150 per channel"
+        );
+    }
+
+    #[test]
+    fn linearize_channel_low_branch_divides() {
+        // c=10 lands in the linear (<=0.04045) branch: 10/255/12.92. `/ -> %` and
+        // `/ -> *` both diverge from 0.003035. Kills 247:12.
+        let v = linearize_channel(10);
+        assert!(
+            (v - 0.003_035).abs() < 1e-4,
+            "low-branch linearize wrong: {v}"
+        );
+    }
+
+    #[test]
+    fn relative_luminance_white_is_one() {
+        // WCAG sum 0.2126R + 0.7152G + 0.0722B. For WHITE clean=1.0; a `+ -> -` on
+        // either term diverges. a11y_audit uses a LOCAL lum copy, never this fn.
+        // Kills 258:9, 259:9.
+        assert!((relative_luminance(Color32::WHITE) - 1.0).abs() < 1e-3);
+        assert!(relative_luminance(Color32::BLACK).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ensure_readable_tone_pushes_away_from_a_dark_background() {
+        // On a DARK titlebar (bg_l < 0.5) a low-contrast tone must be pushed
+        // TOWARD WHITE (lightened), never toward black. This pins the
+        // `if bg_l < 0.5` direction choice: `< -> ==` and `< -> >` both collapse
+        // to target=BLACK for a dark bg, darkening instead of lightening and
+        // inverting the contrast fix. (`< -> <=` differs only at bg_l == 0.5
+        // exactly — unreachable from u8 channels — so it is pardoned.)
+        let bg = Color32::from_gray(20); // dark titlebar
+        let tone = Color32::from_gray(45); // low-contrast vs bg (< MIN_GAP)
+        let out = ensure_readable_tone(tone, bg);
+        assert!(
+            relative_luminance(out) > relative_luminance(tone),
+            "a dark bg must LIGHTEN the tone (push toward white): out_l={} tone_l={}",
+            relative_luminance(out),
+            relative_luminance(tone)
+        );
+        assert!(
+            (relative_luminance(out) - relative_luminance(bg)).abs() >= 0.34,
+            "the pushed tone must reach the MIN_GAP contrast floor"
+        );
+    }
+
+    #[test]
+    fn load_snippets_reads_a_real_snippets_file() {
+        // load_snippets() reads `<config-dir>/snippets.toml`. Point
+        // SCR1B3_CONFIG_DIR at a temp dir holding a real one and assert the
+        // parsed set is non-empty + contains the trigger — this kills the whole
+        // `load_snippets -> Default::default()` (empty-set) body replacement.
+        static LK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("SCR1B3_CONFIG_DIR");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("snippets.toml"),
+            "[[snippets]]\nprefix = \"fn\"\nbody = \"fn ${1}() {}\"\n",
+        )
+        .unwrap();
+        std::env::set_var("SCR1B3_CONFIG_DIR", dir.path());
+        let set = load_snippets();
+        match prev {
+            Some(v) => std::env::set_var("SCR1B3_CONFIG_DIR", v),
+            None => std::env::remove_var("SCR1B3_CONFIG_DIR"),
+        }
+        assert!(
+            !set.is_empty(),
+            "a real snippets.toml must load a non-empty set"
+        );
+        assert!(
+            set.lookup("fn").is_some(),
+            "the 'fn' trigger from the file must be present (not the empty default)"
+        );
+    }
+
+    #[test]
+    fn make_layouter_galley_cache_invalidates_on_text_change() {
+        // The galley cache short-circuits to the cached Arc<Galley> only when the
+        // content key MATCHES (`*gk == key`). Mutant 664 (`== -> !=`) would return
+        // the cached galley when the text CHANGED — rendering STALE text. Drive
+        // the layouter twice with different text (same wrap) and assert the second
+        // galley reflects the NEW text, not the stale first one.
+        egui::__run_test_ui(|ui| {
+            let hl = Highlighter::new();
+            let cache = std::cell::RefCell::new(None);
+            let gcache = std::cell::RefCell::new(None);
+            let inc = std::cell::RefCell::new(IncrementalHighlightState::default());
+            let mut layouter = make_layouter(
+                &hl,
+                &cache,
+                &gcache,
+                &inc,
+                Some("txt"),
+                egui::FontId::monospace(12.0),
+                1.0,
+                false, // word_wrap
+                Color32::WHITE,
+                Color32::from_rgb(0, 0, 255),
+                false, // detect_links
+            );
+            let s1 = String::from("first buffer contents");
+            let s2 = String::from("second entirely different contents");
+            let _g1 = layouter(ui, &s1, 400.0); // primes the galley cache with s1's key
+            let g2 = layouter(ui, &s2, 400.0); // same wrap, different text
+            assert!(
+                g2.text().contains("second"),
+                "the galley cache must MISS on a text change (not return the stale first galley): {:?}",
+                g2.text()
+            );
+            assert!(
+                !g2.text().contains("first"),
+                "the second galley must not carry the stale first-buffer text: {:?}",
+                g2.text()
+            );
+        });
+    }
+
+    #[test]
+    fn make_layouter_galley_cache_invalidates_on_wrap_change() {
+        // The galley cache short-circuits only when BOTH the content key AND the
+        // wrap width match (`*gk == key && *gw == eff_wrap`). Mutant 664:38
+        // (`*gw == eff_wrap` -> `!=`) returns the galley laid out at the OLD wrap
+        // when the wrap CHANGES (same text). Drive the layouter with word_wrap=true
+        // and the SAME text at a narrow then a wide width; the wide re-layout must
+        // be SHORTER (fewer wrapped rows) than the stale narrow galley.
+        egui::__run_test_ui(|ui| {
+            let hl = Highlighter::new();
+            let cache = std::cell::RefCell::new(None);
+            let gcache = std::cell::RefCell::new(None);
+            let inc = std::cell::RefCell::new(IncrementalHighlightState::default());
+            let mut layouter = make_layouter(
+                &hl,
+                &cache,
+                &gcache,
+                &inc,
+                Some("txt"),
+                egui::FontId::monospace(12.0),
+                1.0,
+                true, // word_wrap = true so eff_wrap tracks the wrap arg
+                Color32::WHITE,
+                Color32::from_rgb(0, 0, 255),
+                false, // detect_links
+            );
+            let text = String::from("some buffer prose to lay out at two different widths");
+            let _g_narrow = layouter(ui, &text, 60.0); // primes gcache with wrap=60
+            let g_wide = layouter(ui, &text, 600.0); // SAME text (same key), wrap=600
+                                                     // The galley RETAINS the wrap width it was laid out at
+                                                     // (`job.wrap.max_width`) — a headless-robust observable that does not
+                                                     // depend on real font metrics. On a wrap change the cache must MISS
+                                                     // and re-layout at 600; the 664:38 mutant returns the stale wrap=60
+                                                     // galley instead.
+            assert!(
+                g_wide.job.wrap.max_width > 100.0,
+                "the galley cache must re-layout on a wrap change (expected the wide 600 layout, \
+                 not the stale narrow 60): job.wrap.max_width={}",
+                g_wide.job.wrap.max_width
+            );
+        });
+    }
+
+    #[test]
+    fn highlight_job_underlines_url_spans_only() {
+        // append_split sub-segments a line at URL byte-boundaries: the URL portion
+        // gets the underlined url_fmt, the rest keeps base. The returned LayoutJob
+        // (epaint data, no GUI) exposes .text and per-section .format.underline.
+        // This pins the append_split loop + the no-URL fast path: dropping the
+        // loop/stub loses the URL text, and mis-classifying the in-URL test
+        // under- or over-underlines.
+        let hl = Highlighter::new();
+        let build = |text: &str| {
+            let mut inc = IncrementalHighlightState::default();
+            highlight_job(
+                &hl,
+                text,
+                Some("txt"),
+                egui::FontId::monospace(12.0),
+                1.0,
+                &mut inc,
+                Color32::WHITE,
+                Color32::from_rgb(0, 0, 255),
+                true, // detect_links
+            )
+        };
+
+        // (a) URL line → the sub-segmenting while-loop. The URL text must survive
+        // and be underlined; the surrounding prose must NOT be.
+        let url_text = "visit http://example.com now\n";
+        let url = "http://example.com";
+        let ustart = url_text.find(url).unwrap();
+        let uend = ustart + url.len();
+        let job = build(url_text);
+        assert!(
+            job.text.contains(url),
+            "the URL text must survive append_split: {:?}",
+            job.text
+        );
+        let underlined_at = |b: usize| {
+            job.sections
+                .iter()
+                .any(|s| s.byte_range.contains(&b) && s.format.underline.width > 0.0)
+        };
+        assert!(
+            underlined_at(ustart + 1),
+            "a byte inside the URL must be underlined"
+        );
+        assert!(
+            !underlined_at(1),
+            "the leading 'visit' prose must NOT be underlined"
+        );
+        assert!(
+            !underlined_at(uend + 1),
+            "the trailing ' now' prose must NOT be underlined"
+        );
+
+        // (b) No-URL line → the `urls.is_empty()` fast path. Its whole text must
+        // survive (kills the `!seg.is_empty()` drop) with zero underline.
+        let plain = build("just plain prose line\n");
+        // Exact-equality (not `contains`): the trailing '\n' is appended by the
+        // tail branch (`byte < line.len()`), so a dropped/mis-guarded tail
+        // (458 `< -> ==` / `> ` / delete) loses the newline and fails here.
+        assert_eq!(
+            plain.text, "just plain prose line\n",
+            "the no-URL line (incl. its trailing newline tail) must survive verbatim"
+        );
+        assert!(
+            plain
+                .sections
+                .iter()
+                .all(|s| s.format.underline.width == 0.0),
+            "a line with no URL must have no underlined section"
+        );
+    }
+
+    #[test]
+    fn newline_with_indent_preserves_leading_whitespace() {
+        // Cursor at the end of an indented line: the inserted newline copies the
+        // "  " indent. `line_start = rfind('\n').map(|i| i + 1)` -> `i * 1` (= i)
+        // / `i - 1` makes line_start point AT/BEFORE the '\n', so the indent scan
+        // starts on the newline and collects nothing. Kills 772:57.
+        let (out, _cur) = newline_with_indent("x\n  foo", 7);
+        assert_eq!(
+            out, "x\n  foo\n  ",
+            "the new line inherits the two-space indent"
+        );
+    }
+
+    #[test]
+    fn lerp_rgb_midpoint() {
+        // Same no-clamp midpoint trick: 100->200 @ 0.5 = 150 per channel. Kills the
+        // four 266 arithmetic mutants (+->*, -->+, *->+, *->/).
+        let o = lerp_rgb(
+            Color32::from_rgb(100, 100, 100),
+            Color32::from_rgb(200, 200, 200),
+            0.5,
+        );
+        assert_eq!((o.r(), o.g(), o.b()), (150, 150, 150));
+    }
     use scribe_core::config::WindowConfig;
 
     /// A representative "text/foreground" theme colour. This is the colour the

@@ -44,3 +44,18 @@ fn default_family_is_jetbrains_and_does_not_double_insert() {
     // No redundant second JetBrains entry when it's already the selection.
     assert_ne!(mono.get(1).map(String::as_str), Some("JetBrainsMono"));
 }
+
+#[test]
+fn monospace_family_includes_phosphor_fallback_once() {
+    // build_fonts appends "phosphor" as a Monospace fallback (add_to_fonts only
+    // registers it in Proportional). Existing tests assert mono[0]/[1] but never
+    // the fallback. The `delete !` / `== -> !=` mutants on the dedup guard drop
+    // it. Kills render_support 142:12, 142:35.
+    let f = build_fonts("JetBrains Mono", "System default");
+    let mono = &f.families[&egui::FontFamily::Monospace];
+    let phos = mono.iter().filter(|x| x.as_str() == "phosphor").count();
+    assert_eq!(
+        phos, 1,
+        "phosphor must be a Monospace fallback exactly once: {mono:?}"
+    );
+}

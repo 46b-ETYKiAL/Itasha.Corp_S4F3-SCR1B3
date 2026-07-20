@@ -412,6 +412,123 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prefix_before_walks_to_buffer_start() {
+        // A prefix that walks to column 0: clean `while start > 0` stops at 0; the
+        // `>=` mutant reads bytes[0-1] and underflow-panics. Kills 203:17.
+        assert_eq!(prefix_before("foo", 3), (0, "foo".to_string()));
+    }
+
+    #[test]
+    fn label_for_def_empty_name_falls_back_to_keyword() {
+        // Anonymous block header: the name token cleans to "" -> label is the bare
+        // keyword. The `if !n.is_empty() -> if true` guard mutant emits "impl "
+        // (trailing space) instead. Kills 271:24.
+        assert_eq!(label_for_def("impl {"), Some("impl".to_string()));
+        assert_eq!(label_for_def("fn {"), Some("fn".to_string()));
+    }
+
+    #[test]
+    fn fold_regions_string_end_exposes_brace() {
+        // A `{` inside a string is ignored; a `}` on the next line pops nothing ->
+        // empty. The string-end mutants close the string early, exposing the `{`.
+        // Kills 55:26, 55:31.
+        assert!(fold_regions("open = \"x{y\";\nclose }\n").is_empty());
+    }
+
+    #[test]
+    fn fold_regions_open_string_swallows_brace() {
+        // `"q"` closes, ` { ` opens line0, `}` line2 -> region (0,2). The
+        // `prev != '\\'` -> `==` mutant never closes the string. Kills 55:39.
+        let r = fold_regions("x = \"q\" {\n body;\n}\n");
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].start_line, r[0].end_line), (0, 2));
+    }
+
+    #[test]
+    fn fold_regions_ignores_braces_in_string_body() {
+        // Deleting the string-start arm treats in-string braces as real. Kills 60:21.
+        assert!(fold_regions("x = \"{\"\n}\n").is_empty());
+    }
+
+    #[test]
+    fn fold_regions_line_comment_hides_brace() {
+        // `// }` is a comment -> `}` ignored -> region (0,3). The comment-guard
+        // false / `!=` mutants treat it as code. Kills 61:28-false, 61:41.
+        let r = fold_regions("a {\n// }\nb;\n}\n");
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].start_line, r[0].end_line), (0, 3));
+    }
+
+    #[test]
+    fn fold_regions_single_slash_is_not_comment() {
+        // A single `/` (peek is space) is NOT a comment -> `}` pops -> region (0,1).
+        // The comment-guard true mutant swallows it. Kills 61:28-true.
+        let r = fold_regions("x {\na / b }\n");
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].start_line, r[0].end_line), (0, 1));
+    }
+
+    #[test]
+    fn symbol_scopes_string_end_exposes_brace() {
+        // Same scanner as fold_regions but scope-gated by label_for_def. Kills
+        // 302:26, 302:31.
+        assert!(symbol_scopes("fn a() {\ns = \"x}\"\n").is_empty());
+    }
+
+    #[test]
+    fn symbol_scopes_open_string_swallows_close() {
+        // Kills 302:39.
+        let s = symbol_scopes("fn a() {\nx;\n\"q\" }\n");
+        assert_eq!(
+            s.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(),
+            vec!["fn a"]
+        );
+        assert_eq!((s[0].start_line, s[0].end_line), (0, 2));
+    }
+
+    #[test]
+    fn symbol_scopes_string_arm_hides_brace() {
+        // Kills 307:21.
+        let s = symbol_scopes("fn a() {\nx = \"{\"\ny;\n}\n");
+        assert_eq!(
+            s.iter().map(|x| x.label.as_str()).collect::<Vec<_>>(),
+            vec!["fn a"]
+        );
+        assert_eq!(s[0].end_line, 3);
+    }
+
+    #[test]
+    fn symbol_scopes_line_comment_hides_close() {
+        // Kills 308:28-false, 308:41.
+        let s = symbol_scopes("fn a() {\nx; // }\ny;\n}\n");
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].end_line, 3);
+    }
+
+    #[test]
+    fn symbol_scopes_single_slash_is_not_comment() {
+        // Kills 308:28-true.
+        let s = symbol_scopes("fn a() {\nz = a / b }\n");
+        assert_eq!(s.len(), 1);
+        assert_eq!((s[0].start_line, s[0].end_line), (0, 1));
+    }
+
+    #[test]
+    fn outline_symbols_section_end_spans_to_next_peer() {
+        // "# A"(l1,line0), "## B"(l2,line1), "# C"(l1,line2). A's section runs to
+        // the line before the next level-1 heading (C@2) => 1. The `+ -> *`
+        // collapses every end to its own start; `<= -> >` breaks at the nested B;
+        // `+ -> -` panics at i=0. Kills 360:33 (x2), 361:27.
+        let out = outline_symbols("# A\n## B\n# C\n", Some("md"));
+        let a = out.iter().find(|s| s.label == "A").expect("heading A");
+        assert_eq!(
+            a.end_line, 1,
+            "A must span to just before the next peer heading"
+        );
+        assert!(a.end_line > a.start_line);
+    }
+
+    #[test]
     fn folds_multiline_brace_pairs() {
         let src = "fn a() {\n    body;\n}\nfn b() {}\n";
         let regions = fold_regions(src);
