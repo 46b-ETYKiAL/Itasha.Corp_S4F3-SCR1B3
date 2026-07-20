@@ -15,15 +15,16 @@ use scribe_core::config::{ClaimType, ToolbarConfig, UpdateMode};
 use scribe_core::{Config, ReportingMode};
 
 /// Left-nav categories, in display order. Look-and-feel groups first
-/// (Appearance, Fonts, Window, Toolbar, Motion), then editing behaviour
-/// (Editor, Spellcheck), then system (Plugins, Default app, Updates, Privacy) —
-/// with "Default app" sitting directly below Plugins, then Updates and Privacy.
+/// (Appearance, Fonts, Motion, Window, Toolbar) so the visual pages sit
+/// together, then editing behaviour (Editor, Spellcheck), then system (Plugins,
+/// Default app, Updates, Privacy) — with "Default app" sitting directly below
+/// Plugins, then Updates and Privacy.
 const CATEGORIES: &[&str] = &[
     "Appearance",
     "Fonts",
+    "Motion",
     "Window",
     "Toolbar",
-    "Motion",
     "Editor",
     "Spellcheck",
     "Plugins",
@@ -582,7 +583,16 @@ fn render_sections(
             "Appearance",
             "Theme, window chrome, and toolbar look. Changes apply live.",
         );
-        settings_grid(ui, "settings-appearance", |ui| {
+        // -- Theme & scale -- (header intentionally NOT the bare word "Theme":
+        // it would collide with the "Theme" row label under search, giving two
+        // identically-labelled AccessKit nodes.)
+        group(
+            ui,
+            "Theme & scale",
+            "The active colour theme, OS matching, and overall interface scale.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-appearance-theme", |ui| {
             if row_visible(q, "theme") {
                 // Phase 17 T17.2: theme picker over the built-ins + a free text
                 // field for user themes under <config_dir>/themes/<name>.toml.
@@ -685,6 +695,27 @@ fn render_sections(
                 changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
                 ui.end_row();
             }
+            changed |= grid_bool(
+                ui,
+                q,
+                "follow os dark light",
+                "Follow OS dark/light",
+                "Automatically switch between a light and dark theme to match the operating \
+                 system's appearance setting.",
+                &mut config.appearance.follow_os_theme,
+                &def.appearance.follow_os_theme,
+            );
+        });
+        ui.add_space(6.0);
+
+        // -- Backgrounds --
+        group(
+            ui,
+            "Backgrounds",
+            "Override the app and note background colours independently of the theme.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-appearance-backgrounds", |ui| {
             if row_visible(q, "background colour color app override") {
                 // #88 — app background colour, independent of the theme.
                 ui.label("App background").on_hover_text(
@@ -758,16 +789,17 @@ fn render_sections(
                 });
                 ui.end_row();
             }
-            changed |= grid_bool(
-                ui,
-                q,
-                "follow os dark light",
-                "Follow OS dark/light",
-                "Automatically switch between a light and dark theme to match the operating \
-                 system's appearance setting.",
-                &mut config.appearance.follow_os_theme,
-                &def.appearance.follow_os_theme,
-            );
+        });
+        ui.add_space(6.0);
+
+        // -- Window chrome --
+        group(
+            ui,
+            "Window chrome",
+            "How the window frame, title bar, and status bar are drawn.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-appearance-chrome", |ui| {
             changed |= grid_bool(
                 ui,
                 q,
@@ -803,6 +835,13 @@ fn render_sections(
                 &mut config.appearance.show_status_bar,
                 &def.appearance.show_status_bar,
             );
+        });
+        ui.add_space(6.0);
+
+        // -- Toolbar look --
+        group(ui, "Toolbar look", "How toolbar items are labelled.");
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-appearance-toolbar", |ui| {
             changed |= grid_bool(
                 ui,
                 q,
@@ -858,7 +897,14 @@ fn render_sections(
             "Editor font family, text size, and line spacing. (Ligatures are off — \
              the renderer does no OpenType shaping.)",
         );
-        settings_grid(ui, "settings-fonts", |ui| {
+        // -- Typeface --
+        group(
+            ui,
+            "Typeface",
+            "Fonts for the editor text and the app interface.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-fonts-typeface", |ui| {
             if row_visible(q, "font family theme editor note") {
                 ui.label("Note font")
                     .on_hover_text("Font for the note/editor text. Applies live, no restart.");
@@ -950,6 +996,69 @@ fn render_sections(
                     reset_to_default(ui, &mut config.editor.note_theme, &def.editor.note_theme);
                 ui.end_row();
             }
+        });
+        ui.add_space(6.0);
+
+        // -- Size & spacing --
+        group(ui, "Size & spacing", "Editor text size and line spacing.");
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-fonts-size", |ui| {
+            if row_visible(q, "editor size") {
+                ui.label("Size")
+                    .on_hover_text("Font size of the editor text, in points.");
+                ui.horizontal(|ui| {
+                    if ui.small_button("-").on_hover_text("Smaller").clicked() {
+                        config.fonts.editor_size =
+                            (config.fonts.editor_size - 1.0).clamp(8.0, 32.0);
+                        changed = true;
+                    }
+                    changed |= ui
+                        .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0))
+                        .changed();
+                    if ui.small_button("+").on_hover_text("Larger").clicked() {
+                        config.fonts.editor_size =
+                            (config.fonts.editor_size + 1.0).clamp(8.0, 32.0);
+                        changed = true;
+                    }
+                });
+                changed |=
+                    reset_to_default(ui, &mut config.fonts.editor_size, &def.fonts.editor_size);
+                ui.end_row();
+            }
+            if row_visible(q, "line height") {
+                ui.label("Line height").on_hover_text(
+                    "Vertical spacing between lines, as a multiple of the font size. Note: the \
+                     text caret + selection are exactly this tall, so a larger value also makes \
+                     them taller than the glyphs. ~1.2 keeps the caret tight to the text.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.small_button("-").on_hover_text("Tighter").clicked() {
+                        config.fonts.line_height = (config.fonts.line_height - 0.1).clamp(1.0, 2.5);
+                        changed = true;
+                    }
+                    changed |= ui
+                        .add(egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5))
+                        .changed();
+                    if ui.small_button("+").on_hover_text("Looser").clicked() {
+                        config.fonts.line_height = (config.fonts.line_height + 0.1).clamp(1.0, 2.5);
+                        changed = true;
+                    }
+                });
+                changed |=
+                    reset_to_default(ui, &mut config.fonts.line_height, &def.fonts.line_height);
+                ui.end_row();
+            }
+        });
+        ui.add_space(6.0);
+
+        // -- Markdown colouring --
+        group(
+            ui,
+            "Markdown colouring",
+            "Colour extra note tokens the syntax grammar leaves plain.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-fonts-markdown", |ui| {
             changed |= grid_bool(
                 ui,
                 q,
@@ -1013,51 +1122,6 @@ fn render_sections(
                 &mut config.editor.md_color_table_pipes,
                 &def.editor.md_color_table_pipes,
             );
-            if row_visible(q, "editor size") {
-                ui.label("Size")
-                    .on_hover_text("Font size of the editor text, in points.");
-                ui.horizontal(|ui| {
-                    if ui.small_button("-").on_hover_text("Smaller").clicked() {
-                        config.fonts.editor_size =
-                            (config.fonts.editor_size - 1.0).clamp(8.0, 32.0);
-                        changed = true;
-                    }
-                    changed |= ui
-                        .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0))
-                        .changed();
-                    if ui.small_button("+").on_hover_text("Larger").clicked() {
-                        config.fonts.editor_size =
-                            (config.fonts.editor_size + 1.0).clamp(8.0, 32.0);
-                        changed = true;
-                    }
-                });
-                changed |=
-                    reset_to_default(ui, &mut config.fonts.editor_size, &def.fonts.editor_size);
-                ui.end_row();
-            }
-            if row_visible(q, "line height") {
-                ui.label("Line height").on_hover_text(
-                    "Vertical spacing between lines, as a multiple of the font size. Note: the \
-                     text caret + selection are exactly this tall, so a larger value also makes \
-                     them taller than the glyphs. ~1.2 keeps the caret tight to the text.",
-                );
-                ui.horizontal(|ui| {
-                    if ui.small_button("-").on_hover_text("Tighter").clicked() {
-                        config.fonts.line_height = (config.fonts.line_height - 0.1).clamp(1.0, 2.5);
-                        changed = true;
-                    }
-                    changed |= ui
-                        .add(egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5))
-                        .changed();
-                    if ui.small_button("+").on_hover_text("Looser").clicked() {
-                        config.fonts.line_height = (config.fonts.line_height + 0.1).clamp(1.0, 2.5);
-                        changed = true;
-                    }
-                });
-                changed |=
-                    reset_to_default(ui, &mut config.fonts.line_height, &def.fonts.line_height);
-                ui.end_row();
-            }
         });
         space(ui);
     }
@@ -1683,7 +1747,14 @@ fn render_sections(
         );
         // Master OFF by default — calm-surface principle (DECISION-2026-005);
         // animation is opt-in so idle frames cost the same as plain egui.
-        settings_grid(ui, "settings-motion", |ui| {
+        // -- Animation --
+        group(
+            ui,
+            "Animation",
+            "Master switch, and the speed of the editor's chrome transitions.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-motion-master", |ui| {
             changed |= grid_bool(
                 ui,
                 q,
@@ -1708,24 +1779,21 @@ fn render_sections(
                     reset_to_default(ui, &mut config.motion.intensity, &def.motion.intensity);
                 ui.end_row();
             }
-            if row_visible(q, "cursor blink motion") {
-                ui.add_enabled_ui(on, |ui| {
-                    changed |= ui
-                        .checkbox(&mut config.motion.cursor_blink, "Blink the text cursor")
-                        .on_hover_text(
-                            "Blink the text caret instead of showing it steady. Disable for a \
-                             calmer, motion-free caret.",
-                        )
-                        .changed();
-                });
-                ui.label("");
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.motion.cursor_blink,
-                    &def.motion.cursor_blink,
-                );
-                ui.end_row();
-            }
+        });
+        ui.add_space(6.0);
+
+        // `on` gates every effect below in lock-step with the master toggle,
+        // read once here so each group's grid closure can capture it.
+        let on = config.motion.enabled;
+
+        // -- CRT screen --
+        group(
+            ui,
+            "CRT screen",
+            "Scanlines, flicker, and the boot glitch over the whole surface.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-motion-crt", |ui| {
             if row_visible(q, "crt scanlines retro motion effect") {
                 ui.add_enabled_ui(on, |ui| {
                     changed |= ui
@@ -1762,6 +1830,78 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+            if row_visible(q, "screen flicker motion effect") {
+                ui.add_enabled_ui(on, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.motion.flicker, "Screen flicker")
+                        .on_hover_text("Subtle CRT-style brightness flicker over the whole window.")
+                        .changed();
+                });
+                ui.label("");
+                changed |= reset_to_default(ui, &mut config.motion.flicker, &def.motion.flicker);
+                ui.end_row();
+            }
+            if row_visible(q, "flicker strength motion") {
+                ui.label("Flicker strength")
+                    .on_hover_text("How strong the screen flicker is (capped low for comfort).");
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.flicker,
+                    &mut config.motion.flicker_strength,
+                    0.0..=0.20,
+                    0.01,
+                );
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.flicker_strength,
+                    &def.motion.flicker_strength,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "flicker speed cadence motion") {
+                ui.label("Flicker speed").on_hover_text(
+                    "How fast the screen flicker pulses. 1 is the standard cadence; lower is a \
+                     slower shimmer and higher flickers faster. Independent of the strength.",
+                );
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.flicker,
+                    &mut config.motion.flicker_speed,
+                    0.25..=3.0,
+                    0.1,
+                );
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.flicker_speed,
+                    &def.motion.flicker_speed,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "boot glitch startup motion effect") {
+                ui.add_enabled_ui(on, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.motion.boot_glitch, "Boot glitch")
+                        .on_hover_text(
+                            "A one-shot glitch sweep plays for a moment when the app launches.",
+                        )
+                        .changed();
+                });
+                ui.label("");
+                changed |=
+                    reset_to_default(ui, &mut config.motion.boot_glitch, &def.motion.boot_glitch);
+                ui.end_row();
+            }
+        });
+        ui.add_space(6.0);
+
+        // -- Ambient node-mesh --
+        group(
+            ui,
+            "Ambient node-mesh",
+            "The drifting Wired node-mesh background lattice.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-motion-mesh", |ui| {
             if row_visible(q, "wired node mesh ambient background motion") {
                 ui.add_enabled_ui(on, |ui| {
                     changed |= ui
@@ -1891,6 +2031,17 @@ fn render_sections(
                 });
                 ui.end_row();
             }
+        });
+        ui.add_space(6.0);
+
+        // -- Tape & motion accents --
+        group(
+            ui,
+            "Tape & motion accents",
+            "VHS tracking bands sweeping down the window.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-motion-tape", |ui| {
             if row_visible(q, "vhs tracking lines motion effect") {
                 ui.add_enabled_ui(on, |ui| {
                     changed |= ui
@@ -1924,50 +2075,32 @@ fn render_sections(
                     reset_to_default(ui, &mut config.motion.vhs_speed, &def.motion.vhs_speed);
                 ui.end_row();
             }
-            if row_visible(q, "screen flicker motion effect") {
+        });
+        ui.add_space(6.0);
+
+        // -- Caret --
+        group(
+            ui,
+            "Caret",
+            "Blink and the phosphor ghost-trail behind the text caret.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-motion-caret", |ui| {
+            if row_visible(q, "cursor blink motion") {
                 ui.add_enabled_ui(on, |ui| {
                     changed |= ui
-                        .checkbox(&mut config.motion.flicker, "Screen flicker")
-                        .on_hover_text("Subtle CRT-style brightness flicker over the whole window.")
+                        .checkbox(&mut config.motion.cursor_blink, "Blink the text cursor")
+                        .on_hover_text(
+                            "Blink the text caret instead of showing it steady. Disable for a \
+                             calmer, motion-free caret.",
+                        )
                         .changed();
                 });
                 ui.label("");
-                changed |= reset_to_default(ui, &mut config.motion.flicker, &def.motion.flicker);
-                ui.end_row();
-            }
-            if row_visible(q, "flicker strength motion") {
-                ui.label("Flicker strength")
-                    .on_hover_text("How strong the screen flicker is (capped low for comfort).");
-                changed |= stepped_slider(
-                    ui,
-                    on && config.motion.flicker,
-                    &mut config.motion.flicker_strength,
-                    0.0..=0.20,
-                    0.01,
-                );
                 changed |= reset_to_default(
                     ui,
-                    &mut config.motion.flicker_strength,
-                    &def.motion.flicker_strength,
-                );
-                ui.end_row();
-            }
-            if row_visible(q, "flicker speed cadence motion") {
-                ui.label("Flicker speed").on_hover_text(
-                    "How fast the screen flicker pulses. 1 is the standard cadence; lower is a \
-                     slower shimmer and higher flickers faster. Independent of the strength.",
-                );
-                changed |= stepped_slider(
-                    ui,
-                    on && config.motion.flicker,
-                    &mut config.motion.flicker_speed,
-                    0.25..=3.0,
-                    0.1,
-                );
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.motion.flicker_speed,
-                    &def.motion.flicker_speed,
+                    &mut config.motion.cursor_blink,
+                    &def.motion.cursor_blink,
                 );
                 ui.end_row();
             }
@@ -2000,20 +2133,6 @@ fn render_sections(
                     &mut config.motion.caret_trail_intensity,
                     &def.motion.caret_trail_intensity,
                 );
-                ui.end_row();
-            }
-            if row_visible(q, "boot glitch startup motion effect") {
-                ui.add_enabled_ui(on, |ui| {
-                    changed |= ui
-                        .checkbox(&mut config.motion.boot_glitch, "Boot glitch")
-                        .on_hover_text(
-                            "A one-shot glitch sweep plays for a moment when the app launches.",
-                        )
-                        .changed();
-                });
-                ui.label("");
-                changed |=
-                    reset_to_default(ui, &mut config.motion.boot_glitch, &def.motion.boot_glitch);
                 ui.end_row();
             }
         });
@@ -3142,6 +3261,18 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
 
 fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     let mut changed = false;
+    // Same section idiom as the `group` closure in `render_sections` (a strong
+    // label, a muted one-line description, then a thin rule), replicated inline
+    // because this is a separate free function without that closure in scope —
+    // so every settings page's sub-sections read consistently.
+    let group = |ui: &mut egui::Ui, label: &str, desc: &str| {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(label).strong());
+        if !desc.is_empty() {
+            ui.label(egui::RichText::new(desc).weak().small());
+        }
+        ui.separator();
+    };
     // Cap the editor content to a FIXED width (NOT available_width). This is the
     // load-bearing line for "the Settings window doesn't widen on the Toolbar
     // page": binding to available_width creates a feedback loop (wide window →
@@ -3187,7 +3318,12 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     // Phase 18 T18.5: button size + spacing + icon size sliders. All values
     // are clamped at render time so a malformed user toml can't produce a
     // 4000-px-tall toolbar.
-    ui.label(egui::RichText::new("Sizing").strong().small());
+    group(
+        ui,
+        "Sizing",
+        "Button and icon dimensions, and the gap between buttons.",
+    );
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.label("Button height (px)")
             .on_hover_text("Height of each quick-access toolbar button, in pixels.");
@@ -3230,8 +3366,8 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         config.toolbar.icon_size_px = scribe_core::config::ToolbarConfig::default_icon_size();
         changed = true;
     }
-    ui.add_space(8.0);
-    ui.label(egui::RichText::new("Items").strong().small());
+    group(ui, "Items", "Add, remove, and drag-reorder the toolbar buttons.");
+    ui.add_space(4.0);
     changed |= toolbar_list_editor(ui, &mut config.toolbar.items, "items", true);
     if ui
         .small_button("Reset toolbar to defaults")
@@ -3243,21 +3379,15 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     }
 
     // ---- User-curated "more-actions" dropdown menu (same editor as Items) ----
-    ui.add_space(10.0);
-    ui.label(
-        egui::RichText::new("Dropdown (more-actions menu)")
-            .strong()
-            .small(),
+    ui.add_space(2.0);
+    group(
+        ui,
+        "Menu (more-actions dropdown)",
+        "Actions parked in the toolbar's more-actions menu — reachable without taking a \
+         toolbar slot, so the bar stays clean. Curated with the SAME controls as the items \
+         above.",
     );
-    ui.label(
-        egui::RichText::new(
-            "Actions parked in the toolbar's more-actions menu — reachable without taking a \
-             toolbar slot, so the bar stays clean. Curated with the SAME controls as the items \
-             above.",
-        )
-        .weak()
-        .small(),
-    );
+    ui.add_space(4.0);
     if ui
         .checkbox(
             &mut config.toolbar.show_dropdown,
