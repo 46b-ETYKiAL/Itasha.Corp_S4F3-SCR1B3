@@ -427,6 +427,11 @@ criteria = "safe-to-deploy"
 version = "2.4.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.fastrand]]
+version = "2.5.0"
+criteria = "safe-to-deploy"
+notes = "dependabot patch bump; prior version exempted"
+
 [[exemptions.fax]]
 version = "0.2.7"
 criteria = "safe-to-deploy"
@@ -1364,6 +1369,11 @@ criteria = "safe-to-deploy"
 version = "2.6.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.syn]]
+version = "3.0.2"
+criteria = "safe-to-deploy"
+notes = "transitive of thiserror-impl 2.0.19 dependabot bump (dtolnay)"
+
 [[exemptions.syntect]]
 version = "5.3.0"
 criteria = "safe-to-deploy"
@@ -1396,6 +1406,11 @@ criteria = "safe-to-deploy"
 version = "2.0.18"
 criteria = "safe-to-deploy"
 
+[[exemptions.thiserror]]
+version = "2.0.19"
+criteria = "safe-to-deploy"
+notes = "dependabot patch bump; prior version exempted"
+
 [[exemptions.thiserror-impl]]
 version = "1.0.69"
 criteria = "safe-to-deploy"
@@ -1403,6 +1418,11 @@ criteria = "safe-to-deploy"
 [[exemptions.thiserror-impl]]
 version = "2.0.18"
 criteria = "safe-to-deploy"
+
+[[exemptions.thiserror-impl]]
+version = "2.0.19"
+criteria = "safe-to-deploy"
+notes = "dependabot patch bump; prior version exempted"
 
 [[exemptions.thread_local]]
 version = "1.1.9"
@@ -1684,6 +1704,11 @@ criteria = "safe-to-deploy"
 version = "29.0.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.wgpu-core-deps-apple]]
+version = "29.0.4"
+criteria = "safe-to-deploy"
+notes = "dependabot patch bump; prior version exempted"
+
 [[exemptions.wgpu-core-deps-emscripten]]
 version = "29.0.3"
 criteria = "safe-to-deploy"
@@ -1703,6 +1728,11 @@ criteria = "safe-to-deploy"
 [[exemptions.wgpu-naga-bridge]]
 version = "29.0.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.wgpu-naga-bridge]]
+version = "29.0.4"
+criteria = "safe-to-deploy"
+notes = "dependabot patch bump; prior version exempted"
 
 [[exemptions.wgpu-types]]
 version = "29.0.3"
