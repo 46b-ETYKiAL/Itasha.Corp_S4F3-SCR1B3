@@ -926,6 +926,48 @@ mod tint_tests {
     }
 
     #[test]
+    fn make_layouter_galley_cache_invalidates_on_text_change() {
+        // The galley cache short-circuits to the cached Arc<Galley> only when the
+        // content key MATCHES (`*gk == key`). Mutant 664 (`== -> !=`) would return
+        // the cached galley when the text CHANGED — rendering STALE text. Drive
+        // the layouter twice with different text (same wrap) and assert the second
+        // galley reflects the NEW text, not the stale first one.
+        egui::__run_test_ui(|ui| {
+            let hl = Highlighter::new();
+            let cache = std::cell::RefCell::new(None);
+            let gcache = std::cell::RefCell::new(None);
+            let inc = std::cell::RefCell::new(IncrementalHighlightState::default());
+            let mut layouter = make_layouter(
+                &hl,
+                &cache,
+                &gcache,
+                &inc,
+                Some("txt"),
+                egui::FontId::monospace(12.0),
+                1.0,
+                false, // word_wrap
+                Color32::WHITE,
+                Color32::from_rgb(0, 0, 255),
+                false, // detect_links
+            );
+            let s1 = String::from("first buffer contents");
+            let s2 = String::from("second entirely different contents");
+            let _g1 = layouter(ui, &s1, 400.0); // primes the galley cache with s1's key
+            let g2 = layouter(ui, &s2, 400.0); // same wrap, different text
+            assert!(
+                g2.text().contains("second"),
+                "the galley cache must MISS on a text change (not return the stale first galley): {:?}",
+                g2.text()
+            );
+            assert!(
+                !g2.text().contains("first"),
+                "the second galley must not carry the stale first-buffer text: {:?}",
+                g2.text()
+            );
+        });
+    }
+
+    #[test]
     fn highlight_job_underlines_url_spans_only() {
         // append_split sub-segments a line at URL byte-boundaries: the URL portion
         // gets the underlined url_fmt, the rest keeps base. The returned LayoutJob
