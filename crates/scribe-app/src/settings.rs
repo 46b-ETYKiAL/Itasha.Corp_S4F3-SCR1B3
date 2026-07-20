@@ -1310,7 +1310,9 @@ fn render_sections(
                 ];
                 ui.label("Caret style")
                     .on_hover_text("Shape of the text caret: thin bar, full block, or underline.");
-                let cur = styles.iter().position(|(s, _)| *s == config.editor.caret_style);
+                let cur = styles
+                    .iter()
+                    .position(|(s, _)| *s == config.editor.caret_style);
                 let sel = styles
                     .iter()
                     .find(|(s, _)| *s == config.editor.caret_style)
@@ -1477,7 +1479,8 @@ fn render_sections(
                     "Keep the caret at least this many lines from the top/bottom edge when \
                      navigating by keyboard (Vim scrolloff). 0 disables.",
                 );
-                changed |= stepped_slider(ui, true, &mut config.scroll.caret_scroll_off, 0..=12, 1.0);
+                changed |=
+                    stepped_slider(ui, true, &mut config.scroll.caret_scroll_off, 0..=12, 1.0);
                 changed |= reset_to_default(
                     ui,
                     &mut config.scroll.caret_scroll_off,
@@ -2272,8 +2275,13 @@ fn render_sections(
                     "How strongly the tint colour is blended over the surface — 0 is none, \
                      1 is full.",
                 );
-                changed |=
-                    stepped_slider(ui, tint_on, &mut config.window.tint_strength, 0.0..=1.0, 0.1);
+                changed |= stepped_slider(
+                    ui,
+                    tint_on,
+                    &mut config.window.tint_strength,
+                    0.0..=1.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.window.tint_strength,
@@ -3327,7 +3335,13 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     ui.horizontal(|ui| {
         ui.label("Button height (px)")
             .on_hover_text("Height of each quick-access toolbar button, in pixels.");
-        changed |= stepped_slider(ui, true, &mut config.toolbar.button_size_px, 16.0..=64.0, 1.0);
+        changed |= stepped_slider(
+            ui,
+            true,
+            &mut config.toolbar.button_size_px,
+            16.0..=64.0,
+            1.0,
+        );
         changed |= reset_to_default(
             ui,
             &mut config.toolbar.button_size_px,
@@ -3337,8 +3351,13 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     ui.horizontal(|ui| {
         ui.label("Button spacing (px)")
             .on_hover_text("Gap between adjacent toolbar buttons, in pixels.");
-        changed |=
-            stepped_slider(ui, true, &mut config.toolbar.button_spacing_px, 0.0..=24.0, 1.0);
+        changed |= stepped_slider(
+            ui,
+            true,
+            &mut config.toolbar.button_spacing_px,
+            0.0..=24.0,
+            1.0,
+        );
         changed |= reset_to_default(
             ui,
             &mut config.toolbar.button_spacing_px,
@@ -3366,7 +3385,11 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         config.toolbar.icon_size_px = scribe_core::config::ToolbarConfig::default_icon_size();
         changed = true;
     }
-    group(ui, "Items", "Add, remove, and drag-reorder the toolbar buttons.");
+    group(
+        ui,
+        "Items",
+        "Add, remove, and drag-reorder the toolbar buttons.",
+    );
     ui.add_space(4.0);
     changed |= toolbar_list_editor(ui, &mut config.toolbar.items, "items", true);
     if ui
