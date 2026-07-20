@@ -968,6 +968,49 @@ mod tint_tests {
     }
 
     #[test]
+    fn make_layouter_galley_cache_invalidates_on_wrap_change() {
+        // The galley cache short-circuits only when BOTH the content key AND the
+        // wrap width match (`*gk == key && *gw == eff_wrap`). Mutant 664:38
+        // (`*gw == eff_wrap` -> `!=`) returns the galley laid out at the OLD wrap
+        // when the wrap CHANGES (same text). Drive the layouter with word_wrap=true
+        // and the SAME text at a narrow then a wide width; the wide re-layout must
+        // be SHORTER (fewer wrapped rows) than the stale narrow galley.
+        egui::__run_test_ui(|ui| {
+            let hl = Highlighter::new();
+            let cache = std::cell::RefCell::new(None);
+            let gcache = std::cell::RefCell::new(None);
+            let inc = std::cell::RefCell::new(IncrementalHighlightState::default());
+            let mut layouter = make_layouter(
+                &hl,
+                &cache,
+                &gcache,
+                &inc,
+                Some("txt"),
+                egui::FontId::monospace(12.0),
+                1.0,
+                true, // word_wrap = true so eff_wrap tracks the wrap arg
+                Color32::WHITE,
+                Color32::from_rgb(0, 0, 255),
+                false, // detect_links
+            );
+            let text = String::from("some buffer prose to lay out at two different widths");
+            let _g_narrow = layouter(ui, &text, 60.0); // primes gcache with wrap=60
+            let g_wide = layouter(ui, &text, 600.0); // SAME text (same key), wrap=600
+            // The galley RETAINS the wrap width it was laid out at
+            // (`job.wrap.max_width`) — a headless-robust observable that does not
+            // depend on real font metrics. On a wrap change the cache must MISS
+            // and re-layout at 600; the 664:38 mutant returns the stale wrap=60
+            // galley instead.
+            assert!(
+                g_wide.job.wrap.max_width > 100.0,
+                "the galley cache must re-layout on a wrap change (expected the wide 600 layout, \
+                 not the stale narrow 60): job.wrap.max_width={}",
+                g_wide.job.wrap.max_width
+            );
+        });
+    }
+
+    #[test]
     fn highlight_job_underlines_url_spans_only() {
         // append_split sub-segments a line at URL byte-boundaries: the URL portion
         // gets the underlined url_fmt, the rest keeps base. The returned LayoutJob
