@@ -107,6 +107,7 @@ exclude_re = [
   "paint_wired_mesh",
   "paint_caret_trail",
   "paint_boot_glitch",
+  "paint_squiggle",  # render_support.rs spellcheck-underline paint: painter.line_segment only (GPU pixels, no return/observable state) — ADR-0007 egui-paint
   # settings.rs settings-panel render surfaces
   '\brender_sections\b',
   '\brender_update_status\b',
