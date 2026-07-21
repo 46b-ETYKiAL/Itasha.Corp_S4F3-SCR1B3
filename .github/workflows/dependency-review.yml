@@ -1,0 +1,54 @@
+# PR-time supply-chain gate. Blocks a pull request that INTRODUCES a dependency
+# carrying a known (GHSA) vulnerability at/above `fail-on-severity`, BEFORE it
+# lands — a gate the whole-tree cargo-deny/cargo-audit CI cannot give (they run
+# after merge / on the full tree, not as a diff gate on the PR).
+#
+# Complements — does not replace — cargo-deny (deny.toml), which stays the
+# authoritative advisory + license gate over the entire dependency tree.
+# License checking is deliberately OFF here: GitHub's dependency-graph SPDX
+# metadata for Cargo crates is incomplete and produces false "unknown license"
+# failures, so deny.toml owns licenses and this action owns the PR vuln-diff.
+#
+# GitHub's dependency graph parses Cargo.lock, so this works on the Rust tree.
+name: Dependency Review
+
+on:
+  pull_request:
+    branches: [master]
+
+# Least-privilege default; the job elevates only what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: dep-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: dependency review
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # comment-summary-in-pr (no-ops on fork PRs; the gate still runs)
+    steps:
+      - name: Harden the runner (egress block)
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          # Block-mode egress firewall. dependency-review-action only reaches
+          # the GitHub dependency-graph API; checkout reaches github.com.
+          egress-policy: block
+          disable-sudo: true
+          allowed-endpoints: >
+            github.com:443
+            api.github.com:443
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Dependency review
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          # deny.toml is the authoritative license gate — see header.
+          license-check: false
+          comment-summary-in-pr: on-failure

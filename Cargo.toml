@@ -71,3 +71,12 @@ lto = "thin"
 codegen-units = 1
 strip = true                  # tiny binary ("not bloated")
 panic = "abort"
+# Defense-in-depth for a parser of UNTRUSTED file content: with the release
+# default (wrapping arithmetic) a length/offset miscalculation can silently
+# become an out-of-bounds index or logic bug. `overflow-checks` turns an integer
+# overflow into an immediate, clean `panic = "abort"` (fail-fast) instead. The
+# crates are `#![forbid(unsafe_code)]`, so the worst case is a controlled abort
+# on a malicious file (availability), never memory corruption. Small arithmetic
+# cost, worth it for an editor that opens arbitrary files. (rustc Exploit
+# Mitigations; Rust security WG guidance for untrusted-input parsers.)
+overflow-checks = true
