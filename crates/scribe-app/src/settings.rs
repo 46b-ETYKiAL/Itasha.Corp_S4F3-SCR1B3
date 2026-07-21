@@ -484,6 +484,29 @@ fn stepper_combo(
     changed
 }
 
+/// Whether the − step button is live: the parent control is enabled AND the
+/// value is strictly above the low bound (at the bound the button is disabled so
+/// it can never step past the range — W3C ARIA APG slider guidance).
+fn step_down_enabled(enabled: bool, cur: f64, lo: f64) -> bool {
+    enabled && cur > lo
+}
+
+/// Whether the + step button is live: the parent control is enabled AND the
+/// value is strictly below the high bound.
+fn step_up_enabled(enabled: bool, cur: f64, hi: f64) -> bool {
+    enabled && cur < hi
+}
+
+/// Nudge one `step` DOWN, clamped at the low bound (no wrap).
+fn nudge_down(cur: f64, step: f64, lo: f64) -> f64 {
+    (cur - step).max(lo)
+}
+
+/// Nudge one `step` UP, clamped at the high bound (no wrap).
+fn nudge_up(cur: f64, step: f64, hi: f64) -> f64 {
+    (cur + step).min(hi)
+}
+
 /// A slider flanked by −/+ step buttons (minus LEFT, plus RIGHT) — added to
 /// every settings slider so a value can be nudged one `step` without dragging.
 /// The buttons CLAMP at the range bounds (no wrap) and are disabled at the bound
@@ -506,13 +529,13 @@ fn stepped_slider<N: egui::emath::Numeric>(
         let cur = val.to_f64();
         if ui
             .add_enabled(
-                enabled && cur > lo,
+                step_down_enabled(enabled, cur, lo),
                 egui::Button::new(egui_phosphor::thin::MINUS),
             )
             .on_hover_text("Decrease")
             .clicked()
         {
-            *val = N::from_f64((cur - step).max(lo));
+            *val = N::from_f64(nudge_down(cur, step, lo));
             changed = true;
         }
         changed |= ui
@@ -521,13 +544,13 @@ fn stepped_slider<N: egui::emath::Numeric>(
         let cur = val.to_f64();
         if ui
             .add_enabled(
-                enabled && cur < hi,
+                step_up_enabled(enabled, cur, hi),
                 egui::Button::new(egui_phosphor::thin::PLUS),
             )
             .on_hover_text("Increase")
             .clicked()
         {
-            *val = N::from_f64((cur + step).min(hi));
+            *val = N::from_f64(nudge_up(cur, step, hi));
             changed = true;
         }
     });
@@ -3584,6 +3607,185 @@ mod index_step {
     fn an_empty_list_returns_zero() {
         assert_eq!(step_index(0, None, 1), 0);
         assert_eq!(step_index(0, None, -1), 0);
+    }
+}
+
+#[cfg(test)]
+mod stepper_widgets {
+    //! Behaviour of the shared `stepped_slider` / `stepper_combo` controls. The
+    //! pure predicate/clamp helpers are asserted directly (their comparison &
+    //! arithmetic mutants cannot be reached through the UI because the clamp
+    //! masks an over-stepped value at the bounds); the click→effect wiring is
+    //! exercised through an `egui_kittest` harness.
+    use super::{
+        nudge_down, nudge_up, step_down_enabled, step_up_enabled, stepped_slider, stepper_combo,
+    };
+    use egui_kittest::kittest::Queryable as _;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    // ---- pure helpers (kill the comparison + arithmetic mutants) ----
+
+    /// The − button is live ONLY when the parent is enabled AND the value is
+    /// STRICTLY above the low bound. Kills `&&`→`||` (parent-off must win),
+    /// `>`→`>=` (dead exactly AT the bound), and `>`→`==`/`<` (live above it).
+    #[test]
+    fn minus_button_is_live_only_strictly_above_the_low_bound() {
+        assert!(
+            step_down_enabled(true, 5.0, 0.0),
+            "enabled + above min → live"
+        );
+        assert!(
+            !step_down_enabled(true, 0.0, 0.0),
+            "AT the low bound → dead (>= would wrongly report live)"
+        );
+        assert!(
+            !step_down_enabled(false, 5.0, 0.0),
+            "parent disabled → dead (|| would wrongly report live)"
+        );
+    }
+
+    /// The + button is live ONLY when enabled AND strictly below the high bound.
+    /// Kills `&&`→`||`, `<`→`<=` (dead AT the bound), and `<`→`>`/`==`.
+    #[test]
+    fn plus_button_is_live_only_strictly_below_the_high_bound() {
+        assert!(
+            step_up_enabled(true, 5.0, 10.0),
+            "enabled + below max → live"
+        );
+        assert!(
+            !step_up_enabled(true, 10.0, 10.0),
+            "AT the high bound → dead (<= would wrongly report live)"
+        );
+        assert!(
+            !step_up_enabled(false, 5.0, 10.0),
+            "parent disabled → dead (|| would wrongly report live)"
+        );
+    }
+
+    /// − steps down exactly one `step`, clamped at the low bound. Kills `-`→`+`
+    /// (would give 6), `-`→`/` (would give 5), and `.max`→`.min` (clamp inverts).
+    #[test]
+    fn nudge_down_subtracts_one_step_and_clamps_at_the_low_bound() {
+        assert_eq!(nudge_down(5.0, 1.0, 0.0), 4.0);
+        assert_eq!(
+            nudge_down(0.5, 1.0, 0.0),
+            0.0,
+            "never steps below the low bound"
+        );
+    }
+
+    /// The + button steps up exactly one `step`, clamped at the high bound.
+    /// Kills `+`→`-` (would give 4), `+`→`*` (would give 5), and `.min`→`.max`.
+    #[test]
+    fn nudge_up_adds_one_step_and_clamps_at_the_high_bound() {
+        assert_eq!(nudge_up(5.0, 1.0, 10.0), 6.0);
+        assert_eq!(
+            nudge_up(9.5, 1.0, 10.0),
+            10.0,
+            "never steps above the high bound"
+        );
+    }
+
+    // ---- harness wiring (kill the UI control-flow mutants) ----
+
+    /// Clicking − on the live slider steps the value down by one AND the control
+    /// reports the change. Kills `stepped_slider -> bool` replaced with `false`
+    /// (return would be false) and `changed |= …` replaced with `&=` (the
+    /// minus-set `true` would be zeroed because the slider itself did not change).
+    #[test]
+    fn clicking_minus_steps_down_and_reports_changed() {
+        let val = Rc::new(Cell::new(5.0_f64));
+        let changed = Rc::new(Cell::new(false));
+        let (v2, c2) = (val.clone(), changed.clone());
+        let mut h = egui_kittest::Harness::builder().build_ui(move |ui| {
+            let mut cur = v2.get();
+            let ch = stepped_slider(ui, true, &mut cur, 0.0..=10.0, 1.0);
+            v2.set(cur);
+            c2.set(c2.get() || ch); // latch across settling frames
+        });
+        h.run();
+        changed.set(false); // reset after the initial settle, before the click
+        h.get_by_label(egui_phosphor::thin::MINUS).click();
+        h.run();
+        assert_eq!(val.get(), 4.0, "minus steps the value down by one");
+        assert!(changed.get(), "the control reports the change");
+    }
+
+    /// Clicking + steps the value up by one and reports the change.
+    #[test]
+    fn clicking_plus_steps_up_and_reports_changed() {
+        let val = Rc::new(Cell::new(5.0_f64));
+        let changed = Rc::new(Cell::new(false));
+        let (v2, c2) = (val.clone(), changed.clone());
+        let mut h = egui_kittest::Harness::builder().build_ui(move |ui| {
+            let mut cur = v2.get();
+            let ch = stepped_slider(ui, true, &mut cur, 0.0..=10.0, 1.0);
+            v2.set(cur);
+            c2.set(c2.get() || ch);
+        });
+        h.run();
+        changed.set(false);
+        h.get_by_label(egui_phosphor::thin::PLUS).click();
+        h.run();
+        assert_eq!(val.get(), 6.0, "plus steps the value up by one");
+        assert!(changed.get(), "the control reports the change");
+    }
+
+    /// Clicking the ◀ caret cycles to the PREVIOUS option and reports the change.
+    /// Kills the deleted `-` in `step_index(len, current_idx, -1)` (the caret
+    /// would otherwise step FORWARD to index 2) and `stepper_combo -> bool`
+    /// replaced with `false` (return would be false).
+    #[test]
+    fn caret_left_picks_the_previous_option_and_reports_changed() {
+        let picked = Rc::new(Cell::new(None::<usize>));
+        let changed = Rc::new(Cell::new(false));
+        let (p2, c2) = (picked.clone(), changed.clone());
+        let mut h = egui_kittest::Harness::builder().build_ui(move |ui| {
+            let ch = stepper_combo(
+                ui,
+                "test-combo",
+                100.0,
+                "option",
+                3,
+                Some(1),
+                "b",
+                |i| ["a", "b", "c"][i].to_string(),
+                |i| p2.set(Some(i)),
+            );
+            c2.set(c2.get() || ch);
+        });
+        h.run();
+        changed.set(false);
+        picked.set(None);
+        h.get_by_label(egui_phosphor::thin::CARET_LEFT).click();
+        h.run();
+        assert_eq!(picked.get(), Some(0), "◀ steps to the previous index");
+        assert!(changed.get(), "the control reports the change");
+    }
+
+    /// Clicking the ▶ caret cycles to the NEXT option.
+    #[test]
+    fn caret_right_picks_the_next_option() {
+        let picked = Rc::new(Cell::new(None::<usize>));
+        let p2 = picked.clone();
+        let mut h = egui_kittest::Harness::builder().build_ui(move |ui| {
+            stepper_combo(
+                ui,
+                "test-combo",
+                100.0,
+                "option",
+                3,
+                Some(1),
+                "b",
+                |i| ["a", "b", "c"][i].to_string(),
+                |i| p2.set(Some(i)),
+            );
+        });
+        h.run();
+        h.get_by_label(egui_phosphor::thin::CARET_RIGHT).click();
+        h.run();
+        assert_eq!(picked.get(), Some(2), "▶ steps to the next index");
     }
 }
 
