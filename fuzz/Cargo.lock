@@ -999,7 +999,7 @@ dependencies = [
 
 [[package]]
 name = "scribe-core"
-version = "0.4.61"
+version = "0.4.62"
 dependencies = [
  "chardetng",
  "directories",
