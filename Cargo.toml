@@ -13,7 +13,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.4.60"
+version = "0.4.61"
 edition = "2021"
 # True floor: the egui 0.34 stack (egui/eframe/egui_tiles/epaint…) declares
 # rust-version 1.92, so the workspace cannot build below it. Verified with
