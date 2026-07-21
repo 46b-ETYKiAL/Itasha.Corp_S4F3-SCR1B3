@@ -15,15 +15,16 @@ use scribe_core::config::{ClaimType, ToolbarConfig, UpdateMode};
 use scribe_core::{Config, ReportingMode};
 
 /// Left-nav categories, in display order. Look-and-feel groups first
-/// (Appearance, Fonts, Window, Toolbar, Motion), then editing behaviour
-/// (Editor, Spellcheck), then system (Plugins, Default app, Updates, Privacy) —
-/// with "Default app" sitting directly below Plugins, then Updates and Privacy.
+/// (Appearance, Fonts, Motion, Window, Toolbar) so the visual pages sit
+/// together, then editing behaviour (Editor, Spellcheck), then system (Plugins,
+/// Default app, Updates, Privacy) — with "Default app" sitting directly below
+/// Plugins, then Updates and Privacy.
 const CATEGORIES: &[&str] = &[
     "Appearance",
     "Fonts",
+    "Motion",
     "Window",
     "Toolbar",
-    "Motion",
     "Editor",
     "Spellcheck",
     "Plugins",
@@ -402,6 +403,160 @@ fn grid_bool(
     changed
 }
 
+/// Step an index in a list of `len` options by `delta`, wrapping both ways
+/// (`rem_euclid`). A `current` of `None` (the selected value is not in the list,
+/// e.g. a user-typed theme name) lands on the first option stepping forward and
+/// the last stepping back, so the arrows always have a defined destination.
+/// Generalizes `step_theme_index` to any indexed option list.
+fn step_index(len: usize, current: Option<usize>, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let n = len as isize;
+    match current {
+        Some(i) => (i as isize + delta).rem_euclid(n) as usize,
+        None if delta > 0 => 0,
+        None => (n - 1) as usize,
+    }
+}
+
+/// A dropdown flanked by prev/next stepper arrows — the generalization of the
+/// theme step-arrows applied to EVERY settings dropdown so an option can be
+/// cycled in place without opening the menu (mirrors C0PL4ND). The `ComboBox` is
+/// pinned to `width` so the flanking arrows stay stationary as the selected label
+/// changes length; the Phosphor carets carry accessible hover names
+/// (`Previous {what}` / `Next {what}`) because a bare caret glyph reads only as a
+/// codepoint to AccessKit. `current_idx` is the selected option's index (`None`
+/// when the current value is not in the list → arrows land on an end).
+/// `on_pick(i)` applies option `i` (and performs any side-effects). Renders the
+/// control column only (the caller owns the label + ↺ reset columns). Returns
+/// whether the value changed.
+#[allow(clippy::too_many_arguments)]
+fn stepper_combo(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    width: f32,
+    what: &str,
+    len: usize,
+    current_idx: Option<usize>,
+    selected: &str,
+    label_at: impl Fn(usize) -> String,
+    mut on_pick: impl FnMut(usize),
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        if ui
+            .add(egui::Button::new(egui_phosphor::thin::CARET_LEFT))
+            .on_hover_text(format!("Previous {what}"))
+            .clicked()
+        {
+            on_pick(step_index(len, current_idx, -1));
+            changed = true;
+        }
+        // Track the pick locally so `selectable_value` closes the menu on select;
+        // apply it via `on_pick` after the menu closure.
+        let mut picked = current_idx;
+        egui::ComboBox::from_id_salt(id_salt)
+            .width(width)
+            .selected_text(selected.to_owned())
+            .show_ui(ui, |ui| {
+                for i in 0..len {
+                    ui.selectable_value(&mut picked, Some(i), label_at(i));
+                }
+            })
+            .response
+            .on_hover_text(format!("Choose a {what}, or use the arrows to cycle."));
+        if picked != current_idx {
+            if let Some(i) = picked {
+                on_pick(i);
+                changed = true;
+            }
+        }
+        if ui
+            .add(egui::Button::new(egui_phosphor::thin::CARET_RIGHT))
+            .on_hover_text(format!("Next {what}"))
+            .clicked()
+        {
+            on_pick(step_index(len, current_idx, 1));
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// Whether the − step button is live: the parent control is enabled AND the
+/// value is strictly above the low bound (at the bound the button is disabled so
+/// it can never step past the range — W3C ARIA APG slider guidance).
+fn step_down_enabled(enabled: bool, cur: f64, lo: f64) -> bool {
+    enabled && cur > lo
+}
+
+/// Whether the + step button is live: the parent control is enabled AND the
+/// value is strictly below the high bound.
+fn step_up_enabled(enabled: bool, cur: f64, hi: f64) -> bool {
+    enabled && cur < hi
+}
+
+/// Nudge one `step` DOWN, clamped at the low bound (no wrap).
+fn nudge_down(cur: f64, step: f64, lo: f64) -> f64 {
+    (cur - step).max(lo)
+}
+
+/// Nudge one `step` UP, clamped at the high bound (no wrap).
+fn nudge_up(cur: f64, step: f64, hi: f64) -> f64 {
+    (cur + step).min(hi)
+}
+
+/// A slider flanked by −/+ step buttons (minus LEFT, plus RIGHT) — added to
+/// every settings slider so a value can be nudged one `step` without dragging.
+/// The buttons CLAMP at the range bounds (no wrap) and are disabled at the bound
+/// (W3C ARIA APG slider guidance). `enabled` gates the whole control in lock-step
+/// with a parent toggle (the `add_enabled` gating several Motion/Window sliders
+/// already use). Generic over any `egui` numeric so integer sliders (tab width,
+/// scroll-off, check interval) step by 1 the same way. Renders the control column
+/// only (the caller owns the label + ↺ reset). Returns whether the value changed.
+fn stepped_slider<N: egui::emath::Numeric>(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    val: &mut N,
+    range: std::ops::RangeInclusive<N>,
+    step: f64,
+) -> bool {
+    let lo = range.start().to_f64();
+    let hi = range.end().to_f64();
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let cur = val.to_f64();
+        if ui
+            .add_enabled(
+                step_down_enabled(enabled, cur, lo),
+                egui::Button::new(egui_phosphor::thin::MINUS),
+            )
+            .on_hover_text("Decrease")
+            .clicked()
+        {
+            *val = N::from_f64(nudge_down(cur, step, lo));
+            changed = true;
+        }
+        changed |= ui
+            .add_enabled(enabled, egui::Slider::new(val, range.clone()))
+            .changed();
+        let cur = val.to_f64();
+        if ui
+            .add_enabled(
+                step_up_enabled(enabled, cur, hi),
+                egui::Button::new(egui_phosphor::thin::PLUS),
+            )
+            .on_hover_text("Increase")
+            .clicked()
+        {
+            *val = N::from_f64(nudge_up(cur, step, hi));
+            changed = true;
+        }
+    });
+    changed
+}
+
 /// Render every category section that is visible for the current selection /
 /// search query. Comfortable spacing (group gaps) keeps it from feeling
 /// squished even at the default window size.
@@ -551,9 +706,7 @@ fn render_sections(
                     "Zoom the entire interface — text, chrome, and controls — for readability. \
                      1.0 is the standard size; the range is 0.5× to 3×.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(&mut config.ui_scale, 0.5..=3.0))
-                    .changed();
+                changed |= stepped_slider(ui, true, &mut config.ui_scale, 0.5..=3.0, 0.1);
                 changed |= reset_to_default(ui, &mut config.ui_scale, &def.ui_scale);
                 ui.end_row();
             }
@@ -730,28 +883,33 @@ fn render_sections(
             "Editor font family, text size, and line spacing. (Ligatures are off — \
              the renderer does no OpenType shaping.)",
         );
-        settings_grid(ui, "settings-fonts", |ui| {
+        // -- Typeface --
+        group(
+            ui,
+            "Typeface",
+            "Fonts for the editor text and the app interface.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-fonts-typeface", |ui| {
             if row_visible(q, "font family theme editor note") {
                 ui.label("Note font")
                     .on_hover_text("Font for the note/editor text. Applies live, no restart.");
-                egui::ComboBox::from_id_salt("note-font-picker")
-                    .selected_text(config.fonts.editor_family.clone())
-                    .show_ui(ui, |ui| {
-                        for (display, _key) in crate::app::FONT_FAMILIES {
-                            if ui
-                                .selectable_value(
-                                    &mut config.fonts.editor_family,
-                                    (*display).to_string(),
-                                    *display,
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text("Choose one of the bundled coding fonts for the note text.");
+                let fams = crate::app::FONT_FAMILIES;
+                let cur = fams
+                    .iter()
+                    .position(|(d, _)| *d == config.fonts.editor_family.as_str());
+                let sel = config.fonts.editor_family.clone();
+                changed |= stepper_combo(
+                    ui,
+                    "note-font-picker",
+                    168.0,
+                    "note font",
+                    fams.len(),
+                    cur,
+                    &sel,
+                    |i| fams[i].0.to_string(),
+                    |i| config.fonts.editor_family = fams[i].0.to_string(),
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.fonts.editor_family,
@@ -764,34 +922,38 @@ fn render_sections(
                     "Font for the app interface (toolbar, settings, status). 'System default' \
                      keeps the built-in UI font. Applies live.",
                 );
-                egui::ComboBox::from_id_salt("ui-font-picker")
-                    .selected_text(config.fonts.ui_family.clone())
-                    .show_ui(ui, |ui| {
-                        if ui
-                            .selectable_value(
-                                &mut config.fonts.ui_family,
-                                "System default".to_string(),
-                                "System default",
-                            )
-                            .changed()
-                        {
-                            changed = true;
+                let fams = crate::app::FONT_FAMILIES;
+                let cur = if config.fonts.ui_family == "System default" {
+                    Some(0)
+                } else {
+                    fams.iter()
+                        .position(|(d, _)| *d == config.fonts.ui_family.as_str())
+                        .map(|i| i + 1)
+                };
+                let sel = config.fonts.ui_family.clone();
+                changed |= stepper_combo(
+                    ui,
+                    "ui-font-picker",
+                    168.0,
+                    "app UI font",
+                    fams.len() + 1,
+                    cur,
+                    &sel,
+                    |i| {
+                        if i == 0 {
+                            "System default".to_string()
+                        } else {
+                            fams[i - 1].0.to_string()
                         }
-                        for (display, _key) in crate::app::FONT_FAMILIES {
-                            if ui
-                                .selectable_value(
-                                    &mut config.fonts.ui_family,
-                                    (*display).to_string(),
-                                    *display,
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text("Choose the app-interface font (or keep the system default).");
+                    },
+                    |i| {
+                        config.fonts.ui_family = if i == 0 {
+                            "System default".to_string()
+                        } else {
+                            fams[i - 1].0.to_string()
+                        };
+                    },
+                );
                 changed |= reset_to_default(ui, &mut config.fonts.ui_family, &def.fonts.ui_family);
                 ui.end_row();
             }
@@ -800,28 +962,89 @@ fn render_sections(
                     "Colour scheme for the note text / syntax highlighting, separate from the \
                      app theme. Applies live.",
                 );
-                egui::ComboBox::from_id_salt("note-theme-picker")
-                    .selected_text(config.editor.note_theme.clone())
-                    .show_ui(ui, |ui| {
-                        for name in crate::app::NOTE_THEMES {
-                            if ui
-                                .selectable_value(
-                                    &mut config.editor.note_theme,
-                                    (*name).to_string(),
-                                    *name,
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text("Pick a note text colour scheme.");
+                let themes = crate::app::NOTE_THEMES;
+                let cur = themes
+                    .iter()
+                    .position(|n| *n == config.editor.note_theme.as_str());
+                let sel = config.editor.note_theme.clone();
+                changed |= stepper_combo(
+                    ui,
+                    "note-theme-picker",
+                    168.0,
+                    "note colour theme",
+                    themes.len(),
+                    cur,
+                    &sel,
+                    |i| themes[i].to_string(),
+                    |i| config.editor.note_theme = themes[i].to_string(),
+                );
                 changed |=
                     reset_to_default(ui, &mut config.editor.note_theme, &def.editor.note_theme);
                 ui.end_row();
             }
+        });
+        ui.add_space(6.0);
+
+        // -- Size & spacing --
+        group(ui, "Size & spacing", "Editor text size and line spacing.");
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-fonts-size", |ui| {
+            if row_visible(q, "editor size") {
+                ui.label("Size")
+                    .on_hover_text("Font size of the editor text, in points.");
+                ui.horizontal(|ui| {
+                    if ui.small_button("-").on_hover_text("Smaller").clicked() {
+                        config.fonts.editor_size =
+                            (config.fonts.editor_size - 1.0).clamp(8.0, 32.0);
+                        changed = true;
+                    }
+                    changed |= ui
+                        .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0))
+                        .changed();
+                    if ui.small_button("+").on_hover_text("Larger").clicked() {
+                        config.fonts.editor_size =
+                            (config.fonts.editor_size + 1.0).clamp(8.0, 32.0);
+                        changed = true;
+                    }
+                });
+                changed |=
+                    reset_to_default(ui, &mut config.fonts.editor_size, &def.fonts.editor_size);
+                ui.end_row();
+            }
+            if row_visible(q, "line height") {
+                ui.label("Line height").on_hover_text(
+                    "Vertical spacing between lines, as a multiple of the font size. Note: the \
+                     text caret + selection are exactly this tall, so a larger value also makes \
+                     them taller than the glyphs. ~1.2 keeps the caret tight to the text.",
+                );
+                ui.horizontal(|ui| {
+                    if ui.small_button("-").on_hover_text("Tighter").clicked() {
+                        config.fonts.line_height = (config.fonts.line_height - 0.1).clamp(1.0, 2.5);
+                        changed = true;
+                    }
+                    changed |= ui
+                        .add(egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5))
+                        .changed();
+                    if ui.small_button("+").on_hover_text("Looser").clicked() {
+                        config.fonts.line_height = (config.fonts.line_height + 0.1).clamp(1.0, 2.5);
+                        changed = true;
+                    }
+                });
+                changed |=
+                    reset_to_default(ui, &mut config.fonts.line_height, &def.fonts.line_height);
+                ui.end_row();
+            }
+        });
+        ui.add_space(6.0);
+
+        // -- Markdown colouring --
+        group(
+            ui,
+            "Markdown colouring",
+            "Colour extra note tokens the syntax grammar leaves plain.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-fonts-markdown", |ui| {
             changed |= grid_bool(
                 ui,
                 q,
@@ -885,51 +1108,6 @@ fn render_sections(
                 &mut config.editor.md_color_table_pipes,
                 &def.editor.md_color_table_pipes,
             );
-            if row_visible(q, "editor size") {
-                ui.label("Size")
-                    .on_hover_text("Font size of the editor text, in points.");
-                ui.horizontal(|ui| {
-                    if ui.small_button("-").on_hover_text("Smaller").clicked() {
-                        config.fonts.editor_size =
-                            (config.fonts.editor_size - 1.0).clamp(8.0, 32.0);
-                        changed = true;
-                    }
-                    changed |= ui
-                        .add(egui::Slider::new(&mut config.fonts.editor_size, 8.0..=32.0))
-                        .changed();
-                    if ui.small_button("+").on_hover_text("Larger").clicked() {
-                        config.fonts.editor_size =
-                            (config.fonts.editor_size + 1.0).clamp(8.0, 32.0);
-                        changed = true;
-                    }
-                });
-                changed |=
-                    reset_to_default(ui, &mut config.fonts.editor_size, &def.fonts.editor_size);
-                ui.end_row();
-            }
-            if row_visible(q, "line height") {
-                ui.label("Line height").on_hover_text(
-                    "Vertical spacing between lines, as a multiple of the font size. Note: the \
-                     text caret + selection are exactly this tall, so a larger value also makes \
-                     them taller than the glyphs. ~1.2 keeps the caret tight to the text.",
-                );
-                ui.horizontal(|ui| {
-                    if ui.small_button("-").on_hover_text("Tighter").clicked() {
-                        config.fonts.line_height = (config.fonts.line_height - 0.1).clamp(1.0, 2.5);
-                        changed = true;
-                    }
-                    changed |= ui
-                        .add(egui::Slider::new(&mut config.fonts.line_height, 1.0..=2.5))
-                        .changed();
-                    if ui.small_button("+").on_hover_text("Looser").clicked() {
-                        config.fonts.line_height = (config.fonts.line_height + 0.1).clamp(1.0, 2.5);
-                        changed = true;
-                    }
-                });
-                changed |=
-                    reset_to_default(ui, &mut config.fonts.line_height, &def.fonts.line_height);
-                ui.end_row();
-            }
         });
         space(ui);
     }
@@ -970,9 +1148,7 @@ fn render_sections(
             if row_visible(q, "tab width") {
                 ui.label("Tab width")
                     .on_hover_text("How many columns a tab character occupies.");
-                changed |= ui
-                    .add(egui::Slider::new(&mut config.editor.tab_width, 1..=8))
-                    .changed();
+                changed |= stepped_slider(ui, true, &mut config.editor.tab_width, 1..=8, 1.0);
                 changed |=
                     reset_to_default(ui, &mut config.editor.tab_width, &def.editor.tab_width);
                 ui.end_row();
@@ -1120,21 +1296,25 @@ fn render_sections(
                 ];
                 ui.label("Caret style")
                     .on_hover_text("Shape of the text caret: thin bar, full block, or underline.");
-                egui::ComboBox::from_id_salt("caret-style")
-                    .selected_text(
-                        styles
-                            .iter()
-                            .find(|(s, _)| *s == config.editor.caret_style)
-                            .map(|(_, l)| *l)
-                            .unwrap_or("bar"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (style, label) in styles {
-                            changed |= ui
-                                .selectable_value(&mut config.editor.caret_style, style, label)
-                                .changed();
-                        }
-                    });
+                let cur = styles
+                    .iter()
+                    .position(|(s, _)| *s == config.editor.caret_style);
+                let sel = styles
+                    .iter()
+                    .find(|(s, _)| *s == config.editor.caret_style)
+                    .map(|(_, l)| *l)
+                    .unwrap_or("bar");
+                changed |= stepper_combo(
+                    ui,
+                    "caret-style",
+                    168.0,
+                    "caret style",
+                    styles.len(),
+                    cur,
+                    sel,
+                    |i| styles[i].1.to_string(),
+                    |i| config.editor.caret_style = styles[i].0,
+                );
                 changed |=
                     reset_to_default(ui, &mut config.editor.caret_style, &def.editor.caret_style);
                 ui.end_row();
@@ -1142,9 +1322,7 @@ fn render_sections(
             if row_visible(q, "caret width cursor thickness") {
                 ui.label("Caret width")
                     .on_hover_text("Caret thickness for the bar/underline styles (points).");
-                changed |= ui
-                    .add(egui::Slider::new(&mut config.editor.caret_width, 1.0..=4.0))
-                    .changed();
+                changed |= stepped_slider(ui, true, &mut config.editor.caret_width, 1.0..=4.0, 0.5);
                 changed |=
                     reset_to_default(ui, &mut config.editor.caret_width, &def.editor.caret_width);
                 ui.end_row();
@@ -1158,21 +1336,25 @@ fn render_sections(
                 ];
                 ui.label("Scrollbar style")
                     .on_hover_text("Editor scrollbar chrome: default, a slim bar, or hidden.");
-                egui::ComboBox::from_id_salt("scrollbar-style")
-                    .selected_text(
-                        styles
-                            .iter()
-                            .find(|(s, _)| *s == config.editor.scrollbar_style)
-                            .map(|(_, l)| *l)
-                            .unwrap_or("auto"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (style, label) in styles {
-                            changed |= ui
-                                .selectable_value(&mut config.editor.scrollbar_style, style, label)
-                                .changed();
-                        }
-                    });
+                let cur = styles
+                    .iter()
+                    .position(|(s, _)| *s == config.editor.scrollbar_style);
+                let sel = styles
+                    .iter()
+                    .find(|(s, _)| *s == config.editor.scrollbar_style)
+                    .map(|(_, l)| *l)
+                    .unwrap_or("auto");
+                changed |= stepper_combo(
+                    ui,
+                    "scrollbar-style",
+                    168.0,
+                    "scrollbar style",
+                    styles.len(),
+                    cur,
+                    sel,
+                    |i| styles[i].1.to_string(),
+                    |i| config.editor.scrollbar_style = styles[i].0,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.editor.scrollbar_style,
@@ -1196,9 +1378,7 @@ fn render_sections(
                     "Mouse-wheel scrolling speed. egui's default (40) feels slow next to \
                      Windows; 75 is the SCR1B3 default.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(&mut config.scroll.speed, 10.0..=200.0))
-                    .changed();
+                changed |= stepped_slider(ui, true, &mut config.scroll.speed, 10.0..=200.0, 1.0);
                 changed |= reset_to_default(ui, &mut config.scroll.speed, &def.scroll.speed);
                 ui.end_row();
             }
@@ -1226,12 +1406,13 @@ fn render_sections(
                     "How fast middle-click autoscroll drifts per pixel of pointer offset \
                      from the click point.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(
-                        &mut config.scroll.autoscroll_sensitivity,
-                        2.0..=15.0,
-                    ))
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    true,
+                    &mut config.scroll.autoscroll_sensitivity,
+                    2.0..=15.0,
+                    1.0,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.scroll.autoscroll_sensitivity,
@@ -1244,12 +1425,13 @@ fn render_sections(
                     "Radius (px) around the middle-click origin where the pointer produces NO \
                      scrolling — a still zone so small jitters don't drift the page.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(
-                        &mut config.scroll.autoscroll_dead_zone,
-                        4.0..=40.0,
-                    ))
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    true,
+                    &mut config.scroll.autoscroll_dead_zone,
+                    4.0..=40.0,
+                    1.0,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.scroll.autoscroll_dead_zone,
@@ -1283,12 +1465,8 @@ fn render_sections(
                     "Keep the caret at least this many lines from the top/bottom edge when \
                      navigating by keyboard (Vim scrolloff). 0 disables.",
                 );
-                changed |= ui
-                    .add(egui::Slider::new(
-                        &mut config.scroll.caret_scroll_off,
-                        0..=12,
-                    ))
-                    .changed();
+                changed |=
+                    stepped_slider(ui, true, &mut config.scroll.caret_scroll_off, 0..=12, 1.0);
                 changed |= reset_to_default(
                     ui,
                     &mut config.scroll.caret_scroll_off,
@@ -1318,34 +1496,35 @@ fn render_sections(
                 ];
                 ui.label("Tab bar position")
                     .on_hover_text("Where the strip of open-file tabs sits around the editor.");
-                egui::ComboBox::from_id_salt("tab-bar-position")
-                    .selected_text(
-                        positions
-                            .iter()
-                            .find(|(p, _)| *p == config.editor.tab_bar_position)
-                            .map(|(_, s)| *s)
-                            .unwrap_or("top"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (pos, label) in positions {
-                            let prev = config.editor.tab_bar_position;
-                            if ui
-                                .selectable_value(&mut config.editor.tab_bar_position, pos, label)
-                                .changed()
-                            {
-                                changed = true;
-                                // Switching TO a Left/Right bar from a non-side one
-                                // defaults "rotate side tabs" ON (the requested
-                                // default for vertical bars); the user can turn it
-                                // back off. No effect Top/Bottom.
-                                if pos.is_vertical() && !prev.is_vertical() {
-                                    config.editor.side_tabs_rotated = true;
-                                }
-                            }
+                let cur = positions
+                    .iter()
+                    .position(|(p, _)| *p == config.editor.tab_bar_position);
+                let sel = positions
+                    .iter()
+                    .find(|(p, _)| *p == config.editor.tab_bar_position)
+                    .map(|(_, s)| *s)
+                    .unwrap_or("top");
+                changed |= stepper_combo(
+                    ui,
+                    "tab-bar-position",
+                    168.0,
+                    "tab bar position",
+                    positions.len(),
+                    cur,
+                    sel,
+                    |i| positions[i].1.to_string(),
+                    |i| {
+                        // Switching TO a Left/Right bar from a non-side one defaults
+                        // "rotate side tabs" ON (the requested default for vertical
+                        // bars); the user can turn it back off. No effect Top/Bottom.
+                        let prev = config.editor.tab_bar_position;
+                        let pos = positions[i].0;
+                        config.editor.tab_bar_position = pos;
+                        if pos.is_vertical() && !prev.is_vertical() {
+                            config.editor.side_tabs_rotated = true;
                         }
-                    })
-                    .response
-                    .on_hover_text("Choose the edge where the open-tab strip is shown.");
+                    },
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.editor.tab_bar_position,
@@ -1516,19 +1695,22 @@ fn render_sections(
                     "The file type a brand-new note suggests in the Save dialog. Markdown \
                      (.md) by default — you can still pick any name or extension when saving.",
                 );
-                egui::ComboBox::from_id_salt("default-save-format")
-                    .selected_text(config.integration.default_save_format.ui_label())
-                    .show_ui(ui, |ui| {
-                        for fmt in DefaultSaveFormat::ALL {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut config.integration.default_save_format,
-                                    fmt,
-                                    fmt.ui_label(),
-                                )
-                                .changed();
-                        }
-                    });
+                let formats = DefaultSaveFormat::ALL;
+                let cur = formats
+                    .iter()
+                    .position(|f| *f == config.integration.default_save_format);
+                let sel = config.integration.default_save_format.ui_label();
+                changed |= stepper_combo(
+                    ui,
+                    "default-save-format",
+                    168.0,
+                    "save format",
+                    formats.len(),
+                    cur,
+                    sel,
+                    |i| formats[i].ui_label().to_string(),
+                    |i| config.integration.default_save_format = formats[i],
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.integration.default_save_format,
@@ -1554,7 +1736,14 @@ fn render_sections(
         );
         // Master OFF by default — calm-surface principle (DECISION-2026-005);
         // animation is opt-in so idle frames cost the same as plain egui.
-        settings_grid(ui, "settings-motion", |ui| {
+        // -- Animation --
+        group(
+            ui,
+            "Animation",
+            "Master switch, and the speed of the editor's chrome transitions.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-motion-master", |ui| {
             changed |= grid_bool(
                 ui,
                 q,
@@ -1574,34 +1763,26 @@ fn render_sections(
                      and 2 is double that. This does NOT control the retro visual effects \
                      (flicker / VHS / mesh) — those have their own per-effect speed sliders below.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on,
-                        egui::Slider::new(&mut config.motion.intensity, 0.0..=2.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(ui, on, &mut config.motion.intensity, 0.0..=2.0, 0.1);
                 changed |=
                     reset_to_default(ui, &mut config.motion.intensity, &def.motion.intensity);
                 ui.end_row();
             }
-            if row_visible(q, "cursor blink motion") {
-                ui.add_enabled_ui(on, |ui| {
-                    changed |= ui
-                        .checkbox(&mut config.motion.cursor_blink, "Blink the text cursor")
-                        .on_hover_text(
-                            "Blink the text caret instead of showing it steady. Disable for a \
-                             calmer, motion-free caret.",
-                        )
-                        .changed();
-                });
-                ui.label("");
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.motion.cursor_blink,
-                    &def.motion.cursor_blink,
-                );
-                ui.end_row();
-            }
+        });
+        ui.add_space(6.0);
+
+        // `on` gates every effect below in lock-step with the master toggle,
+        // read once here so each group's grid closure can capture it.
+        let on = config.motion.enabled;
+
+        // -- CRT screen --
+        group(
+            ui,
+            "CRT screen",
+            "Scanlines, flicker, and the boot glitch over the whole surface.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-motion-crt", |ui| {
             if row_visible(q, "crt scanlines retro motion effect") {
                 ui.add_enabled_ui(on, |ui| {
                     changed |= ui
@@ -1624,12 +1805,13 @@ fn render_sections(
                 ui.label("Scanline darkness").on_hover_text(
                     "How dark the CRT scanlines are — 0 is invisible, 1 is strong dark bands.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.crt_scanlines,
-                        egui::Slider::new(&mut config.motion.scanline_darkness, 0.0..=1.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.crt_scanlines,
+                    &mut config.motion.scanline_darkness,
+                    0.0..=1.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.scanline_darkness,
@@ -1637,6 +1819,78 @@ fn render_sections(
                 );
                 ui.end_row();
             }
+            if row_visible(q, "screen flicker motion effect") {
+                ui.add_enabled_ui(on, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.motion.flicker, "Screen flicker")
+                        .on_hover_text("Subtle CRT-style brightness flicker over the whole window.")
+                        .changed();
+                });
+                ui.label("");
+                changed |= reset_to_default(ui, &mut config.motion.flicker, &def.motion.flicker);
+                ui.end_row();
+            }
+            if row_visible(q, "flicker strength motion") {
+                ui.label("Flicker strength")
+                    .on_hover_text("How strong the screen flicker is (capped low for comfort).");
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.flicker,
+                    &mut config.motion.flicker_strength,
+                    0.0..=0.20,
+                    0.01,
+                );
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.flicker_strength,
+                    &def.motion.flicker_strength,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "flicker speed cadence motion") {
+                ui.label("Flicker speed").on_hover_text(
+                    "How fast the screen flicker pulses. 1 is the standard cadence; lower is a \
+                     slower shimmer and higher flickers faster. Independent of the strength.",
+                );
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.flicker,
+                    &mut config.motion.flicker_speed,
+                    0.25..=3.0,
+                    0.1,
+                );
+                changed |= reset_to_default(
+                    ui,
+                    &mut config.motion.flicker_speed,
+                    &def.motion.flicker_speed,
+                );
+                ui.end_row();
+            }
+            if row_visible(q, "boot glitch startup motion effect") {
+                ui.add_enabled_ui(on, |ui| {
+                    changed |= ui
+                        .checkbox(&mut config.motion.boot_glitch, "Boot glitch")
+                        .on_hover_text(
+                            "A one-shot glitch sweep plays for a moment when the app launches.",
+                        )
+                        .changed();
+                });
+                ui.label("");
+                changed |=
+                    reset_to_default(ui, &mut config.motion.boot_glitch, &def.motion.boot_glitch);
+                ui.end_row();
+            }
+        });
+        ui.add_space(6.0);
+
+        // -- Ambient node-mesh --
+        group(
+            ui,
+            "Ambient node-mesh",
+            "The drifting Wired node-mesh background lattice.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-motion-mesh", |ui| {
             if row_visible(q, "wired node mesh ambient background motion") {
                 ui.add_enabled_ui(on, |ui| {
                     changed |= ui
@@ -1662,12 +1916,13 @@ fn render_sections(
                     "How many nodes the wired-mesh background draws (sparse to dense). \
                      Higher values scale the node count with the window size.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.wired_ambient,
-                        egui::Slider::new(&mut config.motion.mesh_density, 0.0..=2.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.wired_ambient,
+                    &mut config.motion.mesh_density,
+                    0.0..=2.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.mesh_density,
@@ -1680,12 +1935,13 @@ fn render_sections(
                     "How bright the wired-mesh lines and nodes are. 1 is the standard look; \
                      lower dims the lattice toward invisible, higher makes it pop.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.wired_ambient,
-                        egui::Slider::new(&mut config.motion.mesh_brightness, 0.0..=3.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.wired_ambient,
+                    &mut config.motion.mesh_brightness,
+                    0.0..=3.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.mesh_brightness,
@@ -1698,12 +1954,13 @@ fn render_sections(
                     "How fast the wired-mesh nodes drift. 1 is the standard rate; lower is a \
                      slower, calmer breathe and higher makes the lattice shift faster.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.wired_ambient,
-                        egui::Slider::new(&mut config.motion.mesh_drift_speed, 0.25..=3.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.wired_ambient,
+                    &mut config.motion.mesh_drift_speed,
+                    0.25..=3.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.mesh_drift_speed,
@@ -1763,6 +2020,17 @@ fn render_sections(
                 });
                 ui.end_row();
             }
+        });
+        ui.add_space(6.0);
+
+        // -- Tape & motion accents --
+        group(
+            ui,
+            "Tape & motion accents",
+            "VHS tracking bands sweeping down the window.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-motion-tape", |ui| {
             if row_visible(q, "vhs tracking lines motion effect") {
                 ui.add_enabled_ui(on, |ui| {
                     changed |= ui
@@ -1785,58 +2053,43 @@ fn render_sections(
                     "How fast the VHS tracking bands sweep down the window. 1 is the standard \
                      rate; lower drifts more slowly and higher sweeps faster.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.vhs_tracking,
-                        egui::Slider::new(&mut config.motion.vhs_speed, 0.25..=3.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.vhs_tracking,
+                    &mut config.motion.vhs_speed,
+                    0.25..=3.0,
+                    0.1,
+                );
                 changed |=
                     reset_to_default(ui, &mut config.motion.vhs_speed, &def.motion.vhs_speed);
                 ui.end_row();
             }
-            if row_visible(q, "screen flicker motion effect") {
+        });
+        ui.add_space(6.0);
+
+        // -- Caret --
+        group(
+            ui,
+            "Caret",
+            "Blink and the phosphor ghost-trail behind the text caret.",
+        );
+        ui.add_space(4.0);
+        settings_grid(ui, "settings-motion-caret", |ui| {
+            if row_visible(q, "cursor blink motion") {
                 ui.add_enabled_ui(on, |ui| {
                     changed |= ui
-                        .checkbox(&mut config.motion.flicker, "Screen flicker")
-                        .on_hover_text("Subtle CRT-style brightness flicker over the whole window.")
+                        .checkbox(&mut config.motion.cursor_blink, "Blink the text cursor")
+                        .on_hover_text(
+                            "Blink the text caret instead of showing it steady. Disable for a \
+                             calmer, motion-free caret.",
+                        )
                         .changed();
                 });
                 ui.label("");
-                changed |= reset_to_default(ui, &mut config.motion.flicker, &def.motion.flicker);
-                ui.end_row();
-            }
-            if row_visible(q, "flicker strength motion") {
-                ui.label("Flicker strength")
-                    .on_hover_text("How strong the screen flicker is (capped low for comfort).");
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.flicker,
-                        egui::Slider::new(&mut config.motion.flicker_strength, 0.0..=0.20),
-                    )
-                    .changed();
                 changed |= reset_to_default(
                     ui,
-                    &mut config.motion.flicker_strength,
-                    &def.motion.flicker_strength,
-                );
-                ui.end_row();
-            }
-            if row_visible(q, "flicker speed cadence motion") {
-                ui.label("Flicker speed").on_hover_text(
-                    "How fast the screen flicker pulses. 1 is the standard cadence; lower is a \
-                     slower shimmer and higher flickers faster. Independent of the strength.",
-                );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.flicker,
-                        egui::Slider::new(&mut config.motion.flicker_speed, 0.25..=3.0),
-                    )
-                    .changed();
-                changed |= reset_to_default(
-                    ui,
-                    &mut config.motion.flicker_speed,
-                    &def.motion.flicker_speed,
+                    &mut config.motion.cursor_blink,
+                    &def.motion.cursor_blink,
                 );
                 ui.end_row();
             }
@@ -1857,31 +2110,18 @@ fn render_sections(
                     "How far the caret ghost-trail reaches — from a faint short flick to a \
                      bold, long comet tail.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        on && config.motion.caret_trail,
-                        egui::Slider::new(&mut config.motion.caret_trail_intensity, 0.0..=2.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    on && config.motion.caret_trail,
+                    &mut config.motion.caret_trail_intensity,
+                    0.0..=2.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.motion.caret_trail_intensity,
                     &def.motion.caret_trail_intensity,
                 );
-                ui.end_row();
-            }
-            if row_visible(q, "boot glitch startup motion effect") {
-                ui.add_enabled_ui(on, |ui| {
-                    changed |= ui
-                        .checkbox(&mut config.motion.boot_glitch, "Boot glitch")
-                        .on_hover_text(
-                            "A one-shot glitch sweep plays for a moment when the app launches.",
-                        )
-                        .changed();
-                });
-                ui.label("");
-                changed |=
-                    reset_to_default(ui, &mut config.motion.boot_glitch, &def.motion.boot_glitch);
                 ui.end_row();
             }
         });
@@ -1952,15 +2192,11 @@ fn render_sections(
                     "How see-through the window is — 1.0 is fully opaque, lower is more \
                      transparent. Only active for translucent modes.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        translucent,
-                        // Floor at 0.0 for MAXIMUM transparency — the chrome/panel
-                        // fills fully vanish; the editor text is painted opaque on
-                        // top so it stays legible even at zero.
-                        egui::Slider::new(&mut config.window.opacity, 0.0..=1.0),
-                    )
-                    .changed();
+                // Floor at 0.0 for MAXIMUM transparency — the chrome/panel fills
+                // fully vanish; the editor text is painted opaque on top so it
+                // stays legible even at zero.
+                changed |=
+                    stepped_slider(ui, translucent, &mut config.window.opacity, 0.0..=1.0, 0.1);
                 changed |= reset_to_default(ui, &mut config.window.opacity, &def.window.opacity);
                 ui.end_row();
             }
@@ -2025,12 +2261,13 @@ fn render_sections(
                     "How strongly the tint colour is blended over the surface — 0 is none, \
                      1 is full.",
                 );
-                changed |= ui
-                    .add_enabled(
-                        tint_on,
-                        egui::Slider::new(&mut config.window.tint_strength, 0.0..=1.0),
-                    )
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    tint_on,
+                    &mut config.window.tint_strength,
+                    0.0..=1.0,
+                    0.1,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.window.tint_strength,
@@ -2214,41 +2451,36 @@ fn render_sections(
                      version exists), auto (check once per launch, ask before installing). A \
                      check reads only the public GitHub releases API and sends no identifiers.",
                 );
-                egui::ComboBox::from_id_salt("update-mode")
-                    .selected_text(
-                        modes
-                            .iter()
-                            .find(|(m, _)| *m == config.updates.mode)
-                            .map(|(_, s)| *s)
-                            .unwrap_or("notify"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (m, label) in modes {
-                            if ui
-                                .selectable_value(&mut config.updates.mode, m, label)
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        }
-                    })
-                    .response
-                    .on_hover_text(
-                        "A check reads only the public GitHub releases API; no analytics or \
-                         identifiers are sent.",
-                    );
+                let cur = modes.iter().position(|(m, _)| *m == config.updates.mode);
+                let sel = modes
+                    .iter()
+                    .find(|(m, _)| *m == config.updates.mode)
+                    .map(|(_, s)| *s)
+                    .unwrap_or("notify");
+                changed |= stepper_combo(
+                    ui,
+                    "update-mode",
+                    168.0,
+                    "update mode",
+                    modes.len(),
+                    cur,
+                    sel,
+                    |i| modes[i].1.to_string(),
+                    |i| config.updates.mode = modes[i].0,
+                );
                 changed |= reset_to_default(ui, &mut config.updates.mode, &def.updates.mode);
                 ui.end_row();
             }
             if row_visible(q, "check interval hours") {
                 ui.label("Check interval (hours)")
                     .on_hover_text("How often, in hours, to check for a new release (1–168).");
-                changed |= ui
-                    .add(egui::Slider::new(
-                        &mut config.updates.check_interval_hours,
-                        1..=168,
-                    ))
-                    .changed();
+                changed |= stepped_slider(
+                    ui,
+                    true,
+                    &mut config.updates.check_interval_hours,
+                    1..=168,
+                    1.0,
+                );
                 changed |= reset_to_default(
                     ui,
                     &mut config.updates.check_interval_hours,
@@ -3023,6 +3255,18 @@ fn render_update_status(ui: &mut egui::Ui, updater: &mut crate::updater::Updater
 
 fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     let mut changed = false;
+    // Same section idiom as the `group` closure in `render_sections` (a strong
+    // label, a muted one-line description, then a thin rule), replicated inline
+    // because this is a separate free function without that closure in scope —
+    // so every settings page's sub-sections read consistently.
+    let group = |ui: &mut egui::Ui, label: &str, desc: &str| {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(label).strong());
+        if !desc.is_empty() {
+            ui.label(egui::RichText::new(desc).weak().small());
+        }
+        ui.separator();
+    };
     // Cap the editor content to a FIXED width (NOT available_width). This is the
     // load-bearing line for "the Settings window doesn't widen on the Toolbar
     // page": binding to available_width creates a feedback loop (wide window →
@@ -3068,15 +3312,22 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     // Phase 18 T18.5: button size + spacing + icon size sliders. All values
     // are clamped at render time so a malformed user toml can't produce a
     // 4000-px-tall toolbar.
-    ui.label(egui::RichText::new("Sizing").strong().small());
+    group(
+        ui,
+        "Sizing",
+        "Button and icon dimensions, and the gap between buttons.",
+    );
+    ui.add_space(4.0);
     ui.horizontal(|ui| {
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut config.toolbar.button_size_px, 16.0..=64.0)
-                    .text("Button height (px)"),
-            )
-            .on_hover_text("Height of each quick-access toolbar button, in pixels.")
-            .changed();
+        ui.label("Button height (px)")
+            .on_hover_text("Height of each quick-access toolbar button, in pixels.");
+        changed |= stepped_slider(
+            ui,
+            true,
+            &mut config.toolbar.button_size_px,
+            16.0..=64.0,
+            1.0,
+        );
         changed |= reset_to_default(
             ui,
             &mut config.toolbar.button_size_px,
@@ -3084,13 +3335,15 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         );
     });
     ui.horizontal(|ui| {
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut config.toolbar.button_spacing_px, 0.0..=24.0)
-                    .text("Button spacing (px)"),
-            )
-            .on_hover_text("Gap between adjacent toolbar buttons, in pixels.")
-            .changed();
+        ui.label("Button spacing (px)")
+            .on_hover_text("Gap between adjacent toolbar buttons, in pixels.");
+        changed |= stepped_slider(
+            ui,
+            true,
+            &mut config.toolbar.button_spacing_px,
+            0.0..=24.0,
+            1.0,
+        );
         changed |= reset_to_default(
             ui,
             &mut config.toolbar.button_spacing_px,
@@ -3098,13 +3351,9 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         );
     });
     ui.horizontal(|ui| {
-        changed |= ui
-            .add(
-                egui::Slider::new(&mut config.toolbar.icon_size_px, 10.0..=32.0)
-                    .text("Icon glyph size (px)"),
-            )
-            .on_hover_text("Active only when 'Toolbar shows icons' (Appearance) is on.")
-            .changed();
+        ui.label("Icon glyph size (px)")
+            .on_hover_text("Active only when 'Toolbar shows icons' (Appearance) is on.");
+        changed |= stepped_slider(ui, true, &mut config.toolbar.icon_size_px, 10.0..=32.0, 1.0);
         changed |= reset_to_default(
             ui,
             &mut config.toolbar.icon_size_px,
@@ -3122,8 +3371,12 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
         config.toolbar.icon_size_px = scribe_core::config::ToolbarConfig::default_icon_size();
         changed = true;
     }
-    ui.add_space(8.0);
-    ui.label(egui::RichText::new("Items").strong().small());
+    group(
+        ui,
+        "Items",
+        "Add, remove, and drag-reorder the toolbar buttons.",
+    );
+    ui.add_space(4.0);
     changed |= toolbar_list_editor(ui, &mut config.toolbar.items, "items", true);
     if ui
         .small_button("Reset toolbar to defaults")
@@ -3135,21 +3388,15 @@ fn render_toolbar_editor(ui: &mut egui::Ui, config: &mut Config) -> bool {
     }
 
     // ---- User-curated "more-actions" dropdown menu (same editor as Items) ----
-    ui.add_space(10.0);
-    ui.label(
-        egui::RichText::new("Dropdown (more-actions menu)")
-            .strong()
-            .small(),
+    ui.add_space(2.0);
+    group(
+        ui,
+        "Menu (more-actions dropdown)",
+        "Actions parked in the toolbar's more-actions menu — reachable without taking a \
+         toolbar slot, so the bar stays clean. Curated with the SAME controls as the items \
+         above.",
     );
-    ui.label(
-        egui::RichText::new(
-            "Actions parked in the toolbar's more-actions menu — reachable without taking a \
-             toolbar slot, so the bar stays clean. Curated with the SAME controls as the items \
-             above.",
-        )
-        .weak()
-        .small(),
-    );
+    ui.add_space(4.0);
     if ui
         .checkbox(
             &mut config.toolbar.show_dropdown,
@@ -3313,6 +3560,235 @@ mod toolbar_drop {
 /// nothing in the suite clicks the arrows. Extracting it to a pure function is
 /// what makes the assertions below possible at all; each test names the
 /// surviving mutant it kills.
+#[cfg(test)]
+mod index_step {
+    use super::step_index;
+
+    /// Forward stepping (kills `+` → `-`/`*` at the `i + delta` site).
+    #[test]
+    fn forward_moves_to_the_next_index() {
+        assert_eq!(step_index(4, Some(0), 1), 1);
+        assert_eq!(step_index(4, Some(1), 1), 2);
+    }
+
+    /// Backward stepping.
+    #[test]
+    fn backward_moves_to_the_previous_index() {
+        assert_eq!(step_index(4, Some(2), -1), 1);
+    }
+
+    /// `rem_euclid` wraps both ways — a plain `%` would give -1 and panic the
+    /// caller's index.
+    #[test]
+    fn the_ends_wrap_in_both_directions() {
+        assert_eq!(step_index(4, Some(0), -1), 3, "off the front wraps to last");
+        assert_eq!(step_index(4, Some(3), 1), 0, "off the end wraps to first");
+    }
+
+    /// A `None` current (value not in the list) lands on the end it travels
+    /// toward — kills the `delta > 0` guard (true/false both wrong) and the
+    /// `len - 1` backward arm.
+    #[test]
+    fn a_missing_current_lands_on_the_end_it_travels_toward() {
+        assert_eq!(step_index(4, None, 1), 0, "forward → first");
+        assert_eq!(step_index(4, None, -1), 3, "backward → last");
+    }
+
+    /// Kills `delta > 0` → `delta >= 0`: a zero step is not strictly forward, so
+    /// a missing current falls to the last-entry arm, not the first.
+    #[test]
+    fn a_zero_step_from_a_missing_current_is_not_forward() {
+        assert_eq!(step_index(4, None, 0), 3);
+    }
+
+    /// The empty-list guard returns 0 (never indexes an empty slice / divides by
+    /// zero in `rem_euclid`).
+    #[test]
+    fn an_empty_list_returns_zero() {
+        assert_eq!(step_index(0, None, 1), 0);
+        assert_eq!(step_index(0, None, -1), 0);
+    }
+}
+
+#[cfg(test)]
+mod stepper_widgets {
+    //! Behaviour of the shared `stepped_slider` / `stepper_combo` controls. The
+    //! pure predicate/clamp helpers are asserted directly (their comparison &
+    //! arithmetic mutants cannot be reached through the UI because the clamp
+    //! masks an over-stepped value at the bounds); the click→effect wiring is
+    //! exercised through an `egui_kittest` harness.
+    use super::{
+        nudge_down, nudge_up, step_down_enabled, step_up_enabled, stepped_slider, stepper_combo,
+    };
+    use egui_kittest::kittest::Queryable as _;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    // ---- pure helpers (kill the comparison + arithmetic mutants) ----
+
+    /// The − button is live ONLY when the parent is enabled AND the value is
+    /// STRICTLY above the low bound. Kills `&&`→`||` (parent-off must win),
+    /// `>`→`>=` (dead exactly AT the bound), and `>`→`==`/`<` (live above it).
+    #[test]
+    fn minus_button_is_live_only_strictly_above_the_low_bound() {
+        assert!(
+            step_down_enabled(true, 5.0, 0.0),
+            "enabled + above min → live"
+        );
+        assert!(
+            !step_down_enabled(true, 0.0, 0.0),
+            "AT the low bound → dead (>= would wrongly report live)"
+        );
+        assert!(
+            !step_down_enabled(false, 5.0, 0.0),
+            "parent disabled → dead (|| would wrongly report live)"
+        );
+    }
+
+    /// The + button is live ONLY when enabled AND strictly below the high bound.
+    /// Kills `&&`→`||`, `<`→`<=` (dead AT the bound), and `<`→`>`/`==`.
+    #[test]
+    fn plus_button_is_live_only_strictly_below_the_high_bound() {
+        assert!(
+            step_up_enabled(true, 5.0, 10.0),
+            "enabled + below max → live"
+        );
+        assert!(
+            !step_up_enabled(true, 10.0, 10.0),
+            "AT the high bound → dead (<= would wrongly report live)"
+        );
+        assert!(
+            !step_up_enabled(false, 5.0, 10.0),
+            "parent disabled → dead (|| would wrongly report live)"
+        );
+    }
+
+    /// − steps down exactly one `step`, clamped at the low bound. Kills `-`→`+`
+    /// (would give 6), `-`→`/` (would give 5), and `.max`→`.min` (clamp inverts).
+    #[test]
+    fn nudge_down_subtracts_one_step_and_clamps_at_the_low_bound() {
+        assert_eq!(nudge_down(5.0, 1.0, 0.0), 4.0);
+        assert_eq!(
+            nudge_down(0.5, 1.0, 0.0),
+            0.0,
+            "never steps below the low bound"
+        );
+    }
+
+    /// The + button steps up exactly one `step`, clamped at the high bound.
+    /// Kills `+`→`-` (would give 4), `+`→`*` (would give 5), and `.min`→`.max`.
+    #[test]
+    fn nudge_up_adds_one_step_and_clamps_at_the_high_bound() {
+        assert_eq!(nudge_up(5.0, 1.0, 10.0), 6.0);
+        assert_eq!(
+            nudge_up(9.5, 1.0, 10.0),
+            10.0,
+            "never steps above the high bound"
+        );
+    }
+
+    // ---- harness wiring (kill the UI control-flow mutants) ----
+
+    /// Clicking − on the live slider steps the value down by one AND the control
+    /// reports the change. Kills `stepped_slider -> bool` replaced with `false`
+    /// (return would be false) and `changed |= …` replaced with `&=` (the
+    /// minus-set `true` would be zeroed because the slider itself did not change).
+    #[test]
+    fn clicking_minus_steps_down_and_reports_changed() {
+        let val = Rc::new(Cell::new(5.0_f64));
+        let changed = Rc::new(Cell::new(false));
+        let (v2, c2) = (val.clone(), changed.clone());
+        let mut h = egui_kittest::Harness::builder().build_ui(move |ui| {
+            let mut cur = v2.get();
+            let ch = stepped_slider(ui, true, &mut cur, 0.0..=10.0, 1.0);
+            v2.set(cur);
+            c2.set(c2.get() || ch); // latch across settling frames
+        });
+        h.run();
+        changed.set(false); // reset after the initial settle, before the click
+        h.get_by_label(egui_phosphor::thin::MINUS).click();
+        h.run();
+        assert_eq!(val.get(), 4.0, "minus steps the value down by one");
+        assert!(changed.get(), "the control reports the change");
+    }
+
+    /// Clicking + steps the value up by one and reports the change.
+    #[test]
+    fn clicking_plus_steps_up_and_reports_changed() {
+        let val = Rc::new(Cell::new(5.0_f64));
+        let changed = Rc::new(Cell::new(false));
+        let (v2, c2) = (val.clone(), changed.clone());
+        let mut h = egui_kittest::Harness::builder().build_ui(move |ui| {
+            let mut cur = v2.get();
+            let ch = stepped_slider(ui, true, &mut cur, 0.0..=10.0, 1.0);
+            v2.set(cur);
+            c2.set(c2.get() || ch);
+        });
+        h.run();
+        changed.set(false);
+        h.get_by_label(egui_phosphor::thin::PLUS).click();
+        h.run();
+        assert_eq!(val.get(), 6.0, "plus steps the value up by one");
+        assert!(changed.get(), "the control reports the change");
+    }
+
+    /// Clicking the ◀ caret cycles to the PREVIOUS option and reports the change.
+    /// Kills the deleted `-` in `step_index(len, current_idx, -1)` (the caret
+    /// would otherwise step FORWARD to index 2) and `stepper_combo -> bool`
+    /// replaced with `false` (return would be false).
+    #[test]
+    fn caret_left_picks_the_previous_option_and_reports_changed() {
+        let picked = Rc::new(Cell::new(None::<usize>));
+        let changed = Rc::new(Cell::new(false));
+        let (p2, c2) = (picked.clone(), changed.clone());
+        let mut h = egui_kittest::Harness::builder().build_ui(move |ui| {
+            let ch = stepper_combo(
+                ui,
+                "test-combo",
+                100.0,
+                "option",
+                3,
+                Some(1),
+                "b",
+                |i| ["a", "b", "c"][i].to_string(),
+                |i| p2.set(Some(i)),
+            );
+            c2.set(c2.get() || ch);
+        });
+        h.run();
+        changed.set(false);
+        picked.set(None);
+        h.get_by_label(egui_phosphor::thin::CARET_LEFT).click();
+        h.run();
+        assert_eq!(picked.get(), Some(0), "◀ steps to the previous index");
+        assert!(changed.get(), "the control reports the change");
+    }
+
+    /// Clicking the ▶ caret cycles to the NEXT option.
+    #[test]
+    fn caret_right_picks_the_next_option() {
+        let picked = Rc::new(Cell::new(None::<usize>));
+        let p2 = picked.clone();
+        let mut h = egui_kittest::Harness::builder().build_ui(move |ui| {
+            stepper_combo(
+                ui,
+                "test-combo",
+                100.0,
+                "option",
+                3,
+                Some(1),
+                "b",
+                |i| ["a", "b", "c"][i].to_string(),
+                |i| p2.set(Some(i)),
+            );
+        });
+        h.run();
+        h.get_by_label(egui_phosphor::thin::CARET_RIGHT).click();
+        h.run();
+        assert_eq!(picked.get(), Some(2), "▶ steps to the next index");
+    }
+}
+
 #[cfg(test)]
 mod theme_step {
     use super::step_theme_index;
